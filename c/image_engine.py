@@ -869,16 +869,40 @@ def save_png(png, prompt, seed, directory=None, now=None):
     os.makedirs(directory, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     stem = f"{stamp}-{_slug(prompt)}-s{seed}"
-    path = os.path.join(directory, stem + ".png")
-    counter = 2
-    while os.path.exists(path):
-        path = os.path.join(directory, f"{stem}-{counter}.png")
+    counter = 1
+    while True:
+        suffix = "" if counter == 1 else f"-{counter}"
+        path = os.path.join(directory, f"{stem}{suffix}.png")
         counter += 1
-    temporary = path + f".{os.getpid()}.tmp"
-    with open(temporary, "wb") as handle:
-        handle.write(png)
-    os.replace(temporary, path)
-    return path
+        if os.path.exists(path):
+            continue
+        # Cooperating saves reserve names before publishing complete PNGs.
+        # An abandoned reservation merely skips that name; no stale-file deletion.
+        reservation = path + ".reserve"
+        try:
+            descriptor = os.open(reservation, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        temporary = None
+        try:
+            os.close(descriptor)
+            if os.path.exists(path):
+                continue
+            temp_path = path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(temp_path, "wb") as handle:
+                temporary = temp_path
+                handle.write(png)
+            os.replace(temporary, path)
+            return path
+        finally:
+            try:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                os.unlink(reservation)
 
 
 # ---------------------------------------------------------------- the model
