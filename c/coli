@@ -2367,8 +2367,11 @@ IMAGE_SUFFIXES = (".png",".jpg",".jpeg",".webp",".bmp",".gif",".tif",".tiff")
 # da shlex, che in modalita' POSIX mangia le barre rovesciate e va in errore su
 # un apostrofo -- cioe' su una frase italiana su due.
 _ESTENSIONI = "|".join(suffix[1:] for suffix in IMAGE_SUFFIXES)
+_IMAGE_PATH_START = r"(?:[A-Za-z]:\\|~?/|\./)"
 IMAGE_PATH = re.compile(
-    r"(?:[A-Za-z]:\\|~?/|\./)[^\"'<>|?*\n]*?\.(?:" + _ESTENSIONI + r")\b",
+    r'"' + _IMAGE_PATH_START + r'[^"\n]*\.(?:' + _ESTENSIONI + r')"'
+    + r"|'" + _IMAGE_PATH_START + r"[^'\n]*\.(?:" + _ESTENSIONI + r")'"
+    + r"|" + _IMAGE_PATH_START + r"[^\"'<>|?*\n]*?\.(?:" + _ESTENSIONI + r")\b",
     re.IGNORECASE)
 
 
