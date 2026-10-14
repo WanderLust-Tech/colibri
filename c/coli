@@ -1217,7 +1217,7 @@ class MDStream:
             if ch=="`":
                 self.icode=not self.icode
                 out.append(C.org if self.icode else C.r); i+=1; continue
-            if ch=="*":
+            if ch=="*" and not self.icode:
                 j=i
                 while j<len(txt) and txt[j]=="*": j+=1
                 if j-i>=2:               # **/***: grassetto on/off, gli asterischi spariscono
