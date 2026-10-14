@@ -7336,6 +7336,10 @@ class APIHandler(BaseHTTPRequestHandler):
             body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise APIError(400, "Request body must be valid JSON.")
+        except (ValueError, RecursionError):
+            # The runtime's integer and nesting guards reject client data,
+            # before an engine has received any request.
+            raise APIError(400, "Request body exceeds the supported JSON parsing limits.")
         try:
             # An escaped lone surrogate ("\ud83d") parses, but it is the same invalid
             # text as the undecodable bytes above: no UTF-8 can carry it, and the
@@ -7344,6 +7348,8 @@ class APIHandler(BaseHTTPRequestHandler):
         except UnicodeEncodeError:
             raise APIError(400, "Request body contains an unpaired UTF-16 surrogate "
                                 "escape; strings must be valid Unicode.")
+        except RecursionError:
+            raise APIError(400, "Request body exceeds the supported JSON parsing limits.")
         if not isinstance(body, dict):
             raise APIError(400, "Request body must be a JSON object.")
         return body

@@ -101,6 +101,10 @@ below). Audio is accepted only by Inkling checkpoints with audio support. The
 default bind address is localhost; set `COLI_API_KEY` before exposing the
 server beyond the machine.
 
+Request bodies must fit within 4 MiB and the running Python JSON parser's
+limits. An integer or nesting depth the runtime cannot parse receives HTTP
+400 before engine work; the gateway preserves the runtime's limits.
+
 The hosted-platform bookkeeping fields `store`, `metadata`, `service_tier`,
 `user`, `safety_identifier`, `parallel_tool_calls`, `prompt_cache_key`,
 `verbosity`, `web_search_options`, `moderation`, and

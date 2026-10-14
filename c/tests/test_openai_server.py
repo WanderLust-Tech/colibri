@@ -3188,6 +3188,108 @@ class HTTPTest(unittest.TestCase):
         self.addCleanup(caught.exception.close)
         self.assertEqual(caught.exception.code, 400)
 
+    def _request_with_raw_metadata(self, path, fields, metadata):
+        # Build the wire bytes directly: constructing a Python integer first
+        # would trip the caller's digit guard before the HTTP request existed.
+        head = json.dumps({"model": "test-model", **fields})[:-1].encode()
+        data = head + b',"metadata":' + metadata + b'}'
+        self.assertLess(len(data), openai_server.MAX_BODY)
+        return urlopen(Request(self.base + path, data=data,
+                               headers={"Authorization": "Bearer secret",
+                                        "Content-Type": "application/json"}), timeout=2)
+
+    @staticmethod
+    def _json_limit_routes():
+        return (("/v1/completions", {"prompt": "Hi"}),
+                ("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hi"}]}),
+                ("/v1/messages", {"max_tokens": 4,
+                                  "messages": [{"role": "user", "content": "Hi"}]}))
+
+    def test_json_integer_limit_is_a_client_error(self):
+        limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if not limit or limit > 65536:
+            self.skipTest("No bounded integer-string limit is enabled on this runtime")
+        for path, fields in self._json_limit_routes():
+            for sign in (b"", b"-"):
+                with self.subTest(path=path, sign=sign):
+                    before = len(self.engine.calls)
+                    with self.assertRaises(HTTPError) as caught:
+                        self._request_with_raw_metadata(path, fields,
+                                                        sign + b"1" * (limit + 1))
+                    with caught.exception as response:
+                        error = json.load(response)["error"]
+                        self.assertEqual(len(self.engine.calls), before)
+                        self.assertEqual(response.code, 400)
+                        self.assertEqual(error["type"], "invalid_request_error")
+                        self.assertIn("parsing limits", error["message"])
+
+    def test_json_nesting_guard_never_becomes_an_engine_error(self):
+        # Python releases differ in which nesting depths their JSON parser can
+        # accept. Preserve a successful parse, or classify its refusal as 400;
+        # do not change global recursion limits to manufacture a guard failure.
+        metadata = b"[" * 100000 + b"0" + b"]" * 100000
+        for path, fields in self._json_limit_routes():
+            with self.subTest(path=path):
+                before = len(self.engine.calls)
+                try:
+                    response = self._request_with_raw_metadata(path, fields, metadata)
+                except HTTPError as response:
+                    with response:
+                        error = json.load(response)["error"]
+                        self.assertEqual(len(self.engine.calls), before)
+                        self.assertEqual(response.code, 400)
+                        self.assertEqual(error["type"], "invalid_request_error")
+                        self.assertIn("parsing limits", error["message"])
+                else:
+                    with response:
+                        json.load(response)
+                        self.assertEqual(response.status, 200)
+                    self.assertEqual(len(self.engine.calls), before + 1)
+
+    def test_json_limits_preserve_unicode_nested_and_boundary_metadata(self):
+        values = [json.dumps("healthy 🌿", ensure_ascii=False).encode(),
+                  b"[" * 64 + b"0" + b"]" * 64]
+        limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if 0 < limit <= 65536:
+            values.append(b"1" * limit)
+        for path, fields in self._json_limit_routes():
+            for metadata in values:
+                with self.subTest(path=path, metadata_bytes=len(metadata)):
+                    before = len(self.engine.calls)
+                    with self._request_with_raw_metadata(path, fields, metadata) as response:
+                        json.load(response)
+                        self.assertEqual(response.status, 200)
+                    self.assertEqual(len(self.engine.calls), before + 1)
+            before = len(self.engine.calls)
+            with self.assertRaises(HTTPError) as caught:
+                self._request_with_raw_metadata(path, fields, b'{"unfinished":')
+            with caught.exception as response:
+                self.assertEqual(response.code, 400)
+                self.assertEqual(json.load(response)["error"]["type"], "invalid_request_error")
+            self.assertEqual(len(self.engine.calls), before)
+
+    def test_existing_json_error_envelopes_remain_exact(self):
+        cases = ((b'{"unfinished":', "Request body must be valid JSON."),
+                 (b'"\xff"', "Request body must be valid JSON."),
+                 (b'"\\ud83d"', "Request body contains an unpaired UTF-16 surrogate "
+                                  "escape; strings must be valid Unicode."))
+        for path, fields in self._json_limit_routes():
+            for metadata, message in cases:
+                with self.subTest(path=path, metadata=metadata):
+                    before = len(self.engine.calls)
+                    with self.assertRaises(HTTPError) as caught:
+                        self._request_with_raw_metadata(path, fields, metadata)
+                    with caught.exception as response:
+                        actual = json.load(response)
+                        self.assertEqual(response.code, 400)
+                    expected = ({"type": "error", "error": {
+                        "type": "invalid_request_error", "message": message}}
+                        if path == "/v1/messages" else {"error": {
+                            "message": message, "type": "invalid_request_error",
+                            "param": None, "code": None}})
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(len(self.engine.calls), before)
+
     def test_unpaired_surrogate_is_a_client_error(self):
         """JSON can spell a lone UTF-16 surrogate ("\\ud83d": a client that cut a
         string between the two halves of an emoji). json.loads accepts it, no
