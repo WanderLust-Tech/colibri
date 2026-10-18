@@ -996,12 +996,22 @@ memInfo.free:                     23.50 GB (97%)
         for label, blob in layouts.items():
             with mock.patch("resource_plan.subprocess.run",
                             return_value=lscpu(blob)), \
+                 mock.patch("resource_plan.performance_core_count", return_value=None), \
                  mock.patch.object(sys, "platform", "linux"):
                 plan = build_plan(self.model, available_memory=16 * GB,
                                   available_disk=1, gpus=[])
                 env = environment_for_plan(plan)
             self.assertEqual(plan["cpu"]["physical_cores"], 12, label)
             self.assertEqual(env["OMP_NUM_THREADS"], "12", label)
+        # a hybrid CPU: the team is its performance cores, the physical count stays
+        with mock.patch("resource_plan.subprocess.run", return_value=lscpu(layouts["2-col (-p=core,socket)"])), \
+             mock.patch("resource_plan.performance_core_count", return_value=4), \
+             mock.patch.object(sys, "platform", "linux"):
+            plan = build_plan(self.model, available_memory=16 * GB, available_disk=1, gpus=[])
+            env = environment_for_plan(plan)
+        self.assertEqual((plan["cpu"]["physical_cores"], plan["cpu"]["team_threads"]), (12, 4))
+        self.assertEqual(plan["cpu"]["thread_policy"], "performance-cores")
+        self.assertEqual(env["OMP_NUM_THREADS"], "4")
 
     def test_plan_does_not_set_omp_affinity_vars(self):
         # The real #325 regression: --auto-tier set OMP_PROC_BIND=spread +
@@ -1459,7 +1469,9 @@ memInfo.free:                     23.50 GB (97%)
         self.assertEqual(env["RAM_GB"], "12")
         self.assertEqual(env["COLI_CUDA"], "1")
         self.assertEqual(env["COLI_GPUS"], "1")
-        self.assertEqual(env["OMP_NUM_THREADS"], str(plan["cpu"]["physical_cores"]))
+        # the plan's team: the physical cores, a hybrid CPU's performance cores
+        self.assertEqual(env["OMP_NUM_THREADS"], str(plan["cpu"]["team_threads"]))
+        self.assertLessEqual(plan["cpu"]["team_threads"], plan["cpu"]["physical_cores"])
         # The plan must NOT set OMP_PROC_BIND / OMP_PLACES on any platform:
         # the engine's own hot-thread tuning owns affinity (it prefers
         # OMP_PROC_BIND=close for the back-to-back per-expert matmuls). Setting
@@ -2749,6 +2761,61 @@ class VulkanPartialChainInklingMimoTest(unittest.TestCase):
                 self.assertEqual(forced["tiers"]["ram"]["dense_on_device_bytes"], droppable(k, False))
         none = build_plan(self.model, env=dict(on, COLI_VK_CHAIN_LAYERS="0"), vulkan=dgpu, **kwargs)["tiers"]["ram"]
         self.assertEqual(none["dense_on_device_bytes"], 0)
+
+
+class PerformanceCoreCountTest(unittest.TestCase):
+    """A hybrid x86 CPU's OpenMP team: its performance cores (performance_core_count)."""
+
+    @staticmethod
+    def _windows_records(classes, cache_records=1):
+        # SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship, Size, then
+        # PROCESSOR_RELATIONSHIP (Flags, EfficiencyClass, ...); 48 bytes a record
+        out = b""
+        for _ in range(cache_records):   # RelationCache: skipped
+            out += (2).to_bytes(4, "little") + (48).to_bytes(4, "little") + bytes(40)
+        for cls in classes:
+            out += (0).to_bytes(4, "little") + (48).to_bytes(4, "little") + bytes([0, cls]) + bytes(38)
+        return out
+
+    def test_windows_counts_the_highest_efficiency_class(self):
+        from resource_plan import _windows_performance_cores
+        self.assertEqual(_windows_performance_cores(self._windows_records([1] * 6 + [0] * 8)), 6)
+        self.assertEqual(_windows_performance_cores(self._windows_records([1] * 6 + [0] * 8 + [0] * 2)), 6)
+        self.assertIsNone(_windows_performance_cores(self._windows_records([0] * 16)))
+        self.assertIsNone(_windows_performance_cores(b"\0" * 7))
+
+    def _sysfs(self, root, p, e, siblings):
+        (root / "devices/cpu_core").mkdir(parents=True)
+        (root / "devices/cpu_core/cpus").write_text(p + "\n", encoding="ascii")
+        if e is not None:
+            (root / "devices/cpu_atom").mkdir(parents=True)
+            (root / "devices/cpu_atom/cpus").write_text(e + "\n", encoding="ascii")
+        for cpu, sib in siblings.items():
+            d = root / f"devices/system/cpu/cpu{cpu}/topology"
+            d.mkdir(parents=True)
+            (d / "thread_siblings_list").write_text(sib + "\n", encoding="ascii")
+
+    def test_linux_counts_the_p_cores_once_per_sibling_list(self):
+        from resource_plan import _linux_performance_cores
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)   # an i5-13500: P-cores 0-11 (SMT pairs), E-cores 12-19
+            self._sysfs(root, "0-11", "12-19", {c: f"{c - c % 2}-{c - c % 2 + 1}" for c in range(12)})
+            self.assertEqual(_linux_performance_cores(root), 6)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)   # one kind of core: no cpu_atom PMU
+            self._sysfs(root, "0-7", None, {c: str(c) for c in range(8)})
+            self.assertIsNone(_linux_performance_cores(root))
+        self.assertIsNone(_linux_performance_cores(Path("/nonexistent-sysfs")))
+
+    def test_team_falls_back_to_the_physical_cores(self):
+        import resource_plan
+        with mock.patch("resource_plan.performance_core_count", return_value=None), \
+             mock.patch("resource_plan.physical_cpu_count", return_value=8):
+            self.assertEqual(resource_plan.team_cpu_count(), 8)
+        with mock.patch("resource_plan.performance_core_count", return_value=6), \
+             mock.patch("resource_plan.physical_cpu_count", return_value=14):
+            self.assertEqual(resource_plan.team_cpu_count(), 6)
 
 
 class PhysicalCpuCountTest(unittest.TestCase):

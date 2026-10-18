@@ -639,8 +639,8 @@ def env_for_engine(a, arch, plan=None):
     # setdefault, so an explicit OMP_NUM_THREADS still wins.
     if not env.get("COLI_NO_OMP_TUNE"):
         if arch != "deepseek_v4":
-            from resource_plan import physical_cpu_count
-            env.setdefault("OMP_NUM_THREADS", str(physical_cpu_count()))
+            from resource_plan import team_cpu_count
+            env.setdefault("OMP_NUM_THREADS", str(team_cpu_count()))
         else:
             env.setdefault("OMP_WAIT_POLICY", "active")
             env.setdefault("GOMP_SPINCOUNT", "200000")
@@ -1008,8 +1008,8 @@ def env_for(a):
     # setdefault, so an explicit OMP_NUM_THREADS still wins, and the whole
     # thing stays behind COLI_NO_OMP_TUNE like the rest of the OMP tuning.
     if not e.get("COLI_NO_OMP_TUNE"):
-        from resource_plan import physical_cpu_count
-        e.setdefault("OMP_NUM_THREADS", str(physical_cpu_count()))
+        from resource_plan import team_cpu_count
+        e.setdefault("OMP_NUM_THREADS", str(team_cpu_count()))
     if sys.platform == "win32":
         # COLI_NO_OMP_TUNE spegne SOLO il blocco OMP (stesso perimetro del
         # self-exec di glm.c; presence-based come nel motore: impostarla a

@@ -380,7 +380,17 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
                                      temp=None, cap=None)
 
     def test_other_engines_get_physical_cores(self):
-        with mock.patch("resource_plan.physical_cpu_count", return_value=6):
+        with mock.patch("resource_plan.physical_cpu_count", return_value=6), \
+             mock.patch("resource_plan.performance_core_count", return_value=None):
+            for arch in ("inkling", "kimi", "olmoe"):
+                with self.subTest(arch=arch):
+                    env = self.coli.env_for_engine(self.args(), arch)
+                    self.assertEqual(env.get("OMP_NUM_THREADS"), "6")
+
+    def test_a_hybrid_cpu_gets_its_performance_cores(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("resource_plan.physical_cpu_count", return_value=14), \
+             mock.patch("resource_plan.performance_core_count", return_value=6):
             for arch in ("inkling", "kimi", "olmoe"):
                 with self.subTest(arch=arch):
                     env = self.coli.env_for_engine(self.args(), arch)
