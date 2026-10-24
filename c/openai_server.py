@@ -7532,6 +7532,11 @@ class APIHandler(BaseHTTPRequestHandler):
         if not base.is_dir():
             return False
         rel = unquote(path).lstrip("/") or "index.html"
+        # unquote('%00') embeds a NUL. Path raises ValueError, which do_GET
+        # does not catch, and a NUL with no dot also matches the SPA fallback
+        # if the exception is swallowed. Either way it is not a file.
+        if "\x00" in rel:
+            return False
         target = (base / rel).resolve()
         try:
             target.relative_to(base)

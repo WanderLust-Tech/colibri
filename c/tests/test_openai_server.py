@@ -3706,6 +3706,12 @@ class StaticServingTest(unittest.TestCase):
         self.addCleanup(caught.exception.close)
         self.assertEqual(caught.exception.code, 404)
 
+    def test_nul_in_the_path_is_not_found(self):
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/%00", timeout=2)
+        self.addCleanup(caught.exception.close)
+        self.assertEqual(caught.exception.code, 404)
+
 
     def get(self, path, headers=None):
         request = Request(self.base + path, headers=headers or {})
