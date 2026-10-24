@@ -99,6 +99,19 @@ int main(void) {
     for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++)
         CHECK(json_parse_checked(malformed[i]) == NULL);
 
+    /* Overflow to infinity is not a value a checked reader can store. */
+    CHECK(json_parse_checked("1e9999") == NULL);
+    CHECK(json_parse_checked("{\"a\":-1e9999}") == NULL);
+    root = json_parse("1e9999", NULL);
+    CHECK(root && !isfinite(root->num));
+    json_free(root);
+    root = json_parse_checked("1e308");
+    CHECK(root && isfinite(root->num));
+    json_free(root);
+    root = json_parse_checked("3e2");
+    CHECK(root && root->num == 300.0);
+    json_free(root);
+
 
     puts("json tests: ok");
     return 0;

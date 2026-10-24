@@ -4,6 +4,7 @@
  * Non e' completo (niente unicode \uXXXX, niente notazione esotica) ma copre cio' che serve. */
 #ifndef JSON_H
 #define JSON_H
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -195,7 +196,9 @@ static jval *j_parse_val(jparser *p) {
           while (*q>='0' && *q<='9') q++;
       }
       char *end; double d = strtod(start, &end);
-      if (end==start || end!=q) p->error=1;
+      /* 1e9999 is a legal JSON number and strtod returns inf. Checked
+       * callers then cast that inf. Legacy json_parse still returns it. */
+      if (end==start || end!=q || !isfinite(d)) p->error=1;
       p->s = end; jval *v = j_new(J_NUM); v->num = d; return v; }
 }
 
