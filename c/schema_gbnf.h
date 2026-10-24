@@ -90,6 +90,8 @@ static void sgb_put_json_string_lit(SgbCtx *C, const char *raw){
 
 /* emit a number the way a model would print it: shortest round-trip via %g */
 static void sgb_put_number_lit(SgbCtx *C, double d){
+    /* 1e9999 parses as inf. %.17g then writes the literal inf, which is not JSON. */
+    if (!isfinite(d)){ sgb_fail(C, "non-finite number"); return; }
     char b[64]; snprintf(b, sizeof b, "\"%.17g\"", d);
     /* %.17g writes 0.1 as 0.10000000000000001: a fraction takes the fewest
      * digits that read back as the same double, the text a model writes. */

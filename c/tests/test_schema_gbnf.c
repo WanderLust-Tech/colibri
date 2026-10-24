@@ -178,6 +178,8 @@ int main(void){
     /* 6. unsupported schemas -> NULL (fallback), never crash */
     {
         char err[160];
+        CHECK(schema_to_gbnf("{\"const\":1e9999}", err, sizeof err) == NULL);
+        CHECK(schema_to_gbnf("{\"enum\":[1,-1e9999]}", err, sizeof err) == NULL);
         CHECK(schema_to_gbnf("{\"oneOf\":[{\"type\":\"string\"}]}", err, sizeof err) == NULL);
         CHECK(schema_to_gbnf("{\"type\":\"string\",\"pattern\":\"a+\"}", err, sizeof err) == NULL);
         CHECK(schema_to_gbnf("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"},"
