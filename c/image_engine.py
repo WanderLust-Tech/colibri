@@ -403,7 +403,8 @@ class ImageEngine:
                         finished = True          # the engine is done with this request
                         width_out, height_out = body.get("width"), body.get("height")
                         channels = body.get("channels", 4)
-                        if (not isinstance(width_out, int) or not isinstance(height_out, int) or
+                        if (isinstance(width_out, bool) or isinstance(height_out, bool) or
+                                not isinstance(width_out, int) or not isinstance(height_out, int) or
                                 channels != 4 or len(payload) != width_out * height_out * 4):
                             raise ImageEngineError(
                                 f"IMAGE frame does not describe its payload ({width_out}x{height_out}"

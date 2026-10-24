@@ -269,6 +269,12 @@ class ImageEngineTest(unittest.TestCase):
         self.assertEqual(result["width"], 256)
         self.assertTrue(any("stray" in line for line in self.logs))
 
+    def test_bool_image_dimensions_are_rejected(self):
+        engine = self.engine()
+        with self.assertRaises(ie.ImageEngineError):
+            engine.generate("__stub_bool_dims__", 256, 256, 2, 1)
+        self.assertTrue(engine.alive)
+
     def test_an_engine_that_dies_while_loading(self):
         with self.assertRaisesRegex(ie.ImageEngineError, "exited while loading"):
             ie.ImageEngine(STUB, str(Path(self.tmp.name) / "missing"), env=stub_env(),
