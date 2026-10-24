@@ -7021,6 +7021,10 @@ class APIServer(ThreadingHTTPServer):
         super().close_request(request)
 
 
+def _reject_json_constant(name):
+    raise json.JSONDecodeError(f"{name} is not a JSON value", name, 0)
+
+
 def _content_length(value):
     # int() also accepts signs and underscores, but HTTP lengths are 1*DIGIT.
     # Read and early-error drain must agree on that exact framing grammar.
@@ -7343,7 +7347,8 @@ class APIHandler(BaseHTTPRequestHandler):
     @staticmethod
     def parse_json_object(raw):
         try:
-            body = json.loads(raw)
+            # parse_constant: NaN/Infinity/-Infinity are Python extensions, not JSON.
+            body = json.loads(raw, parse_constant=_reject_json_constant)
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise APIError(400, "Request body must be valid JSON.")
         except (ValueError, RecursionError):
