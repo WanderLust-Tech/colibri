@@ -182,6 +182,17 @@ int main(void){
         CHECK(schema_to_gbnf("{\"type\":\"string\",\"pattern\":\"a+\"}", err, sizeof err) == NULL);
         CHECK(schema_to_gbnf("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"},"
                              "\"b\":{\"type\":\"string\"}},\"required\":[\"a\"]}", err, sizeof err) == NULL); /* subset-required */
+        CHECK(schema_to_gbnf("{\"type\":\"array\",\"minItems\":0.5,\"items\":{\"type\":\"string\"}}", err, sizeof err) == NULL);
+        CHECK(schema_to_gbnf("{\"type\":\"array\",\"minItems\":-1,\"items\":{\"type\":\"string\"}}", err, sizeof err) == NULL);
+        CHECK(schema_to_gbnf("{\"type\":\"array\",\"minItems\":true,\"items\":{\"type\":\"string\"}}", err, sizeof err) == NULL);
+        {
+            char *kept = schema_to_gbnf("{\"type\":\"array\",\"minItems\":0,\"items\":{\"type\":\"string\"}}", err, sizeof err);
+            CHECK(kept != NULL);
+            free(kept);
+            kept = schema_to_gbnf("{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"string\"}}", err, sizeof err);
+            CHECK(kept != NULL);
+            free(kept);
+        }
         CHECK(schema_to_gbnf("not json at all {{", err, sizeof err) == NULL
               || 1 /* json.h is permissive; compiler must still fail or produce a parseable grammar */);
     }
