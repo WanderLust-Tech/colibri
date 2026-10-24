@@ -32,6 +32,18 @@ int main(void) {
     CHECK(strcmp(json_get(root, "unicode")->str, "λ 🚀") == 0);
     json_free(root);
 
+    /* An unpaired surrogate is not a Unicode scalar. Checked parse rejects it;
+     * a paired surrogate (the rocket above) still decodes. Legacy stays permissive. */
+    CHECK(json_parse_checked("\"\\uD800\"") == NULL);
+    CHECK(json_parse_checked("\"\\uDE80\"") == NULL);
+    CHECK(json_parse_checked("\"\\uD800\\u0041\"") == NULL);
+    root = json_parse_checked("\"\\uD83D\\uDE80\"");
+    CHECK(root && strcmp(root->str, "🚀") == 0);
+    json_free(root);
+    root = json_parse("\"\\uD800\"", NULL);
+    CHECK(root && root->t == J_STR);
+    json_free(root);
+
     /* Checked key lookup must not alias a name through a decoded NUL. The
      * legacy API still returns its original permissive representation. */
     const char *nul_key="{\"x\\u0000ignored\":1}";

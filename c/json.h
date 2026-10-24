@@ -94,6 +94,10 @@ static char *j_parse_str_raw(jparser *p, int is_key) {
                         unsigned lo = (unsigned)strtoul((char[]){p->s[2],p->s[3],p->s[4],p->s[5],0}, NULL, 16);
                         if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp-0xD800)<<10) + (lo-0xDC00); p->s += 6; }
                     }
+                    /* A leftover surrogate is not Unicode. Checked callers
+                     * (tokenizer, safetensors, qpack) must fail the file.
+                     * Legacy json_parse ignores p->error and keeps the bytes. */
+                    if (cp >= 0xD800 && cp <= 0xDFFF) p->error = 1;
                     if (cp < 0x80) { J_PUT(cp); }
                     else if (cp < 0x800) { J_PUT(0xC0|(cp>>6)); J_PUT(0x80|(cp&0x3F)); }
                     else if (cp < 0x10000) { J_PUT(0xE0|(cp>>12)); J_PUT(0x80|((cp>>6)&0x3F)); J_PUT(0x80|(cp&0x3F)); }
