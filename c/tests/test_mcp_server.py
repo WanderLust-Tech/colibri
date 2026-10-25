@@ -208,6 +208,18 @@ class Protocol(unittest.TestCase):
         data = self.x.reply(1)["result"]["structuredContent"]
         self.assertEqual(data["text"], "line 47\nline 48\nline 49")
 
+    def test_build_logs_reads_the_latest_backend_log(self):
+        # The setup writes one build log per backend (setup_flow.build_log_name).
+        cuda, cpu = setup_flow.log_path("build-cuda"), setup_flow.log_path("build-cpu")
+        os.makedirs(os.path.dirname(cuda))
+        Path(cuda).write_text("nvcc fatal: unsupported gpu architecture")
+        Path(cpu).write_text("make: *** [colibri] Error 1")
+        os.utime(cuda, (1, 1))
+        self.x.send(request(1, "tools/call", {"name": "logs", "arguments": {"which": "build"}}))
+        data = self.x.reply(1)["result"]["structuredContent"]
+        self.assertEqual(data["log"], cpu)
+        self.assertEqual(data["text"], "make: *** [colibri] Error 1")
+
     def test_a_crashing_tool_does_not_take_the_server_down(self):
         with mock.patch.dict(mcp_server.HANDLERS, {"status": lambda a, n: 1 / 0}), \
              mock.patch.object(mcp_server, "_log") as logged:

@@ -19,6 +19,7 @@ Tools, all thin wrappers over setup_flow.py (the same code `coli setup` runs):
 Run it with `coli mcp`, or `python3 c/mcp_server.py`. docs/MCP_SERVER.md has
 the client configuration.
 """
+import glob
 import json
 import os
 import subprocess
@@ -286,6 +287,11 @@ def tool_status(args, notify):
 def tool_logs(args, notify):
     which = {"server": "serve"}.get(args.get("which", "server"), args.get("which", "server"))
     path = setup_flow.log_path(which)
+    if which == "build":
+        # one log per backend (setup_flow.build_log_name): the latest build's
+        builds = glob.glob(os.path.join(glob.escape(os.path.dirname(path)), "build-*.log"))
+        if builds:
+            path = max(builds, key=os.path.getmtime)
     return {"log": path, "text": setup_flow.tail_file(path, int(args.get("lines") or 100))}
 
 
