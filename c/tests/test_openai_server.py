@@ -3820,6 +3820,17 @@ class ToolArgumentTypeTest(unittest.TestCase):
         self.assertIsInstance(args["qty"], int)
         self.assertIs(args["express"], True)
 
+    def test_optional_string_parameter_holding_digits_stays_a_string(self):
+        tools = [{"type": "function", "function": {"name": "lookup_order", "parameters": {
+            "type": "object", "properties": {
+                "order_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                "qty": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None},
+            }}}}]
+        args = self._args("<tool_call>lookup_order"
+                          "<arg_key>order_id</arg_key><arg_value>12345</arg_value>"
+                          "<arg_key>qty</arg_key><arg_value>2</arg_value></tool_call>", tools)
+        self.assertEqual(args, {"order_id": "12345", "qty": 2})
+
     def test_unknown_parameter_keeps_permissive_decoding(self):
         args = self._args("<tool_call>lookup_order"
                           "<arg_key>extra</arg_key><arg_value>7</arg_value></tool_call>")

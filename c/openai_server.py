@@ -684,6 +684,10 @@ def _tool_param_types(tools):
         for key, spec in props.items():
             if isinstance(spec, dict):
                 t = spec.get("type")
+                branches = spec.get("anyOf", spec.get("oneOf"))
+                if t is None and isinstance(branches, list):
+                    # pydantic's Optional[str]: {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                    t = [b.get("type") for b in branches if isinstance(b, dict)]
                 if isinstance(t, list):          # {"type": ["string", "null"]}
                     t = next((x for x in t if x != "null"), None)
                 types[key] = t
