@@ -4397,7 +4397,9 @@ def cmd_web(a):
     if not os.path.exists(os.path.join(dist, "index.html")):
         print(f"{C.yel}web UI not built:{C.r} run  cd web && npm install && npm run build  first;")
         print("serving the API anyway (the dashboard will 404 until built).")
-    url = f"http://{a.host}:{a.port}/"
+    # A wildcard bind is not an address to connect to (Windows refuses 0.0.0.0).
+    shown = "127.0.0.1" if a.host in ("0.0.0.0", "") else a.host
+    url = f"http://{shown}:{a.port}/"
     if not getattr(a, "no_browser", False):
         import threading, urllib.request, webbrowser
         def opener():
@@ -4416,7 +4418,7 @@ def cmd_web(a):
             while True:
                 time.sleep(2); waited += 2
                 try:
-                    urllib.request.urlopen(f"http://{a.host}:{a.port}/health", timeout=5)
+                    urllib.request.urlopen(f"{url}health", timeout=5)
                 except OSError:
                     # Say something once, rather than looking hung. A 93-layer K3 load
                     # is 40+ minutes and the user has no way to tell waiting from stuck.
