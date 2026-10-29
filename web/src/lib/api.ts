@@ -151,6 +151,85 @@ export async function listModels(baseUrl: string, apiKey: string, signal?: Abort
   return (await listModelInfo(baseUrl, apiKey, signal)).map((model) => model.id)
 }
 
+/* A model downloaded on the machine running the server, from GET /v1/models/installed.
+   `switchable` is the server's own verdict (engine built, KV slots, cluster mode);
+   `reason` says why not. The server names a model by `key`, never by path. */
+export interface InstalledModel {
+  key: string
+  id: string
+  name: string
+  family: string
+  modality: string
+  size_bytes: number | null
+  verified: boolean
+  current: boolean
+  switchable: boolean
+  reason: string | null
+}
+
+export interface InstalledModels {
+  /* False when this server cannot restart itself (not started by the coli launcher). */
+  switch: boolean
+  reason: string | null
+  models: InstalledModel[]
+}
+
+export async function listInstalledModels(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<InstalledModels> {
+  const response = await fetch(endpoint(baseUrl, "models/installed"), { headers: headers(apiKey), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { switch?: boolean; reason?: string | null; data?: InstalledModel[] }
+  return { switch: body.switch === true, reason: body.reason ?? null, models: body.data ?? [] }
+}
+
+/* Asks the server to restart on another installed model. It answers 202 and goes
+   down: follow it with waitForModel. */
+export async function switchModel(baseUrl: string, apiKey: string, key: string, signal?: AbortSignal): Promise<{ id: string; name: string }> {
+  const response = await fetch(endpoint(baseUrl, "models/switch"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ key }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { id: string; name: string }
+  return { id: body.id, name: body.name }
+}
+
+function pause(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"))
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve() }, ms)
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")) }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+export interface WaitForModelOptions {
+  signal?: AbortSignal
+  intervalMs?: number
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+}
+
+/* Polls until the restarted server answers. There is no deadline: Kimi K3 takes
+   forty minutes to load, and the user can leave the page. "ready" means `id` is
+   being served. "fell-back" means the server came back on another model after
+   being down, which is the launcher returning to the previous one because `id`
+   did not start. Connection errors while it restarts are expected, not failures. */
+export async function waitForModel(
+  baseUrl: string, apiKey: string, id: string, options: WaitForModelOptions = {},
+): Promise<"ready" | "fell-back"> {
+  const { signal, intervalMs = 2000, sleep = pause } = options
+  let wentDown = false
+  for (;;) {
+    await sleep(intervalMs, signal)
+    try {
+      const ids = await listModels(baseUrl, apiKey, signal)
+      if (ids.includes(id)) return "ready"
+      if (wentDown && ids.length) return "fell-back"
+    } catch (cause) {
+      if (signal?.aborted) throw cause
+      wentDown = true
+    }
+  }
+}
+
 export function generatesImages(model: ModelInfo | undefined) {
   return !!model?.capabilities?.includes("image_generation")
 }

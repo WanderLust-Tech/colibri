@@ -615,6 +615,32 @@ What you get is one workspace with a dock to switch page:
   and the last 30 turns as a trend;
 - a light and a dark theme.
 
+### Switching between installed models
+
+A server serves one model, so **Settings, Model** lists the models installed on
+the machine and switches by restarting: the server refuses while a response is
+being generated, then drains its engine, goes away while the new model loads (seconds for a small model, many minutes for the
+largest) and comes back on the same address. If the new model does not start, the
+launcher returns to the previous one and the dashboard says so.
+
+- **Which models are listed.** Complete downloads, one folder deep, in the setup's
+  models folder, in every folder of `COLI_MODELS_ROOT` (separated like `PATH`), in
+  the folder that holds the served model, and in `~/colibri-models`. A download in
+  progress is left out; a model fetched some other way is listed as *not verified*.
+- **When it is offered.** Only on a server started by the `coli` launcher
+  (`coli serve`, `coli web`, `coli start`), and not when `COLI_ENGINE` pins one engine
+  for every model. A model is greyed out, with the reason, when its engine is not
+  built, when `--kv-slots` is above what its family supports, or for cluster mode
+  with a non-GLM model.
+- **What carries over, and what does not.** Your launch flags (`--port`, `--ram`,
+  `--api-key`, `--kv-slots`...) carry over; `--model-id` does not, because the new
+  model announces its own. The switch lasts for this run: `coli start` still starts
+  the model the setup installed.
+- **From a script.** `GET /v1/models/installed` lists them, `POST /v1/models/switch`
+  with `{"key": ...}` restarts, then poll `GET /v1/models` until the new id appears
+  (see the [API reference](api-reference/overview.mdx)). The browser names a model
+  by key, never by path, and a page on another origin cannot trigger a switch.
+
 The dashboard talks to the engine over a small line protocol and plain JSON
 endpoints — nothing heavier than the engine itself. `web/` is a pure OpenAI-API
 client (React + TypeScript) and also works against any other compatible
