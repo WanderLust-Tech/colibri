@@ -50,6 +50,7 @@ import { Profiling } from "./Profiling"
 import { persistPublicSettings, stored } from "@/lib/storage"
 import { appendDelta, continuable, continuation, setFinish } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
+import ModelSwitcher from "@/components/ModelSwitcher"
 import { useLocale } from "./i18n"
 
 const message = (role: ChatMessage["role"], content: string, images?: string[]): ChatMessage => {
@@ -605,7 +606,10 @@ export default function App() {
         <div className="settings-content">
           {settingsPage === "general" && <section className="settings-card"><h2>{t("ui.appearance")}</h2><div className="theme-choices">{["dark", "light"].map(value => <button key={value} className={`theme-choice ${value}`} aria-pressed={theme === value} onClick={() => setTheme(value)}><span /><b>{t(`ui.${value}`)}</b></button>)}</div><label className="language-field"><Globe />{t("ui.language")}<select value={locale} onChange={e => setLocale(e.target.value)}>{locales.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}</select></label><p className="settings-help">{t("chat.inputHint")}</p></section>}
           {settingsPage === "connection" && <section className="settings-card">{connectionControls}</section>}
-          {settingsPage === "model" && <section className="settings-card">{inferenceControls}</section>}
+          {settingsPage === "model" && <section className="settings-card">
+            <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />
+            {inferenceControls}
+          </section>}
           {settingsPage === "system" && <section className="settings-card">{runtimeControls}{metrics}</section>}
         </div>
       </section> : view === "brain" ? <BrainWorkspace baseUrl={baseUrl} apiKey={apiKey} connected={connected} />

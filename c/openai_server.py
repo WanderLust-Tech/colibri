@@ -6154,6 +6154,11 @@ class APIServer(ThreadingHTTPServer):
         self.allowed_hosts = tuple(
             h.strip().lower() for h in allowed_hosts if h and h.strip())
         self.created = int(time.time())
+        # The dashboard's model switcher (model_switch.py): `switch` is set by the
+        # launcher when it can re-execute itself; `relaunch_to` is the model dir the
+        # next process should serve, set by POST /v1/models/switch.
+        self.switch = None
+        self.relaunch_to = None
         # Hashes of the states /v1/systemone scored lately: a state seen again is
         # worth a photo, one seen once is probably a feed (systemone's pin rule).
         self._states_seen = collections.OrderedDict()
@@ -6651,6 +6656,66 @@ class APIHandler(BaseHTTPRequestHandler):
         if model != self.server.model_id:
             raise APIError(404, f"The model `{model}` does not exist.", "model", "model_not_found")
 
+    # ------------------------------------------------------ the dashboard's model switcher
+    #
+    # One server process serves one model (ARCH, the chat template and the engine are
+    # fixed at start), so "switch" means: answer 202, drain this engine, return from
+    # serve(), and let the launcher re-execute itself on the other model. See
+    # model_switch.py for why the browser names a model by key and never by path.
+    def _switch_scan(self):
+        import model_switch
+        return model_switch, model_switch.scan_installed(
+            self.server.switch, lambda family: default_engine(family).exists())
+
+    def installed_models(self, request_id):
+        ctx = self.server.switch
+        if ctx is None:
+            self.send_json(200, {"object": "list", "switch": False, "data": [],
+                                 "reason": "this server was not started by the coli launcher"},
+                           request_id)
+            return
+        model_switch, entries = self._switch_scan()
+        self.send_json(200, {"object": "list", "switch": ctx.enabled, "reason": ctx.reason,
+                             "data": [model_switch.public(entry) for entry in entries]},
+                       request_id)
+
+    def switch_model(self, body, request_id):
+        ctx = self.server.switch
+        if ctx is None or not ctx.enabled:
+            raise APIError(501, (ctx.reason if ctx else None) or
+                           "This server was not started by the coli launcher, so it cannot "
+                           "switch models.", None, "switch_unavailable")
+        # A page on another site could otherwise POST here from the user's browser: the
+        # body is read as JSON whatever its Content-Type says. A JSON Content-Type forces
+        # a CORS preflight, and a foreign Origin is refused outright.
+        origin = self.headers.get("Origin")
+        if origin and "*" not in self.server.cors_origins and origin not in self.server.cors_origins \
+                and urlsplit(origin).netloc != self.headers.get("Host", ""):
+            raise APIError(403, "Cross-origin model switches are not allowed.", None, "forbidden")
+        if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+            raise APIError(415, "Send Content-Type: application/json.", None, "unsupported_media_type")
+        key = body.get("key")
+        if not isinstance(key, str) or not key:
+            raise APIError(400, "`key` must be the key of an installed model.", "key", "invalid_request_error")
+        model_switch, entries = self._switch_scan()
+        entry = next((e for e in entries if e["key"] == key), None)
+        if entry is None:
+            raise APIError(404, "No installed model has that key.", "key", "model_not_found")
+        if entry["current"]:
+            raise APIError(409, "That model is already the one being served.", "key", "already_current")
+        if not entry["switchable"]:
+            raise APIError(409, f"That model cannot be started here: {entry['reason']}.", "key", "not_switchable")
+        if self.server.scheduler.snapshot()["active"]:
+            raise APIError(409, "A response is being generated. Switching would cut it off; "
+                                "try again when it has finished.", None, "busy")
+        if self.server.relaunch_to is not None:
+            raise APIError(409, "A switch is already in progress.", None, "switching")
+        self.server.relaunch_to = entry["path"]
+        self.log_message("switching model: %s -> %s", self.server.model_id, entry["id"])
+        self.send_json(202, {"status": "switching", "key": entry["key"], "id": entry["id"],
+                             "name": entry["name"]}, request_id)
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
     # The dashboard ships in two layouts and the old single path only knew one:
     # a source checkout puts this file in c/ (so web/dist is one level UP), while
     # a release archive and an installed tree put it next to web/dist. Probing for
@@ -6761,6 +6826,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"object": "list", "data": [self.server.model_entry()],
                                      "models": [self.server.jev_model_card()]},
                                request_id)
+            elif path == "/v1/models/installed":
+                self.installed_models(request_id)
             elif path.startswith("/v1/models/") and unquote(path[11:]) == self.server.model_id:
                 self.send_json(200, self.server.model_entry(), request_id)
             else:
@@ -6801,7 +6868,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 return
             # A client written for Jev sends "jev-latest": on that route the
             # served model answers whatever name was asked for.
-            if path != "/v1/systemone":
+            if path not in ("/v1/systemone", "/v1/models/switch"):
                 self.check_model(body)
             if is_image_engine(self.server.engine) and path in TEXT_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is an image generation model and "
@@ -6824,6 +6891,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.systemone(body, request_id)
             elif path == "/v1/messages":
                 self.anthropic_messages(body, request_id)
+            elif path == "/v1/models/switch":
+                self.switch_model(body, request_id)
             else:
                 raise APIError(404, "Not found.", None, "not_found")
         except APIError as error:
@@ -8305,7 +8374,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
 def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
           cap=None, max_tokens=1024, engine=None, env=None, cors_origins=None,
-          max_queue=8, queue_timeout=300, kv_slots=1, allowed_hosts=(), family=None):
+          max_queue=8, queue_timeout=300, kv_slots=1, allowed_hosts=(), family=None,
+          switch=None):
+    """Serve until shut down. Returns the model dir the dashboard asked to switch to,
+    or None; the launcher then re-executes itself on it (model_switch.py)."""
     if not 1 <= max_tokens:
         raise ValueError("max_tokens must be positive")
     if not 1 <= port <= 65535:
@@ -8337,6 +8409,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
     # milliseconds rather than loading hundreds of GB and leaking a child.
     server = APIServer((host, port), None, model_id, api_key, max_tokens, origins,
                        max_queue, queue_timeout, kv_slots, allowed_hosts=allowed_hosts)
+    server.switch = switch
     runtime = None
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:
@@ -8411,6 +8484,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
         server.server_close()
         if runtime is not None:
             runtime.close()
+    return server.relaunch_to
 
 
 def main():

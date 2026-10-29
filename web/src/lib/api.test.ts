@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  listModelInfo, serverEndpoint, streamChat, type GenerateImageOptions, type ImageProgress,
+  listInstalledModels, listModelInfo, serverEndpoint, streamChat, switchModel, waitForModel,
+  type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
 afterEach(() => vi.unstubAllGlobals())
@@ -401,5 +402,82 @@ describe("generateImage", () => {
     controller.abort()
     await expect(run).rejects.toMatchObject({ name: "AbortError" })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("model switching", () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
+  const models = (...ids: string[]) => json({ object: "list", data: ids.map((id) => ({ id })) })
+  const noWait = () => Promise.resolve()
+
+  it("lists installed models and whether the server can switch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({
+      switch: true, reason: null, data: [{ key: "a1", id: "glm-5.2-colibri", name: "GLM-5.2", current: true }],
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    const result = await listInstalledModels("http://localhost:8000/v1/", "secret")
+    expect(result.switch).toBe(true)
+    expect(result.models).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/v1/models/installed", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer secret" }),
+    }))
+  })
+
+  it("treats a server that does not say it can switch as unable to", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ data: [] })))
+    await expect(listInstalledModels("http://localhost:8000/v1", "")).resolves.toEqual({ switch: false, reason: null, models: [] })
+  })
+
+  it("asks for a switch by key and never sends a path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({ status: "switching", key: "b2", id: "mimo-v2.6-flash", name: "MiMo" }, 202))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(switchModel("http://localhost:8000/v1", "secret", "b2")).resolves.toEqual({ id: "mimo-v2.6-flash", name: "MiMo" })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("http://localhost:8000/v1/models/switch")
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(init.body)).toEqual({ key: "b2" })
+  })
+
+  it("surfaces the server's reason when it refuses", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      json({ error: { message: "A response is being generated." } }, 409)))
+    await expect(switchModel("http://localhost:8000/v1", "", "b2")).rejects.toThrow("A response is being generated.")
+  })
+
+  it("waits through the restart until the new model is served", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(models("old"))                       // still draining
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))    // down
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))    // loading
+      .mockResolvedValueOnce(models("new"))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("ready")
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it("does not mistake the old server, before it goes down, for a fall back", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(models("old"))
+      .mockResolvedValueOnce(models("old"))
+      .mockResolvedValueOnce(models("new"))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("ready")
+  })
+
+  it("reports a fall back when the server returns on the previous model", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(models("old")))
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("fell-back")
+  })
+
+  it("stops waiting when the page stops caring", async () => {
+    const controller = new AbortController()
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")))
+    const sleep = vi.fn(async () => { controller.abort() })
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { signal: controller.signal, sleep })).rejects.toThrow()
   })
 })
