@@ -491,8 +491,8 @@ static float *qiv_resnet(const QivRes *r, float *x, int H, int W, int keep){
 /* Mid-block attention, in place: x += proj(softmax(q k^T / sqrt(C)) v), one head,
  * every pixel attends to every pixel. Queries go in blocks so the score matrix
  * stays small at 2048x2048 (16384 tokens). */
-static int qiv_attention(const QiVae *v, float *x, int N){
-    const int C = v->qkv.cin;
+static int qiv_attention_w(const QivConv *wqkv, const QivConv *wproj, const float *gamma, float *x, int N){
+    const int C = wqkv->cin;
     const float scale = (float)sqrt((double)C);
     float *xn = qiv_alloc((size_t)N * C), *qkv = qiv_alloc((size_t)N * 3 * C);
     float *k = qiv_alloc((size_t)N * C), *vt = qiv_alloc((size_t)N * C);
@@ -501,8 +501,8 @@ static int qiv_attention(const QiVae *v, float *x, int N){
     int rc = -1;
     if (!xn || !qkv || !k || !vt || !S) goto out;
     #pragma omp parallel for schedule(static)
-    for (int p = 0; p < N; p++) qiv_norm_px(xn + (size_t)p * C, x + (size_t)p * C, C, v->attn_g, scale, 0);
-    qi_gemm(qkv, xn, N, &v->qkv.m, v->qkv.b);
+    for (int p = 0; p < N; p++) qiv_norm_px(xn + (size_t)p * C, x + (size_t)p * C, C, gamma, scale, 0);
+    qi_gemm(qkv, xn, N, &wqkv->m, wqkv->b);
     #pragma omp parallel for schedule(static)
     for (int p = 0; p < N; p++) {
         memcpy(k + (size_t)p * C, qkv + (size_t)p * 3 * C + C, sizeof(float) * C);
@@ -524,13 +524,18 @@ static int qiv_attention(const QiVae *v, float *x, int N){
         }
         qi_gemm(xn + (size_t)i0 * C, S, m, &Vm, NULL);        /* xn is free again: reuse for O */
     }
-    qi_gemm(qkv, xn, N, &v->proj.m, v->proj.b);             /* qkv reused for proj(O) [N][C] */
+    qi_gemm(qkv, xn, N, &wproj->m, wproj->b);               /* qkv reused for proj(O) [N][C] */
     #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < (size_t)N * C; i++) x[i] += qkv[i];
     rc = 0;
 out:
     free(xn); free(qkv); free(k); free(vt); free(S);
     return rc;
+}
+
+/* The decoder's mid block; the encoder's has the same shape (qwenimage_vae_enc.h). */
+static int qiv_attention(const QiVae *v, float *x, int N){
+    return qiv_attention_w(&v->qkv, &v->proj, v->attn_g, x, N);
 }
 
 /* conv_out's [HW][OC] to the picture: torch.clamp(-1, 1), then postprocess

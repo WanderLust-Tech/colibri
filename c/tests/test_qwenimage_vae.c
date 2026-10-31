@@ -1,4 +1,5 @@
-/* The Qwen-Image-2.1 VAE decoder (qwenimage_vae.h) against diffusers.
+/* The Qwen-Image-2.1 VAE decoder (qwenimage_vae.h) and encoder (qwenimage_vae_enc.h)
+ * against diffusers.
  *
  *   test_qwenimage_vae FIXTURE             FIXTURE/vae + FIXTURE/vae_ref (make_qwenimage_vae_tiny.py),
  *                                          each case twice: default bands, then one-row bands (--bands)
@@ -14,8 +15,13 @@
  * float output and how many uint8 values differ. The float output of two f32
  * implementations with different summation orders can land on opposite sides
  * of a rounding boundary, so a handful of off-by-one bytes is expected; an
- * off-by-two is not. */
+ * off-by-two is not.
+ *
+ * The same reference file may hold encoder cases: enc{k}.img [16h][16w][4] uint8 and
+ * enc{k}.z [h][w][z] (the pipeline's normalized latents of that picture). Reported per
+ * case: max abs error and the error norm relative to the latent's norm. */
 #include "../qwenimage_vae.h"
+#include "../qwenimage_vae_enc.h"
 #include <time.h>
 
 static long rss_kb(const char *key){
@@ -92,6 +98,30 @@ static int check(QiVae *v, const float *z, int h, int w, const float *ro, const 
            ok ? "ok  " : "FAIL", maxerr, sumerr / (HW * v->out_ch), tol, ndiff, HW * 4, maxd);
     if (ppm) write_ppm(ppm, k, rgba, h * v->scale, w * v->scale);
     free(rgba); free(f);
+    return ok;
+}
+
+/* encode the picture and compare with the reference latents zr [h][w][Z]; returns 1 if ok */
+static int check_enc(QiVaeEnc *e, const uint8_t *img, int H, int W, const float *zr, double tol){
+    const size_t n = (size_t)(H / e->scale) * (W / e->scale) * e->z_dim;
+    float *z = malloc(n * sizeof(float));
+    if (!z) { fprintf(stderr, "OOM\n"); return 0; }
+    double t0 = qiv_now();
+    int rc = qive_encode(e, img, H, W, z);
+    double secs = qiv_now() - t0;
+    if (rc) { free(z); printf("  FAIL encode returned %d\n", rc); return 0; }
+    double maxerr = 0, sumerr = 0, en = 0, rn = 0;
+    for (size_t i = 0; i < n; i++) {
+        double d = (double)z[i] - zr[i];
+        sumerr += fabs(d); en += d * d; rn += (double)zr[i] * zr[i];
+        if (fabs(d) > maxerr) maxerr = fabs(d);
+    }
+    double rel = sqrt(en / (rn > 0 ? rn : 1));
+    int ok = maxerr <= tol && rel <= tol;
+    printf("  encode %dx%d -> %dx%d: %.2f s at %d threads\n", H, W, H / e->scale, W / e->scale, secs, threads());
+    printf("  %s latent max|err| %.3g (mean %.3g), relative norm %.3g (tol %.1g)\n",
+           ok ? "ok  " : "FAIL", maxerr, sumerr / n, rel, tol);
+    free(z);
     return ok;
 }
 
@@ -195,6 +225,33 @@ int main(int argc, char **argv){
             }
             free(z); free(ro); free(rr);
         }
+        QiVaeEnc *enc = NULL;
+        for (int k = 0;; k++) {
+            char ni[64], nz[64];
+            snprintf(ni, sizeof ni, "enc%d.img", k); snprintf(nz, sizeof nz, "enc%d.z", k);
+            st_tensor *ti = st_find(&R, ni), *tz = st_find(&R, nz);
+            if (!ti) break;
+            if (!tz || ti->rank != 3 || ti->shape[2] != 4 || tz->rank != 3) { fprintf(stderr, "%s: malformed case\n", ni); fails++; break; }
+            if (!enc) {
+                enc = qive_load(vae_dir);
+                if (!enc) { fails++; break; }
+                printf("loaded the encoder: %d down blocks, x%d, %.1f MB of weights\n", enc->nblk, enc->scale, enc->wbytes / 1e6);
+            }
+            int H = (int)ti->shape[0], W = (int)ti->shape[1];
+            if (tz->shape[2] != enc->z_dim || tz->shape[0] * enc->scale != H || tz->shape[1] * enc->scale != W) {
+                fprintf(stderr, "%s: latent shape does not match the picture\n", nz); fails++; break; }
+            uint8_t *img = read_u8(&R, ni, (int64_t)H * W * 4);
+            float *zr = read_f32(&R, nz, tz->numel);
+            if (!img || !zr) { fails++; break; }
+            for (int pass = 0; pass < (bands ? 2 : 1); pass++) {
+                qiv_col_floats = pass ? 1 : (size_t)16 << 20;
+                qiv_attn_floats = pass ? 1 : (size_t)4 << 20;
+                printf("enc%d: picture %dx%d%s\n", k, H, W, pass ? ", one-row bands" : "");
+                fails += !check_enc(enc, img, H, W, zr, tol);
+            }
+            free(img); free(zr);
+        }
+        qive_free(enc);
         st_destroy(&R);
     }
     qiv_free(v);

@@ -1895,7 +1895,7 @@ qwen38-vision-check: tests/test_qwen38_vision$(EXE)
 	$(PYTHON) tools/make_qwen38_vision_tiny.py --out ./qwen38_vision_tiny
 	./tests/test_qwen38_vision$(EXE) ./qwen38_vision_tiny
 
-# Qwen-Image-2.1 VAE decoder against diffusers. The fixture needs torch and
+# Qwen-Image-2.1 VAE decoder and encoder against diffusers. The fixture needs torch and
 # diffusers (tools/make_qwenimage_vae_tiny.py OUTDIR, about 6 MB); the test itself
 # is plain C: make test_qwenimage_vae && tests/test_qwenimage_vae OUTDIR
 tests/test_qwenimage_vae$(EXE): tests/test_qwenimage_vae.c

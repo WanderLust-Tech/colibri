@@ -19,6 +19,14 @@ Every case k stores three tensors:
 The decode path is the pipeline's own: unpack to [1, C, 1, h, w], multiply by
 latents_std and add latents_mean from the VAE config, decode, take frame 0,
 postprocess. Needs torch and diffusers (the reference venv), not the engine.
+
+The encoder (c/qwenimage_vae_enc.h) has its own cases, --enc-shapes (latent HxW):
+    enc{k}.img    u8   [16h][16w][4]  an RGBA picture: smooth colour, noise, varying alpha
+    enc{k}.z      f32  [h][w][z_dim]  what QwenImage21Pipeline._encode_vae_image makes of it:
+                                      vae.encode(...) in argmax mode (the posterior's mean),
+                                      then (latent - latents_mean) / latents_std; token-major,
+                                      so it is what the decoder takes
+The picture goes through VaeImageProcessor.preprocess as the pipeline does.
 """
 import argparse
 import os
@@ -28,6 +36,7 @@ import numpy as np
 import torch
 from diffusers import AutoencoderKLQwenImage21
 from diffusers.image_processor import VaeImageProcessor
+from PIL import Image
 from safetensors.torch import save_file
 
 
@@ -74,11 +83,46 @@ def decode_case(vae, z_tok, h, w):
     return image[0].contiguous(), torch.from_numpy(rgba.copy()), dt
 
 
+def test_picture(h, w, seed):
+    """A deterministic RGBA picture [16h][16w][4] uint8. Smooth colour so the encoder sees
+    structure at every scale, noise so it is not only low-pass, alpha that varies so the
+    fourth input channel is not a constant."""
+    H, W = 16 * h, 16 * w
+    g = np.random.default_rng(seed)
+    yy, xx = np.meshgrid(np.linspace(0, 1, H), np.linspace(0, 1, W), indexing="ij")
+    chans = []
+    for c in range(3):
+        fy, fx, ph = g.uniform(1.0, 4.0), g.uniform(1.0, 4.0), g.uniform(0, 6.28)
+        chans.append(0.5 + 0.4 * np.sin(2 * np.pi * (fy * yy * (c + 1) / 2 + fx * xx) + ph))
+    alpha = 0.75 + 0.25 * np.sin(2 * np.pi * (xx + yy))
+    img = np.stack(chans + [alpha], axis=-1) + 0.12 * g.standard_normal((H, W, 4))
+    return np.clip(np.round(img * 255), 0, 255).astype(np.uint8)
+
+
+def encode_case(vae, rgba):
+    """rgba [H][W][4] uint8 -> (normalized latents [h][w][z_dim], seconds)."""
+    cfg = vae.config
+    H, W = rgba.shape[:2]
+    # the pipeline: preprocess to [-1, 1], add the frame axis, encode in argmax mode, normalize
+    proc = VaeImageProcessor(vae_scale_factor=16, vae_latent_channels=cfg.z_dim)
+    x = proc.preprocess(Image.fromarray(rgba, "RGBA"), height=H, width=W).unsqueeze(2)
+    assert x.shape == (1, cfg.in_channels, 1, H, W), x.shape
+    t0 = time.time()
+    with torch.no_grad():
+        lat = vae.encode(x).latent_dist.mode()
+    dt = time.time() - t0
+    mean = torch.tensor(cfg.latents_mean).view(1, cfg.z_dim, 1, 1, 1).to(lat.dtype)
+    std = torch.tensor(cfg.latents_std).view(1, cfg.z_dim, 1, 1, 1).to(lat.dtype)
+    lat = (lat - mean) / std
+    return lat[0, :, 0].permute(1, 2, 0).contiguous(), dt
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("outdir")
     ap.add_argument("--vae", help="existing VAE dir (default: build a tiny random one)")
     ap.add_argument("--shapes", default="5x7,4x6", help="latent HxW list, comma separated")
+    ap.add_argument("--enc-shapes", default="3x5,4x4", help="latent HxW of the encoder cases (the picture is 16x larger)")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--threads", type=int, default=8)
     a = ap.parse_args()
@@ -101,6 +145,14 @@ def main():
         tensors[f"case{k}.z"] = z_tok.reshape(h, w, -1).contiguous()
         tensors[f"case{k}.out"] = out
         tensors[f"case{k}.rgba"] = rgba
+    for k, s in enumerate(a.enc_shapes.split(",") if a.enc_shapes else []):
+        h, w = (int(v) for v in s.lower().split("x"))
+        pic = test_picture(h, w, a.seed + 100 + k)
+        z, dt = encode_case(vae, pic)
+        print(f"enc{k}: image {16 * h}x{16 * w} -> latent {h}x{w}, diffusers encode {dt:.2f} s, "
+              f"z mean {z.mean().item():.3f} std {z.std().item():.3f}")
+        tensors[f"enc{k}.img"] = torch.from_numpy(pic.copy())
+        tensors[f"enc{k}.z"] = z
     os.makedirs(os.path.join(a.outdir, "vae_ref"), exist_ok=True)
     save_file(tensors, os.path.join(a.outdir, "vae_ref", "ref.safetensors"))
 
