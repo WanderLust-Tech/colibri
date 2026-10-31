@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import type { ChatMessage } from "./api"
 import {
-  SIZE_PRESETS, chatTurns, clampSteps, dataUrlBlob, duration, elapsedClock, imageFileName,
+  SIZE_PRESETS, chatTurns, clampSteps, dataUrlBlob, derivedSize, duration, elapsedClock, imageFileName,
   parseSeed, parseSize, progressFraction, randomSeed, snapSide, validSide,
 } from "./images"
 
@@ -23,6 +23,35 @@ describe("image sizes", () => {
     expect(parseSize("768x432")).toBeNull()
     expect(parseSize("garbage")).toBeNull()
     expect(parseSize(null)).toBeNull()
+  })
+})
+
+describe("the size an edit comes out at", () => {
+  /* The numbers are the engine's: the real model drew a 1024x768 picture at 576x448 with a 512
+     reference, and the engine tests pin 64x48 at 896x672 with the default 768. */
+  it("follows the picture's aspect at ref x ref pixels, sides rounded to a multiple of 32", () => {
+    expect(derivedSize(1024, 768, 512)).toEqual({ width: 576, height: 448 })
+    expect(derivedSize(64, 48)).toEqual({ width: 896, height: 672 })
+    expect(derivedSize(768, 1024)).toEqual({ width: 672, height: 896 })
+    expect(derivedSize(500, 500)).toEqual({ width: 768, height: 768 })
+  })
+
+  it("is the engine's own rule even where the result is out of the engine's range", () => {
+    // 4000 x 5 comes out 21728 x 32: the engine refuses that size, and the app does not draw with it
+    expect(derivedSize(4000, 5)).toEqual({ width: 21728, height: 32 })
+    expect(validSide(21728)).toBe(false)
+  })
+
+  it("rounds a tie to the even multiple, as Python's round does", () => {
+    // 48 / 32 = 1.5 -> 2 and 80 / 32 = 2.5 -> 2: Math.round would say 2 and 3
+    expect(derivedSize(100, 100, 48)).toEqual({ width: 64, height: 64 })
+    expect(derivedSize(100, 100, 80)).toEqual({ width: 64, height: 64 })
+  })
+
+  it("gives up on a picture so long and thin that a side rounds to nothing, or on no picture", () => {
+    expect(derivedSize(4000, 1, 32)).toBeNull()
+    expect(derivedSize(0, 100)).toBeNull()
+    expect(derivedSize(100, Number.NaN)).toBeNull()
   })
 })
 

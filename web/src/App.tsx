@@ -31,12 +31,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
-  generateImage, generatesImages, getHealth, listModelInfo, streamChat,
-  type ChatMessage, type GeneratedImage, type HealthResponse, type StreamChatResult,
+  editsImages, generateImage, generatesImages, getHealth, listModelInfo, streamChat,
+  type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type StreamChatResult,
 } from "@/lib/api"
 import {
-  DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, imageFileName, parseSeed, parseSize,
-  presetOf, randomSeed, sizeKey, validSide, type ImageSize,
+  DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, derivedSize, imageFileName, loadPicture, parseSeed,
+  parseSize, presetOf, randomSeed, sizeKey, validSide, type EditPicture, type ImageSize,
 } from "@/lib/images"
 import { resendFrom } from "@/lib/chat"
 import { activeRequests, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
@@ -73,6 +73,9 @@ export default function App() {
   /* Models the server marks with the image_generation capability. With one of
      them selected the conversation generates pictures instead of text. */
   const [imageModels, setImageModels] = useState<string[]>([])
+  /* Of those, the ones whose engine also edits pictures (the image_edit capability),
+     with what /v1/images/edits accepts. */
+  const [editLimits, setEditLimits] = useState<Record<string, NonNullable<ModelInfo["edit"]>>>({})
   const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
@@ -109,6 +112,15 @@ export default function App() {
   const [imageSteps, setImageSteps] = useState(() => clampSteps(Number(stored(localStorage, "colibri.imageSteps", String(DEFAULT_STEPS)))))
   const [seedText, setSeedText] = useState("")
   const [imageRun, setImageRun] = useState<ImageRun | null>(null)
+  /* Pictures attached to the next image, which then edits them, and whether the
+     size follows the last one. Kept after sending: refining an edit is the
+     common next step. */
+  const [pictures, setPictures] = useState<EditPicture[]>([])
+  const [sizeAuto, setSizeAuto] = useState(true)
+  const editRef = useRef<HTMLInputElement>(null)
+  /* The files an edit was made from, by the turn that shows its result: Again and
+     Try again need them, and nothing a reload could bring back holds them. */
+  const editFiles = useRef(new Map<string, File[]>())
   const historyDialog = useRef<HTMLDialogElement>(null)
   useEffect(() => { document.documentElement.dataset.theme = theme; try { localStorage.setItem("colibri.theme", theme) } catch {} }, [theme])
   useEffect(() => { if (historyOpen) historyDialog.current?.showModal(); else historyDialog.current?.close() }, [historyOpen])
@@ -123,6 +135,9 @@ export default function App() {
   const capacity = health?.scheduler?.capacity || kvSlots
   const failures = health?.scheduler ? health.scheduler.rejected + health.scheduler.timed_out + health.scheduler.cancelled : 0
   const imageMode = imageModels.includes(model)
+  const editLimit = imageMode ? editLimits[model] : undefined
+  const canEdit = Boolean(editLimit)
+  const attached = canEdit ? pictures : []
   const seed = parseSeed(seedText)
 
   const updateMessages = (next: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) =>
@@ -191,6 +206,7 @@ export default function App() {
       const found = info.map((item) => item.id)
       setModels(found)
       setImageModels(info.filter(generatesImages).map((item) => item.id))
+      setEditLimits(Object.fromEntries(info.flatMap((item) => editsImages(item) && item.edit ? [[item.id, item.edit] as const] : [])))
       if (found.length && !found.includes(model)) setModel(found[0])
       setConnected(true)
       try {
@@ -235,9 +251,28 @@ export default function App() {
     } catch { setError("status.serverError") }
   }
 
+  /* Pictures for an edit stay files: the request is a multipart upload, so there is
+     no data URI to make. Anything that is not an image is ignored, as in the chat. */
+  const attachPictures = async (files: FileList | File[] | null) => {
+    const chosen = Array.from(files || []).filter((file) => file.type.startsWith("image/"))
+    if (!chosen.length || !editLimit) return
+    if (pictures.length + chosen.length > editLimit.maxImages) { setError("image.tooManyPictures"); return }
+    try {
+      const loaded = await Promise.all(chosen.map(loadPicture))
+      setPictures((current) => [...current, ...loaded])
+      setSizeAuto(true)
+      setError("")
+    } catch { setError("status.serverError") }
+  }
+  const removePicture = (id: string) => setPictures((current) => {
+    const gone = current.find((picture) => picture.id === id)
+    if (gone) URL.revokeObjectURL(gone.url)
+    return current.filter((picture) => picture.id !== id)
+  })
+
   const canSend = useMemo(() => imageMode
-    ? Boolean(draft.trim() && model && !loading && seed !== undefined && validSide(imageSize.width) && validSide(imageSize.height))
-    : (draft.trim() || pending.length) && model && !loading, [draft, imageMode, imageSize, loading, model, pending, seed])
+    ? Boolean(draft.trim() && model && !loading && seed !== undefined && ((attached.length && sizeAuto) || (validSide(imageSize.width) && validSide(imageSize.height))))
+    : (draft.trim() || pending.length) && model && !loading, [attached.length, draft, imageMode, imageSize, loading, model, pending, seed, sizeAuto])
 
   /* The shared streaming core. POSTs `payload` and appends every delta into the
      message `targetId`, with the same live metrics and abort/error wiring whether
@@ -348,7 +383,7 @@ export default function App() {
      `targetId`, whose `generated` field already holds the request. Progress and
      previews live in imageRun, outside the transcript; the finished picture is
      written onto the turn. Cancel is the same abortRef as the chat's Stop. */
-  const runImage = async (targetId: string, request: GeneratedImage) => {
+  const runImage = async (targetId: string, request: GeneratedImage, input?: { files: File[]; auto: boolean }) => {
     setError("")
     setLoading(true)
     const controller = new AbortController()
@@ -358,14 +393,17 @@ export default function App() {
     const update = (change: Partial<ImageRun>) => setImageRun((run) => run && run.targetId === targetId ? { ...run, ...change } : run)
     try {
       const image = await generateImage({
-        baseUrl, apiKey, model, ...request, signal: controller.signal,
+        baseUrl, apiKey, model, ...request,
+        /* an edit: the pictures go up, and an automatic size is left to the engine */
+        ...(input ? { images: input.files, ...(input.auto ? { width: undefined, height: undefined } : {}) } : {}),
+        signal: controller.signal,
         onProgress: (progress) => update({ progress }),
         onPartial: (preview) => update({ preview }),
         onPlainRequest: () => update({ plain: true }),
       })
       const seconds = (performance.now() - started) / 1000
       updateMessages((current) => current.map((item) => item.id === targetId
-        ? { ...item, finish: "stop", generated: { ...image, seconds } } : item))
+        ? { ...item, finish: "stop", generated: { ...image, seconds, ...(request.edit ? { edit: request.edit } : {}) } } : item))
       setConnected(true)
     } catch (cause) {
       const finish = controller.signal.aborted ? "aborted" : "error"
@@ -383,29 +421,43 @@ export default function App() {
   const sendImage = async () => {
     const prompt = draft.trim()
     if (!prompt || loading || seed === undefined) return
-    const request = { prompt, width: imageSize.width, height: imageSize.height, steps: imageSteps, seed: seed ?? randomSeed() }
+    const files = attached.map((picture) => picture.file)
+    /* With pictures attached and the size on auto, the engine picks the size from the last
+       one; the placeholder is shaped by the same rule, and falls back to the chosen size
+       for a picture too long and thin for it. */
+    const last = attached[attached.length - 1]
+    const derived = files.length && sizeAuto && last ? derivedSize(last.width, last.height, editLimit?.refResolution?.default) : null
+    const guess = derived && validSide(derived.width) && validSide(derived.height) ? derived : null
+    const size = guess ?? imageSize
+    const request = { prompt, width: size.width, height: size.height, steps: imageSteps, seed: seed ?? randomSeed(), ...(files.length ? { edit: files.length } : {}) }
     const assistant = imageTurn(request)
     setDraft("")
     updateMessages((current) => [...current, { ...message("user", prompt), mode: "image" }, assistant])
-    await runImage(assistant.id, request)
+    if (files.length) editFiles.current.set(assistant.id, files)
+    await runImage(assistant.id, request, files.length ? { files, auto: guess !== null } : undefined)
   }
 
   /* Same prompt, size and steps, a seed never used before: a new picture
      under the old one, so the two can be compared. */
-  const imageAgain = async (image: GeneratedImage) => {
+  const imageAgain = async (image: GeneratedImage, sourceId: string) => {
     if (loading) return
+    const files = image.edit ? editFiles.current.get(sourceId) : undefined
+    if (image.edit && !files) { setError("image.editInputsGone"); return }
     const { prompt, width, height, steps } = image
-    const assistant = imageTurn({ prompt, width, height, steps, seed: randomSeed() })
+    const assistant = imageTurn({ prompt, width, height, steps, seed: randomSeed(), ...(image.edit ? { edit: image.edit } : {}) })
+    if (files) editFiles.current.set(assistant.id, files)
     updateMessages((current) => [...current, assistant])
-    await runImage(assistant.id, assistant.generated!)
+    await runImage(assistant.id, assistant.generated!, files ? { files, auto: false } : undefined)
   }
 
   const imageRetry = async (item: ChatMessage) => {
     if (loading || !item.generated) return
-    const { prompt, width, height, steps, seed: previous } = item.generated
-    const request = { prompt, width, height, steps, seed: previous }
+    const { prompt, width, height, steps, seed: previous, edit } = item.generated
+    const files = edit ? editFiles.current.get(item.id) : undefined
+    if (edit && !files) { setError("image.editInputsGone"); return }
+    const request = { prompt, width, height, steps, seed: previous, ...(edit ? { edit } : {}) }
     updateMessages((current) => current.map((turn) => turn.id === item.id ? { ...turn, finish: undefined, generated: request } : turn))
-    await runImage(item.id, request)
+    await runImage(item.id, request, files ? { files, auto: false } : undefined)
   }
 
   const downloadImage = (image: GeneratedImage) => {
@@ -517,7 +569,7 @@ export default function App() {
   const imageCard = (item: ChatMessage) => {
     const image = item.generated!
     if (image.url) return <ImageResultCard image={image} copied={copied === `${item.id}:seed`} busy={loading || !imageMode}
-      onDownload={() => downloadImage(image)} onCopySeed={() => void copySeed(item)} onAgain={() => void imageAgain(image)} />
+      onDownload={() => downloadImage(image)} onCopySeed={() => void copySeed(item)} onAgain={() => void imageAgain(image, item.id)} />
     if (imageRun?.targetId === item.id) return <ImageProgressCard request={image} run={imageRun} onCancel={() => abortRef.current?.abort()} />
     return <ImageStoppedCard request={image} finish={item.finish} busy={loading || !imageMode} onRetry={() => void imageRetry(item)} />
   }
@@ -576,8 +628,15 @@ export default function App() {
         <div className="composer-wrap">
           {error && <div className="error-banner" role="alert">{t(error)}</div>}
           <form className={cn("composer", imageMode && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
-            onDragOver={e => { if (!imageMode && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
-            onDrop={e => { if (!imageMode && e.dataTransfer.files.length) { e.preventDefault(); void attach(e.dataTransfer.files) } }}>
+            onDragOver={e => { if ((!imageMode || canEdit) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
+            onDrop={e => { if ((!imageMode || canEdit) && e.dataTransfer.files.length) { e.preventDefault(); void (imageMode ? attachPictures : attach)(e.dataTransfer.files) } }}>
+            {imageMode && attached.length > 0 && <div className="composer-attachments">
+              {attached.map((picture, at) => <span key={picture.id} className="attachment">
+                <img src={picture.url} alt={t("image.attachedAlt", { n: at + 1 })} />
+                <button type="button" aria-label={t("image.removePicture")} title={t("image.removePicture")}
+                  onClick={() => removePicture(picture.id)}><X /></button>
+              </span>)}
+            </div>}
             {!imageMode && pending.length > 0 && <div className="composer-attachments">
               {pending.map((url, at) => <span key={at} className="attachment">
                 <img src={url} alt={t("ui.attachedImage", { n: at + 1 })} />
@@ -585,10 +644,17 @@ export default function App() {
                   onClick={() => setPending(list => list.filter((_, index) => index !== at))}><X /></button>
               </span>)}
             </div>}
-            <Textarea ref={draftRef} id="draft" aria-label={imageMode ? t("image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={imageMode ? t("image.placeholder") : t("chat.placeholder")} onPaste={event => { if (imageMode) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void attach(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
+            <Textarea ref={draftRef} id="draft" aria-label={imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} onPaste={event => { if (imageMode && !canEdit) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void (imageMode ? attachPictures : attach)(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
             <div className="composer-foot">
-              {imageMode ? <ImageControls size={imageSize} custom={customSize} steps={imageSteps} seed={seedText} seedValid={seed !== undefined}
-                onSize={setImageSize} onCustom={setCustomSize} onSteps={setImageSteps} onSeed={setSeedText} /> : <>
+              {imageMode ? <>
+              {canEdit && <input ref={editRef} type="file" accept="image/*" multiple hidden
+                onChange={e => { void attachPictures(e.target.files); e.target.value = "" }} />}
+              <ImageControls size={imageSize} custom={customSize} steps={imageSteps} seed={seedText} seedValid={seed !== undefined}
+                onSize={(next) => { setSizeAuto(false); setImageSize(next) }} onCustom={(next) => { setSizeAuto(false); setCustomSize(next) }}
+                onSteps={setImageSteps} onSeed={setSeedText}
+                canEdit={canEdit} auto={attached.length > 0 && sizeAuto} onAuto={attached.length ? () => setSizeAuto(true) : undefined}
+                onAttach={() => editRef.current?.click()} />
+              </> : <>
               <input ref={fileRef} type="file" accept="image/*" multiple hidden
                 onChange={e => { void attach(e.target.files); e.target.value = "" }} />
               <button type="button" className="attach-chip" aria-label={t("ui.attachImage")} title={t("ui.attachImage")}

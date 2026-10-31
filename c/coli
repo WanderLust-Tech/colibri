@@ -1392,7 +1392,8 @@ def info_image_model(a, family, row):
     row("on disk", f"{inv['disk_bytes']/1e9:.1f} GB")
     row("output", f"PNG (RGBA) · saved to {image_dir()} (COLI_IMAGE_DIR)")
     row("use", "coli chat (TUI, shows the image) · coli run \"prompt\" --out x.png · "
-               "coli serve (POST /v1/images/generations)")
+               "coli run \"instruction\" --image photo.png (edit) · "
+               "coli serve (POST /v1/images/generations, /v1/images/edits)")
     if inv["research_license"]:
         row("license", "Qwen Research License: non-commercial; never redistribute the weights")
     try:

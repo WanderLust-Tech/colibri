@@ -50,6 +50,51 @@ export function snapSide(value: number) {
   return Math.min(SIDE.max, Math.max(SIDE.min, snapped))
 }
 
+/* A picture attached to an edit: the file to upload, an object URL for its
+   thumbnail (revoked when it is removed), and its natural size, which gives the
+   size the edit will come out at. */
+export interface EditPicture {
+  id: string
+  file: File
+  url: string
+  width: number
+  height: number
+}
+
+export function loadPicture(file: File): Promise<EditPicture> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = () => resolve({
+      id: `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`,
+      file, url, width: image.naturalWidth, height: image.naturalHeight,
+    })
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error(file.name)) }
+    image.src = url
+  })
+}
+
+/* The side, in pixels, the engine works reference pictures at unless told otherwise (the
+   pipeline's own is 1024: this is the memory-friendly default the engine reports). */
+export const REF_RESOLUTION = 768
+
+/* The size an edit comes out at when none is chosen: the engine's own rule (the
+   pipeline's calculate_dimensions), the last picture's aspect at ref*ref pixels with
+   each side rounded to a multiple of 32, ties to even. Used only to shape the
+   placeholder; the finished picture says what was really drawn. null when the
+   picture is so long and thin that a side rounds to nothing. */
+export function derivedSize(width: number, height: number, ref = REF_RESOLUTION): ImageSize | null {
+  if (!(width > 0 && height > 0)) return null
+  const wide = Math.sqrt(ref * ref * (width / height))
+  const roundEven = (value: number) => {
+    const floor = Math.floor(value)
+    const diff = value - floor
+    return (diff < 0.5 ? floor : diff > 0.5 ? floor + 1 : floor % 2 === 0 ? floor : floor + 1) * SIDE.multiple
+  }
+  const size = { width: roundEven(wide / SIDE.multiple), height: roundEven(wide / (width / height) / SIDE.multiple) }
+  return size.width >= SIDE.multiple && size.height >= SIDE.multiple ? size : null
+}
+
 export function parseSize(text: string | null): ImageSize | null {
   const match = /^(\d+)x(\d+)$/.exec(text || "")
   if (!match) return null

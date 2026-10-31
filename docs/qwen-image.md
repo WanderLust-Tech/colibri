@@ -1,6 +1,7 @@
 # Qwen-Image-2.1 on colibri
 
-`c/qwenimage` turns a text prompt into a picture with
+`c/qwenimage` turns a text prompt into a picture, or a picture and an
+instruction into an edited one, with
 [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1), read
 straight from the official diffusers checkpoint. There is no conversion step:
 the engine quantizes the text encoder and the diffusion transformer to int8
@@ -12,7 +13,7 @@ The same front ends as the text models reach it:
   and the picture is drawn **inside the terminal**, then saved as a PNG.
 - `coli run "prompt"` makes one image and writes it to a file.
 - `coli serve` (and `coli web`) expose `POST /v1/images/generations`, the
-  OpenAI images API.
+  OpenAI images API, and `POST /v1/images/edits` to change a picture you give it.
 
 <p align="center">
   <img src="media/qwen-image-web.png" width="820" alt="the web UI: the prompt, and the image colibri generated for it, with size, steps, seed and time">
@@ -47,8 +48,9 @@ found and their size on disk.
 ## RAM
 
 The text encoder's language model and the transformer are held as int8 with
-one scale per row; the text encoder's vision tower and its output head are
-never loaded. On the real checkpoint `coli plan` reports (measured from the
+one scale per row; the text encoder's output head is never loaded, and its
+vision tower only while a picture is being edited ([Editing
+pictures](#editing-pictures)). On the real checkpoint `coli plan` reports (measured from the
 safetensors headers):
 
 | part | on disk | in RAM |
@@ -120,6 +122,58 @@ coli run --model ~/Models/Qwen-Image-2.1 --size 1024x576 --seed 42 \
 Without `--out` the PNG goes to the images folder. When the output is a
 terminal the picture is drawn there too; when it is piped, `coli run` prints
 only the path on stdout.
+
+## Editing pictures
+
+Qwen-Image-2.1 also edits: give it one or more pictures and an instruction, and
+it draws the picture with that change. It works from your pictures as
+references (the text encoder looks at them, and so does the transformer), not
+by adding noise to them, so what you did not ask to change is kept. On the real
+checkpoint, "make the sky a vivid purple and orange sunset" on a drawing of a
+house on a hill gave back the same house, hill and sun under a new sky.
+
+```sh
+coli run --model ~/Models/Qwen-Image-2.1 --image house.png --steps 8 \
+  --out sunset.png "make the sky a vivid purple and orange sunset"
+```
+
+- `--image` takes a path and repeats (up to 4 pictures). The prompt is an
+  instruction about the pictures; a second picture can be a style or a subject
+  to bring in ("put the cat from the second picture on the sofa").
+- Unless you give `--size`, the picture comes out at the **last** picture's
+  shape, at about `ref_resolution`² pixels (the pipeline's own rule).
+- `--ref-resolution N` is the side, in pixels, the pictures are worked at:
+  384 to 1024, default 768. The pipeline uses 1024; the default is lower
+  because every reference pixel block is memory and time (below).
+- In `coli chat`, `/image PATH` attaches a picture (so does dropping a file on
+  the prompt), `/image` lists them, `/image clear` goes back to drawing from
+  scratch, and `/size auto` returns the size to "follow the last picture".
+  Attached pictures stay attached, so a result can be refined step by step.
+- In the web UI, a model that edits shows an attach button next to the size;
+  the pictures appear as thumbnails, the size reads "Auto (follows the
+  picture)", and a result says it was edited from N pictures. "New seed" runs
+  the same edit again.
+- Over HTTP it is `POST /v1/images/edits` ([below](#post-v1imagesedits)).
+
+**What it costs.** Measured on a 24-core i9 with the text encoder staged out
+(`COLI_IMG_TE=stage`): a 1024x768 photo at `--ref-resolution 512` became
+576x448, and the whole 8-step edit took 91 s (encode 15 s, denoise 71 s at
+8.8 s a step, decode 4 s). The picture goes through the text encoder's vision
+tower (1.1 GB in bf16, loaded only while an edit encodes), the VAE's encoder
+and the transformer once; after that every step attends to it. Each reference
+token keeps a key and a value in each of the 32 blocks, **1 MiB a token**: a
+768-pixel reference is 2304 tokens (2.3 GiB), a 1024-pixel one 4096 (4 GiB),
+and the engine refuses requests whose pictures add up to more than 7168. That
+memory is freed when the edit ends.
+
+**What it does not do.** There is no mask: this model edits by instruction,
+not by inpainting a region. Pictures are only read from the request itself,
+never fetched from a URL or a path. Seeds are the engine's own, so an edit is
+not reproducible against the Python pipeline from its seed (it is
+reproducible here, and the engine's results are held to the pipeline's to
+within rounding when both start from the same noise: `tools/make_qwenimage_edit_e2e_ref.py`).
+A picture is resized as the pipeline does it (Lanczos, to a multiple of 32);
+one that rounds to nothing, such as 4000x1, is refused.
 
 ## Sizes, steps, seed
 
@@ -234,6 +288,39 @@ Errors are OpenAI-shaped: HTTP 400 for a bad size, an empty prompt or
 since the engine draws one image at a time. `GET /v1/models` marks the model
 with `"capabilities": ["image_generation"]` and its size rules;
 `/v1/chat/completions` answers 400 and points to the images endpoint.
+
+### POST /v1/images/edits
+
+The same request with pictures, answered the same way (and streamed the same way).
+Either what OpenAI's SDKs send, `multipart/form-data` with the files in `image`
+(or `image[]`, repeated):
+
+```sh
+curl -s http://127.0.0.1:8000/v1/images/edits \
+  -F model=qwen-image-2.1-colibri -F prompt='make the sky a vivid purple sunset' \
+  -F image=@house.png -F steps=8 -F seed=1 \
+  | python3 -c 'import sys, json, base64; d = json.load(sys.stdin);
+open("sunset.png", "wb").write(base64.b64decode(d["data"][0]["b64_json"])); print(d["colibri"])'
+```
+
+or JSON, with `image` or `images` as base64, a `data:` URL, or objects carrying
+`image_url` (a data URL as a string or as `{"url": ...}`). Fields besides the
+pictures are those of the generations endpoint, and `size` may be left out or
+`"auto"`: the engine then follows the last picture. `ref_resolution` is the
+side the pictures are worked at (the range is in `/v1/models`).
+
+Pictures: PNG (8-bit grey, RGB or RGBA) always; with [Pillow](https://pypi.org/project/pillow/)
+installed also JPEG, WebP, GIF, BMP and palette or 16-bit PNG, turned upright by
+their EXIF orientation. Each is limited to 2048 pixels a side and 4 megapixels:
+with Pillow a larger one is shrunk to fit, without it the request is refused
+and says so. A request is at most 32 MiB.
+
+Refused with 400, naming the field: no picture, more than 4, a `mask`, an
+`http(s)` URL or a `file_id` (the server fetches nothing and keeps no files),
+a picture it cannot read, a `ref_resolution` outside the range, a size given
+by one side only. `GET /v1/models` marks a model whose engine can edit with
+`"image_edit"` among its capabilities and an `image.edit` block
+(`max_images`, `max_side`, `max_pixels`, `ref_resolution`).
 
 ## Timings
 

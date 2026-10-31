@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
-  askSystemOne, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
+  askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
   listModelInfo, serverEndpoint, streamChat, type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
@@ -187,6 +187,22 @@ describe("model capabilities", () => {
     ])
     expect(models.map(generatesImages)).toEqual([true, false])
   })
+
+  it("reads what an image-editing model accepts, and nothing it did not state", async () => {
+    const range = { default: 768, min: 384, max: 1024 }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [
+      { id: "edits", capabilities: ["image_generation", "image_edit"], image: { edit: { max_images: 4, ref_resolution: range } } },
+      { id: "edits-no-range", capabilities: ["image_generation", "image_edit"], image: { edit: { max_images: 2, ref_resolution: { default: "x" } } } },
+      { id: "claims-edit-without-limits", capabilities: ["image_generation", "image_edit"], image: {} },
+      { id: "draws-only", capabilities: ["image_generation"], image: { edit: { max_images: 4 } } },
+    ] }))))
+    const models = await listModelInfo("http://x/v1", "")
+    expect(models.map(editsImages)).toEqual([true, true, true, false])
+    expect(models[0].edit).toEqual({ maxImages: 4, refResolution: range })
+    expect(models[1].edit).toEqual({ maxImages: 2 })
+    expect(models[2].edit).toBeUndefined()
+    expect(models[3].edit).toBeUndefined()   // a limit without the capability is not an edit model
+  })
 })
 
 describe("generateImage", () => {
@@ -233,6 +249,36 @@ describe("generateImage", () => {
   })
 
   const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).body)) as Record<string, unknown>
+
+  it("sends pictures to /images/edits as a multipart form, with no size when none is given", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamed(events))
+    vi.stubGlobal("fetch", fetchMock)
+    const files = [new File(["one"], "a.png", { type: "image/png" }), new File(["two"], "b.png", { type: "image/png" })]
+    const image = await generateImage(options({ images: files, width: undefined, height: undefined, refResolution: 512 }))
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:8000/v1/images/edits")
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.body).toBeInstanceOf(FormData)
+    const form = init.body as FormData
+    expect(Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === "string"))).toEqual({
+      model: "qwen-image-2.1-colibri", prompt: "a hummingbird", n: "1", response_format: "b64_json",
+      steps: "8", seed: "1234", stream: "true", ref_resolution: "512",
+    })
+    expect(form.getAll("image").map((file) => (file as File).name)).toEqual(["a.png", "b.png"])
+    // the browser writes the multipart Content-Type with its boundary; setting JSON here would break it
+    expect(init.headers).toEqual({ Authorization: "Bearer secret" })
+    // the size is the engine's answer, not the request's
+    expect(image.width).toBe(768)
+    expect(image.height).toBe(512)
+  })
+
+  it("keeps sending an explicit size with the pictures when one was chosen", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamed(events))
+    vi.stubGlobal("fetch", fetchMock)
+    await generateImage(options({ images: [new File(["x"], "a.png")], apiKey: "" }))
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect((init.body as FormData).get("size")).toBe("768x512")
+    expect(init.headers).toEqual({})
+  })
 
   it("streams progress, previews and the result, and posts the contract's body", async () => {
     const fetchMock = vi.fn().mockResolvedValue(streamed(events))

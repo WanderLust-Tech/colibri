@@ -136,15 +136,35 @@ export interface ModelInfo {
      with "chat" and "systemone", and a decision model with "systemone" and
      "decision" (it answers only POST /v1/systemone). */
   capabilities?: string[]
+  /* What POST /v1/images/edits takes, for a model that edits pictures
+     ("image_edit" among its capabilities): how many pictures at most, and the
+     range of the side, in pixels, the engine works them at. */
+  edit?: { maxImages: number; refResolution?: { default: number; min: number; max: number } }
+}
+
+const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0
+
+/* /v1/models: `image.edit` is {max_images, ref_resolution: {default, min, max}} on a
+   model that edits. Anything else is left out rather than guessed. */
+function editLimits(image: unknown): ModelInfo["edit"] {
+  const edit = (image as { edit?: { max_images?: unknown; ref_resolution?: Record<string, unknown> } } | undefined)?.edit
+  if (!edit || !positive(edit.max_images)) return undefined
+  const range = edit.ref_resolution
+  const refResolution = range && positive(range.default) && positive(range.min) && positive(range.max)
+    ? { default: Number(range.default), min: Number(range.min), max: Number(range.max) } : undefined
+  return { maxImages: Number(edit.max_images), ...(refResolution ? { refResolution } : {}) }
 }
 
 export async function listModelInfo(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
   const response = await fetch(endpoint(baseUrl, "models"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown }> }
-  return (body.data || []).map(({ id, capabilities }) => Array.isArray(capabilities)
-    ? { id, capabilities: capabilities.filter((item): item is string => typeof item === "string") }
-    : { id })
+  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown }> }
+  return (body.data || []).map(({ id, capabilities, image }) => {
+    if (!Array.isArray(capabilities)) return { id }
+    const list = capabilities.filter((item): item is string => typeof item === "string")
+    const edit = list.includes("image_edit") ? editLimits(image) : undefined
+    return { id, capabilities: list, ...(edit ? { edit } : {}) }
+  })
 }
 
 export async function listModels(baseUrl: string, apiKey: string, signal?: AbortSignal) {
@@ -153,6 +173,11 @@ export async function listModels(baseUrl: string, apiKey: string, signal?: Abort
 
 export function generatesImages(model: ModelInfo | undefined) {
   return !!model?.capabilities?.includes("image_generation")
+}
+
+/* An image model whose engine can also edit pictures: POST /v1/images/edits */
+export function editsImages(model: ModelInfo | undefined) {
+  return !!model?.capabilities?.includes("image_edit")
 }
 
 export async function getHealth(baseUrl: string, apiKey = "", signal?: AbortSignal): Promise<HealthResponse> {
@@ -384,6 +409,9 @@ export interface GeneratedImage {
   url?: string
   seconds?: number
   timings?: ImageTimings
+  /* How many pictures this was edited from, when it was an edit. The pictures
+     themselves are not kept with the turn. */
+  edit?: number
 }
 
 export interface GenerateImageOptions {
@@ -391,10 +419,18 @@ export interface GenerateImageOptions {
   apiKey: string
   model: string
   prompt: string
-  width: number
-  height: number
+  /* Left out together, the size is the engine's choice: for an edit it follows
+     the last picture. The values here then only say what to expect. */
+  width?: number
+  height?: number
   steps: number
   seed: number
+  /* Pictures to edit (the prompt is then an instruction about them): the same
+     request goes to /v1/images/edits as a multipart form, the way OpenAI's SDKs
+     send it. */
+  images?: File[]
+  /* The side, in pixels, the engine works the pictures at; its own default when absent. */
+  refResolution?: number
   signal: AbortSignal
   onProgress?: (progress: ImageProgress) => void
   /* A preview as a data URI, small and noisy: the latent of the step so far. */
@@ -416,22 +452,29 @@ const IMAGE_EVENT = {
   completed: "image_generation.completed",
 }
 
-function imageRequest(options: GenerateImageOptions, stream: boolean) {
-  return {
-    method: "POST",
-    headers: headers(options.apiKey),
-    signal: options.signal,
-    body: JSON.stringify({
-      model: options.model,
-      prompt: options.prompt,
-      size: `${options.width}x${options.height}`,
-      n: 1,
-      response_format: "b64_json",
-      steps: options.steps,
-      seed: options.seed,
-      stream,
-    }),
+const imagePath = (options: GenerateImageOptions) => options.images?.length ? "images/edits" : "images/generations"
+
+function imageRequest(options: GenerateImageOptions, stream: boolean): RequestInit {
+  const fields: Record<string, string | number | boolean> = {
+    model: options.model,
+    prompt: options.prompt,
+    n: 1,
+    response_format: "b64_json",
+    steps: options.steps,
+    seed: options.seed,
+    stream,
   }
+  if (options.width !== undefined && options.height !== undefined) fields.size = `${options.width}x${options.height}`
+  if (options.images?.length) {
+    /* multipart: the browser sets the boundary, so no Content-Type here */
+    if (options.refResolution !== undefined) fields.ref_resolution = options.refResolution
+    const form = new FormData()
+    for (const [name, value] of Object.entries(fields)) form.append(name, String(value))
+    for (const file of options.images) form.append("image", file, file.name)
+    const auth: Record<string, string> = options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}
+    return { method: "POST", headers: auth, signal: options.signal, body: form }
+  }
+  return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
 }
 
 async function imageError(response: Response) {
@@ -455,7 +498,7 @@ function streamError(data: string) {
 }
 
 async function streamImage(options: GenerateImageOptions): Promise<ImageGenerationResponse> {
-  const response = await fetch(endpoint(options.baseUrl, "images/generations"), imageRequest(options, true))
+  const response = await fetch(endpoint(options.baseUrl, imagePath(options)), imageRequest(options, true))
   if (!response.ok) throw await imageError(response)
   /* A server that ignores `stream` answers with the plain object: that is the
      result, not a failure, and asking again would generate a second picture. */
@@ -512,7 +555,7 @@ async function streamImage(options: GenerateImageOptions): Promise<ImageGenerati
 }
 
 async function requestImage(options: GenerateImageOptions): Promise<ImageGenerationResponse> {
-  const response = await fetch(endpoint(options.baseUrl, "images/generations"), imageRequest(options, false))
+  const response = await fetch(endpoint(options.baseUrl, imagePath(options)), imageRequest(options, false))
   if (!response.ok) throw await imageError(response)
   return (await response.json()) as ImageGenerationResponse
 }
@@ -534,8 +577,8 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const info = answer.colibri
   return {
     prompt: options.prompt,
-    width: info?.width ?? options.width,
-    height: info?.height ?? options.height,
+    width: info?.width ?? options.width ?? 0,
+    height: info?.height ?? options.height ?? 0,
     steps: info?.steps ?? options.steps,
     seed: info?.seed ?? options.seed,
     url,
