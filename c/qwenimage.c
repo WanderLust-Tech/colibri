@@ -5,7 +5,8 @@
  *
  *   text_encoder  Qwen3-VL's language model (36 layers, 8B). Only a prefill: the
  *                 last layer's hidden states, before the final norm, are the
- *                 prompt's embedding. lm_head and the vision tower are not read.
+ *                 prompt's embedding. lm_head is not read; the vision tower is,
+ *                 only for the reference pictures of an edit (qwenimage_vit.h).
  *   transformer   the DiT: 32 single-stream blocks over [prompt ; image tokens].
  *                 Prompt tokens are modulated as if t = 0 and attend causally, so
  *                 their keys and values do not depend on the step: they are
@@ -23,7 +24,11 @@
  *             [--seed S] --out image.png
  *   qwenimage --model DIR --serve        line protocol, see serve_loop()
  *   qwenimage --model DIR --ref REFDIR   compare every stage with a reference
- *                                         dump (tools/make_qwenimage_tiny.py) */
+ *                                         dump (tools/make_qwenimage_tiny.py)
+ *   qwenimage --model DIR --edit-ref REFDIR   the DiT with reference images
+ *                                         (tools/make_qwenimage_edit_ref.py)
+ *   qwenimage --model DIR --vl-ref REFDIR     the vision tower and the text encoder
+ *                                         with pictures (tools/make_qwenimage_vl_ref.py) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -300,17 +305,20 @@ static void attention(float *out, int ldo, const float *Q, int ldq, int Tq,
     if (g_prof) g_t_att += now_s() - tprof;
 }
 
+#include "qwenimage_vit.h"       /* Qwen3-VL's vision tower: the reference images of an edit */
+
 /* ---- text encoder (Qwen3-VL language model, prefill only) ------------------ */
 
 typedef struct { Lin q, k, v, o, gate, up, down; float *ln1, *ln2, *qn, *kn; } TeLayer;
 typedef struct {
     int hidden, layers, heads, kv, hd, inter, vocab;
     float eps, theta;
+    int mrope[3], mrope_ok;     /* interleaved M-RoPE sections (t, h, w); ok when the config states them */
     shards S; int open;
     st_tensor *embed;
     TeLayer *L; int loaded;
     Tok tok; int tok_loaded;
-    int im_start, im_end;
+    int im_start, im_end, image_pad;
 } Te;
 
 static void te_config(Te *te, const char *model){
@@ -330,6 +338,18 @@ static void te_config(Te *te, const char *model){
     if (te->theta == 0) {
         jval *rp = json_get(c, "rope_parameters");
         te->theta = (float)jnum(rp, "rope_theta", 5000000.0);
+    }
+    /* the M-RoPE layout, which text alone never reads (three equal positions make it the plain rotary) but
+     * an image does: how many of the hd/2 frequencies follow the frame, row and column positions */
+    {
+        jval *rs = json_get(c, "rope_scaling"); if (!rs) rs = json_get(c, "rope_parameters");
+        jval *sec = rs ? json_get(rs, "mrope_section") : NULL;
+        te->mrope_ok = sec && sec->t == J_ARR && sec->len == 3 && jbool(rs, "mrope_interleaved", 0);
+        for (int i = 0; te->mrope_ok && i < 3; i++) {
+            te->mrope_ok = sec->kids[i]->t == J_NUM && sec->kids[i]->num >= 0 && sec->kids[i]->num <= 4096;
+            te->mrope[i] = te->mrope_ok ? (int)sec->kids[i]->num : 0;
+        }
+        if (te->mrope_ok && te->mrope[0] + te->mrope[1] + te->mrope[2] != te->hd / 2) te->mrope_ok = 0;
     }
     json_free(root); free(arena);
     /* Model files come from mirrors nobody vouches for: every dimension that
@@ -410,6 +430,7 @@ static void te_tokenizer(Te *te, const char *model){
     te->tok_loaded = 1;
     te->im_start = tok_id_of(&te->tok, "<|im_start|>");
     te->im_end = tok_id_of(&te->tok, "<|im_end|>");
+    te->image_pad = tok_id_of(&te->tok, "<|image_pad|>");
     if (te->im_start < 0 || te->im_end < 0) {
         fprintf(stderr, "[qwenimage] tokenizer has no <|im_start|>/<|im_end|>\n"); exit(1);
     }
@@ -439,38 +460,52 @@ static int *te_encode_prompt(Te *te, const char *prompt, int *n_out, int *drop_o
     return ids;
 }
 
-/* rotate-half RoPE over the full head (text only: Qwen3-VL's M-RoPE with three
- * equal position components is the plain 1D rotary). */
-static void te_rope(float *x, int T, int nh, int hd, int ld, float theta){
+/* rotate-half RoPE over the full head. Qwen3-VL's M-RoPE gives each token three positions (frame, row,
+ * column) and hands each of the hd/2 frequencies to one of them: interleaved, frequency i follows the
+ * row when i % 3 == 1 (below 3 * sec[1]), the column when i % 3 == 2 (below 3 * sec[2]), the frame
+ * otherwise. With pos3 NULL a token's three positions are its index, which makes it the plain 1-D
+ * rotary (text alone). pos3 is [T][3]: frame, row, column. */
+static void te_rope(float *x, int T, int nh, int hd, int ld, float theta, const int *pos3, const int *sec){
     int half = hd / 2;
-    float *inv = fmalloc(half);
-    for (int i = 0; i < half; i++) inv[i] = 1.f / powf(theta, (float)(2 * i) / (float)hd);
+    float *inv = fmalloc(half); int *axis = xmalloc(sizeof(int) * half);
+    for (int i = 0; i < half; i++) {
+        inv[i] = 1.f / powf(theta, (float)(2 * i) / (float)hd);
+        axis[i] = !pos3 || !sec ? 0 : (i % 3 == 1 && i < 3 * sec[1]) ? 1 : (i % 3 == 2 && i < 3 * sec[2]) ? 2 : 0;
+    }
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; t++)
         for (int h = 0; h < nh; h++) {
             float *r = x + (int64_t)t * ld + (int64_t)h * hd;
             for (int i = 0; i < half; i++) {
-                float a = (float)t * inv[i], c = cosf(a), s = sinf(a);
+                float a = (float)(pos3 ? pos3[3 * t + axis[i]] : t) * inv[i], c = cosf(a), s = sinf(a);
                 float x0 = r[i], x1 = r[i + half];
                 r[i] = x0 * c - x1 * s;
                 r[i + half] = x1 * c + x0 * s;
             }
         }
-    free(inv);
+    free(inv); free(axis);
 }
 
-/* ids[T] -> hidden[T][hidden]: the last layer's output before the final norm. */
-static float *te_forward(Te *te, const int *ids, int T){
+/* ids[T] -> hidden[T][hidden]: the last layer's output before the final norm.
+ *
+ * With pictures (an edit): vmask[t] marks the <|image_pad|> rows, whose input embedding is the next row of
+ * vis[nvis][hidden] (the vision tower's merged tokens, in order) instead of the table's; pos3[T][3] are the
+ * M-RoPE positions (te_positions); and after each of the first nds layers the matching deepstack feature
+ * ds[l][nvis][hidden] is ADDED to the same rows. NULL for all of them is the text-only encoder. */
+static float *te_forward_mm(Te *te, const int *ids, int T, const int *pos3, const uint8_t *vmask,
+                            const float *vis, int nds, const float *ds){
     int H = te->hidden, qd = te->heads * te->hd, kd = te->kv * te->hd, I = te->inter;
     float *x = fmalloc((size_t)T * H), *h = fmalloc((size_t)T * H);
     float *q = fmalloc((size_t)T * qd), *k = fmalloc((size_t)T * kd), *v = fmalloc((size_t)T * kd);
     float *a = fmalloc((size_t)T * qd), *g = fmalloc((size_t)T * I), *u = fmalloc((size_t)T * I);
     int esz = te->embed->dtype == 0 ? 2 : 4;
     void *row = xmalloc((size_t)H * esz);
+    int nvis = 0;
     for (int t = 0; t < T; t++) {
+        float *dst = x + (int64_t)t * H;
+        if (vmask && vmask[t]) { memcpy(dst, vis + (int64_t)nvis++ * H, (size_t)H * 4); continue; }
         if (ids[t] < 0 || ids[t] >= te->vocab) { fprintf(stderr, "[qwenimage] token id %d out of range\n", ids[t]); exit(1); }
         st_pread_full(te->embed->fd, row, (int64_t)H * esz, te->embed->off + (int64_t)ids[t] * H * esz, "embed row");
-        float *dst = x + (int64_t)t * H;
         if (esz == 2) for (int i = 0; i < H; i++) dst[i] = qi_bf16(((uint16_t *)row)[i]);
         else memcpy(dst, row, (size_t)H * 4);
     }
@@ -481,8 +516,8 @@ static float *te_forward(Te *te, const int *ids, int T){
         linear(q, h, T, &L->q); linear(k, h, T, &L->k); linear(v, h, T, &L->v);
         rmsnorm_rows(q, q, L->qn, T * te->heads, te->hd, te->eps, 0);
         rmsnorm_rows(k, k, L->kn, T * te->kv, te->hd, te->eps, 0);
-        te_rope(q, T, te->heads, te->hd, qd, te->theta);
-        te_rope(k, T, te->kv, te->hd, kd, te->theta);
+        te_rope(q, T, te->heads, te->hd, qd, te->theta, pos3, te->mrope);
+        te_rope(k, T, te->kv, te->hd, kd, te->theta, pos3, te->mrope);
         attention(a, qd, q, qd, T, k, v, kd, T, te->heads, te->kv, te->hd, 0, NULL);
         linear(h, a, T, &L->o);
         for (int64_t i = 0; i < (int64_t)T * H; i++) x[i] += h[i];
@@ -492,9 +527,143 @@ static float *te_forward(Te *te, const int *ids, int T){
         for (int64_t i = 0; i < (int64_t)T * I; i++) g[i] = silu(g[i]) * u[i];
         linear(h, g, T, &L->down);
         for (int64_t i = 0; i < (int64_t)T * H; i++) x[i] += h[i];
+        if (vmask && l < nds) {          /* deepstack: a visual feature into the picture rows after the layer */
+            const float *f = ds + (int64_t)l * nvis * H;
+            for (int t = 0, j = 0; t < T; t++)
+                if (vmask[t]) { float *dst = x + (int64_t)t * H; const float *s = f + (int64_t)j++ * H;
+                                for (int i = 0; i < H; i++) dst[i] += s[i]; }
+        }
     }
     free(h); free(q); free(k); free(v); free(a); free(g); free(u);
     return x;
+}
+static float *te_forward(Te *te, const int *ids, int T){
+    return te_forward_mm(te, ids, T, NULL, NULL, NULL, 0, NULL);
+}
+
+/* ---- the text encoder with pictures (an edit) ------------------------------- */
+
+typedef struct { char *s; size_t n, cap; } QiStr;
+static void qistr_add(QiStr *b, const char *t, size_t len){
+    if (b->n + len + 1 > b->cap) { b->cap = (b->n + len + 1) * 2; b->s = realloc(b->s, b->cap); if (!b->s) { fprintf(stderr, "[qwenimage] out of memory\n"); exit(1); } }
+    memcpy(b->s + b->n, t, len); b->n += len; b->s[b->n] = 0;
+}
+
+/* The pipeline's image-conditioned template, tokenized as one string. Each picture is
+ * "<imageK><|vision_start|>" + one <|image_pad|> per vision token + "<|vision_end|>", the pictures
+ * separated by a space and followed by the prompt (the processor expands the template's single
+ * placeholder into ntok[i] of them). ntok[i] = merged tokens of picture i. */
+static int *te_encode_edit_ids(Te *te, const char *prompt, int nimg, const int *ntok, int *n_out, int *drop_out){
+    char *norm = NULL; size_t norm_len = 0;
+    const char *p = prompt && *prompt ? prompt : " ";
+    if (q38_nfc_normalize(p, strlen(p), &norm, &norm_len) != 0) { norm = strdup(p); norm_len = strlen(p); }
+    QiStr b = {0};
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n", QI_SYS);
+    qistr_add(&b, tmp, strlen(tmp));
+    for (int i = 0; i < nimg; i++) {
+        snprintf(tmp, sizeof tmp, "%s<image%d><|vision_start|>", i ? " " : "", i + 1);
+        qistr_add(&b, tmp, strlen(tmp));
+        for (int k = 0; k < ntok[i]; k++) qistr_add(&b, "<|image_pad|>", 13);
+        qistr_add(&b, "<|vision_end|>", 14);
+    }
+    qistr_add(&b, norm, norm_len);
+    qistr_add(&b, "<|im_end|>\n<|im_start|>assistant\n", 33);
+    int max = (int)b.n + 16;
+    int *ids = xmalloc(sizeof(int) * max);
+    int n = tok_encode(&te->tok, b.s, (int)b.n, ids, max);
+    char sys[512]; snprintf(sys, sizeof sys, "<|im_start|>system\n%s<|im_end|>\n", QI_SYS);
+    int t2[256];
+    *drop_out = tok_encode(&te->tok, sys, (int)strlen(sys), t2, 256);
+    *n_out = n;
+    free(b.s); free(norm);
+    return ids;
+}
+
+/* M-RoPE positions (get_rope_index): text advances one position per token; a run of <|image_pad|> is a
+ * picture whose merged grid[i] = (rows, cols) takes the frame position `cur`, row cur + r, column cur + c,
+ * and moves `cur` on by max(rows, cols). pos3 is [T][3]. -1 when the runs do not match the grids. */
+static int te_positions(const Te *te, const int *ids, int T, int nimg, const int (*grid)[2], int *pos3,
+                        char *msg, size_t msgn){
+    int cur = 0, img = 0;
+    for (int t = 0; t < T; ) {
+        if (ids[t] != te->image_pad) { pos3[3 * t] = pos3[3 * t + 1] = pos3[3 * t + 2] = cur++; t++; continue; }
+        int e = t; while (e < T && ids[e] == te->image_pad) e++;
+        if (img >= nimg || e - t != grid[img][0] * grid[img][1]) {
+            snprintf(msg, msgn, "the prompt has <|image_pad|> tokens of its own (a run of %d where the pictures "
+                     "have %d)", e - t, img < nimg ? grid[img][0] * grid[img][1] : 0);
+            return -1;
+        }
+        int gw = grid[img][1];
+        for (int i = 0; i < e - t; i++) {
+            pos3[3 * (t + i)] = cur; pos3[3 * (t + i) + 1] = cur + i / gw; pos3[3 * (t + i) + 2] = cur + i % gw;
+        }
+        cur += grid[img][0] > gw ? grid[img][0] : gw; img++; t = e;
+    }
+    if (img != nimg) { snprintf(msg, msgn, "%d picture(s) but %d run(s) of image tokens", nimg, img); return -1; }
+    return 0;
+}
+
+typedef struct { const uint8_t *rgba; int w, h; } EditPic;
+#define QI_MAX_EDIT_PICS 16
+
+/* The prompt and its pictures -> what the DiT reads: emb[Lv][hidden] (the system turn dropped) and
+ * mask[Lv] (1 at the picture slots). Needs te_load and qivt_config/qivt_load. Each picture is RGBA at its
+ * final size: multiples of 32, inside the processor's pixel bounds, i.e. already resized the way the
+ * pipeline does before it encodes anything. NULL with msg set when something is off. */
+static float *te_encode_edit(Te *te, const QiVit *vit, const char *prompt, const EditPic *pic, int nimg,
+                             int *Lv_out, uint8_t **mask_out, char *msg, size_t msgn){
+    int H = te->hidden;
+    if (!te->mrope_ok) { snprintf(msg, msgn, "text_encoder/config.json has no interleaved mrope_section"); return NULL; }
+    if (te->image_pad < 0) { snprintf(msg, msgn, "the tokenizer has no <|image_pad|>"); return NULL; }
+    if (vit->out_hidden != H) { snprintf(msg, msgn, "the vision tower's width %d is not the text encoder's %d", vit->out_hidden, H); return NULL; }
+    if (nimg < 1 || nimg > QI_MAX_EDIT_PICS) { snprintf(msg, msgn, "%d pictures (1..%d)", nimg, QI_MAX_EDIT_PICS); return NULL; }
+    int u = vit->merge * vit->merge, unit = vit->patch * vit->merge, total = 0;
+    int ntok[QI_MAX_EDIT_PICS], (*grid)[2] = xmalloc(sizeof(int[2]) * nimg);
+    for (int i = 0; i < nimg; i++) {
+        int w = pic[i].w, h = pic[i].h;
+        int64_t px = (int64_t)w * h;
+        if (w <= 0 || h <= 0 || w % unit || h % unit || px < vit->min_px || px > vit->max_px ||
+            (w > h ? w : h) > 200 * (w > h ? h : w)) {
+            snprintf(msg, msgn, "picture %d is %dx%d: the vision encoder reads multiples of %d with %lld..%lld pixels "
+                     "(resize it first)", i + 1, w, h, unit, (long long)vit->min_px, (long long)vit->max_px);
+            free(grid); return NULL;
+        }
+        grid[i][0] = h / unit; grid[i][1] = w / unit;
+        ntok[i] = grid[i][0] * grid[i][1];
+        total += ntok[i];
+    }
+    /* the pictures through the tower, their tokens back to back */
+    float *vis = fmalloc((size_t)total * H), *ds = fmalloc((size_t)(vit->nds ? vit->nds : 1) * total * H);
+    for (int i = 0, off = 0; i < nimg; i++) {
+        int gh = pic[i].h / vit->patch, gw = pic[i].w / vit->patch, n = gh * gw;
+        float *pt = fmalloc((size_t)n * vit->in_ch * vit->patch * vit->patch);
+        float *dsi = fmalloc((size_t)(vit->nds ? vit->nds : 1) * ntok[i] * H);
+        qivt_patchify(vit, pic[i].rgba, pic[i].h, pic[i].w, pt, NULL);
+        if (qivt_forward(vit, pt, gh, gw, vis + (size_t)off * H, dsi) != n / u) { snprintf(msg, msgn, "vision tower failed"); free(pt); free(dsi); free(vis); free(ds); free(grid); return NULL; }
+        for (int j = 0; j < vit->nds; j++)
+            memcpy(ds + ((size_t)j * total + off) * H, dsi + (size_t)j * ntok[i] * H, (size_t)ntok[i] * H * 4);
+        off += ntok[i];
+        free(pt); free(dsi);
+    }
+    int T, drop;
+    int *ids = te_encode_edit_ids(te, prompt, nimg, ntok, &T, &drop);
+    int *pos3 = xmalloc(sizeof(int) * 3 * (size_t)T);
+    float *emb = NULL;
+    if (te_positions(te, ids, T, nimg, (const int (*)[2])grid, pos3, msg, msgn) == 0) {
+        uint8_t *vmask = xmalloc((size_t)T);
+        for (int t = 0; t < T; t++) vmask[t] = ids[t] == te->image_pad;
+        float *hid = te_forward_mm(te, ids, T, pos3, vmask, vis, vit->nds, ds);
+        int Lv = T - drop;
+        emb = fmalloc((size_t)Lv * H);
+        memcpy(emb, hid + (size_t)drop * H, (size_t)Lv * H * 4);
+        uint8_t *mk = xmalloc((size_t)Lv);
+        memcpy(mk, vmask + drop, (size_t)Lv);
+        *Lv_out = Lv; *mask_out = mk;
+        free(hid); free(vmask);
+    }
+    free(ids); free(pos3); free(vis); free(ds); free(grid);
+    return emb;
 }
 
 /* ---- DiT ------------------------------------------------------------------- */
@@ -1028,6 +1197,7 @@ typedef struct {
 #ifdef QI_HAVE_VAE
     QiVae *vae;
 #endif
+    QiVit vit;      /* the vision tower of an edit; configured and loaded when one comes */
     int te_resident;
     /* the last prompt's prefix: a new seed for the same prompt skips the text
      * encoder and the prefix pass entirely */
@@ -1620,12 +1790,143 @@ static int run_edit_oracle(Engine *e, const char *refdir){
     return fails ? 1 : 0;
 }
 
+static uint8_t *ref_u8(shards *S, const char *fmt, int k, int j, int64_t *n){
+    char name[64]; snprintf(name, sizeof name, fmt, k, j);
+    st_tensor *t = st_find(S, name);
+    if (!t || t->dtype == 0 || t->dtype == 2) return NULL;
+    uint8_t *b = xmalloc((size_t)t->nbytes);
+    st_pread_full(t->fd, b, t->nbytes, t->off, "ref u8");
+    if (n) *n = t->nbytes;
+    return b;
+}
+static float *ref_f(shards *S, const char *fmt, int k, int j, int64_t *n){
+    char name[64]; snprintf(name, sizeof name, fmt, k, j);
+    return ref_tensor(S, name, n);
+}
+
+/* The image side of the text encoder against transformers (tools/make_qwenimage_vl_ref.py): the vision
+ * tower alone (flattening, patches, merged tokens, deepstack taps), then the ids and M-RoPE positions of the
+ * edit template, then the language model on the reference's own tower outputs, and last the whole chain
+ * from the RGBA bytes. */
+static int run_vl_oracle(Engine *e, const char *refdir){
+    char *arena = NULL;
+    jval *meta = read_json(refdir, "ref.json", &arena);
+    jval *cases = meta ? json_get(meta, "cases") : NULL;
+    if (!cases || cases->t != J_ARR || !cases->len) { fprintf(stderr, "[vl-oracle] ref.json has no cases\n"); return 2; }
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    qivt_config(&e->vit, e->model); qivt_load(&e->vit, e->model);
+    int need_te = 0;       /* a tower-only reference (the real checkpoint's) never reaches the language model */
+    for (int k = 0; k < cases->len; k++) need_te |= !jbool(cases->kids[k], "tower_only", 0);
+    if (need_te) te_load(&e->te, e->model);
+    QiVit *vit = &e->vit; Te *te = &e->te;
+    int H = te->hidden, fails = 0, u = vit->merge * vit->merge;
+    const double TIGHT = 2e-4, LOOSE = 2e-3;
+    for (int k = 0; k < cases->len; k++) {
+        jval *c = cases->kids[k], *im = json_get(c, "images"), *nm = json_get(c, "name"), *pm = json_get(c, "prompt");
+        int nimg = im && im->t == J_ARR ? im->len : 0, drop_ref = (int)jnum(c, "drop_idx", -1);
+        int nds = (int)jnum(c, "nds", -1), Tref = (int)jnum(c, "t", 0), Lvref = (int)jnum(c, "lv", 0);
+        int tower = jbool(c, "tower_only", 0);
+        if (!nimg || nimg > QI_MAX_EDIT_PICS || nds != vit->nds || (!tower && (!pm || pm->t != J_STR || !Tref))) {
+            fprintf(stderr, "[vl-oracle] case %d is malformed (or has %d deepstack taps, the tower %d)\n", k, nds, vit->nds);
+            return 2; }
+        fprintf(stderr, "[vl-oracle] case %d %s: %d picture(s)%s\n", k, nm && nm->t == J_STR ? nm->str : "", nimg,
+                tower ? ", the vision tower only" : "");
+        EditPic pic[QI_MAX_EDIT_PICS]; int ntok[QI_MAX_EDIT_PICS], (*grid)[2] = xmalloc(sizeof(int[2]) * nimg), total = 0;
+        float **vis_j = xmalloc(sizeof(float *) * nimg), **ds_j = xmalloc(sizeof(float *) * nimg * (nds ? nds : 1));
+        for (int j = 0; j < nimg; j++) {
+            jval *ij = im->kids[j], *g = json_get(ij, "grid");
+            int h = (int)jnum(ij, "h", 0), w = (int)jnum(ij, "w", 0);
+            int gh = (int)g->kids[0]->num, gw = (int)g->kids[1]->num, n = gh * gw;
+            int64_t nb = 0;
+            uint8_t *rgba = ref_u8(&R, "c%d.i%d.rgba", k, j, &nb), *rgb_ref = ref_u8(&R, "c%d.i%d.rgb", k, j, NULL);
+            float *pix = ref_f(&R, "c%d.i%d.pix", k, j, NULL); vis_j[j] = ref_f(&R, "c%d.i%d.vis", k, j, NULL);
+            if (!rgba || nb != (int64_t)h * w * 4 || !rgb_ref || !pix || !vis_j[j] || gh != h / vit->patch || gw != w / vit->patch) {
+                fprintf(stderr, "[vl-oracle] case %d picture %d: a tensor is missing or mis-sized\n", k, j); return 2; }
+            pic[j] = (EditPic){ rgba, w, h }; grid[j][0] = gh / vit->merge; grid[j][1] = gw / vit->merge;
+            ntok[j] = grid[j][0] * grid[j][1]; total += ntok[j];
+            /* 1. flatten + patchify, from the RGBA bytes */
+            int per = vit->in_ch * vit->patch * vit->patch;
+            float *pt = fmalloc((size_t)n * per); uint8_t *rgb = xmalloc((size_t)h * w * 3);
+            qivt_patchify(vit, rgba, h, w, pt, rgb);
+            size_t bad = 0; for (size_t i = 0; i < (size_t)h * w * 3; i++) bad += rgb[i] != rgb_ref[i];
+            fprintf(stderr, "[vl-oracle]   picture %d (%dx%d) flattened over white: %zu of %zu bytes differ\n", j, w, h, bad, (size_t)h * w * 3);
+            fails += bad != 0;
+            char what[64];
+            snprintf(what, sizeof what, "  patches %d", j);
+            fails += cmp(what, pt, pix, (size_t)n * per) > 1e-6;
+            /* 2. the tower, from the reference's patches */
+            float *vo = fmalloc((size_t)ntok[j] * H), *dso = fmalloc((size_t)(nds ? nds : 1) * ntok[j] * H);
+            if (qivt_forward(vit, pix, gh, gw, vo, dso) != ntok[j]) { fprintf(stderr, "[vl-oracle] tower failed\n"); return 2; }
+            snprintf(what, sizeof what, "  vision tokens %d", j);
+            fails += cmp(what, vo, vis_j[j], (size_t)ntok[j] * H) > TIGHT;
+            for (int m = 0; m < nds; m++) {
+                char name[64]; snprintf(name, sizeof name, "c%%d.i%%d.ds%d", m);
+                ds_j[j * nds + m] = ref_f(&R, name, k, j, NULL);
+                snprintf(what, sizeof what, "  deepstack %d.%d", j, m);
+                fails += cmp(what, dso + (size_t)m * ntok[j] * H, ds_j[j * nds + m], (size_t)ntok[j] * H) > TIGHT;
+            }
+            free(pt); free(rgb); free(vo); free(dso); free(rgb_ref); free(pix);
+        }
+        if (tower) {
+            for (int j = 0; j < nimg; j++) { free((void *)pic[j].rgba); free(vis_j[j]); for (int m = 0; m < nds; m++) free(ds_j[j * nds + m]); }
+            free(vis_j); free(ds_j); free(grid);
+            continue;
+        }
+        /* 3. the ids and positions of the template */
+        int T, drop;
+        int *ids = te_encode_edit_ids(te, pm->str, nimg, ntok, &T, &drop);
+        float *ids_ref = ref_named(&R, "c%d.ids", k), *pos_ref = ref_named(&R, "c%d.pos", k);
+        int id_ok = T == Tref && drop == drop_ref && ids_ref;
+        for (int t = 0; id_ok && t < T; t++) id_ok = (int)ids_ref[t] == ids[t];
+        fprintf(stderr, "[vl-oracle]   tokens: %d (ref %d), drop_idx %d (ref %d): %s\n", T, Tref, drop, drop_ref, id_ok ? "IDENTICAL" : "DIFFERENT");
+        fails += !id_ok;
+        int *use = xmalloc(sizeof(int) * Tref), *pos3 = xmalloc(sizeof(int) * 3 * (size_t)Tref); char msg[256] = "";
+        for (int t = 0; t < Tref; t++) use[t] = (int)ids_ref[t];
+        int pos_ok = !te_positions(te, use, Tref, nimg, (const int (*)[2])grid, pos3, msg, sizeof msg);
+        for (int t = 0; pos_ok && t < Tref; t++)
+            for (int a = 0; a < 3; a++) pos_ok = pos_ok && pos3[3 * t + a] == (int)pos_ref[(size_t)a * Tref + t];
+        fprintf(stderr, "[vl-oracle]   M-RoPE positions: %s%s\n", pos_ok ? "IDENTICAL" : "DIFFERENT ", msg);
+        fails += !pos_ok;
+        /* 4. the language model, on the reference's ids and the reference tower's outputs */
+        float *vis = fmalloc((size_t)total * H), *ds = fmalloc((size_t)(nds ? nds : 1) * total * H);
+        uint8_t *vmask = xmalloc((size_t)Tref);
+        for (int t = 0; t < Tref; t++) vmask[t] = use[t] == te->image_pad;
+        for (int j = 0, off = 0; j < nimg; j++) {
+            memcpy(vis + (size_t)off * H, vis_j[j], (size_t)ntok[j] * H * 4);
+            for (int m = 0; m < nds; m++) memcpy(ds + ((size_t)m * total + off) * H, ds_j[j * nds + m], (size_t)ntok[j] * H * 4);
+            off += ntok[j];
+        }
+        float *hid = te_forward_mm(te, use, Tref, pos3, vmask, vis, nds, ds);
+        float *emb_ref = ref_named(&R, "c%d.emb", k);
+        uint8_t *mk_ref = ref_u8(&R, "c%d.img_mask", k, 0, NULL);
+        fails += cmp("  language model, ref tower", hid + (size_t)drop_ref * H, emb_ref, (size_t)Lvref * H) > TIGHT;
+        int mask_ok = mk_ref != NULL;
+        for (int t = 0; mask_ok && t < Lvref; t++) mask_ok = (vmask[t + drop_ref] != 0) == (mk_ref[t] != 0);
+        fprintf(stderr, "[vl-oracle]   picture-slot mask: %s\n", mask_ok ? "IDENTICAL" : "DIFFERENT");
+        fails += !mask_ok;
+        /* 5. everything from the RGBA bytes */
+        int Lv = 0; uint8_t *mk = NULL;
+        float *emb = te_encode_edit(te, vit, pm->str, pic, nimg, &Lv, &mk, msg, sizeof msg);
+        if (!emb || Lv != Lvref) { fprintf(stderr, "[vl-oracle] chained encode failed: %s\n", msg); fails++; }
+        else fails += cmp("  chained from RGBA", emb, emb_ref, (size_t)Lvref * H) > LOOSE;
+        (void)u;
+        free(emb); free(mk); free(hid); free(vis); free(ds); free(vmask); free(use); free(pos3); free(ids);
+        free(ids_ref); free(pos_ref); free(emb_ref); free(mk_ref); free(grid);
+        for (int j = 0; j < nimg; j++) { free((void *)pic[j].rgba); free(vis_j[j]); for (int m = 0; m < nds; m++) free(ds_j[j * nds + m]); }
+        free(vis_j); free(ds_j);
+    }
+    qivt_free(vit);
+    fprintf(stderr, fails ? "[vl-oracle] FAILED\n" : "[vl-oracle] all cases within tolerance\n");
+    return fails ? 1 : 0;
+}
+
 static void usage(void){
     fprintf(stderr,
         "usage: qwenimage --model DIR --prompt TEXT [--width 768] [--height 512] [--steps 8] [--seed N] --out FILE.png\n"
         "       qwenimage --model DIR --serve\n"
         "       qwenimage --model DIR --ref REFDIR\n"
         "       qwenimage --model DIR --edit-ref REFDIR   the reference-image path of the DiT\n"
+        "       qwenimage --model DIR --vl-ref REFDIR     the vision tower and the text encoder with pictures\n"
         "env:   COLI_IMG_BITS=8|16|32 weight storage (default 8: int8 rows)\n"
         "       COLI_IMG_ACT8=0  f32 activations in the DiT (default where VNNI exists: int8, about 2x per step)\n"
         "       COLI_IMG_TE=resident|stage  keep the text encoder loaded between prompts (serve default: resident)\n"
@@ -1639,7 +1940,7 @@ int main(int argc, char **argv){
     /* Windows: the IMAGE and PREVIEW frames carry raw bytes; a text-mode stdout
      * would turn every 0x0A inside them into 0x0D 0x0A (#748) */
     coli_serve_binary_mode();
-    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL, *edit_ref = NULL;
+    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL, *edit_ref = NULL, *vl_ref = NULL;
     int width = 768, height = 512, steps = 8, serve = 0;
     uint64_t seed = 42; int seed_set = 0;
     for (int i = 1; i < argc; i++) {
@@ -1649,6 +1950,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--out") && v) { out = v; i++; }
         else if (!strcmp(a, "--ref") && v) { ref = v; i++; }
         else if (!strcmp(a, "--edit-ref") && v) { edit_ref = v; i++; }
+        else if (!strcmp(a, "--vl-ref") && v) { vl_ref = v; i++; }
         else if (!strcmp(a, "--width") && v) { width = atoi(v); i++; }
         else if (!strcmp(a, "--height") && v) { height = atoi(v); i++; }
         else if (!strcmp(a, "--steps") && v) { steps = atoi(v); i++; }
@@ -1662,7 +1964,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--serve")) serve = 1;
         else { usage(); return 2; }
     }
-    if (!model || (!serve && !ref && !edit_ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
+    if (!model || (!serve && !ref && !edit_ref && !vl_ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
     const char *b = getenv("COLI_IMG_BITS");
     if (b && *b) { g_bits = atoi(b); if (g_bits != 8 && g_bits != 16 && g_bits != 32) { usage(); return 2; } }
     /* On by default where VNNI exists: measured 2x on the step (768x512: 34.3 -> 18.3 s
@@ -1680,6 +1982,7 @@ int main(int argc, char **argv){
     engine_init(&e, model);
     if (ref) { int rc = run_oracle(&e, ref); qi_vk_report(); return rc; }
     if (edit_ref) { int rc = run_edit_oracle(&e, edit_ref); qi_vk_report(); return rc; }
+    if (vl_ref) { int rc = run_vl_oracle(&e, vl_ref); qi_vk_report(); return rc; }
     if (getenv("QWENIMAGE_PRINT_TOKENS")) {          /* tokenizer check against the processor */
         int n, drop; int *ids = te_encode_prompt(&e.te, prompt ? prompt : "", &n, &drop);
         printf("drop %d ids", drop);

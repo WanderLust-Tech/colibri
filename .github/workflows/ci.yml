@@ -1468,6 +1468,16 @@ jobs:
           # text between; two adjacent), held to its RoPE table and noise prediction
           python3 tools/make_qwenimage_edit_ref.py qwenimage_tiny qwenimage_edit_ref
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-ref qwenimage_edit_ref
+      - name: "The text encoder with pictures: vision tower, deepstack, M-RoPE, the edit template"
+        run: |
+          cd c
+          # transformers' own condition-image encoding on synthetic RGBA pictures (random
+          # alpha, two aspect ratios, an empty prompt): the flatten over white byte for byte,
+          # the tower's tokens and deepstack taps, the template's ids and M-RoPE positions,
+          # then the language model's hidden states, from the reference's tower outputs and
+          # chained from the RGBA bytes
+          python3 tools/make_qwenimage_vl_ref.py qwenimage_tiny qwenimage_vl_ref
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --vl-ref qwenimage_vl_ref
       - name: "The VAE alone: tiny decoder and encoder at two latent shapes"
         run: |
           cd c
@@ -1487,13 +1497,15 @@ jobs:
           export ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0 UBSAN_OPTIONS=print_stacktrace=1 OMP_NUM_THREADS=2
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --ref qwenimage_tiny/ref > qwenimage-san.log 2>&1 || true
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-ref qwenimage_edit_ref >> qwenimage-san.log 2>&1 || true
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --vl-ref qwenimage_vl_ref >> qwenimage-san.log 2>&1 || true
           QWENIMAGE_TINY=qwenimage_tiny python3 -m unittest tests.test_qwenimage_engine_serve >> qwenimage-san.log 2>&1 || true
           if grep -qE "ERROR: AddressSanitizer|runtime error:" qwenimage-san.log; then
             cat qwenimage-san.log
             exit 1
           fi
           grep -q "all stages within tolerance" qwenimage-san.log
-          grep -q "all cases within tolerance" qwenimage-san.log
+          grep -q "edit-oracle\] all cases within tolerance" qwenimage-san.log
+          grep -q "vl-oracle\] all cases within tolerance" qwenimage-san.log
 
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)
