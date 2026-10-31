@@ -1478,6 +1478,14 @@ jobs:
           # chained from the RGBA bytes
           python3 tools/make_qwenimage_vl_ref.py qwenimage_tiny qwenimage_vl_ref
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --vl-ref qwenimage_vl_ref
+      - name: "A whole edit against the pipeline: resize, towers, VAE encoder, DiT prefix, steps, decode"
+        run: |
+          cd c
+          # diffusers' complete QwenImage21Pipeline on RGBA pictures of arbitrary sizes (one, two,
+          # one smaller than it is worked at), the pipeline's own initial noise: the engine gets only
+          # the pictures and the prompt, and must reach the same final latents and RGBA
+          python3 tools/make_qwenimage_edit_e2e_ref.py qwenimage_tiny qwenimage_edit_e2e_ref
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-e2e-ref qwenimage_edit_e2e_ref
       - name: "The VAE alone: tiny decoder and encoder at two latent shapes"
         run: |
           cd c
@@ -1498,6 +1506,7 @@ jobs:
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --ref qwenimage_tiny/ref > qwenimage-san.log 2>&1 || true
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-ref qwenimage_edit_ref >> qwenimage-san.log 2>&1 || true
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --vl-ref qwenimage_vl_ref >> qwenimage-san.log 2>&1 || true
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-e2e-ref qwenimage_edit_e2e_ref >> qwenimage-san.log 2>&1 || true
           QWENIMAGE_TINY=qwenimage_tiny python3 -m unittest tests.test_qwenimage_engine_serve >> qwenimage-san.log 2>&1 || true
           if grep -qE "ERROR: AddressSanitizer|runtime error:" qwenimage-san.log; then
             cat qwenimage-san.log
@@ -1506,6 +1515,7 @@ jobs:
           grep -q "all stages within tolerance" qwenimage-san.log
           grep -q "edit-oracle\] all cases within tolerance" qwenimage-san.log
           grep -q "vl-oracle\] all cases within tolerance" qwenimage-san.log
+          grep -q "e2e-oracle\] all cases within tolerance" qwenimage-san.log
 
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)

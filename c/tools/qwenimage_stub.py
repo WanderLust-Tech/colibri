@@ -18,6 +18,8 @@ test would let a bug on one side hide the same bug on the other.
 Serve protocol (one request at a time, logs on stderr):
     engine -> READY {...}
     client -> GEN {"id","prompt","width","height","steps","seed","preview"}
+              an edit adds "images": [{"width","height","data": base64 RGBA}] and "ref_resolution",
+              and may leave out width and height (derived from the last picture); READY says "edit": true
     engine -> PROGRESS {"id","stage","step","steps","elapsed"}   step = steps COMPLETED
     engine -> PREVIEW {"id","step","width","height","channels":3,"bytes":N} + N bytes + "\\n"
     engine -> IMAGE {"id","width","height","channels":4,"bytes":N,"seed","steps","timings"}
@@ -31,11 +33,13 @@ Knobs (environment), all optional:
     QWENIMAGE_STUB_LOAD_DELAY  seconds before READY (default 0)
     QWENIMAGE_STUB_PREVIEW     0 never sends PREVIEW even when asked (default 1)
     QWENIMAGE_STUB_MULTIPLE    the side multiple READY advertises (default 32)
+    QWENIMAGE_STUB_EDIT        0 reports no editing in READY and refuses pictures (default 1)
 Prompts containing __stub_error__ get an ERROR, __stub_crash__ kills the
 process in the middle of denoising, __stub_garbage__ writes a stray stdout line
 first: the three failure shapes a front end has to survive.
 """
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -53,6 +57,8 @@ import zlib
 DEFAULTS = {"model": "qwen-image-2.1", "default_width": 768, "default_height": 512,
             "default_steps": 8, "min_side": 256, "max_side": 2048, "multiple": 32}
 MAX_STEPS = 200
+EDIT_INFO = {"edit": True, "max_edit_images": 4, "max_source_side": 4096,
+             "ref_resolution": {"default": 768, "min": 384, "max": 1024}}
 
 
 def log(message):
@@ -195,6 +201,8 @@ def check(request, info):
     if not isinstance(prompt, str) or not prompt.strip():
         return "prompt must be a non-empty string"
     for key in ("width", "height"):
+        if "images" in request and key not in request:
+            continue                          # an edit: derived from the last picture
         value = request.get(key, info[f"default_{key}"])
         if isinstance(value, bool) or not isinstance(value, int):
             return f"{key} must be an integer"
@@ -208,6 +216,44 @@ def check(request, info):
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         return "seed must be a non-negative integer"
     return None
+
+
+# ---------------------------------------------------------------- edits
+def edit_pictures(request, info):
+    """(pictures, error): the request's pictures decoded and checked the way the engine does."""
+    if "edit" not in info:
+        return None, "this stub was started without editing (QWENIMAGE_STUB_EDIT=0)"
+    images = request.get("images")
+    if not isinstance(images, list) or not 1 <= len(images) <= info["max_edit_images"]:
+        return None, f"`images` must hold 1 to {info['max_edit_images']} pictures"
+    pictures = []
+    for i, image in enumerate(images, 1):
+        w, h = (image.get("width"), image.get("height")) if isinstance(image, dict) else (None, None)
+        data = image.get("data") if isinstance(image, dict) else None
+        if (isinstance(w, bool) or isinstance(h, bool) or not isinstance(w, int) or not isinstance(h, int)
+                or not 1 <= w <= info["max_source_side"] or not 1 <= h <= info["max_source_side"]
+                or not isinstance(data, str)):
+            return None, f"picture {i} needs width and height (1 to {info['max_source_side']}) and data (base64 RGBA)"
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except ValueError:
+            raw = b""
+        if len(raw) != w * h * 4:
+            return None, f"picture {i}: data does not decode to {w}x{h} RGBA ({w * h * 4} bytes)"
+        pictures.append((w, h, raw))
+    limits = info["ref_resolution"]
+    ref = request.get("ref_resolution", limits["default"])
+    if isinstance(ref, bool) or not isinstance(ref, int) or not limits["min"] <= ref <= limits["max"]:
+        return None, f"ref_resolution must be between {limits['min']} and {limits['max']} (got {ref!r})"
+    return pictures, None
+
+
+def derived_size(pictures, ref):
+    """The pipeline's calculate_dimensions for the last picture: round(x / 32) * 32, ties to even."""
+    w, h = pictures[-1][0], pictures[-1][1]
+    width = math.sqrt(ref * ref * w / h)
+    height = width / (w / h)
+    return round(width / 32) * 32, round(height / 32) * 32
 
 
 # ---------------------------------------------------------------- serve loop
@@ -228,6 +274,8 @@ class Wire:
 
 def serve(args):
     info = dict(DEFAULTS)
+    if os.environ.get("QWENIMAGE_STUB_EDIT", "1") != "0":
+        info.update(EDIT_INFO)
     try:
         info["multiple"] = max(1, int(os.environ.get("QWENIMAGE_STUB_MULTIPLE", info["multiple"])))
     except ValueError:
@@ -275,8 +323,25 @@ def serve(args):
             wire.line("ERROR", {"id": rid, "message": error})
             continue
         prompt = body["prompt"]
-        width = body.get("width", info["default_width"])
-        height = body.get("height", info["default_height"])
+        if "images" in body:
+            pictures, error = edit_pictures(body, info)
+            if error:
+                wire.line("ERROR", {"id": rid, "message": error})
+                continue
+            digest = hashlib.sha256(b"".join(p[2] for p in pictures)).hexdigest()
+            ref = body.get("ref_resolution", info["ref_resolution"]["default"])
+            derived = derived_size(pictures, ref)
+            width, height = body.get("width", derived[0]), body.get("height", derived[1])
+            if not (info["min_side"] <= width <= info["max_side"] and info["min_side"] <= height <= info["max_side"]
+                    and width % info["multiple"] == 0 and height % info["multiple"] == 0):
+                wire.line("ERROR", {"id": rid, "message": f"the size {width}x{height} is not a multiple of "
+                                    f"{info['multiple']} in [{info['min_side']}, {info['max_side']}]"})
+                continue
+            # the picture is part of what is drawn: a different picture draws a different result
+            prompt = f"{prompt}\0edit\0{digest}"
+        else:
+            width = body.get("width", info["default_width"])
+            height = body.get("height", info["default_height"])
         steps = body.get("steps", info["default_steps"])
         seed = body.get("seed", 0)
         want_preview = bool(body.get("preview")) and os.environ.get("QWENIMAGE_STUB_PREVIEW", "1") != "0"

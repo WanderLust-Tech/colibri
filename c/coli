@@ -2214,6 +2214,7 @@ IMAGE_CHAT_COMMANDS = {
     "size":   "WxH       image size; /size alone lists the presets (TAB completes them)",
     "steps":  "N         denoising steps (more is slower and usually cleaner)",
     "seed":   "N|random  fix the seed to reproduce an image, or a new one each time",
+    "image":  "PATH|clear  a picture to edit (several allowed; or drop a file on the prompt); alone, lists them",
     "render": "MODE      how images are drawn: kitty | iterm | sixel | blocks | none",
     "save":   "[PATH]    a copy of the last image: a folder, or a file name (.png is added)",
     "help":   "          this list",
@@ -2240,13 +2241,14 @@ class LocalImageBackend:
         self.info = self.engine.info
 
     def generate(self, prompt, width, height, steps, seed, want_preview, on_progress,
-                 on_preview, on_interrupt):
+                 on_preview, on_interrupt, images=None, ref_resolution=None):
         from image_engine import encode_png
         def preview(meta, pixels):
             on_preview(meta.get("width"), meta.get("height"), meta.get("channels", 3), pixels)
         result = self.engine.generate(prompt, width, height, steps, seed, preview=want_preview,
                                       on_progress=on_progress, on_preview=preview,
-                                      interruptible=True, on_interrupt=on_interrupt)
+                                      interruptible=True, on_interrupt=on_interrupt,
+                                      images=images, ref_resolution=ref_resolution)
         result["png"] = encode_png(result["width"], result["height"], result["rgba"], 4)
         return result
 
@@ -2256,6 +2258,18 @@ class LocalImageBackend:
 
     def close(self):
         self.engine.close()
+
+def multipart_form(fields, files, boundary=None):
+    """(content type, body) of a multipart/form-data request: text fields, then files [(name, filename, bytes)]."""
+    boundary = boundary or "----coli" + os.urandom(12).hex()
+    out = bytearray()
+    for name, value in fields.items():
+        out += f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+    for name, filename, data in files:
+        out += (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                f'Content-Type: image/png\r\n\r\n').encode("utf-8") + data + b"\r\n"
+    out += f"--{boundary}--\r\n".encode("utf-8")
+    return f"multipart/form-data; boundary={boundary}", bytes(out)
 
 class RemoteImageBackend:
     """A running `coli serve` with an image model, over its streamed endpoint."""
@@ -2269,17 +2283,28 @@ class RemoteImageBackend:
         self.alive = True
 
     def generate(self, prompt, width, height, steps, seed, want_preview, on_progress,
-                 on_preview, on_interrupt):
+                 on_preview, on_interrupt, images=None, ref_resolution=None):
         import base64, urllib.request, urllib.error
-        from image_engine import ImageCancelled, ImageEngineError, decode_png
-        body = {"model": self.model_id, "prompt": prompt, "size": f"{width}x{height}",
-                "steps": steps, "seed": seed, "n": 1, "response_format": "b64_json",
-                "stream": True}
+        from image_engine import ImageCancelled, ImageEngineError, decode_png, encode_png
+        body = {"model": self.model_id, "prompt": prompt, "steps": steps, "seed": seed, "n": 1,
+                "response_format": "b64_json", "stream": True}
+        if width is not None and height is not None:
+            body["size"] = f"{width}x{height}"
         if not want_preview:
             body["partial_images"] = 0
-        req = urllib.request.Request(self.base + "/v1/images/generations",
-                                     data=json.dumps(body).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"})
+        if images:
+            # an edit: the pictures go up as PNG files in a multipart request, as OpenAI's SDKs send them
+            if ref_resolution is not None:
+                body["ref_resolution"] = ref_resolution
+            fields = {key: ("true" if value is True else str(value)) for key, value in body.items()}
+            files = [("image", f"picture{i}.png", encode_png(p["width"], p["height"], p["rgba"], 4))
+                     for i, p in enumerate(images, 1)]
+            content_type, payload = multipart_form(fields, files)
+            url, headers = self.base + "/v1/images/edits", {"Content-Type": content_type}
+        else:
+            payload, url = json.dumps(body).encode("utf-8"), self.base + "/v1/images/generations"
+            headers = {"Content-Type": "application/json"}
+        req = urllib.request.Request(url, data=payload, headers=headers)
         if self.api_key: req.add_header("Authorization", f"Bearer {self.api_key}")
         completed = None
         try:
@@ -2491,7 +2516,66 @@ def image_settings(a, info):
     if seed is not None:
         problem = check_seed(seed)
         if problem: sys.exit(f"{C.yel}--seed: {problem}{C.r}")
-    return {"width": width, "height": height, "steps": steps, "seed": seed}
+    settings = {"width": width, "height": height, "steps": steps, "seed": seed, "images": [],
+                "ref_resolution": getattr(a, "ref_resolution", None),
+                "size_set": bool(getattr(a, "size", None))}
+    for path in getattr(a, "image", None) or []:
+        picture, why = attach_picture(settings, info, path)
+        if why: sys.exit(f"{C.yel}--image: {why}{C.r}")
+    check_ref_resolution(settings, info, exit_on_error=True)
+    return settings
+
+def edit_limits(info):
+    """(max pictures, ref_resolution range or None) from an engine's READY or a server's model entry; None
+    pictures when the model does not edit."""
+    from image_engine import MAX_EDIT_IMAGES
+    edit = info.get("edit")
+    if not edit: return 0, None
+    if isinstance(edit, dict):                   # a gateway's /v1/models entry
+        return min(MAX_EDIT_IMAGES, int(edit.get("max_images") or 1)), edit.get("ref_resolution")
+    return min(MAX_EDIT_IMAGES, int(info.get("max_edit_images") or 1)), info.get("ref_resolution")
+
+def check_ref_resolution(settings, info, exit_on_error=False):
+    value = settings.get("ref_resolution")
+    if value is None: return None
+    _count, limits = edit_limits(info)
+    low, high = (int(limits["min"]), int(limits["max"])) if limits else (1, 1 << 16)
+    if value < low or value > high:
+        why = f"--ref-resolution must be between {low} and {high}"
+        if exit_on_error: sys.exit(f"{C.yel}{why}{C.r}")
+        return why
+    return None
+
+def attach_picture(settings, info, path):
+    """Read a picture the user named and add it to the settings: (description, None), or (None, why).
+    Unless a size was chosen, the size then follows the last picture (the engine derives it)."""
+    from image_engine import decode_picture, ImageRequestError, MAX_EDIT_BODY
+    limit, _range = edit_limits(info)
+    if not limit:
+        return None, "this model cannot edit pictures (its engine reports no vision tower and VAE encoder)"
+    if len(settings["images"]) >= limit:
+        return None, f"at most {limit} pictures per edit (/image clear starts over)"
+    target = to_local_path(path)
+    try:
+        with open(target, "rb") as handle:
+            data = handle.read(MAX_EDIT_BODY + 1)
+    except OSError as error:
+        return None, f"cannot read {target}: {error.strerror or error}"
+    if len(data) > MAX_EDIT_BODY:
+        return None, f"{target} is larger than {MAX_EDIT_BODY >> 20} MB"
+    try:
+        picture = decode_picture(data)
+    except ImageRequestError as error:
+        return None, f"{target}: {error}"
+    settings["images"].append(picture)
+    if not settings.get("size_set"):
+        settings["width"] = settings["height"] = None        # follows the last picture
+    return f"{os.path.basename(target)} ({picture['width']}x{picture['height']})", None
+
+def clear_pictures(settings, info):
+    settings["images"] = []
+    if settings["width"] is None:                          # back to the engine's default size
+        settings["width"], settings["height"] = info["default_width"], info["default_height"]
 
 def generate_image(backend, prompt, settings, protocol, out=None, stream=None, last=None):
     """One image: progress, the picture drawn in the terminal, the PNG on disk.
@@ -2509,7 +2593,9 @@ def generate_image(backend, prompt, settings, protocol, out=None, stream=None, l
     try:
         result = backend.generate(prompt, settings["width"], settings["height"],
                                   settings["steps"], seed, previews, progress.progress,
-                                  progress.preview, progress.interrupted)
+                                  progress.preview, progress.interrupted,
+                                  images=settings.get("images") or None,
+                                  ref_resolution=settings.get("ref_resolution"))
     except ImageCancelled:
         progress.stop()
         print(f"  {C.yel}■ cancelled{C.r}\n", file=stream)
@@ -2592,9 +2678,17 @@ def image_repl(a, backend, model_id):
           f"{image_dir()}{C.r}")
     print(f"  {C.dim}describe an image and press Enter · Ctrl-C stops it · /size /steps /seed · "
           f"/save · /help · :q exits{C.r}")
-    print(f"  {C.dim}{settings['width']}x{settings['height']} · {settings['steps']} steps · seed "
+    size_text = (f"{settings['width']}x{settings['height']}" if settings["width"] is not None
+                 else "size follows the last picture")
+    print(f"  {C.dim}{size_text} · {settings['steps']} steps · seed "
           f"{settings['seed'] if settings['seed'] is not None else 'random'} · drawn with "
-          f"{protocol} ({why}){C.r}\n")
+          f"{protocol} ({why}){C.r}")
+    if settings["images"]:
+        print(f"  {C.dim}editing {len(settings['images'])} picture(s): the prompt is an instruction · "
+              f"/image clear draws from scratch again{C.r}")
+    elif edit_limits(info)[0]:
+        print(f"  {C.dim}this model edits pictures: /image PATH attaches one{C.r}")
+    print()
     presets = ["x".join(map(str, preset)) for preset in SIZE_PRESETS]
     install_chat_completer(IMAGE_CHAT_COMMANDS,
                            {"size": presets, "seed": ["random"],
@@ -2616,14 +2710,41 @@ def image_repl(a, backend, model_id):
         if msg in (":q", "/q", "exit"): break
         if not msg.strip(): continue
         name, rest = chat_command(msg)
+        # A file dropped on the prompt of a model that edits is a picture to edit, not a prompt
+        if name is None and edit_limits(info)[0] and IMAGE_PATH.fullmatch(msg.strip().strip("\"'")):
+            name, rest = "image", msg.strip()
         if name is not None and name not in IMAGE_CHAT_COMMANDS:
             print(f"  {C.yel}  unknown command: {msg.split()[0]}{C.r}")
             chat_commands_help(IMAGE_CHAT_COMMANDS); continue
         if name == "quit": break
         if name == "help": chat_commands_help(IMAGE_CHAT_COMMANDS); continue
+        if name == "image":
+            what = rest.strip()
+            if not what:
+                if settings["images"]:
+                    sizes = ", ".join(f"{p['width']}x{p['height']}" for p in settings["images"])
+                    print(f"  {C.dim}✦ editing {len(settings['images'])} picture(s) ({sizes}) · /image clear "
+                          f"draws from scratch again{C.r}\n")
+                else:
+                    print(f"  {C.dim}✦ no pictures: describing draws from scratch · /image PATH attaches "
+                          f"one to edit{C.r}\n")
+                continue
+            if what.lower() in ("clear", "none", "off"):
+                clear_pictures(settings, info)
+                print(f"  {C.dim}✦ no pictures: describing draws from scratch{C.r}\n"); continue
+            picture, why = attach_picture(settings, info, what)
+            if why: print(f"  {C.yel}  {why}{C.r}\n"); continue
+            print(f"  {C.dim}✦ attached {picture}: {len(settings['images'])} picture(s), now describe the edit"
+                  f"{'' if settings.get('size_set') else ' · the size follows the last picture'}{C.r}\n"); continue
         if name == "size":
+            if rest.strip().lower() == "auto":
+                if not settings["images"]:
+                    print(f"  {C.yel}  /size auto follows the last picture: attach one with /image first{C.r}\n"); continue
+                settings["width"] = settings["height"] = None; settings["size_set"] = False
+                print(f"  {C.dim}✦ the size follows the last picture{C.r}\n"); continue
             if not rest:
-                current = f"{settings['width']}x{settings['height']}"
+                current = (f"{settings['width']}x{settings['height']}" if settings["width"] is not None
+                           else "follows the last picture")
                 listed = "  ".join(f"{C.b}{p}{C.r}{C.dim}" if p == current else p for p in presets)
                 print(f"  {C.dim}sizes: {listed} · now {current} · any WxH in multiples of "
                       f"{info['multiple']} from {info['min_side']} to {info['max_side']}{C.r}\n")
@@ -2637,6 +2758,7 @@ def image_repl(a, backend, model_id):
                 hint = "x".join(map(str, nearest_size(width, height, info)))
                 print(f"  {C.yel}  {problem} (closest: /size {hint}){C.r}\n"); continue
             settings["width"], settings["height"] = width, height
+            settings["size_set"] = True
             print(f"  {C.dim}✦ size {width}x{height}{C.r}\n"); continue
         if name == "steps":
             try: steps = int(rest)
@@ -3549,7 +3671,13 @@ def main():
     # Image models: what to draw and where to put it. Ignored by text models.
     image_flags=(("--size",dict(default=None,help="image size WxH (image models; default: the engine's)")),
                  ("--steps",dict(type=int,default=None,help="denoising steps (image models)")),
-                 ("--seed",dict(type=int,default=None,help="image seed (image models; default: random)")))
+                 ("--seed",dict(type=int,default=None,help="image seed (image models; default: random)")),
+                 ("--image",dict(action="append",default=None,metavar="PATH",
+                                 help="a picture to edit (image models that edit; repeat for several): the "
+                                      "prompt is then an instruction about the pictures")),
+                 ("--ref-resolution",dict(type=int,default=None,metavar="N",
+                                          help="side, in pixels, the pictures are worked on at when editing "
+                                               "(default: the engine's; larger is slower and needs more memory)")))
     for flag,kw in image_flags: pr.add_argument(flag,**kw)
     pr.add_argument("--out",default=None,help="PNG path for an image model (default: the images folder)")
     pc=sub.add_parser("chat", parents=[common])

@@ -28,7 +28,9 @@
  *   qwenimage --model DIR --edit-ref REFDIR   the DiT with reference images
  *                                         (tools/make_qwenimage_edit_ref.py)
  *   qwenimage --model DIR --vl-ref REFDIR     the vision tower and the text encoder
- *                                         with pictures (tools/make_qwenimage_vl_ref.py) */
+ *                                         with pictures (tools/make_qwenimage_vl_ref.py)
+ *   qwenimage --model DIR --edit-e2e-ref REFDIR   a whole edit, pictures to RGBA
+ *                                         (tools/make_qwenimage_edit_e2e_ref.py) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -52,8 +54,10 @@
 #if __has_include("qwenimage_vae.h")
 #include "qwenimage_vae.h"
 #define QI_HAVE_VAE 1
+#include "qwenimage_vae_enc.h"   /* the encoder an edit's reference pictures go through */
 #endif
 #endif
+#include "qwenimage_resize.h"
 #ifdef COLI_VULKAN
 /* VK=1 and COLI_VULKAN=1: the DiT's matrices run on the GPU, all the image
  * tokens of a product in one call. One command buffer: main thread only. */
@@ -1198,6 +1202,9 @@ typedef struct {
     QiVae *vae;
 #endif
     QiVit vit;      /* the vision tower of an edit; configured and loaded when one comes */
+#ifdef QI_HAVE_VAE
+    QiVaeEnc *vae_enc;
+#endif
     int te_resident;
     /* the last prompt's prefix: a new seed for the same prompt skips the text
      * encoder and the prefix pass entirely */
@@ -1325,17 +1332,17 @@ static int engine_prefix(Engine *e, const char *prompt, float **emb_out, int *L_
     return 0;
 }
 
-/* Generates one image. rgba is [height][width][4]. Returns 0, or -1 with msg. */
-static int engine_generate(Engine *e, const char *prompt, int width, int height, int steps, uint64_t seed,
-                           uint8_t *rgba, double timings[3], const Progress *pg, char *msg, size_t msgn){
-    double t0 = now_s();
+static int check_size(int w, int h, int steps, char *msg, size_t n);
+
+/* Everything after the prefix, shared by a plain prompt and an edit: noise (or lat_init, the oracle's own),
+ * the denoising loop against e->prefix, and the decode. rgba is [height][width][4]. lat_out, when not
+ * NULL, receives the final latents [gh*gw][C]. t0/t1: when the request started / the prefix was done. */
+static int engine_sample(Engine *e, int width, int height, int steps, uint64_t seed, const float *lat_init,
+                         uint8_t *rgba, double timings[3], const Progress *pg, double t0, double t1,
+                         float *lat_out, char *msg, size_t msgn){
     int gh = height / 16, gw = width / 16, N = gh * gw, C = e->dit.in_ch;
-    emit_progress(pg, "encode", 0, steps, t0);
-    int L;
-    if (engine_prefix(e, prompt, NULL, &L, msg, msgn) < 0) return -1;
-    double t1 = now_s();
     float *lat = fmalloc((size_t)N * C), *np = fmalloc((size_t)N * C);
-    randn(lat, (size_t)N * C, seed);
+    if (lat_init) memcpy(lat, lat_init, (size_t)N * C * 4); else randn(lat, (size_t)N * C, seed);
     float *sig = fmalloc(steps + 1), *ts = fmalloc(steps);
     sched_sigmas(&e->sch, steps, N, sig, ts, NULL);
     DitStep s; dit_step_init(&s, &e->dit, &e->prefix, gh, gw);
@@ -1374,9 +1381,139 @@ static int engine_generate(Engine *e, const char *prompt, int width, int height,
     }
     double t3 = now_s();
     if (timings) { timings[0] = t1 - t0; timings[1] = t2 - t1; timings[2] = t3 - t2; }
+    if (lat_out && rc == 0) memcpy(lat_out, lat, (size_t)N * C * 4);
     free(lat); free(np); free(sig); free(ts);
     return rc;
 }
+
+/* Generates one image. rgba is [height][width][4]. Returns 0, or -1 with msg. */
+static int engine_generate(Engine *e, const char *prompt, int width, int height, int steps, uint64_t seed,
+                           uint8_t *rgba, double timings[3], const Progress *pg, char *msg, size_t msgn){
+    double t0 = now_s();
+    emit_progress(pg, "encode", 0, steps, t0);
+    int L;
+    if (engine_prefix(e, prompt, NULL, &L, msg, msgn) < 0) return -1;
+    return engine_sample(e, width, height, steps, seed, NULL, rgba, timings, pg, t0, now_s(), NULL, msg, msgn);
+}
+
+#ifdef QI_HAVE_VAE
+/* ---- editing: reference pictures -------------------------------------------- */
+
+#define QI_MAX_EDIT_SRC 4            /* pictures per request */
+#define QI_MAX_SRC_SIDE 4096         /* a source's side, before it is resized */
+#define QI_EDIT_REF_RES 768          /* default reference resolution (the pipeline's output_resolution is 1024) */
+#define QI_EDIT_REF_RES_MIN 384
+#define QI_EDIT_REF_RES_MAX 1024
+/* Every prefix row keeps a key and a value per block (1 MiB a row on the real model), so the rows are bounded:
+ * the prompt plus the reference pictures' latent tokens. */
+#define QI_MAX_EDIT_ROWS 8192
+
+/* Whether this checkpoint can edit: a vision tower the engine reads, the M-RoPE layout, the image token, and
+ * the VAE's encoder weights. What the READY frame reports and the gateway checks. */
+static int engine_can_edit(Engine *e){
+    QiVit probe;
+    if (qivt_config(&probe, e->model, 0) != 0 || !e->te.mrope_ok || e->te.image_pad < 0) return 0;
+    if (probe.out_hidden != e->te.hidden) return 0;
+    char dir[2100]; snprintf(dir, sizeof dir, "%s/vae", e->model);
+    shards S; memset(&S, 0, sizeof S);
+    st_init(&S, dir);
+    int ok = st_find(&S, "encoder.conv_in.weight") != NULL;
+    st_destroy(&S);
+    return ok;
+}
+
+/* The prefix of an edit, built into e->prefix: the pictures resized as the pipeline does, through the
+ * vision tower and the text encoder together, through the VAE encoder, and into the DiT. src[i] is RGBA at
+ * its own size. Returns 0, or -1 with msg. */
+static int engine_edit_prefix(Engine *e, const char *prompt, const EditPic *src, int nsrc, int ref_res,
+                              char *msg, size_t msgn){
+    if (nsrc < 1 || nsrc > QI_MAX_EDIT_SRC) { snprintf(msg, msgn, "1 to %d pictures (got %d)", QI_MAX_EDIT_SRC, nsrc); return -1; }
+    if (ref_res < QI_EDIT_REF_RES_MIN || ref_res > QI_EDIT_REF_RES_MAX) {
+        snprintf(msg, msgn, "ref_resolution must be between %d and %d (got %d)", QI_EDIT_REF_RES_MIN, QI_EDIT_REF_RES_MAX, ref_res);
+        return -1;
+    }
+    prefix_free(&e->prefix, e->dit.layers);
+    free(e->last_prompt); e->last_prompt = NULL;      /* the cached prompt prefix is gone: this one is not a plain prompt's */
+    EditPic pic[QI_MAX_EDIT_SRC]; uint8_t *buf[QI_MAX_EDIT_SRC] = {0};
+    int (*sh)[2] = xmalloc(sizeof(int[2]) * nsrc), rc = -1, rows = 0, Lv = 0;
+    float *ref = NULL, *emb = NULL; uint8_t *mask = NULL;
+    for (int i = 0; i < nsrc; i++) {
+        int w, h;
+        if (src[i].w < 1 || src[i].h < 1 || src[i].w > QI_MAX_SRC_SIDE || src[i].h > QI_MAX_SRC_SIDE ||
+            qir_calc_dims((double)ref_res * ref_res, src[i].w, src[i].h, &w, &h) != 0) {
+            snprintf(msg, msgn, "picture %d is %dx%d: each side must be 1 to %d pixels, and the picture not so long and thin "
+                     "that a side rounds to nothing at this ref_resolution", i + 1, src[i].w, src[i].h, QI_MAX_SRC_SIDE);
+            goto out;
+        }
+        buf[i] = xmalloc((size_t)w * h * 4);
+        if (qir_resize_rgba(src[i].rgba, src[i].w, src[i].h, buf[i], w, h)) { snprintf(msg, msgn, "out of memory resizing picture %d", i + 1); goto out; }
+        pic[i] = (EditPic){ buf[i], w, h };
+        sh[i][0] = h / 16; sh[i][1] = w / 16;
+        rows += sh[i][0] * sh[i][1];
+        fprintf(stderr, "[qwenimage] picture %d: %dx%d -> %dx%d\n", i + 1, src[i].w, src[i].h, w, h);
+    }
+    if (rows > QI_MAX_EDIT_ROWS - QI_MAX_PROMPT_TOKENS) {
+        snprintf(msg, msgn, "the pictures make %d reference tokens, the limit is %d: lower ref_resolution or send fewer pictures",
+                 rows, QI_MAX_EDIT_ROWS - QI_MAX_PROMPT_TOKENS);
+        goto out;
+    }
+    /* the language model and the vision tower, together */
+    if (qivt_config(&e->vit, e->model, 0) != 0) { snprintf(msg, msgn, "this checkpoint's vision tower is not one the engine reads"); goto out; }
+    qivt_load(&e->vit, e->model);
+    te_load(&e->te, e->model);
+    emb = te_encode_edit(&e->te, &e->vit, prompt, pic, nsrc, &Lv, &mask, msg, msgn);
+    qivt_free(&e->vit);
+    if (!e->te_resident) te_unload(&e->te);
+    if (!emb) goto out;
+    {
+        int slots = 0; for (int v = 0; v < Lv; v++) slots += mask[v] != 0;
+        if (Lv - slots > QI_MAX_PROMPT_TOKENS) { snprintf(msg, msgn, "prompt too long: %d tokens, the limit is %d", Lv - slots, QI_MAX_PROMPT_TOKENS); goto out; }
+    }
+    /* the pictures through the VAE encoder: their latents are the DiT's reference tokens */
+    if (!e->vae_enc) {
+        char dir[2100]; snprintf(dir, sizeof dir, "%s/vae", e->model);
+        e->vae_enc = qive_load(dir);
+        if (!e->vae_enc) { snprintf(msg, msgn, "cannot load the VAE encoder"); goto out; }
+        if (e->vae_enc->scale != 16 || e->vae_enc->z_dim != e->dit.in_ch) {
+            snprintf(msg, msgn, "the VAE encoder (z_dim %d, %dx) does not fit the transformer", e->vae_enc->z_dim, e->vae_enc->scale);
+            qive_free(e->vae_enc); e->vae_enc = NULL; goto out;
+        }
+    }
+    ref = fmalloc((size_t)rows * e->dit.in_ch);
+    for (int i = 0, off = 0; i < nsrc; i++) {
+        if (qive_encode(e->vae_enc, pic[i].rgba, pic[i].h, pic[i].w, ref + (size_t)off * e->dit.in_ch) != 0) {
+            snprintf(msg, msgn, "VAE encode failed for picture %d", i + 1); goto out; }
+        off += sh[i][0] * sh[i][1];
+    }
+    dit_load(&e->dit, e->model);
+    if (dit_prefix_edit(&e->dit, emb, Lv, mask, nsrc, (const int (*)[2])sh, ref, &e->prefix, NULL, NULL, msg, msgn) != 0) goto out;
+    rc = 0;
+out:
+    for (int i = 0; i < nsrc; i++) free(buf[i]);
+    free(sh); free(ref); free(emb); free(mask);
+    return rc;
+}
+
+/* Edits: the prompt as an instruction about the pictures. width/height 0: the pipeline's default, the last
+ * picture's aspect at ref_res^2 pixels; the size used comes back through *width and *height. rgba holds
+ * cap bytes. */
+static int engine_edit(Engine *e, const char *prompt, const EditPic *src, int nsrc, int ref_res, int *width, int *height,
+                       int steps, uint64_t seed, const float *lat_init, uint8_t *rgba, size_t cap,
+                       double timings[3], const Progress *pg, float *lat_out, char *msg, size_t msgn){
+    double t0 = now_s();
+    if (*width == 0 || *height == 0) {
+        if (nsrc < 1 || qir_calc_dims((double)ref_res * ref_res, src[nsrc - 1].w, src[nsrc - 1].h, width, height) != 0) {
+            snprintf(msg, msgn, "cannot derive an output size from the last picture"); return -1; }
+    }
+    if (check_size(*width, *height, steps, msg, msgn)) return -1;
+    if ((size_t)*width * *height * 4 > cap) { snprintf(msg, msgn, "output buffer too small"); return -1; }
+    emit_progress(pg, "encode", 0, steps, t0);
+    if (engine_edit_prefix(e, prompt, src, nsrc, ref_res, msg, msgn) != 0) return -1;
+    int rc = engine_sample(e, *width, *height, steps, seed, lat_init, rgba, timings, pg, t0, now_s(), lat_out, msg, msgn);
+    prefix_free(&e->prefix, e->dit.layers);      /* gigabytes of keys and values that no later request can reuse */
+    return rc;
+}
+#endif
 
 static int check_size(int w, int h, int steps, char *msg, size_t n){
     if (w < 256 || h < 256 || w > 2048 || h > 2048 || w % 32 || h % 32) {
@@ -1394,12 +1531,13 @@ static int check_size(int w, int h, int steps, char *msg, size_t n){
 
 /* Our own line reader on fd 0: stdio's buffer would hide a CANCEL that arrived
  * together with the GEN from coli_serve_stdin_ready(). */
-/* The buffer grows up to QI_MAX_LINE (the gateway's own body limit). A longer
+/* The buffer grows up to QI_MAX_LINE: room for the pictures of an edit, base64 inside the GEN line
+ * (QI_MAX_EDIT_SRC pictures of up to 2048x2048 RGBA, the gateway's own limit, is about 90 MB). A longer
  * line is read through to its newline and discarded, and read_line hands back
  * "TOOLONG <id>" with the id found at its start, so the client that sent it
  * gets an ERROR instead of waiting forever for an answer to a request the
  * engine never saw. */
-#define QI_MAX_LINE ((size_t)4 << 20)
+#define QI_MAX_LINE ((size_t)96 << 20)
 static char *g_in; static size_t g_in_n, g_in_cap;
 static int g_skipping; static char g_skip_id[128];
 
@@ -1498,9 +1636,115 @@ static void send_error(const char *id, const char *m){
     fflush(stdout);
 }
 
+/* Standard base64 with padding, nothing else allowed (no whitespace, no URL alphabet): the pictures come from
+ * the gateway, which writes exactly this. Returns the decoded size, or -1 when the text is malformed or does
+ * not decode to at most cap bytes. */
+static int64_t b64_decode(const char *s, uint8_t *out, size_t cap){
+    static int8_t tab[256]; static int ready;
+    if (!ready) {
+        memset(tab, -1, sizeof tab);
+        const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) tab[(unsigned char)a[i]] = (int8_t)i;
+        ready = 1;
+    }
+    size_t n = strlen(s), o = 0;
+    if (n % 4) return -1;
+    for (size_t i = 0; i < n; i += 4) {
+        int v[4], pad = 0;
+        for (int k = 0; k < 4; k++) {
+            unsigned char c = (unsigned char)s[i + k];
+            if (c == '=') {
+                if (i + 4 != n || k < 2) return -1;
+                pad++; v[k] = 0;
+            } else if (pad || tab[c] < 0) return -1;
+            else v[k] = tab[c];
+        }
+        size_t take = 3 - (size_t)pad;
+        if (o + take > cap) return -1;
+        uint32_t w = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) | ((uint32_t)v[2] << 6) | (uint32_t)v[3];
+        out[o++] = (uint8_t)(w >> 16);
+        if (take > 1) out[o++] = (uint8_t)(w >> 8);
+        if (take > 2) out[o++] = (uint8_t)w;
+    }
+    return (int64_t)o;
+}
+
+static void send_image(const char *id, int w, int h, uint64_t seed, int steps, const double tm[3], const uint8_t *rgba){
+    printf("IMAGE {\"id\":\""); json_escape_out(id);
+    printf("\",\"width\":%d,\"height\":%d,\"channels\":4,\"bytes\":%lld,\"seed\":%llu,\"steps\":%d,"
+           "\"timings\":{\"encode\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
+           w, h, (long long)w * h * 4, (unsigned long long)seed, steps, tm[0], tm[1], tm[2]);
+    fwrite(rgba, 1, (size_t)w * h * 4, stdout);
+    putchar('\n');
+    fflush(stdout);
+}
+
+#ifdef QI_HAVE_VAE
+/* GEN with "images": [{"width", "height", "data": base64 of RGBA bytes}, ...] (1 to QI_MAX_EDIT_SRC),
+ * optional "ref_resolution", "width"/"height" (default: derived from the last picture). Always answers. */
+static void serve_edit(Engine *e, jval *j, const char *id, const char *prompt, int dsteps, int can_edit){
+    char msg[512] = "";
+    jval *imgs = json_get(j, "images");
+    int n = imgs && imgs->t == J_ARR ? imgs->len : -1, made = 0;
+    EditPic src[QI_MAX_EDIT_SRC]; memset(src, 0, sizeof src);
+    uint8_t *rgba = NULL;
+    if (!can_edit) { send_error(id, "this checkpoint cannot edit pictures (no vision tower or VAE encoder the engine reads)"); return; }
+    if (n < 1 || n > QI_MAX_EDIT_SRC) { snprintf(msg, sizeof msg, "`images` must hold 1 to %d pictures", QI_MAX_EDIT_SRC); send_error(id, msg); return; }
+    for (; made < n; made++) {
+        jval *im = imgs->kids[made], *d = im && im->t == J_OBJ ? json_get(im, "data") : NULL;
+        int w = (int)jnum(im, "width", 0), h = (int)jnum(im, "height", 0);
+        if (w < 1 || h < 1 || w > QI_MAX_SRC_SIDE || h > QI_MAX_SRC_SIDE || !d || d->t != J_STR) {
+            snprintf(msg, sizeof msg, "picture %d needs width and height (1 to %d) and data (base64 RGBA)", made + 1, QI_MAX_SRC_SIDE);
+            goto done;
+        }
+        size_t want = (size_t)w * h * 4;
+        uint8_t *buf = xmalloc(want);
+        int64_t got = b64_decode(d->str, buf, want);
+        if (got != (int64_t)want) {
+            snprintf(msg, sizeof msg, "picture %d: data does not decode to %dx%d RGBA (%zu bytes)", made + 1, w, h, want);
+            free(buf); goto done;
+        }
+        src[made] = (EditPic){ buf, w, h };
+    }
+    {
+        int ref_res = (int)jnum(j, "ref_resolution", QI_EDIT_REF_RES), steps = (int)jnum(j, "steps", dsteps);
+        int w = (int)jnum(j, "width", 0), h = (int)jnum(j, "height", 0);
+        uint64_t seed = (uint64_t)jnum(j, "seed", (double)(time(NULL) & 0x7fffffff));
+        if (ref_res < QI_EDIT_REF_RES_MIN || ref_res > QI_EDIT_REF_RES_MAX) {
+            snprintf(msg, sizeof msg, "ref_resolution must be between %d and %d (got %d)", QI_EDIT_REF_RES_MIN, QI_EDIT_REF_RES_MAX, ref_res);
+            goto done; }
+        if ((w == 0 || h == 0) && qir_calc_dims((double)ref_res * ref_res, src[n - 1].w, src[n - 1].h, &w, &h) != 0) {
+            snprintf(msg, sizeof msg, "cannot derive an output size from the last picture"); goto done; }
+        if (check_size(w, h, steps, msg, sizeof msg)) goto done;
+        g_cancel_pending = 0;
+        rgba = xmalloc((size_t)w * h * 4);
+        double tm[3];
+        Progress pg = { id, serve_cancelled, (int)jnum(j, "preview", 0) };
+        if (engine_edit(e, prompt, src, n, ref_res, &w, &h, steps, seed, NULL, rgba, (size_t)w * h * 4, tm, &pg, NULL, msg, sizeof msg)) goto done;
+        send_image(id, w, h, seed, steps, tm, rgba);
+        msg[0] = 0;
+    }
+done:
+    if (msg[0]) send_error(id, msg);
+    for (int i = 0; i < made; i++) free((void *)src[i].rgba);
+    free(rgba);
+}
+#endif
+
 static int serve_loop(Engine *e, int dw, int dh, int dsteps){
+    int can_edit = 0;
+#ifdef QI_HAVE_VAE
+    can_edit = engine_can_edit(e);
+#endif
     printf("READY {\"model\":\"qwen-image-2.1\",\"default_width\":%d,\"default_height\":%d,\"default_steps\":%d,"
-           "\"min_side\":256,\"max_side\":2048,\"multiple\":32}\n", dw, dh, dsteps);
+           "\"min_side\":256,\"max_side\":2048,\"multiple\":32", dw, dh, dsteps);
+#ifdef QI_HAVE_VAE
+    if (can_edit)
+        printf(",\"edit\":true,\"max_edit_images\":%d,\"max_source_side\":%d,"
+               "\"ref_resolution\":{\"default\":%d,\"min\":%d,\"max\":%d}",
+               QI_MAX_EDIT_SRC, QI_MAX_SRC_SIDE, QI_EDIT_REF_RES, QI_EDIT_REF_RES_MIN, QI_EDIT_REF_RES_MAX);
+#endif
+    printf("}\n");
     fflush(stdout);
     char *line;
     for (;;) {
@@ -1520,6 +1764,11 @@ static int serve_loop(Engine *e, int dw, int dh, int dsteps){
         uint64_t seed = (uint64_t)jnum(j, "seed", (double)(time(NULL) & 0x7fffffff));
         if (!j) send_error(id, "bad GEN line (not JSON)");
         else if (!prompt || !*prompt) send_error(id, "empty prompt");
+#ifdef QI_HAVE_VAE
+        else if (json_get(j, "images")) serve_edit(e, j, id, prompt, dsteps, can_edit);
+#else
+        else if (json_get(j, "images")) send_error(id, "this build has no VAE: it cannot edit pictures");
+#endif
         else if (check_size(w, h, steps, msg, sizeof msg)) send_error(id, msg);
         else {
             g_cancel_pending = 0;
@@ -1527,15 +1776,7 @@ static int serve_loop(Engine *e, int dw, int dh, int dsteps){
             double tm[3];
             Progress pg = { id, serve_cancelled, (int)jnum(j, "preview", 0) };
             if (engine_generate(e, prompt, w, h, steps, seed, rgba, tm, &pg, msg, sizeof msg)) send_error(id, msg);
-            else {
-                printf("IMAGE {\"id\":\""); json_escape_out(id);
-                printf("\",\"width\":%d,\"height\":%d,\"channels\":4,\"bytes\":%lld,\"seed\":%llu,\"steps\":%d,"
-                       "\"timings\":{\"encode\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
-                       w, h, (long long)w * h * 4, (unsigned long long)seed, steps, tm[0], tm[1], tm[2]);
-                fwrite(rgba, 1, (size_t)w * h * 4, stdout);
-                putchar('\n');
-                fflush(stdout);
-            }
+            else send_image(id, w, h, seed, steps, tm, rgba);
             free(rgba);
         }
         if (j) json_free(j);
@@ -1814,7 +2055,7 @@ static int run_vl_oracle(Engine *e, const char *refdir){
     jval *cases = meta ? json_get(meta, "cases") : NULL;
     if (!cases || cases->t != J_ARR || !cases->len) { fprintf(stderr, "[vl-oracle] ref.json has no cases\n"); return 2; }
     shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
-    qivt_config(&e->vit, e->model); qivt_load(&e->vit, e->model);
+    qivt_config(&e->vit, e->model, 1); qivt_load(&e->vit, e->model);
     int need_te = 0;       /* a tower-only reference (the real checkpoint's) never reaches the language model */
     for (int k = 0; k < cases->len; k++) need_te |= !jbool(cases->kids[k], "tower_only", 0);
     if (need_te) te_load(&e->te, e->model);
@@ -1920,6 +2161,55 @@ static int run_vl_oracle(Engine *e, const char *refdir){
     return fails ? 1 : 0;
 }
 
+#ifdef QI_HAVE_VAE
+/* A whole edit against the pipeline (tools/make_qwenimage_edit_e2e_ref.py): source pictures of any size, a
+ * prompt and the pipeline's own initial noise in; the final latents and the decoded RGBA out. Everything
+ * between is the engine's own: the resize, the vision tower and language model, the VAE encoder, the
+ * DiT's prefix, the steps, the decode. */
+static int run_edit_e2e_oracle(Engine *e, const char *refdir){
+    char *arena = NULL;
+    jval *meta = read_json(refdir, "ref.json", &arena);
+    jval *cases = meta ? json_get(meta, "cases") : NULL;
+    if (!cases || cases->t != J_ARR || !cases->len) { fprintf(stderr, "[e2e-oracle] ref.json has no cases\n"); return 2; }
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    e->te_resident = 1;
+    int fails = 0, C = e->dit.in_ch;
+    const double LOOSE = 2e-3;
+    for (int k = 0; k < cases->len; k++) {
+        jval *c = cases->kids[k], *srcs = json_get(c, "sources"), *pm = json_get(c, "prompt"), *nm = json_get(c, "name");
+        int n = srcs && srcs->t == J_ARR ? srcs->len : 0, w = (int)jnum(c, "width", 0), h = (int)jnum(c, "height", 0);
+        int steps = (int)jnum(c, "steps", 0), res = (int)jnum(c, "ref_resolution", 0);
+        if (!n || n > QI_MAX_EDIT_SRC || !pm || pm->t != J_STR || !w || !h || !steps || !res) { fprintf(stderr, "[e2e-oracle] case %d is malformed\n", k); return 2; }
+        EditPic src[QI_MAX_EDIT_SRC];
+        for (int j = 0; j < n; j++) {
+            int sw = (int)jnum(srcs->kids[j], "w", 0), sh = (int)jnum(srcs->kids[j], "h", 0); int64_t nb = 0;
+            uint8_t *a = ref_u8(&R, "c%d.src%d", k, j, &nb);
+            if (!a || nb != (int64_t)sw * sh * 4) { fprintf(stderr, "[e2e-oracle] case %d picture %d is missing\n", k, j); return 2; }
+            src[j] = (EditPic){ a, sw, sh };
+        }
+        int N = (h / 16) * (w / 16); int64_t nb = 0;
+        float *lat = ref_f(&R, "c%d.lat", k, 0, NULL), *fin_ref = ref_f(&R, "c%d.final", k, 0, NULL);
+        uint8_t *rgba_ref = ref_u8(&R, "c%d.rgba", k, 0, &nb);
+        if (!lat || !fin_ref || !rgba_ref || nb != (int64_t)w * h * 4) { fprintf(stderr, "[e2e-oracle] case %d: a tensor is missing\n", k); return 2; }
+        fprintf(stderr, "[e2e-oracle] case %d %s: %d picture(s) -> %dx%d, %d steps, ref_resolution %d\n", k,
+                nm && nm->t == J_STR ? nm->str : "", n, w, h, steps, res);
+        uint8_t *rgba = xmalloc((size_t)w * h * 4); float *fin = fmalloc((size_t)N * C); double tm[3]; char msg[512] = "";
+        int ow = w, oh = h;
+        if (engine_edit(e, pm->str, src, n, res, &ow, &oh, steps, 0, lat, rgba, (size_t)w * h * 4, tm, NULL, fin, msg, sizeof msg)) {
+            fprintf(stderr, "[e2e-oracle] %s\n", msg); fails++; continue; }
+        fails += cmp("final latents", fin, fin_ref, (size_t)N * C) > LOOSE;
+        size_t big = 0, any = 0;
+        for (size_t i = 0; i < (size_t)w * h * 4; i++) { int d = abs((int)rgba[i] - rgba_ref[i]); any += d != 0; big += d > 1; }
+        fprintf(stderr, "[e2e-oracle] RGBA: %zu of %zu bytes differ, %zu by more than 1\n", any, (size_t)w * h * 4, big);
+        fails += big * 1000 > (size_t)w * h * 4;
+        free(rgba); free(fin); free(lat); free(fin_ref); free(rgba_ref);
+        for (int j = 0; j < n; j++) free((void *)src[j].rgba);
+    }
+    fprintf(stderr, fails ? "[e2e-oracle] FAILED\n" : "[e2e-oracle] all cases within tolerance\n");
+    return fails ? 1 : 0;
+}
+#endif
+
 static void usage(void){
     fprintf(stderr,
         "usage: qwenimage --model DIR --prompt TEXT [--width 768] [--height 512] [--steps 8] [--seed N] --out FILE.png\n"
@@ -1927,6 +2217,7 @@ static void usage(void){
         "       qwenimage --model DIR --ref REFDIR\n"
         "       qwenimage --model DIR --edit-ref REFDIR   the reference-image path of the DiT\n"
         "       qwenimage --model DIR --vl-ref REFDIR     the vision tower and the text encoder with pictures\n"
+        "       qwenimage --model DIR --edit-e2e-ref REFDIR   a whole edit against the pipeline\n"
         "env:   COLI_IMG_BITS=8|16|32 weight storage (default 8: int8 rows)\n"
         "       COLI_IMG_ACT8=0  f32 activations in the DiT (default where VNNI exists: int8, about 2x per step)\n"
         "       COLI_IMG_TE=resident|stage  keep the text encoder loaded between prompts (serve default: resident)\n"
@@ -1940,7 +2231,7 @@ int main(int argc, char **argv){
     /* Windows: the IMAGE and PREVIEW frames carry raw bytes; a text-mode stdout
      * would turn every 0x0A inside them into 0x0D 0x0A (#748) */
     coli_serve_binary_mode();
-    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL, *edit_ref = NULL, *vl_ref = NULL;
+    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL, *edit_ref = NULL, *vl_ref = NULL, *e2e_ref = NULL;
     int width = 768, height = 512, steps = 8, serve = 0;
     uint64_t seed = 42; int seed_set = 0;
     for (int i = 1; i < argc; i++) {
@@ -1951,6 +2242,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--ref") && v) { ref = v; i++; }
         else if (!strcmp(a, "--edit-ref") && v) { edit_ref = v; i++; }
         else if (!strcmp(a, "--vl-ref") && v) { vl_ref = v; i++; }
+        else if (!strcmp(a, "--edit-e2e-ref") && v) { e2e_ref = v; i++; }
         else if (!strcmp(a, "--width") && v) { width = atoi(v); i++; }
         else if (!strcmp(a, "--height") && v) { height = atoi(v); i++; }
         else if (!strcmp(a, "--steps") && v) { steps = atoi(v); i++; }
@@ -1964,7 +2256,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--serve")) serve = 1;
         else { usage(); return 2; }
     }
-    if (!model || (!serve && !ref && !edit_ref && !vl_ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
+    if (!model || (!serve && !ref && !edit_ref && !vl_ref && !e2e_ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
     const char *b = getenv("COLI_IMG_BITS");
     if (b && *b) { g_bits = atoi(b); if (g_bits != 8 && g_bits != 16 && g_bits != 32) { usage(); return 2; } }
     /* On by default where VNNI exists: measured 2x on the step (768x512: 34.3 -> 18.3 s
@@ -1983,6 +2275,9 @@ int main(int argc, char **argv){
     if (ref) { int rc = run_oracle(&e, ref); qi_vk_report(); return rc; }
     if (edit_ref) { int rc = run_edit_oracle(&e, edit_ref); qi_vk_report(); return rc; }
     if (vl_ref) { int rc = run_vl_oracle(&e, vl_ref); qi_vk_report(); return rc; }
+#ifdef QI_HAVE_VAE
+    if (e2e_ref) { int rc = run_edit_e2e_oracle(&e, e2e_ref); qi_vk_report(); return rc; }
+#endif
     if (getenv("QWENIMAGE_PRINT_TOKENS")) {          /* tokenizer check against the processor */
         int n, drop; int *ids = te_encode_prompt(&e.te, prompt ? prompt : "", &n, &drop);
         printf("drop %d ids", drop);

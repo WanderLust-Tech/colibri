@@ -45,7 +45,9 @@ typedef struct {
     int loaded;
 } QiVit;
 
-static void qivt_config(QiVit *v, const char *model){
+/* Reads text_encoder/config.json's vision_config. An unsupported one is fatal when `fatal` (an edit was
+ * asked for), otherwise -1 with nothing printed: how the engine finds out whether it can edit at all. */
+static int qivt_config(QiVit *v, const char *model, int fatal){
     char dir[2048]; snprintf(dir, sizeof dir, "%s/text_encoder", model);
     char *arena = NULL;
     jval *root = read_json(dir, "config.json", &arena);
@@ -95,10 +97,12 @@ static void qivt_config(QiVit *v, const char *model){
         v->patch <= 0 || v->patch > 64 || temporal <= 0 || temporal > 8 || v->merge <= 0 || v->merge > 8 ||
         v->in_ch != 3 || v->out_hidden <= 0 || v->out_hidden > 65536 || v->npos <= 0 ||
         v->side * v->side != v->npos || v->npos > (1 << 16)) {
+        if (!fatal) return -1;
         fprintf(stderr, "[qwenimage] text_encoder/config.json: unsupported vision_config "
                         "(needs gelu_pytorch_tanh, 3 channels, a square position grid, head_dim divisible by 4)\n");
         exit(1);
     }
+    return 0;
 }
 
 static void qivt_load_merger(shards *S, const char *pre, const QiVit *v, QivtMerger *g){

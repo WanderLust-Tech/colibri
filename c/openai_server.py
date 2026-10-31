@@ -6006,6 +6006,84 @@ def is_image_engine(engine):
 
 # The endpoints that only make sense for a chat model, refused with a pointer
 # when the model draws images instead.
+# POST /v1/images/edits: the request's pictures and fields. multipart/form-data (what OpenAI's SDKs send)
+# is parsed with the standard library's email parser, the one that is left now that `cgi` is gone.
+_EDIT_INT_FIELDS = ("n", "steps", "seed", "width", "height", "ref_resolution", "partial_images")
+_EDIT_MAX_PARTS = 64
+
+
+def _edit_json_picture(item, where):
+    """One picture of a JSON edit request -> bytes: base64, a data: URL, or an object carrying
+    `image_url` (a string or {"url"}) or `b64_json`. Never a URL to fetch and never a file id."""
+    import base64
+    import binascii
+    if isinstance(item, dict):
+        if "file_id" in item:
+            raise APIError(400, "`file_id` is not supported: this server stores no files. Send the "
+                                "picture itself.", where, "invalid_value")
+        item = item.get("image_url", item.get("b64_json"))
+        if isinstance(item, dict):
+            item = item.get("url")
+    if not isinstance(item, str) or not item.strip():
+        raise APIError(400, f"`{where}` must be base64, a data: URL, or an object with `image_url`.",
+                       where, "invalid_value")
+    text = item.strip()
+    if text[:5].lower() == "data:":
+        head, comma, text = text.partition(",")
+        if not comma or not head.lower().endswith(";base64"):
+            raise APIError(400, f"`{where}`: a data: URL must be base64-encoded.", where, "invalid_value")
+    elif re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", text):
+        raise APIError(400, f"`{where}`: this server does not fetch pictures from URLs; send a data: URL "
+                            "or base64.", where, "invalid_value")
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise APIError(400, f"`{where}` is not valid base64.", where, "invalid_value") from None
+
+
+def parse_multipart_edit(content_type, raw):
+    """(fields, [picture bytes]) of a multipart/form-data edit request: files named `image` or `image[]`
+    are the pictures, every other part is a text field, numbers and `stream` turned into what the JSON
+    form would have carried."""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+    message = BytesParser(policy=HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode("latin-1", "replace") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw)
+    parts = list(message.iter_parts()) if message.is_multipart() else []
+    if not parts:
+        raise APIError(400, "The multipart body has no parts: check its boundary.")
+    if len(parts) > _EDIT_MAX_PARTS:
+        raise APIError(400, f"At most {_EDIT_MAX_PARTS} form parts.")
+    fields, blobs = {}, []
+    for part in parts:
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            raise APIError(400, "A form part has no name.")
+        payload = part.get_payload(decode=True) or b""
+        if name in ("image", "image[]"):
+            blobs.append(payload)
+        elif name in ("mask", "mask[]"):
+            raise APIError(400, "`mask` is not supported: this model edits by reference pictures.", "mask",
+                           "invalid_value")
+        else:
+            try:
+                fields[name] = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                raise APIError(400, f"`{name}` must be UTF-8 text.", name, "invalid_value") from None
+    for key in _EDIT_INT_FIELDS:
+        if key in fields:
+            try:
+                fields[key] = int(fields[key].strip())
+            except ValueError:
+                raise APIError(400, f"`{key}` must be an integer.", key, "invalid_value") from None
+    if "stream" in fields:
+        word = fields["stream"].strip().lower()
+        if word not in ("true", "false", "1", "0"):
+            raise APIError(400, "`stream` must be true or false.", "stream", "invalid_value")
+        fields["stream"] = word in ("true", "1")
+    return fields, blobs
+
+
 TEXT_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone")
 # The endpoints that generate or score text with a language model, refused with a
 # pointer to /v1/systemone when the model is a decision engine (chat=0).
@@ -6097,6 +6175,12 @@ class APIServer(ThreadingHTTPServer):
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
+            if info.get("edit") is True:
+                # what POST /v1/images/edits accepts, so a client can build a valid request
+                entry["image"]["edit"] = {
+                    "max_images": min(image_engine.MAX_EDIT_IMAGES, int(info.get("max_edit_images") or 1)),
+                    "max_side": image_engine.MAX_EDIT_SIDE, "max_pixels": image_engine.MAX_EDIT_PIXELS,
+                    "ref_resolution": info.get("ref_resolution")}
         return entry
 
     def state_seen(self, state, capacity=256):
@@ -6115,7 +6199,9 @@ class APIServer(ThreadingHTTPServer):
         draws (image_generation); every text engine answers POST /v1/systemone
         (systemone), and a decision engine does only that (decision)."""
         if is_image_engine(self.engine):
-            return ["image_generation"]
+            # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
+            edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
+            return ["image_generation", "image_edit"] if edits else ["image_generation"]
         if engine_decides(self.engine) and not engine_chats(self.engine):
             return ["systemone", "decision"]
         return ["chat", "systemone"]
@@ -6488,6 +6574,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 None, "forbidden")
 
     def read_json(self):
+        return self.parse_json_object(self.read_raw_body(MAX_BODY))
+
+    def read_raw_body(self, limit):
         # No transfer decoder lives here: accepting TE+CL would choose CL even
         # though HTTP gives TE precedence. Multiple CL fields are likewise not
         # a boundary we should guess. Refuse before engine work and never reuse
@@ -6503,12 +6592,16 @@ class APIHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.close_connection = True
             raise APIError(400, "Invalid Content-Length header.")
-        if length < 1 or length > MAX_BODY:
-            raise APIError(400, f"Request body must be between 1 and {MAX_BODY} bytes.")
+        if length < 1 or length > limit:
+            raise APIError(400, f"Request body must be between 1 and {limit} bytes.")
         raw = self.rfile.read(length)
         # Only a full read leaves nothing to drain; a short read means the peer went away
         # mid-body, and the drain will notice the EOF and close (#597 item 3).
         self._body_read = len(raw) == length
+        return raw
+
+    @staticmethod
+    def parse_json_object(raw):
         try:
             body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -6524,6 +6617,34 @@ class APIHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             raise APIError(400, "Request body must be a JSON object.")
         return body
+
+    def read_edit_request(self):
+        """POST /v1/images/edits: (fields, [picture bytes]).
+
+        multipart/form-data is what OpenAI's SDKs send (`image` or `image[]` files, the rest text
+        fields); JSON takes `image`/`images` as base64 or data: URLs. Nothing is fetched or read from
+        disk on the client's say-so: an http(s) URL or a file id is refused, as is a `mask` (this
+        model edits by reference, it has no inpainting)."""
+        content_type = self.headers.get("Content-Type", "")
+        raw = self.read_raw_body(image_engine.MAX_EDIT_BODY)
+        kind = content_type.split(";", 1)[0].strip().lower()
+        if kind == "multipart/form-data":
+            return parse_multipart_edit(content_type, raw)
+        if kind not in ("application/json", ""):
+            raise APIError(415, "POST /v1/images/edits takes multipart/form-data or application/json.",
+                           None, "unsupported_media_type")
+        fields = self.parse_json_object(raw)
+        if "mask" in fields:
+            raise APIError(400, "`mask` is not supported: this model edits by reference pictures.", "mask",
+                           "invalid_value")
+        blobs = []
+        for key in ("image", "images"):
+            value = fields.pop(key, None)
+            if value is None:
+                continue
+            for item in value if isinstance(value, list) else [value]:
+                blobs.append(_edit_json_picture(item, key))
+        return fields, blobs
 
     def check_model(self, body):
         model = body.get("model")
@@ -6665,15 +6786,19 @@ class APIHandler(BaseHTTPRequestHandler):
         try:
             self._check_host()
             self.require_auth()
+            path = urlsplit(self.path).path
+            blobs = None
             try:
-                body = self.read_json()
+                if path == "/v1/images/edits":
+                    body, blobs = self.read_edit_request()
+                else:
+                    body = self.read_json()
             except TimeoutError:
                 # Only request intake is on this deadline. A later timeout
                 # from the engine keeps the existing structured 500 response.
                 self.close_connection = True
                 self.log_error("request read deadline exceeded")
                 return
-            path = urlsplit(self.path).path
             # A client written for Jev sends "jev-latest": on that route the
             # served model answers whatever name was asked for.
             if path != "/v1/systemone":
@@ -6689,6 +6814,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                "model", "unsupported_endpoint")
             if path == "/v1/images/generations":
                 self.image_generation(body, request_id)
+            elif path == "/v1/images/edits":
+                self.image_generation(body, request_id, blobs)
             elif path == "/v1/chat/completions":
                 self.chat_completion(body, request_id)
             elif path == "/v1/completions":
@@ -7137,7 +7264,9 @@ class APIHandler(BaseHTTPRequestHandler):
     # what was actually drawn (the seed above all: without it an image cannot be
     # reproduced). One image at a time through the same scheduler as chat, so
     # the queue, its limits and /metrics mean the same thing for both.
-    def image_generation(self, body, request_id):
+    # POST /v1/images/edits is the same request with pictures (`blobs`, the raw files
+    # read_edit_request found): the engine edits them by reference, and the response is the same.
+    def image_generation(self, body, request_id, blobs=None):
         engine = self.server.engine
         if not is_image_engine(engine):
             if not engine_chats(engine):
@@ -7147,8 +7276,15 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, f"`{self.server.model_id}` does not generate images: it is a "
                                 "chat model (POST /v1/chat/completions).",
                            "model", "unsupported_endpoint")
+        edit = blobs is not None
+        if edit and not getattr(engine, "can_edit", False):
+            raise APIError(400, f"`{self.server.model_id}` cannot edit pictures: its engine did not report a "
+                                "vision tower and a VAE encoder (POST /v1/images/generations instead).",
+                           "model", "unsupported_endpoint")
         try:
-            request = image_engine.image_request(body, engine.info)
+            request = image_engine.image_request(body, engine.info, edit=edit)
+            if edit:
+                request["images"] = image_engine.edit_pictures(blobs, engine.info)
         except image_engine.ImageRequestError as error:
             raise APIError(400, str(error), error.param, "invalid_value")
         stream = body.get("stream", False)
@@ -7184,7 +7320,9 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 result = engine.generate(request["prompt"], request["width"], request["height"],
                                          request["steps"], request["seed"], preview=False,
-                                         cancelled=self.client_disconnected)
+                                         cancelled=self.client_disconnected,
+                                         images=request.get("images"),
+                                         ref_resolution=request.get("ref_resolution"))
             except image_engine.ImageCancelled:
                 raise ClientCancelled() from None
             except image_engine.ImageEngineError as error:
@@ -7290,7 +7428,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                      request["steps"], request["seed"],
                                      preview=partial_images != 0, on_progress=on_progress,
                                      on_preview=on_preview, cancelled=cancelled,
-                                     on_idle=on_idle)
+                                     on_idle=on_idle, images=request.get("images"),
+                                     ref_resolution=request.get("ref_resolution"))
         except image_engine.ImageCancelled:
             if not state["started"]:
                 raise ClientCancelled() from None

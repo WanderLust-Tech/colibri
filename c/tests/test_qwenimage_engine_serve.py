@@ -89,6 +89,75 @@ class RealEngineServe(unittest.TestCase):
                 raise image_engine.ImageEngineError(self._final("raw"))
         self.assertEqual(len(self.generate(6)["rgba"]), 256 * 256 * 4)
 
+    # -- editing ------------------------------------------------------------
+    @staticmethod
+    def picture(width, height, phase=0):
+        """A smooth RGBA gradient with a clear corner, as the {"width","height","rgba"} an edit takes."""
+        px = bytearray(width * height * 4)
+        for y in range(height):
+            for x in range(width):
+                i = (y * width + x) * 4
+                px[i:i + 4] = bytes(((x * 255 // width + phase) & 255, (y * 255 // height + 2 * phase) & 255,
+                                     (x + y + phase) * 255 // (width + height) & 255,
+                                     0 if x < width // 4 and y < height // 4 else 255))
+        return {"width": width, "height": height, "rgba": bytes(px)}
+
+    def edit(self, seed, pictures, **kw):
+        return self.engine.generate("make it purple", None, None, 2, seed, images=pictures, ref_resolution=384, **kw)
+
+    def test_ready_reports_editing(self):
+        self.assertTrue(self.engine.can_edit)
+        self.assertEqual(self.engine.info["max_edit_images"], image_engine.MAX_EDIT_IMAGES)
+        self.assertEqual(self.engine.info["ref_resolution"], {"default": 768, "min": 384, "max": 1024})
+
+    def test_edit_frame_determinism_and_inputs(self):
+        pic = self.picture(256, 256)
+        first = self.edit(7, [pic])
+        # the size follows the picture's aspect at ref_resolution^2 pixels: 384 x 384
+        self.assertEqual((first["width"], first["height"], first["channels"]), (384, 384, 4))
+        self.assertEqual(len(first["rgba"]), 384 * 384 * 4)
+        self.assertEqual(self.edit(7, [pic])["rgba"], first["rgba"], "same seed and picture, different bytes")
+        self.assertNotEqual(self.edit(8, [pic])["rgba"], first["rgba"], "the seed changed nothing")
+        self.assertNotEqual(self.edit(7, [self.picture(256, 256, phase=90)])["rgba"], first["rgba"],
+                            "the picture changed nothing")
+        # an edit is not a plain generation, and a plain one still works afterwards
+        self.assertNotEqual(self.generate(7, 384, 384)["rgba"], first["rgba"])
+        self.assertEqual(len(self.generate(7)["rgba"]), 256 * 256 * 4)
+
+    def test_edit_two_pictures_and_a_given_size(self):
+        got = self.engine.generate("put the cat next to the dog", 320, 256, 2, 3, ref_resolution=384,
+                                   images=[self.picture(200, 300), self.picture(300, 200, 40)])
+        self.assertEqual((got["width"], got["height"]), (320, 256))
+        self.assertEqual(len(got["rgba"]), 320 * 256 * 4)
+
+    def test_edit_refusals_keep_the_engine(self):
+        import base64
+        good = base64.b64encode(self.picture(64, 64)["rgba"]).decode()
+
+        def refused(images, extra=None, pattern=None):
+            self.engine._send("GEN", {"id": "bad", "prompt": "x", "steps": 2, "images": images, **(extra or {})})
+            message = self._final("bad")
+            if pattern:
+                self.assertRegex(message, pattern)
+
+        refused([{"width": 64, "height": 64, "data": good[:-4]}], pattern="does not decode")      # short
+        refused([{"width": 64, "height": 64, "data": "not base64!"}], pattern="does not decode")
+        refused([{"width": 65, "height": 64, "data": good}], pattern="does not decode")           # wrong size
+        refused([{"width": 0, "height": 64, "data": good}], pattern="needs width and height")
+        refused([{"width": 64, "height": 64}], pattern="needs width and height")
+        refused([], pattern="1 to 4")
+        refused([{"width": 64, "height": 64, "data": good}] * 5, pattern="1 to 4")
+        refused([{"width": 64, "height": 64, "data": good}], {"ref_resolution": 100}, pattern="ref_resolution")
+        refused([{"width": 64, "height": 64, "data": good}], {"width": 300, "height": 256}, pattern="multiples of 32")
+        refused([{"width": 4096, "height": 8, "data": good}], pattern="needs width and height|does not decode")
+        self.assertEqual(len(self.generate(9)["rgba"]), 256 * 256 * 4)
+
+    def test_edit_prompt_with_image_tokens_is_refused(self):
+        with self.assertRaisesRegex(image_engine.ImageEngineError, "image_pad"):
+            self.engine.generate("add a <|image_pad|> hat", None, None, 2, 1, ref_resolution=384,
+                                 images=[self.picture(64, 64)])
+        self.assertEqual(len(self.generate(9)["rgba"]), 256 * 256 * 4)
+
     def _final(self, rid):
         while True:
             kind, body, _payload = self.engine.events.get(timeout=60)

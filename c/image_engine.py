@@ -10,13 +10,17 @@ message, a keyword, one space and a JSON object, and two of those messages are
 followed by raw pixels:
 
     READY {...}                      once, after the weights are loaded
-    GEN {...}                        client, one request at a time
+    GEN {...}                        client, one request at a time; "images" makes it an edit:
+                                     [{"width","height","data": base64 of RGBA bytes}], and
+                                     READY said "edit": true
     PROGRESS {...}                   any number
     PREVIEW {..."bytes":N} + N + \\n  optional RGB8 thumbnail
     IMAGE {..."bytes":N} + N + \\n    RGBA8, top row first
     ERROR {...}                      the engine stays alive for the next GEN
     CANCEL {...}                     client; answered with ERROR "cancelled"
 """
+import base64
+import io
 import json
 import os
 import queue
@@ -58,7 +62,17 @@ MAX_PROMPT_BYTES = 8192
 # How long a new request waits for the final frame of one that was abandoned
 # (its client vanished, a callback raised) before the engine is given up on.
 ABANDONED_TIMEOUT = 600
-_FRAMES = ("READY", "PROGRESS", "PREVIEW", "IMAGE", "ERROR")
+# Editing. The pictures travel as raw RGBA inside the GEN line, so what is accepted is bounded by what a
+# line can carry: four pictures of up to 2048 x 2048 is about 90 MB of base64, the engine's own limit. A
+# bigger upload is shrunk to fit when Pillow can do it (its Lanczos is what the pipeline resizes with
+# anyway), otherwise refused with the reason. The body limit covers the uploads of a multipart request.
+MAX_EDIT_IMAGES = 4
+MAX_EDIT_SIDE = 2048
+MAX_EDIT_PIXELS = 4 << 20
+MAX_EDIT_BODY = 32 << 20
+# Pillow will open this many pixels to look at a header; a picture past it is a decompression bomb
+MAX_DECODE_PIXELS = 64 << 20
+_FRAMES =("READY", "PROGRESS", "PREVIEW", "IMAGE", "ERROR")
 
 
 class ImageEngineError(RuntimeError):
@@ -279,10 +293,19 @@ class ImageEngine:
     def alive(self):
         return self.dead is None and self.process.poll() is None
 
+    @property
+    def can_edit(self):
+        """Whether the engine said, in READY, that it edits pictures (a vision tower and a VAE encoder)."""
+        return self.info.get("edit") is True
+
     def generate(self, prompt, width, height, steps, seed, preview=False, on_progress=None,
                  on_preview=None, cancelled=None, on_idle=None, interruptible=False,
-                 on_interrupt=None):
+                 on_interrupt=None, images=None, ref_resolution=None):
         """Run one GEN to its final frame and return the image.
+
+        With `images` (a list of {"width","height","rgba"}, see edit_pictures) the request is an edit of
+        those pictures; width and height may then be None, which has the engine derive the size from the
+        last picture, and `ref_resolution` sets how large the engine works on the pictures.
 
         Returns {"width","height","channels","seed","steps","timings","rgba"}.
         Raises ImageCancelled once the engine confirms a CANCEL, ImageEngineError
@@ -292,14 +315,26 @@ class ImageEngine:
         until it answers), the second one propagates."""
         if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             raise ImageRequestError(f"`prompt` is longer than {MAX_PROMPT_BYTES} bytes.", "prompt")
+        request = {"prompt": prompt, "steps": steps, "seed": seed, "preview": 1 if preview else 0}
+        if width is not None:
+            request["width"] = width
+        if height is not None:
+            request["height"] = height
+        if images:
+            if not self.can_edit:
+                raise ImageRequestError("This model cannot edit pictures: its engine did not report a "
+                                        "vision tower and a VAE encoder.", "image")
+            request["images"] = [{"width": p["width"], "height": p["height"],
+                                  "data": base64.b64encode(p["rgba"]).decode("ascii")} for p in images]
+            if ref_resolution is not None:
+                request["ref_resolution"] = ref_resolution
         with self.lock:
             if self.dead:
                 raise ImageEngineError(self.dead)
             self._finish_abandoned()
             self._seq += 1
             rid = f"r{self._seq}"
-            self._send("GEN", {"id": rid, "prompt": prompt, "width": width, "height": height,
-                               "steps": steps, "seed": seed, "preview": 1 if preview else 0})
+            self._send("GEN", {"id": rid, **request})
             cancel_sent = False
 
             def cancel():
@@ -492,13 +527,15 @@ def check_seed(seed):
     return None
 
 
-def image_request(body, info):
+def image_request(body, info, edit=False):
     """Validate an OpenAI-style images request against the engine's READY.
 
-    Returns {"prompt","width","height","steps","seed","seed_given"}; raises
+    Returns {"prompt","width","height","steps","seed","seed_given","ref_resolution"}; raises
     ImageRequestError naming the offending parameter. The rules are the
     contract's: n must be 1, a size either as "WxH" or as width/height, the
-    engine's side multiple and range, a non-empty prompt."""
+    engine's side multiple and range, a non-empty prompt. For an edit (`edit`), no size
+    at all is allowed and comes back as None: the engine derives it from the last picture
+    (the pipeline's own default); `ref_resolution` is checked against READY's range."""
     prompt = body.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ImageRequestError("`prompt` must be a non-empty string.", "prompt")
@@ -521,13 +558,26 @@ def image_request(body, info):
         if width is not None or height is not None:
             raise ImageRequestError("Give either `size` or `width`/`height`, not both.", "size")
         width, height = parse_size(size)
-    width = info["default_width"] if width is None else width
-    height = info["default_height"] if height is None else height
-    problem = check_size(width, height, info)
-    if problem:
-        param = "size" if size not in (None, "auto") else (
-            "width" if "width" in problem.split()[0] else "height")
-        raise ImageRequestError(problem + ".", param)
+    if edit and width is None and height is None:
+        pass                               # the engine derives it from the last picture
+    else:
+        if edit and (width is None or height is None):
+            raise ImageRequestError("Give both `width` and `height`, or neither: the size then "
+                                    "follows the last picture.", "width" if width is None else "height")
+        width = info["default_width"] if width is None else width
+        height = info["default_height"] if height is None else height
+        problem = check_size(width, height, info)
+        if problem:
+            param = "size" if size not in (None, "auto") else (
+                "width" if "width" in problem.split()[0] else "height")
+            raise ImageRequestError(problem + ".", param)
+    ref_resolution = body.get("ref_resolution") if edit else None
+    if ref_resolution is not None:
+        limits = info.get("ref_resolution") or {}
+        low, high = int(limits.get("min") or 1), int(limits.get("max") or 1 << 16)
+        if isinstance(ref_resolution, bool) or not isinstance(ref_resolution, int) or not low <= ref_resolution <= high:
+            raise ImageRequestError(f"`ref_resolution` must be an integer between {low} and {high}: the "
+                                    "size, in pixels of a side, the pictures are worked on at.", "ref_resolution")
     steps = body.get("steps")
     steps = info["default_steps"] if steps is None else steps
     problem = check_steps(steps)
@@ -542,7 +592,7 @@ def image_request(body, info):
     else:
         seed = random_seed()
     return {"prompt": prompt, "width": width, "height": height, "steps": steps,
-            "seed": seed, "seed_given": seed_given}
+            "seed": seed, "seed_given": seed_given, "ref_resolution": ref_resolution}
 
 
 # ---------------------------------------------------------------- PNG
@@ -642,8 +692,13 @@ def decode_png(data):
                          f"interlace {interlace}); 8-bit grey/RGB/RGBA only")
     channels = _CHANNELS[color]
     stride = width * channels
-    raw = zlib.decompress(b"".join(idat))
-    if len(raw) != (stride + 1) * height:
+    # Inflate no further than the header says the image is: a few KB of zeros can claim gigabytes.
+    expected = (stride + 1) * height
+    try:
+        raw = zlib.decompressobj().decompress(b"".join(idat), expected + 1)
+    except zlib.error as error:
+        raise ValueError(f"PNG image data does not inflate ({error})") from None
+    if len(raw) != expected:
         raise ValueError("PNG image data has the wrong length")
     _sub, add = _swar(stride)
     out = bytearray(stride * height)
@@ -677,6 +732,99 @@ def decode_png(data):
         out[y * stride:(y + 1) * stride] = row
         previous = bytes(row)
     return width, height, channels, bytes(out)
+
+
+# ---------------------------------------------------------------- pictures to edit
+def _to_rgba(channels, pixels):
+    """Grey, grey+alpha, RGB or RGBA bytes -> RGBA bytes."""
+    if channels == 4:
+        return bytes(pixels)
+    count = len(pixels) // channels
+    out = bytearray(count * 4)
+    if channels == 3:
+        out[0::4], out[1::4], out[2::4] = pixels[0::3], pixels[1::3], pixels[2::3]
+        out[3::4] = b"\xff" * count
+    elif channels == 1:
+        out[0::4] = out[1::4] = out[2::4] = pixels
+        out[3::4] = b"\xff" * count
+    elif channels == 2:
+        out[0::4] = out[1::4] = out[2::4] = pixels[0::2]
+        out[3::4] = pixels[1::2]
+    else:
+        raise ValueError(f"cannot make RGBA of {channels} channels")
+    return bytes(out)
+
+
+def _pillow():
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    return Image, ImageOps
+
+
+def _fit(width, height, max_side, max_pixels):
+    """The size at which width x height fits both limits, aspect kept (same size when it already does)."""
+    scale = min(1.0, max_side / width, max_side / height, (max_pixels / (width * height)) ** 0.5)
+    if scale >= 1.0:
+        return width, height
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def decode_picture(data, max_side=MAX_EDIT_SIDE, max_pixels=MAX_EDIT_PIXELS):
+    """An uploaded picture -> {"width","height","rgba"} within the limits, or ImageRequestError.
+
+    Without Pillow: an 8-bit grey, grey+alpha, RGB or RGBA PNG, no bigger than the limits (decode_png).
+    With it: whatever Pillow opens (JPEG, WebP, GIF's first frame, BMP, palette and 16-bit PNG), turned
+    upright by its EXIF orientation, and shrunk with Lanczos when it exceeds the limits. Either way the
+    header is read before the pixels, so a small file that claims a huge picture is refused unopened."""
+    data = bytes(data)
+    reason = None
+    if data.startswith(_PNG_MAGIC) and len(data) >= 33:
+        width, height = struct.unpack(">II", data[16:24])
+        if 0 < width * height <= max_pixels and width <= max_side and height <= max_side:
+            try:
+                w, h, channels, pixels = decode_png(data)
+                return {"width": w, "height": h, "rgba": _to_rgba(channels, pixels)}
+            except (ValueError, struct.error, zlib.error) as error:
+                reason = str(error)
+    pil = _pillow()
+    if pil is None:
+        if reason is None and data.startswith(_PNG_MAGIC) and len(data) >= 33:
+            reason = (f"this PNG is {width}x{height}, over the {max_side}-pixel side / "
+                      f"{max_pixels // (1 << 20)} MP limit, and shrinking needs Pillow")
+        raise ImageRequestError(
+            f"Cannot read this picture ({reason or 'not a PNG'}). Without Pillow installed, send an 8-bit "
+            f"grey, RGB or RGBA PNG of at most {max_side}x{max_side} pixels and "
+            f"{max_pixels // (1 << 20)} MP.", "image")
+    Image, ImageOps = pil
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            if im.width * im.height > MAX_DECODE_PIXELS:
+                raise ImageRequestError(f"This picture is {im.width}x{im.height}: too large to open.", "image")
+            im.load()
+            im = ImageOps.exif_transpose(im).convert("RGBA")
+            size = _fit(im.width, im.height, max_side, max_pixels)
+            if size != im.size:
+                im = im.resize(size, Image.LANCZOS)
+            return {"width": im.width, "height": im.height, "rgba": im.tobytes()}
+    except ImageRequestError:
+        raise
+    except Image.UnidentifiedImageError:
+        raise ImageRequestError("Cannot read this picture: it is not in a format Pillow recognises "
+                                "(PNG, JPEG, WebP, GIF and BMP are).", "image") from None
+    except Exception as error:     # Pillow raises a dozen different types for a damaged file
+        raise ImageRequestError(f"Cannot read this picture ({error}).", "image") from None
+
+
+def edit_pictures(blobs, info=None):
+    """The uploaded files of an edit -> the `images` GEN takes. 1 to MAX_EDIT_IMAGES (or what READY allows)."""
+    limit = min(MAX_EDIT_IMAGES, int((info or {}).get("max_edit_images") or MAX_EDIT_IMAGES))
+    if not blobs:
+        raise ImageRequestError("An edit needs at least one picture in `image`.", "image")
+    if len(blobs) > limit:
+        raise ImageRequestError(f"At most {limit} pictures per edit (got {len(blobs)}).", "image")
+    return [decode_picture(blob) for blob in blobs]
 
 
 # ---------------------------------------------------------------- saving
