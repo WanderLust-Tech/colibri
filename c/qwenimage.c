@@ -259,10 +259,12 @@ static inline float gelu_tanh(float x){
 
 /* Attention for every head: out[Tq][heads*hd] = softmax(Q K^T / sqrt(hd)) V.
  * Q rows have stride ldq, K/V rows stride ldk; query head h reads kv head
- * h / (heads/kvheads). causal >= 0: query i sees keys j <= i + causal. */
+ * h / (heads/kvheads). causal >= 0: query i sees keys j <= i + causal.
+ * qlim, when not NULL, gives each query its own count of visible keys (the first
+ * qlim[i]) and replaces causal: how a bidirectional image block sits in a causal sequence. */
 static void attention(float *out, int ldo, const float *Q, int ldq, int Tq,
                       const float *K, const float *V, int ldk, int Tk,
-                      int heads, int kvheads, int hd, int causal){
+                      int heads, int kvheads, int hd, int causal, const int *qlim){
     double tprof = g_prof ? now_s() : 0;
     float *S = fmalloc((size_t)Tq * Tk);
     float *vt = fmalloc((size_t)hd * Tk);
@@ -275,7 +277,7 @@ static void attention(float *out, int ldo, const float *Q, int ldq, int Tq,
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < Tq; i++) {
             float *r = S + (int64_t)i * Tk;
-            int lim = causal >= 0 ? i + causal + 1 : Tk;
+            int lim = qlim ? qlim[i] : causal >= 0 ? i + causal + 1 : Tk;
             if (lim > Tk) lim = Tk;
             float mx = -INFINITY;
             for (int j = 0; j < lim; j++) { r[j] *= scale; if (r[j] > mx) mx = r[j]; }
@@ -481,7 +483,7 @@ static float *te_forward(Te *te, const int *ids, int T){
         rmsnorm_rows(k, k, L->kn, T * te->kv, te->hd, te->eps, 0);
         te_rope(q, T, te->heads, te->hd, qd, te->theta);
         te_rope(k, T, te->kv, te->hd, kd, te->theta);
-        attention(a, qd, q, qd, T, k, v, kd, T, te->heads, te->kv, te->hd, 0);
+        attention(a, qd, q, qd, T, k, v, kd, T, te->heads, te->kv, te->hd, 0, NULL);
         linear(h, a, T, &L->o);
         for (int64_t i = 0; i < (int64_t)T * H; i++) x[i] += h[i];
         rmsnorm_rows(h, x, L->ln2, T, H, te->eps, 0);
@@ -662,8 +664,11 @@ static void dit_rope_apply(float *x, int T, int heads, int hd, const float *cs, 
 }
 
 /* The prompt side of the DiT, computed once per prompt: per block, the keys and
- * values of the text tokens (after norm and RoPE). */
-typedef struct { int L; float **K, **V; unsigned gen; } Prefix;
+ * values of the text tokens (after norm and RoPE). L is the number of rows;
+ * pos is the position the RoPE has reached after them, which the target image's
+ * frame axis starts from. They are equal for text alone; an image block of
+ * h x w tokens advances pos by max(h, w), not by h * w (dit_prefix_edit). */
+typedef struct { int L, pos; float **K, **V; unsigned gen; } Prefix;
 static unsigned g_qi_gen;   /* every prefix and step layout a number of its own (the device chain's uploads) */
 
 static void prefix_free(Prefix *p, int layers){
@@ -673,11 +678,12 @@ static void prefix_free(Prefix *p, int layers){
 
 /* One block over T tokens. q/k/v are written into kbuf/vbuf at row koff (the
  * caller lays the prefix before the image tokens); attention runs over the
- * first ktotal rows. causal: -1 full, >=0 as in attention(). */
+ * first ktotal rows. causal: -1 full, >=0 as in attention(); qlim, when not NULL,
+ * is attention()'s per-query key count and replaces it. */
 typedef struct { float *h, *q, *a, *g, *u; } DitScratch;
 
 static void dit_block(Dit *d, DitBlock *B, float *x, int T, const float *mod,
-                      float *kbuf, float *vbuf, int koff, int ktotal, int causal,
+                      float *kbuf, float *vbuf, int koff, int ktotal, int causal, const int *qlim,
                       const float *cs, const float *sn, DitScratch *w, int need_out){
     int D = d->dim;
     const float *scale1 = mod, *gate1 = mod + D, *scale2 = mod + 2 * D, *gate2 = mod + 3 * D;
@@ -689,7 +695,7 @@ static void dit_block(Dit *d, DitBlock *B, float *x, int T, const float *mod,
     dit_rope_apply(w->q, T, d->heads, d->hd, cs, sn);
     dit_rope_apply(k, T, d->heads, d->hd, cs, sn);
     if (!need_out) return;
-    attention(w->a, D, w->q, D, T, kbuf, vbuf, D, ktotal, d->heads, d->heads, d->hd, causal);
+    attention(w->a, D, w->q, D, T, kbuf, vbuf, D, ktotal, d->heads, d->heads, d->hd, causal, qlim);
     linear(w->h, w->a, T, &B->o);
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; t++)
@@ -710,8 +716,8 @@ static void scratch_alloc(DitScratch *w, const Dit *d, int T){
 }
 static void scratch_free(DitScratch *w){ free(w->h); free(w->q); free(w->a); free(w->g); free(w->u); }
 
-/* emb[L][ctx] (the text encoder's output after drop_idx) -> per-block K/V of the prefix. */
-static void dit_prefix(Dit *d, const float *emb, int L, Prefix *p, float *txt_out /* optional [L][dim] */){
+/* txt_in: emb[L][ctx] -> [L][dim], the text embedder (RMS norm, linear, GELU, linear) */
+static float *dit_txt_in(Dit *d, const float *emb, int L){
     int D = d->dim;
     float *n = fmalloc((size_t)L * d->ctx), *x = fmalloc((size_t)L * D);
     rmsnorm_rows(n, emb, d->txt_norm, L, d->ctx, d->eps, 1);
@@ -720,24 +726,119 @@ static void dit_prefix(Dit *d, const float *emb, int L, Prefix *p, float *txt_ou
     free(n);
     float *y = fmalloc((size_t)L * D);
     linear(y, x, L, &d->txt2);
-    free(x); x = y;
-    if (txt_out) memcpy(txt_out, x, (size_t)L * D * 4);
+    free(x);
+    return y;
+}
+
+/* The blocks over an embedded prefix x[L][dim] (consumed), modulated from t = 0 as the
+ * pipeline does for every token that is not the target's: pos3 gives each row its
+ * (frame, height, width) position, qlim (NULL = causal) each row's count of visible
+ * keys, pos_after the position the RoPE has reached. cs_out/sn_out, when not NULL,
+ * receive the RoPE table [L][hd/2]. */
+static void dit_prefix_run(Dit *d, float *x, int L, const int *pos3, const int *qlim, int pos_after,
+                           Prefix *p, float *cs_out, float *sn_out){
+    int D = d->dim;
     float *mod = fmalloc(4 * (size_t)D), *outs = fmalloc(D);
     dit_modulation(d, 0.f, mod, outs);
-    int *pos = xmalloc(sizeof(int) * 3 * L);
-    for (int t = 0; t < L; t++) pos[3 * t] = pos[3 * t + 1] = pos[3 * t + 2] = t;
     float *cs = fmalloc((size_t)L * d->hd / 2), *sn = fmalloc((size_t)L * d->hd / 2);
-    dit_rope_table(d, pos, L, cs, sn);
-    p->L = L; p->gen = ++g_qi_gen;
+    dit_rope_table(d, pos3, L, cs, sn);
+    if (cs_out) memcpy(cs_out, cs, (size_t)L * d->hd / 2 * 4);
+    if (sn_out) memcpy(sn_out, sn, (size_t)L * d->hd / 2 * 4);
+    p->L = L; p->pos = pos_after; p->gen = ++g_qi_gen;
     p->K = calloc(d->layers, sizeof(float *)); p->V = calloc(d->layers, sizeof(float *));
     DitScratch w; scratch_alloc(&w, d, L);
     for (int l = 0; l < d->layers; l++) {
         p->K[l] = fmalloc((size_t)L * D); p->V[l] = fmalloc((size_t)L * D);
         /* the last block's output is never read: only its keys and values are */
-        dit_block(d, &d->B[l], x, L, mod, p->K[l], p->V[l], 0, L, 0, cs, sn, &w, l + 1 < d->layers);
+        dit_block(d, &d->B[l], x, L, mod, p->K[l], p->V[l], 0, L, 0, qlim, cs, sn, &w, l + 1 < d->layers);
     }
     scratch_free(&w);
-    free(x); free(mod); free(outs); free(pos); free(cs); free(sn);
+    free(x); free(mod); free(outs); free(cs); free(sn);
+}
+
+/* emb[L][ctx] (the text encoder's output after drop_idx) -> per-block K/V of the prefix. */
+static void dit_prefix(Dit *d, const float *emb, int L, Prefix *p, float *txt_out /* optional [L][dim] */){
+    float *x = dit_txt_in(d, emb, L);
+    if (txt_out) memcpy(txt_out, x, (size_t)L * d->dim * 4);
+    int *pos = xmalloc(sizeof(int) * 3 * L);
+    for (int t = 0; t < L; t++) pos[3 * t] = pos[3 * t + 1] = pos[3 * t + 2] = t;
+    dit_prefix_run(d, x, L, pos, NULL, L, p, NULL, NULL);
+    free(pos);
+}
+
+/* The prefix of an edit: the vision-language sequence with the reference images in it.
+ *   emb[Lv][ctx]   the VLM's hidden states after drop_idx
+ *   img_mask[Lv]   nonzero at the <|image_pad|> slots; each stands for 2x2 latent tokens
+ *   sh[i] = {h, w} the i-th reference's latent grid in tokens; ref_lat holds every
+ *                  reference's tokens (raster order, [h*w][in_ch]) back to back
+ * The sequence is the VLM's with every slot expanded to four rows; the reference latents
+ * (through img_in) fill the image rows in order and txt_in of the hidden states fills the
+ * rest. Rows attend causally, except that each image block, counted from the shapes (two
+ * adjacent images stay two blocks), sees all of itself. RoPE: text advances one position
+ * shared by the three axes; an image block freezes the frame axis at the position reached
+ * and centres its height/width grid on zero, then advances by max(h, w).
+ * Returns 0, or -1 with msg if the mask and the shapes disagree. */
+static int dit_prefix_edit(Dit *d, const float *emb, int Lv, const unsigned char *img_mask,
+                           int nref, const int (*sh)[2], const float *ref_lat, Prefix *p,
+                           float *cs_out, float *sn_out, char *msg, size_t msgn){
+    int D = d->dim, S = 0, nimg = 0;
+    for (int v = 0; v < Lv; v++) S += img_mask[v] != 0;
+    for (int i = 0; i < nref; i++) {
+        if (sh[i][0] <= 0 || sh[i][1] <= 0) { snprintf(msg, msgn, "reference %d has an empty grid", i); return -1; }
+        nimg += sh[i][0] * sh[i][1];
+    }
+    if (4 * S != nimg) {
+        snprintf(msg, msgn, "%d image slots stand for %d latent tokens, the references have %d", S, 4 * S, nimg);
+        return -1;
+    }
+    const int Lp = Lv + 3 * S, nt = Lv - S;
+    unsigned char *isimg = xmalloc(Lp);
+    float *gather = fmalloc((size_t)(nt ? nt : 1) * d->ctx);
+    for (int v = 0, t = 0, r = 0; v < Lv; v++) {
+        if (img_mask[v]) { memset(isimg + t, 1, 4); t += 4; }
+        else { isimg[t++] = 0; memcpy(gather + (size_t)r++ * d->ctx, emb + (size_t)v * d->ctx, (size_t)d->ctx * 4); }
+    }
+    float *xt = nt ? dit_txt_in(d, gather, nt) : NULL, *xi = fmalloc((size_t)(nimg ? nimg : 1) * D);
+    free(gather);
+    if (nimg) linear(xi, ref_lat, nimg, &d->img_in);
+
+    int *pos3 = xmalloc(sizeof(int) * 3 * (size_t)Lp), *qlim = xmalloc(sizeof(int) * (size_t)Lp);
+    int cursor = 0, position = 0, rc = 0;
+    for (int b = 0; b < nref && !rc; b++) {
+        const int h = sh[b][0], w = sh[b][1];
+        int start = cursor;
+        while (start < Lp && !isimg[start]) start++;
+        if (start + h * w > Lp) { snprintf(msg, msgn, "reference %d does not fit the image slots", b); rc = -1; break; }
+        for (int t = start; t < start + h * w; t++)
+            if (!isimg[t]) { snprintf(msg, msgn, "reference %d is split by text", b); rc = -1; break; }
+        if (rc) break;
+        for (int t = cursor; t < start; t++, position++) {
+            pos3[3 * t] = pos3[3 * t + 1] = pos3[3 * t + 2] = position;
+            qlim[t] = t + 1;
+        }
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const int t = start + y * w + x;
+                pos3[3 * t] = position;
+                pos3[3 * t + 1] = y - (h - h / 2);
+                pos3[3 * t + 2] = x - (w - w / 2);
+                qlim[t] = start + h * w;
+            }
+        position += h > w ? h : w;
+        cursor = start + h * w;
+    }
+    for (int t = cursor; t < Lp && !rc; t++, position++) {
+        pos3[3 * t] = pos3[3 * t + 1] = pos3[3 * t + 2] = position;
+        qlim[t] = t + 1;
+    }
+    if (!rc) {
+        float *x = fmalloc((size_t)Lp * D);
+        for (int t = 0, r = 0, k = 0; t < Lp; t++)
+            memcpy(x + (size_t)t * D, isimg[t] ? xi + (size_t)k++ * D : xt + (size_t)r++ * D, (size_t)D * 4);
+        dit_prefix_run(d, x, Lp, pos3, qlim, position, p, cs_out, sn_out);
+    }
+    free(isimg); free(xt); free(xi); free(pos3); free(qlim);
+    return rc;
 }
 
 /* noise_pred[N][in_ch] for the image tokens at timestep t. */
@@ -755,7 +856,7 @@ static void dit_step_init(DitStep *s, Dit *d, const Prefix *p, int gh, int gw){
     for (int y = 0; y < gh; y++)
         for (int xx = 0; xx < gw; xx++) {
             int t = y * gw + xx;
-            pos[3 * t] = p->L;
+            pos[3 * t] = p->pos;
             pos[3 * t + 1] = y - (gh - gh / 2);
             pos[3 * t + 2] = xx - (gw - gw / 2);
         }
@@ -793,7 +894,7 @@ static void dit_forward(Dit *d, const Prefix *p, DitStep *s, const float *lat, f
     for (int l = 0; l < d->layers; l++) {
         memcpy(s->kbuf, p->K[l], (size_t)L * D * 4);
         memcpy(s->vbuf, p->V[l], (size_t)L * D * 4);
-        dit_block(d, &d->B[l], s->x, N, mod, s->kbuf, s->vbuf, L, L + N, -1, s->cs, s->sn, &s->w, 1);
+        dit_block(d, &d->B[l], s->x, N, mod, s->kbuf, s->vbuf, L, L + N, -1, NULL, s->cs, s->sn, &s->w, 1);
     }
     layernorm_mod(s->w.h, s->x, outs, N, D, d->eps);
     linear(out, s->w.h, N, &d->proj_out);
@@ -1459,11 +1560,72 @@ static void qi_vk_report(void){
 #endif
 }
 
+/* The reference-image path of the DiT against diffusers' transformer (tools/make_qwenimage_edit_ref.py).
+ * Each case is the transformer's own input: VLM hidden states with image-pad slots, the
+ * reference latents that fill them, the target's latents and a timestep. Held to the RoPE
+ * table of the whole joint sequence and to the noise prediction for the target's tokens. */
+static int run_edit_oracle(Engine *e, const char *refdir){
+    char *arena = NULL;
+    jval *meta = read_json(refdir, "ref.json", &arena);
+    jval *cases = meta ? json_get(meta, "cases") : NULL;
+    if (!cases || cases->t != J_ARR || !cases->len) { fprintf(stderr, "[edit-oracle] ref.json has no cases\n"); return 2; }
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    dit_load(&e->dit, e->model);
+    Dit *d = &e->dit;
+    const double TIGHT = 2e-4;
+    int fails = 0, C = d->in_ch, half = d->hd / 2;
+    for (int k = 0; k < cases->len; k++) {
+        jval *c = cases->kids[k], *rs = json_get(c, "refs"), *tg = json_get(c, "target");
+        jval *nm = json_get(c, "name");
+        int Lv = (int)jnum(c, "lv", 0), nref = rs && rs->t == J_ARR ? rs->len : 0;
+        if (!Lv || !nref || !tg || tg->t != J_ARR || tg->len != 2) { fprintf(stderr, "[edit-oracle] case %d is malformed\n", k); return 2; }
+        int (*sh)[2] = xmalloc(sizeof(int[2]) * nref);
+        for (int i = 0; i < nref; i++) { sh[i][0] = (int)rs->kids[i]->kids[0]->num; sh[i][1] = (int)rs->kids[i]->kids[1]->num; }
+        int gh = (int)tg->kids[0]->num, gw = (int)tg->kids[1]->num, N = gh * gw;
+        float t = (float)jnum(c, "t", 0) * 1000.f;      /* the transformer takes t/1000, the engine the scheduler's t */
+        char key[64], msg[256];
+        snprintf(key, sizeof key, "c%d.emb", k);      float *emb = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.ref", k);      float *ref = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.tgt", k);      float *tgt = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.cos", k);      float *cos_ref = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.sin", k);      float *sin_ref = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.pred", k);     float *pred_ref = ref_tensor(&R, key, NULL);
+        snprintf(key, sizeof key, "c%d.img_mask", k); st_tensor *mt = st_find(&R, key);
+        if (!emb || !ref || !tgt || !cos_ref || !sin_ref || !pred_ref || !mt || mt->nbytes != Lv) {
+            fprintf(stderr, "[edit-oracle] case %d: a tensor is missing\n", k); return 2; }
+        unsigned char *mask = xmalloc((size_t)Lv);
+        st_pread_full(mt->fd, mask, Lv, mt->off, "img_mask");
+        int S = 0; for (int v = 0; v < Lv; v++) S += mask[v] != 0;
+        int Lp = Lv + 3 * S;
+        fprintf(stderr, "[edit-oracle] case %d %s: %d VLM tokens, %d slots, %d reference(s), prefix %d rows, target %dx%d\n",
+                k, nm && nm->t == J_STR ? nm->str : "", Lv, S, nref, Lp, gh, gw);
+        float *cs = fmalloc((size_t)Lp * half), *sn = fmalloc((size_t)Lp * half);
+        Prefix P; memset(&P, 0, sizeof P);
+        if (dit_prefix_edit(d, emb, Lv, mask, nref, (const int (*)[2])sh, ref, &P, cs, sn, msg, sizeof msg)) {
+            fprintf(stderr, "[edit-oracle] %s\n", msg); fails++; continue; }
+        DitStep s; dit_step_init(&s, d, &P, gh, gw);
+        /* the reference's table covers prefix then target; ours is the prefix's then the step's */
+        fails += cmp("rope cos, prefix", cs, cos_ref, (size_t)Lp * half) > 1e-6;
+        fails += cmp("rope sin, prefix", sn, sin_ref, (size_t)Lp * half) > 1e-6;
+        fails += cmp("rope cos, target", s.cs, cos_ref + (size_t)Lp * half, (size_t)N * half) > 1e-6;
+        fails += cmp("rope sin, target", s.sn, sin_ref + (size_t)Lp * half, (size_t)N * half) > 1e-6;
+        float *np = fmalloc((size_t)N * C);
+        dit_forward(d, &P, &s, tgt, t, np);
+        fails += cmp("noise_pred (target)", np, pred_ref, (size_t)N * C) > TIGHT;
+        dit_step_free(&s); prefix_free(&P, d->layers);
+        free(cs); free(sn); free(np); free(sh); free(mask);
+        free(emb); free(ref); free(tgt); free(cos_ref); free(sin_ref); free(pred_ref);
+    }
+    fprintf(stderr, fails ? "[edit-oracle] FAILED\n" : "[edit-oracle] all cases within tolerance\n");
+    return fails ? 1 : 0;
+}
+
 static void usage(void){
     fprintf(stderr,
         "usage: qwenimage --model DIR --prompt TEXT [--width 768] [--height 512] [--steps 8] [--seed N] --out FILE.png\n"
         "       qwenimage --model DIR --serve\n"
         "       qwenimage --model DIR --ref REFDIR\n"
+        "       qwenimage --model DIR --edit-ref REFDIR   the reference-image path of the DiT\n"
         "env:   COLI_IMG_BITS=8|16|32 weight storage (default 8: int8 rows)\n"
         "       COLI_IMG_ACT8=0  f32 activations in the DiT (default where VNNI exists: int8, about 2x per step)\n"
         "       COLI_IMG_TE=resident|stage  keep the text encoder loaded between prompts (serve default: resident)\n"
@@ -1477,7 +1639,7 @@ int main(int argc, char **argv){
     /* Windows: the IMAGE and PREVIEW frames carry raw bytes; a text-mode stdout
      * would turn every 0x0A inside them into 0x0D 0x0A (#748) */
     coli_serve_binary_mode();
-    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL;
+    const char *model = NULL, *prompt = NULL, *out = NULL, *ref = NULL, *edit_ref = NULL;
     int width = 768, height = 512, steps = 8, serve = 0;
     uint64_t seed = 42; int seed_set = 0;
     for (int i = 1; i < argc; i++) {
@@ -1486,6 +1648,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--prompt") && v) { prompt = v; i++; }
         else if (!strcmp(a, "--out") && v) { out = v; i++; }
         else if (!strcmp(a, "--ref") && v) { ref = v; i++; }
+        else if (!strcmp(a, "--edit-ref") && v) { edit_ref = v; i++; }
         else if (!strcmp(a, "--width") && v) { width = atoi(v); i++; }
         else if (!strcmp(a, "--height") && v) { height = atoi(v); i++; }
         else if (!strcmp(a, "--steps") && v) { steps = atoi(v); i++; }
@@ -1499,7 +1662,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--serve")) serve = 1;
         else { usage(); return 2; }
     }
-    if (!model || (!serve && !ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
+    if (!model || (!serve && !ref && !edit_ref && !getenv("QWENIMAGE_PRINT_TOKENS") && (!prompt || !out))) { usage(); return 2; }
     const char *b = getenv("COLI_IMG_BITS");
     if (b && *b) { g_bits = atoi(b); if (g_bits != 8 && g_bits != 16 && g_bits != 32) { usage(); return 2; } }
     /* On by default where VNNI exists: measured 2x on the step (768x512: 34.3 -> 18.3 s
@@ -1516,6 +1679,7 @@ int main(int argc, char **argv){
     static Engine e;
     engine_init(&e, model);
     if (ref) { int rc = run_oracle(&e, ref); qi_vk_report(); return rc; }
+    if (edit_ref) { int rc = run_edit_oracle(&e, edit_ref); qi_vk_report(); return rc; }
     if (getenv("QWENIMAGE_PRINT_TOKENS")) {          /* tokenizer check against the processor */
         int n, drop; int *ids = te_encode_prompt(&e.te, prompt ? prompt : "", &n, &drop);
         printf("drop %d ids", drop);

@@ -1461,7 +1461,14 @@ jobs:
           make qwenimage tests/test_qi_gemm tests/test_qwenimage_vae
           tests/test_qi_gemm
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --ref qwenimage_tiny/ref
-      - name: "The VAE alone: tiny decoder at two latent shapes"
+      - name: "The DiT with reference images: interleaved sequence, block-causal mask, RoPE, t=0 rows"
+        run: |
+          cd c
+          # diffusers' transformer on synthetic edit inputs (one reference; two with
+          # text between; two adjacent), held to its RoPE table and noise prediction
+          python3 tools/make_qwenimage_edit_ref.py qwenimage_tiny qwenimage_edit_ref
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-ref qwenimage_edit_ref
+      - name: "The VAE alone: tiny decoder and encoder at two latent shapes"
         run: |
           cd c
           python3 tools/make_qwenimage_vae_tiny.py qwenimage_vae_tiny
@@ -1479,12 +1486,14 @@ jobs:
           make -B qwenimage EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
           export ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0 UBSAN_OPTIONS=print_stacktrace=1 OMP_NUM_THREADS=2
           COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --ref qwenimage_tiny/ref > qwenimage-san.log 2>&1 || true
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./qwenimage --model qwenimage_tiny --edit-ref qwenimage_edit_ref >> qwenimage-san.log 2>&1 || true
           QWENIMAGE_TINY=qwenimage_tiny python3 -m unittest tests.test_qwenimage_engine_serve >> qwenimage-san.log 2>&1 || true
           if grep -qE "ERROR: AddressSanitizer|runtime error:" qwenimage-san.log; then
             cat qwenimage-san.log
             exit 1
           fi
           grep -q "all stages within tolerance" qwenimage-san.log
+          grep -q "all cases within tolerance" qwenimage-san.log
 
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)
