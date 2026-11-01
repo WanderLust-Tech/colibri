@@ -10,14 +10,29 @@ export interface ImageSize {
 }
 
 /* Every preset is a multiple of 32 on both sides, so none of them can be
-   refused. 16:9 at that granularity exists only as multiples of 512x288. */
+   refused. 16:9 at that granularity exists only as multiples of 512x288.
+   The select groups them by ratio, in the order a ratio first appears here,
+   and each group runs from the smallest picture to the largest: a bigger
+   picture costs more than its pixel count in time, so the order is the cost. */
 export const SIZE_PRESETS: ReadonlyArray<ImageSize & { ratio: string }> = [
   { width: 512, height: 512, ratio: "1:1" },
-  { width: 768, height: 512, ratio: "3:2" },
-  { width: 512, height: 768, ratio: "2:3" },
-  { width: 1024, height: 576, ratio: "16:9" },
-  { width: 576, height: 1024, ratio: "9:16" },
+  { width: 768, height: 768, ratio: "1:1" },
   { width: 1024, height: 1024, ratio: "1:1" },
+  { width: 1536, height: 1536, ratio: "1:1" },
+  { width: 768, height: 512, ratio: "3:2" },
+  { width: 1152, height: 768, ratio: "3:2" },
+  { width: 1536, height: 1024, ratio: "3:2" },
+  { width: 512, height: 768, ratio: "2:3" },
+  { width: 768, height: 1152, ratio: "2:3" },
+  { width: 1024, height: 1536, ratio: "2:3" },
+  { width: 768, height: 576, ratio: "4:3" },
+  { width: 1024, height: 768, ratio: "4:3" },
+  { width: 576, height: 768, ratio: "3:4" },
+  { width: 768, height: 1024, ratio: "3:4" },
+  { width: 1024, height: 576, ratio: "16:9" },
+  { width: 1536, height: 864, ratio: "16:9" },
+  { width: 576, height: 1024, ratio: "9:16" },
+  { width: 864, height: 1536, ratio: "9:16" },
 ]
 
 export const DEFAULT_SIZE: ImageSize = { width: 768, height: 512 }
@@ -48,6 +63,51 @@ export function snapSide(value: number) {
   if (!Number.isFinite(value)) return DEFAULT_SIZE.width
   const snapped = Math.round(value / SIDE.multiple) * SIDE.multiple
   return Math.min(SIDE.max, Math.max(SIDE.min, snapped))
+}
+
+/* A picture attached to an edit: the file to upload, an object URL for its
+   thumbnail (revoked when it is removed), and its natural size, which gives the
+   size the edit will come out at. */
+export interface EditPicture {
+  id: string
+  file: File
+  url: string
+  width: number
+  height: number
+}
+
+export function loadPicture(file: File): Promise<EditPicture> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = () => resolve({
+      id: `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`,
+      file, url, width: image.naturalWidth, height: image.naturalHeight,
+    })
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error(file.name)) }
+    image.src = url
+  })
+}
+
+/* The side, in pixels, the engine works reference pictures at unless told otherwise (the
+   pipeline's own is 1024: this is the memory-friendly default the engine reports). */
+export const REF_RESOLUTION = 768
+
+/* The size an edit comes out at when none is chosen: the engine's own rule (the
+   pipeline's calculate_dimensions), the last picture's aspect at ref*ref pixels with
+   each side rounded to a multiple of 32, ties to even. Used only to shape the
+   placeholder; the finished picture says what was really drawn. null when the
+   picture is so long and thin that a side rounds to nothing. */
+export function derivedSize(width: number, height: number, ref = REF_RESOLUTION): ImageSize | null {
+  if (!(width > 0 && height > 0)) return null
+  const wide = Math.sqrt(ref * ref * (width / height))
+  const roundEven = (value: number) => {
+    const floor = Math.floor(value)
+    const diff = value - floor
+    return (diff < 0.5 ? floor : diff > 0.5 ? floor + 1 : floor % 2 === 0 ? floor : floor + 1) * SIDE.multiple
+  }
+  const size = { width: roundEven(wide / SIDE.multiple), height: roundEven(wide / (width / height) / SIDE.multiple) }
+  return size.width >= SIDE.multiple && size.height >= SIDE.multiple ? size : null
 }
 
 export function parseSize(text: string | null): ImageSize | null {

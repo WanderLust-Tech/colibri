@@ -136,23 +136,127 @@ export interface ModelInfo {
      with "chat" and "systemone", and a decision model with "systemone" and
      "decision" (it answers only POST /v1/systemone). */
   capabilities?: string[]
+  /* What POST /v1/images/edits takes, for a model that edits pictures
+     ("image_edit" among its capabilities): how many pictures at most, and the
+     range of the side, in pixels, the engine works them at. */
+  edit?: { maxImages: number; refResolution?: { default: number; min: number; max: number } }
+}
+
+const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0
+
+/* /v1/models: `image.edit` is {max_images, ref_resolution: {default, min, max}} on a
+   model that edits. Anything else is left out rather than guessed. */
+function editLimits(image: unknown): ModelInfo["edit"] {
+  const edit = (image as { edit?: { max_images?: unknown; ref_resolution?: Record<string, unknown> } } | undefined)?.edit
+  if (!edit || !positive(edit.max_images)) return undefined
+  const range = edit.ref_resolution
+  const refResolution = range && positive(range.default) && positive(range.min) && positive(range.max)
+    ? { default: Number(range.default), min: Number(range.min), max: Number(range.max) } : undefined
+  return { maxImages: Number(edit.max_images), ...(refResolution ? { refResolution } : {}) }
 }
 
 export async function listModelInfo(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
   const response = await fetch(endpoint(baseUrl, "models"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown }> }
-  return (body.data || []).map(({ id, capabilities }) => Array.isArray(capabilities)
-    ? { id, capabilities: capabilities.filter((item): item is string => typeof item === "string") }
-    : { id })
+  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown }> }
+  return (body.data || []).map(({ id, capabilities, image }) => {
+    if (!Array.isArray(capabilities)) return { id }
+    const list = capabilities.filter((item): item is string => typeof item === "string")
+    const edit = list.includes("image_edit") ? editLimits(image) : undefined
+    return { id, capabilities: list, ...(edit ? { edit } : {}) }
+  })
 }
 
 export async function listModels(baseUrl: string, apiKey: string, signal?: AbortSignal) {
   return (await listModelInfo(baseUrl, apiKey, signal)).map((model) => model.id)
 }
 
+/* A model downloaded on the machine running the server, from GET /v1/models/installed.
+   `switchable` is the server's own verdict (engine built, KV slots, cluster mode);
+   `reason` says why not. The server names a model by `key`, never by path. */
+export interface InstalledModel {
+  key: string
+  id: string
+  name: string
+  family: string
+  modality: string
+  size_bytes: number | null
+  verified: boolean
+  current: boolean
+  switchable: boolean
+  reason: string | null
+}
+
+export interface InstalledModels {
+  /* False when this server cannot restart itself (not started by the coli launcher). */
+  switch: boolean
+  reason: string | null
+  models: InstalledModel[]
+}
+
+export async function listInstalledModels(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<InstalledModels> {
+  const response = await fetch(endpoint(baseUrl, "models/installed"), { headers: headers(apiKey), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { switch?: boolean; reason?: string | null; data?: InstalledModel[] }
+  return { switch: body.switch === true, reason: body.reason ?? null, models: body.data ?? [] }
+}
+
+/* Asks the server to restart on another installed model. It answers 202 and goes
+   down: follow it with waitForModel. */
+export async function switchModel(baseUrl: string, apiKey: string, key: string, signal?: AbortSignal): Promise<{ id: string; name: string }> {
+  const response = await fetch(endpoint(baseUrl, "models/switch"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ key }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { id: string; name: string }
+  return { id: body.id, name: body.name }
+}
+
+function pause(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"))
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve() }, ms)
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")) }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+export interface WaitForModelOptions {
+  signal?: AbortSignal
+  intervalMs?: number
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+}
+
+/* Polls until the restarted server answers. There is no deadline: Kimi K3 takes
+   forty minutes to load, and the user can leave the page. "ready" means `id` is
+   being served. "fell-back" means the server came back on another model after
+   being down, which is the launcher returning to the previous one because `id`
+   did not start. Connection errors while it restarts are expected, not failures. */
+export async function waitForModel(
+  baseUrl: string, apiKey: string, id: string, options: WaitForModelOptions = {},
+): Promise<"ready" | "fell-back"> {
+  const { signal, intervalMs = 2000, sleep = pause } = options
+  let wentDown = false
+  for (;;) {
+    await sleep(intervalMs, signal)
+    try {
+      const ids = await listModels(baseUrl, apiKey, signal)
+      if (ids.includes(id)) return "ready"
+      if (wentDown && ids.length) return "fell-back"
+    } catch (cause) {
+      if (signal?.aborted) throw cause
+      wentDown = true
+    }
+  }
+}
+
 export function generatesImages(model: ModelInfo | undefined) {
   return !!model?.capabilities?.includes("image_generation")
+}
+
+/* An image model whose engine can also edit pictures: POST /v1/images/edits */
+export function editsImages(model: ModelInfo | undefined) {
+  return !!model?.capabilities?.includes("image_edit")
 }
 
 export async function getHealth(baseUrl: string, apiKey = "", signal?: AbortSignal): Promise<HealthResponse> {
@@ -384,6 +488,9 @@ export interface GeneratedImage {
   url?: string
   seconds?: number
   timings?: ImageTimings
+  /* How many pictures this was edited from, when it was an edit. The pictures
+     themselves are not kept with the turn. */
+  edit?: number
 }
 
 export interface GenerateImageOptions {
@@ -391,10 +498,18 @@ export interface GenerateImageOptions {
   apiKey: string
   model: string
   prompt: string
-  width: number
-  height: number
+  /* Left out together, the size is the engine's choice: for an edit it follows
+     the last picture. The values here then only say what to expect. */
+  width?: number
+  height?: number
   steps: number
   seed: number
+  /* Pictures to edit (the prompt is then an instruction about them): the same
+     request goes to /v1/images/edits as a multipart form, the way OpenAI's SDKs
+     send it. */
+  images?: File[]
+  /* The side, in pixels, the engine works the pictures at; its own default when absent. */
+  refResolution?: number
   signal: AbortSignal
   onProgress?: (progress: ImageProgress) => void
   /* A preview as a data URI, small and noisy: the latent of the step so far. */
@@ -416,22 +531,29 @@ const IMAGE_EVENT = {
   completed: "image_generation.completed",
 }
 
-function imageRequest(options: GenerateImageOptions, stream: boolean) {
-  return {
-    method: "POST",
-    headers: headers(options.apiKey),
-    signal: options.signal,
-    body: JSON.stringify({
-      model: options.model,
-      prompt: options.prompt,
-      size: `${options.width}x${options.height}`,
-      n: 1,
-      response_format: "b64_json",
-      steps: options.steps,
-      seed: options.seed,
-      stream,
-    }),
+const imagePath = (options: GenerateImageOptions) => options.images?.length ? "images/edits" : "images/generations"
+
+function imageRequest(options: GenerateImageOptions, stream: boolean): RequestInit {
+  const fields: Record<string, string | number | boolean> = {
+    model: options.model,
+    prompt: options.prompt,
+    n: 1,
+    response_format: "b64_json",
+    steps: options.steps,
+    seed: options.seed,
+    stream,
   }
+  if (options.width !== undefined && options.height !== undefined) fields.size = `${options.width}x${options.height}`
+  if (options.images?.length) {
+    /* multipart: the browser sets the boundary, so no Content-Type here */
+    if (options.refResolution !== undefined) fields.ref_resolution = options.refResolution
+    const form = new FormData()
+    for (const [name, value] of Object.entries(fields)) form.append(name, String(value))
+    for (const file of options.images) form.append("image", file, file.name)
+    const auth: Record<string, string> = options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}
+    return { method: "POST", headers: auth, signal: options.signal, body: form }
+  }
+  return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
 }
 
 async function imageError(response: Response) {
@@ -455,7 +577,7 @@ function streamError(data: string) {
 }
 
 async function streamImage(options: GenerateImageOptions): Promise<ImageGenerationResponse> {
-  const response = await fetch(endpoint(options.baseUrl, "images/generations"), imageRequest(options, true))
+  const response = await fetch(endpoint(options.baseUrl, imagePath(options)), imageRequest(options, true))
   if (!response.ok) throw await imageError(response)
   /* A server that ignores `stream` answers with the plain object: that is the
      result, not a failure, and asking again would generate a second picture. */
@@ -512,7 +634,7 @@ async function streamImage(options: GenerateImageOptions): Promise<ImageGenerati
 }
 
 async function requestImage(options: GenerateImageOptions): Promise<ImageGenerationResponse> {
-  const response = await fetch(endpoint(options.baseUrl, "images/generations"), imageRequest(options, false))
+  const response = await fetch(endpoint(options.baseUrl, imagePath(options)), imageRequest(options, false))
   if (!response.ok) throw await imageError(response)
   return (await response.json()) as ImageGenerationResponse
 }
@@ -534,8 +656,8 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const info = answer.colibri
   return {
     prompt: options.prompt,
-    width: info?.width ?? options.width,
-    height: info?.height ?? options.height,
+    width: info?.width ?? options.width ?? 0,
+    height: info?.height ?? options.height ?? 0,
     steps: info?.steps ?? options.steps,
     seed: info?.seed ?? options.seed,
     url,

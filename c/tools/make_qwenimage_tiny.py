@@ -12,7 +12,9 @@ model and is held to those tensors.
 What is tiny and what is not:
   text_encoder  Qwen3VLForConditionalGeneration, text model hidden 64, 2 layers,
                 GQA 4/2, head_dim 16, MLP 128, interleaved M-RoPE [4, 2, 2],
-                rope_theta 5e6; a one-block vision tower that t2i never runs.
+                rope_theta 5e6; a four-block vision tower (hidden 32, 2 heads,
+                deepstack after blocks 0 and 2, a 4x4 learned position grid)
+                that t2i never runs and an edit does (make_qwenimage_vl_ref.py).
                 config.json uses the real checkpoint's keys (rope_scaling,
                 rope_theta), bf16 weights in two shards plus an index.
   transformer   QwenImage21Transformer2DModel, 2 blocks, 2 heads x 32,
@@ -221,7 +223,9 @@ def text_encoder_config() -> dict:
         "transformers_version": __import__("transformers").__version__,
         "video_token_id": sp["<|video_pad|>"],
         "vision_config": {
-            "deepstack_visual_indexes": [0], "depth": 1, "dtype": "bfloat16", "hidden_act": "gelu_pytorch_tanh",
+            # two deepstack taps for the two language layers, not adjacent: a tap is a block's output, and the
+            # list position (not the block number) picks the language layer that gets it
+            "deepstack_visual_indexes": [0, 2], "depth": 4, "dtype": "bfloat16", "hidden_act": "gelu_pytorch_tanh",
             "hidden_size": 32, "in_channels": 3, "initializer_range": 0.02, "intermediate_size": 64,
             "model_type": "qwen3_vl", "num_heads": 2, "num_position_embeddings": 16, "out_hidden_size": 64,
             "patch_size": 16, "spatial_merge_size": 2, "temporal_patch_size": 2,

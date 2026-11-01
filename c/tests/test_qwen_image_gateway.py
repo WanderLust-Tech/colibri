@@ -243,11 +243,11 @@ class ImagesEndpointTest(unittest.TestCase):
         self.assertEqual(status, 200)
         entry = json.loads(raw)["data"][0]
         self.assertEqual(entry["id"], MODEL_ID)
-        self.assertEqual(entry["capabilities"], ["image_generation"])
+        self.assertEqual(entry["capabilities"], ["image_generation", "image_edit"])
         self.assertEqual(entry["image"]["multiple"], 32)
         self.assertEqual(entry["image"]["default_height"], 512)
         status, _h, raw = self.gw.request(f"/v1/models/{MODEL_ID}")
-        self.assertEqual(json.loads(raw)["capabilities"], ["image_generation"])
+        self.assertEqual(json.loads(raw)["capabilities"], ["image_generation", "image_edit"])
 
     def test_auth_is_required(self):
         for key in (None, "wrong"):

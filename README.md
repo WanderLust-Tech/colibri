@@ -458,7 +458,9 @@ with the last 30 turns as a trend.
   Qwen3.8-Flash-Next and Qwen3.8-27B: a path in a `coli chat` message, an
   attachment in `coli web`, or an `image_url` part;
 - **pictures out** with Qwen-Image-2.1 on `POST /v1/images/generations`,
-  and drawn inside the terminal by `coli chat`
+  and drawn inside the terminal by `coli chat`; the same model **edits** a
+  picture you give it from an instruction (`coli run --image`, `/image` in
+  `coli chat`, the web UI, `POST /v1/images/edits`)
   ([qwen-image.md](docs/qwen-image.md));
 - **decisions** on `POST /v1/systemone` ([above](#system-one-a-decision-with-a-probability));
 - **several conversations at once** on every text engine: `coli serve

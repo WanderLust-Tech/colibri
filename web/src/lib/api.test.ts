@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
-  askSystemOne, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  listModelInfo, serverEndpoint, streamChat, type GenerateImageOptions, type ImageProgress,
+  askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
+  listInstalledModels, listModelInfo, serverEndpoint, streamChat, switchModel, waitForModel,
+  type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
 afterEach(() => vi.unstubAllGlobals())
@@ -187,6 +188,22 @@ describe("model capabilities", () => {
     ])
     expect(models.map(generatesImages)).toEqual([true, false])
   })
+
+  it("reads what an image-editing model accepts, and nothing it did not state", async () => {
+    const range = { default: 768, min: 384, max: 1024 }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [
+      { id: "edits", capabilities: ["image_generation", "image_edit"], image: { edit: { max_images: 4, ref_resolution: range } } },
+      { id: "edits-no-range", capabilities: ["image_generation", "image_edit"], image: { edit: { max_images: 2, ref_resolution: { default: "x" } } } },
+      { id: "claims-edit-without-limits", capabilities: ["image_generation", "image_edit"], image: {} },
+      { id: "draws-only", capabilities: ["image_generation"], image: { edit: { max_images: 4 } } },
+    ] }))))
+    const models = await listModelInfo("http://x/v1", "")
+    expect(models.map(editsImages)).toEqual([true, true, true, false])
+    expect(models[0].edit).toEqual({ maxImages: 4, refResolution: range })
+    expect(models[1].edit).toEqual({ maxImages: 2 })
+    expect(models[2].edit).toBeUndefined()
+    expect(models[3].edit).toBeUndefined()   // a limit without the capability is not an edit model
+  })
 })
 
 describe("generateImage", () => {
@@ -233,6 +250,36 @@ describe("generateImage", () => {
   })
 
   const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).body)) as Record<string, unknown>
+
+  it("sends pictures to /images/edits as a multipart form, with no size when none is given", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamed(events))
+    vi.stubGlobal("fetch", fetchMock)
+    const files = [new File(["one"], "a.png", { type: "image/png" }), new File(["two"], "b.png", { type: "image/png" })]
+    const image = await generateImage(options({ images: files, width: undefined, height: undefined, refResolution: 512 }))
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:8000/v1/images/edits")
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.body).toBeInstanceOf(FormData)
+    const form = init.body as FormData
+    expect(Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === "string"))).toEqual({
+      model: "qwen-image-2.1-colibri", prompt: "a hummingbird", n: "1", response_format: "b64_json",
+      steps: "8", seed: "1234", stream: "true", ref_resolution: "512",
+    })
+    expect(form.getAll("image").map((file) => (file as File).name)).toEqual(["a.png", "b.png"])
+    // the browser writes the multipart Content-Type with its boundary; setting JSON here would break it
+    expect(init.headers).toEqual({ Authorization: "Bearer secret" })
+    // the size is the engine's answer, not the request's
+    expect(image.width).toBe(768)
+    expect(image.height).toBe(512)
+  })
+
+  it("keeps sending an explicit size with the pictures when one was chosen", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamed(events))
+    vi.stubGlobal("fetch", fetchMock)
+    await generateImage(options({ images: [new File(["x"], "a.png")], apiKey: "" }))
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect((init.body as FormData).get("size")).toBe("768x512")
+    expect(init.headers).toEqual({})
+  })
 
   it("streams progress, previews and the result, and posts the contract's body", async () => {
     const fetchMock = vi.fn().mockResolvedValue(streamed(events))
@@ -355,5 +402,82 @@ describe("generateImage", () => {
     controller.abort()
     await expect(run).rejects.toMatchObject({ name: "AbortError" })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("model switching", () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
+  const models = (...ids: string[]) => json({ object: "list", data: ids.map((id) => ({ id })) })
+  const noWait = () => Promise.resolve()
+
+  it("lists installed models and whether the server can switch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({
+      switch: true, reason: null, data: [{ key: "a1", id: "glm-5.2-colibri", name: "GLM-5.2", current: true }],
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    const result = await listInstalledModels("http://localhost:8000/v1/", "secret")
+    expect(result.switch).toBe(true)
+    expect(result.models).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/v1/models/installed", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer secret" }),
+    }))
+  })
+
+  it("treats a server that does not say it can switch as unable to", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ data: [] })))
+    await expect(listInstalledModels("http://localhost:8000/v1", "")).resolves.toEqual({ switch: false, reason: null, models: [] })
+  })
+
+  it("asks for a switch by key and never sends a path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({ status: "switching", key: "b2", id: "mimo-v2.6-flash", name: "MiMo" }, 202))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(switchModel("http://localhost:8000/v1", "secret", "b2")).resolves.toEqual({ id: "mimo-v2.6-flash", name: "MiMo" })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("http://localhost:8000/v1/models/switch")
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(init.body)).toEqual({ key: "b2" })
+  })
+
+  it("surfaces the server's reason when it refuses", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      json({ error: { message: "A response is being generated." } }, 409)))
+    await expect(switchModel("http://localhost:8000/v1", "", "b2")).rejects.toThrow("A response is being generated.")
+  })
+
+  it("waits through the restart until the new model is served", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(models("old"))                       // still draining
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))    // down
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))    // loading
+      .mockResolvedValueOnce(models("new"))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("ready")
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it("does not mistake the old server, before it goes down, for a fall back", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(models("old"))
+      .mockResolvedValueOnce(models("old"))
+      .mockResolvedValueOnce(models("new"))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("ready")
+  })
+
+  it("reports a fall back when the server returns on the previous model", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(models("old")))
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { sleep: noWait })).resolves.toBe("fell-back")
+  })
+
+  it("stops waiting when the page stops caring", async () => {
+    const controller = new AbortController()
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")))
+    const sleep = vi.fn(async () => { controller.abort() })
+    await expect(waitForModel("http://localhost:8000/v1", "", "new", { signal: controller.signal, sleep })).rejects.toThrow()
   })
 })

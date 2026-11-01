@@ -152,6 +152,95 @@
         }
       }
     },
+    "/v1/models/installed": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "List the models installed on this machine",
+        "description": "The models found next to the one being served (the setup's models folder, `COLI_MODELS_ROOT`, and the folder holding the served model). `switch` is false when this server was not started by the `coli` launcher and so cannot restart itself on another model. Each entry's `switchable` is the server's own verdict (engine built, KV slots, cluster mode); `reason` says why not. A model is named by `key`, never by path.",
+        "operationId": "listInstalledModels",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Installed models, the served one first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": { "type": "string", "example": "list" },
+                    "switch": { "type": "boolean" },
+                    "reason": { "type": ["string", "null"] },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": { "type": "string", "description": "Opaque id to send to `POST /v1/models/switch`." },
+                          "id": { "type": "string", "description": "The model id the server announces once it serves this model." },
+                          "name": { "type": "string" },
+                          "family": { "type": "string" },
+                          "modality": { "type": "string", "enum": ["text", "image", "decision"] },
+                          "size_bytes": { "type": ["integer", "null"] },
+                          "verified": { "type": "boolean", "description": "Every file the setup's download manifest lists is present at its size." },
+                          "current": { "type": "boolean" },
+                          "switchable": { "type": "boolean" },
+                          "reason": { "type": ["string", "null"] }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/models/switch": {
+      "post": {
+        "tags": ["Models"],
+        "summary": "Restart the server on another installed model",
+        "description": "A server serves one model, so this is a restart: the server answers 202, drains its engine, goes away while the new model loads (seconds for small models, many minutes for the largest) and comes back on the same address. Poll `GET /v1/models` until the new `id` appears. If the new model does not start, the launcher returns to the previous one. Refused with 409 while a response is being generated. Requires `Content-Type: application/json` and, from a browser, an allowed origin.",
+        "operationId": "switchModel",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["key"],
+                "properties": { "key": { "type": "string", "description": "A `key` from `GET /v1/models/installed`." } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The server is restarting on the chosen model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "switching" },
+                    "key": { "type": "string" },
+                    "id": { "type": "string" },
+                    "name": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Already the served model, not startable here (`reason`), a response in progress, or a switch already under way", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "501": { "description": "This server was not started by the `coli` launcher", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": ["Operations"],

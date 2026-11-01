@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { ChevronDown, Copy, Dices, Download, Footprints, Proportions, RefreshCw, RotateCcw, X } from "lucide-react"
+import { ChevronDown, Copy, Dices, Download, Footprints, ImagePlus, Proportions, RefreshCw, RotateCcw, X } from "lucide-react"
 
 import type { GeneratedImage, ImageProgress } from "@/lib/api"
 import {
@@ -86,6 +86,7 @@ export function ImageResultCard({ image, copied, busy, onDownload, onCopySeed, o
     </Frame>
     <p className="image-meta">
       <span>{image.width} × {image.height}</span>
+      {image.edit ? <span>{t("image.meta.edit", { n: image.edit })}</span> : null}
       <span>{t("image.meta.steps", { n: image.steps })}</span>
       <span>{t("image.meta.seed", { seed: image.seed })}</span>
       {image.seconds != null && <span title={breakdown}>{duration(image.seconds, locale)}</span>}
@@ -119,7 +120,7 @@ const RATIOS = [...new Set(SIZE_PRESETS.map((preset) => preset.ratio))]
    chips sit for a text model. A custom side is typed freely and snapped to a
    multiple of 32 when the field is left; a valid value counts right away, so
    sending straight from the field uses what is on screen. */
-export function ImageControls({ size, custom, steps, seed, seedValid, onSize, onCustom, onSteps, onSeed }: {
+export function ImageControls({ size, custom, steps, seed, seedValid, onSize, onCustom, onSteps, onSeed, canEdit = false, auto = false, onAuto, onAttach }: {
   size: ImageSize
   custom: boolean
   steps: number
@@ -129,6 +130,12 @@ export function ImageControls({ size, custom, steps, seed, seedValid, onSize, on
   onCustom: (custom: boolean) => void
   onSteps: (steps: number) => void
   onSeed: (seed: string) => void
+  /* A model that edits pictures: the attach button, and, while pictures are
+     attached, a size that follows the last of them (`auto`). */
+  canEdit?: boolean
+  auto?: boolean
+  onAuto?: () => void
+  onAttach?: () => void
 }) {
   const { t } = useLocale()
   const [width, setWidth] = useState(String(size.width))
@@ -143,15 +150,18 @@ export function ImageControls({ size, custom, steps, seed, seedValid, onSize, on
     if (commit) (axis === "width" ? setWidth : setHeight)(String(next))
     if (commit || validSide(value)) onSize({ ...size, [axis]: next })
   }
-  const selected = custom || !presetOf(size) ? "custom" : sizeKey(size)
+  const selected = auto ? "auto" : custom || !presetOf(size) ? "custom" : sizeKey(size)
   return <div className="image-controls">
+    {canEdit && <button type="button" className="attach-chip" aria-label={t("image.attach")} title={t("image.attach")} onClick={onAttach}><ImagePlus /></button>}
     <label className="image-chip" title={t("image.size")}>
       <Proportions aria-hidden="true" />
       <select aria-label={t("image.size")} value={selected} onChange={(event) => {
+        if (event.target.value === "auto") { onAuto?.(); return }
         if (event.target.value === "custom") { onCustom(true); return }
         const preset = SIZE_PRESETS.find((item) => sizeKey(item) === event.target.value)
         if (preset) { onCustom(false); onSize({ width: preset.width, height: preset.height }) }
       }}>
+        {(auto || onAuto) && <option value="auto">{t("image.sizeAuto")}</option>}
         {RATIOS.map((ratio) => <optgroup key={ratio} label={ratio}>
           {SIZE_PRESETS.filter((preset) => preset.ratio === ratio).map((preset) =>
             <option key={sizeKey(preset)} value={sizeKey(preset)}>{preset.width}×{preset.height}</option>)}

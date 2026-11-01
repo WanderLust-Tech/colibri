@@ -128,7 +128,7 @@ class LauncherTest(unittest.TestCase):
 
     def test_image_commands_share_the_completion_machinery(self):
         self.assertEqual(set(self.cli.IMAGE_CHAT_COMMANDS),
-                         {"size", "steps", "seed", "render", "save", "help", "quit"})
+                         {"size", "steps", "seed", "image", "render", "save", "help", "quit"})
         self.assertEqual(self.cli.chat_command("/size 1024x576"), ("size", "1024x576"))
         # a picture's path at the start of a line is a message, not a command
         self.assertEqual(self.cli.chat_command("/home/me/foto.png cosa vedi?"), (None, None))
@@ -273,6 +273,103 @@ class CommandsTest(unittest.TestCase):
             thread.join(timeout=5)
             engine.close(timeout=5)
 
+    # -- editing: coli run --image, /image in the REPL, and through an attached server ---------------
+    def picture(self, name="photo.png", width=64, height=48, shade=0):
+        from test_qwen_image_edit import picture_png
+        path = Path(self.tmp.name) / name
+        path.write_bytes(picture_png(width, height, shade))
+        return path
+
+    def test_run_edits_a_picture(self):
+        photo, other = self.picture(), self.picture("other.png", shade=90)
+        out = Path(self.tmp.name) / "edited.png"
+        result = run_coli(["run", "--model", self.model, "--steps", "2", "--seed", "5", "--image", str(photo),
+                           "--out", str(out), "make the sky purple"], self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # no --size: the engine derives it from the picture, 4:3 at 768^2 pixels
+        self.assertEqual(image_engine.decode_png(out.read_bytes())[:2], (896, 672))
+        first = out.read_bytes()
+        out2 = Path(self.tmp.name) / "edited2.png"
+        run_coli(["run", "--model", self.model, "--steps", "2", "--seed", "5", "--image", str(other),
+                  "--out", str(out2), "make the sky purple"], self.env)
+        self.assertNotEqual(out2.read_bytes(), first, "a different picture drew the same result")
+        sized = Path(self.tmp.name) / "sized.png"
+        result = run_coli(["run", "--model", self.model, "--steps", "2", "--image", str(photo), "--image", str(other),
+                           "--size", "512x288", "--ref-resolution", "384", "--out", str(sized), "combine"], self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(image_engine.decode_png(sized.read_bytes())[:2], (512, 288))
+
+    def test_run_refuses_what_it_cannot_edit(self):
+        photo = self.picture()
+        out = ["--out", str(Path(self.tmp.name) / "x.png")]
+        missing = run_coli(["run", "--model", self.model, "--image", str(photo) + ".nope", *out, "x"], self.env)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("cannot read", missing.stderr + missing.stdout)
+        bad = Path(self.tmp.name) / "bad.png"
+        bad.write_bytes(b"not a picture")
+        self.assertNotEqual(run_coli(["run", "--model", self.model, "--image", str(bad), *out, "x"], self.env).returncode, 0)
+        ref = run_coli(["run", "--model", self.model, "--image", str(photo), "--ref-resolution", "100", *out, "x"], self.env)
+        self.assertNotEqual(ref.returncode, 0)
+        self.assertIn("--ref-resolution", ref.stderr + ref.stdout)
+        many = [arg for _ in range(5) for arg in ("--image", str(photo))]
+        self.assertIn("at most", run_coli(["run", "--model", self.model, *many, *out, "x"], self.env).stderr)
+        env = dict(self.env, QWENIMAGE_STUB_EDIT="0")
+        refused = run_coli(["run", "--model", self.model, "--image", str(photo), *out, "x"], env)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("cannot edit", refused.stderr + refused.stdout)
+
+    def test_chat_attaches_pictures(self):
+        photo, other = self.picture(), self.picture("tall.png", 48, 64, 40)
+        script = (f"/image\n/image {photo}\n/image {other}\n/image\n/steps 2\n/seed 4\nmake it night\n"
+                  f"/image clear\n/size 256x256\na plain fox\n/image {photo}.nope\n/size auto\n:q\n")
+        result = run_coli(["chat", "--model", self.model, "--no-attach"], self.env, stdin=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("attached photo.png", result.stdout)
+        self.assertIn("2 picture(s)", result.stdout)
+        self.assertIn("cannot read", result.stdout)
+        self.assertIn("attach one with /image first", result.stdout)
+        sizes = sorted(image_engine.decode_png(p.read_bytes())[:2] for p in self.images.glob("*.png"))
+        # the edit followed the LAST picture (3:4, portrait, 768^2 pixels); the plain fox is /size 256x256
+        self.assertEqual(sizes, [(256, 256), (672, 896)])
+
+    def test_chat_takes_a_dropped_file_as_a_picture(self):
+        photo = self.picture()
+        result = run_coli(["chat", "--model", self.model, "--no-attach"], self.env,
+                          stdin=f"{photo}\n/steps 2\nmake it brighter\n:q\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("attached photo.png", result.stdout)
+        self.assertEqual([image_engine.decode_png(p.read_bytes())[:2] for p in self.images.glob("*.png")], [(896, 672)])
+
+    def test_chat_without_editing_says_so(self):
+        photo = self.picture()
+        env = dict(self.env, QWENIMAGE_STUB_EDIT="0")
+        result = run_coli(["chat", "--model", self.model, "--no-attach"], env, stdin=f"/image {photo}\n:q\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cannot edit pictures", result.stdout)
+
+    def test_chat_edits_through_an_attached_serve(self):
+        from openai_server import APIServer
+        photo = self.picture()
+        engine = image_engine.ImageEngine(STUB, self.model, env=stub_env(), on_log=lambda _m: None)
+        server = APIServer(("127.0.0.1", 0), engine, "qwen-image-2.1-colibri", None, 16)
+        thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            result = run_coli(["chat", "--attach", base], self.env,
+                              stdin=f"/image {photo}\n/steps 2\n/seed 9\nmake the sky purple\n:q\n")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("attached photo.png", result.stdout)
+            saved = sorted(self.images.glob("*.png"))
+            self.assertEqual(len(saved), 1, result.stdout)
+            self.assertEqual(image_engine.decode_png(saved[0].read_bytes())[:2], (896, 672))
+        finally:
+            server.scheduler.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            engine.close(timeout=5)
+
     def test_serve_front_door(self):
         """openai_server.py's own main() on an image model: spawns the image
         engine and answers the images endpoint."""
@@ -305,7 +402,7 @@ class CommandsTest(unittest.TestCase):
                         raise
                     time.sleep(0.2)
             self.assertEqual(entry["id"], "qwen-image-2.1-colibri")
-            self.assertEqual(entry["capabilities"], ["image_generation"])
+            self.assertEqual(entry["capabilities"], ["image_generation", "image_edit"])
             body = json.dumps({"model": entry["id"], "prompt": "x", "size": "256x256",
                                "steps": 2}).encode()
             req = Request(f"http://127.0.0.1:{port}/v1/images/generations", data=body,

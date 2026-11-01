@@ -1895,7 +1895,7 @@ qwen38-vision-check: tests/test_qwen38_vision$(EXE)
 	$(PYTHON) tools/make_qwen38_vision_tiny.py --out ./qwen38_vision_tiny
 	./tests/test_qwen38_vision$(EXE) ./qwen38_vision_tiny
 
-# Qwen-Image-2.1 VAE decoder against diffusers. The fixture needs torch and
+# Qwen-Image-2.1 VAE decoder and encoder against diffusers. The fixture needs torch and
 # diffusers (tools/make_qwenimage_vae_tiny.py OUTDIR, about 6 MB); the test itself
 # is plain C: make test_qwenimage_vae && tests/test_qwenimage_vae OUTDIR
 tests/test_qwenimage_vae$(EXE): tests/test_qwenimage_vae.c
@@ -2939,7 +2939,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	  $(INSTALL) -m 755 deepseek_v4$(EXE) $(DESTDIR)$(LIBEXECDIR)/deepseek_v4$(EXE); \
 	fi
 	$(INSTALL) -m 644 family_registry.py resource_plan.py doctor.py autotune.py \
-		openai_server.py cluster.py v4_dsml.py v41_dsml.py version.py \
+		openai_server.py model_switch.py cluster.py v4_dsml.py v41_dsml.py version.py \
 		image_engine.py term_image.py setup_flow.py setup_hw.py setup_catalog.py \
 		setup_download.py mcp_server.py $(DESTDIR)$(LIBEXECDIR)/
 	$(INSTALL) -m 644 tools/*.py $(DESTDIR)$(LIBEXECDIR)/tools/

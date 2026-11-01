@@ -190,3 +190,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .prof-tiles { grid-template-columns: 1fr 1fr; }
   .prof-charts { grid-template-columns: 1fr; }
 }
+
+/* Settings -> Model: the installed models and the switch. */
+.model-switcher { gap: 12px; margin-bottom: 26px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+.model-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.model-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 12px; }
+.model-row.current { border-color: var(--primary); }
+.model-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.model-info strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.model-info small { color: var(--muted-foreground); font-size: 11px; }
+.model-info .model-reason { color: #c9a45c; }
+.model-current { color: var(--primary); font-size: 11px; flex-shrink: 0; }
+.model-confirm { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--muted-foreground); }
+.model-switching { display: flex; align-items: flex-start; gap: 10px; padding: 12px 13px; border-radius: 12px; background: var(--secondary); }
+.model-switching > div { display: flex; flex-direction: column; gap: 4px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
+.model-switching strong { color: var(--foreground); font-size: 12px; font-weight: 500; }
+.model-result.error, .model-error { color: #d98a8a; }
+.model-result.fell-back { color: #c9a45c; }
+@media (max-width: 760px) { .model-row { flex-direction: column; align-items: stretch; } .model-confirm { justify-content: flex-start; } }

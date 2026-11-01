@@ -35,6 +35,14 @@ finished picture carries its size, steps, seed and time, and can be downloaded
 as PNG, have its seed copied, or be made again with a new seed. Image turns
 stay on screen when you switch back to a text model but are never sent to it.
 
+When the model also lists `"image_edit"` (the engine has a vision tower and a
+VAE encoder), the composer has an attach button: pictures dropped, pasted or
+chosen there become thumbnails, the size can be "Auto (follows the picture)",
+and the request is a multipart `POST /v1/images/edits` with the files. A result
+says how many pictures it was edited from, and "New seed" sends the same
+pictures again; they live only in the page, so after a reload an old edit
+cannot be redone without attaching them again.
+
 The test suite stays browser-light: API requests use a mocked `fetch`, while
 runtime capability and storage behavior are covered through pure helpers. It
 checks that `/health` and `/profile` are resolved next to (not below) the OpenAI `/v1` prefix,
