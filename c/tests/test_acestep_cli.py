@@ -288,10 +288,44 @@ class CommandsTest(unittest.TestCase):
         self.assertNotEqual(tune.returncode, 0)
         self.assertIn("text engines", tune.stderr + tune.stdout)
 
-    def test_web_says_the_dashboard_has_no_player_yet(self):
-        r = run_coli(["web", "--model", self.model, "--no-browser"], self.env, timeout=60)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("coli music", r.stderr + r.stdout)
+    def test_serve_launches_the_music_gateway_and_it_makes_a_song(self):
+        """`coli serve` on a music checkpoint: the launcher picks the music engine, the gateway says what it is,
+        and a request comes back as a WAV. (The same path was run on the real engine by hand.)"""
+        import base64
+        import json as jsonlib
+        import socket
+        import time
+        import urllib.request
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        process = subprocess.Popen([sys.executable, str(CLI), "serve", "--model", self.model, "--port", str(port), "--api-key", "k"],
+                                   env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, cwd=str(C_DIR))
+        try:
+            headers = {"Authorization": "Bearer k", "Content-Type": "application/json"}
+            deadline = time.monotonic() + 60
+            health = None
+            while time.monotonic() < deadline and health is None:
+                try:
+                    request = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers=headers)
+                    health = jsonlib.load(urllib.request.urlopen(request, timeout=2))
+                except OSError:
+                    self.assertIsNone(process.poll(), "coli serve exited: " + process.stderr.read())
+                    time.sleep(0.3)
+            self.assertIsNotNone(health, "the gateway never answered")
+            self.assertEqual((health["arch"], health["capabilities"]), ("ace_step", ["music_generation"]))
+            body = jsonlib.dumps({"model": "ace-step-1.5-colibri", "prompt": "calm piano", "duration": 1, "steps": 1, "seed": 4}).encode()
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/audio/music", data=body, headers=headers)
+            answer = jsonlib.load(urllib.request.urlopen(request, timeout=60))
+            pcm, rate, channels = music_engine.decode_wav(base64.b64decode(answer["data"][0]["b64_json"]))
+            self.assertEqual((rate, channels, len(pcm)), (RATE, 2, RATE * 4))
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            process.stderr.close()
 
     def test_help_lists_the_music_command_and_its_flags(self):
         r = run_coli(["music", "--help"], self.env)

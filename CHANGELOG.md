@@ -22,6 +22,8 @@ torch's: the same seed gives the clip upstream makes. [docs/acestep.md](docs/ace
   images route's queue, cancellation on hang-up and structured errors.
 - `coli info`, `coli plan` and `coli doctor` know the checkpoint; `coli setup` offers
   it (6.4 GB, 9 GB of RAM); `make install` and the release archives carry the engine.
+- The dashboard has a music mode: a lyrics box, length, steps, language and seed in the composer, progress with
+  Cancel, and the browser's audio player with Download WAV and New seed (`web/README.md`).
 - ACE-Step 1.5 is MIT licensed.
 
 ## [2.0.0] - 2026-10-06

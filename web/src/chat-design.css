@@ -203,6 +203,18 @@ button{color:inherit}button:disabled{cursor:default;opacity:.4}svg.lucide{stroke
 .image-chip>.image-caret{width:12px;height:12px;pointer-events:none}
 .image-steps{width:2.6ch;text-align:right}
 .image-seed{width:10ch}
+.music-turn{width:min(100%,520px)}
+.music-player{display:block;width:100%;height:42px;border-radius:21px;color-scheme:light dark}
+.music-request{margin:0;font-size:12px;color:var(--muted-foreground)}
+.music-cut{color:var(--foreground)}
+.music-duration{width:4.4ch;text-align:right}
+button.image-chip{background:none;cursor:pointer;font:inherit;font-size:11px}
+button.image-chip:hover,.music-lyrics-chip.on{color:var(--foreground);border-color:color-mix(in srgb,var(--foreground) 40%,transparent)}
+.music-lyrics{display:grid;gap:4px;padding:2px 0 0}
+.music-lyrics>textarea{width:100%;resize:vertical;min-height:96px;max-height:40dvh;padding:9px 11px;border:1px solid var(--border);border-radius:12px;background:var(--input);color:var(--foreground);font:inherit;font-size:13px;line-height:1.5;outline:none}
+.music-lyrics>textarea:focus{border-color:color-mix(in srgb,var(--foreground) 40%,transparent)}
+.music-lyrics>textarea.invalid,.music-lyrics>small.invalid,.image-chip.invalid .music-duration{color:var(--destructive,#e5484d)}
+.music-lyrics>small{justify-self:end;font-size:10px;color:var(--muted-foreground);font-variant-numeric:tabular-nums}
 .image-custom{gap:4px}
 .image-custom input{width:4.4ch;text-align:center}
 .image-chip.invalid,.image-custom input.invalid{border-color:color-mix(in srgb,var(--destructive,#ff766f) 60%,transparent);color:var(--destructive,#ff766f)}

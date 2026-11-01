@@ -3617,9 +3617,6 @@ def cmd_stop(a):
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""
     need_model(a.model)
-    if is_music_model(a.model):
-        sys.exit(f"{C.yel}the dashboard has no music player yet;{C.r} make songs with: coli music \"calm piano\" "
-                 f"(or coli serve, POST /v1/audio/music)")
     # Same two layouts openai_server.py resolves: next to this script (release
     # archive / installed tree) or one level up (source checkout, where this is c/coli).
     cands = [os.path.join(HERE, "web", "dist"),

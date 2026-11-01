@@ -459,7 +459,7 @@ with the last 30 turns as a trend.
   Qwen3.8-Flash-Next and Qwen3.8-27B: a path in a `coli chat` message, an
   attachment in `coli web`, or an `image_url` part;
 - **music out** with ACE-Step 1.5 on `POST /v1/audio/music` and `coli music "calm piano"`:
-  a song, with or without lyrics, as a 48 kHz stereo WAV ([acestep.md](docs/acestep.md));
+  a song, with or without lyrics, as a 48 kHz stereo WAV, with a player in the dashboard ([acestep.md](docs/acestep.md));
 - **pictures out** with Qwen-Image-2.1 on `POST /v1/images/generations`,
   and drawn inside the terminal by `coli chat`; the same model **edits** a
   picture you give it from an instruction (`coli run --image`, `/image` in

@@ -22,10 +22,13 @@ export interface ChatMessage {
   /* Both turns of a text-to-image exchange, the prompt and its picture, carry
      mode "image". They stay in the conversation on screen but are never sent to
      a text model, which would read a question followed by an empty answer. */
-  mode?: "image"
+  mode?: "image" | "music"
   /* The picture of an image turn: the request while it runs, then the result.
      `url` appears only once the image is finished. */
   generated?: GeneratedImage
+  /* The song of a music turn (mode "music"), the same way: the request while it
+     runs, then the result with its `url`. */
+  song?: GeneratedMusic
 }
 
 interface OpenAIError {
@@ -140,6 +143,9 @@ export interface ModelInfo {
      ("image_edit" among its capabilities): how many pictures at most, and the
      range of the side, in pixels, the engine works them at. */
   edit?: { maxImages: number; refResolution?: { default: number; min: number; max: number } }
+  /* What a music model ("music_generation") accepts, from the `audio` block of its
+     /v1/models entry: the range of a clip in seconds, the sampler's steps. */
+  music?: MusicLimits
 }
 
 const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0
@@ -155,15 +161,36 @@ function editLimits(image: unknown): ModelInfo["edit"] {
   return { maxImages: Number(edit.max_images), ...(refResolution ? { refResolution } : {}) }
 }
 
+/* /v1/models: `audio` on a music model. Every number must be there and positive; a
+   server that states less gets the contract's defaults for the rest (the engine's
+   own, music_engine.DEFAULT_INFO), and one that states nothing is left out. */
+export function musicLimits(audio: unknown): MusicLimits | undefined {
+  if (!audio || typeof audio !== "object") return undefined
+  const info = audio as Record<string, unknown>
+  const number = (value: unknown, fallback: number) => (positive(value) ? Number(value) : fallback)
+  const limits: MusicLimits = {
+    sampleRate: number(info.sample_rate, 48000),
+    minDuration: number(info.min_duration, 1),
+    maxDuration: number(info.max_duration, 600),
+    defaultDuration: number(info.default_duration, 30),
+    defaultSteps: number(info.default_steps, 8),
+    maxSteps: number(info.max_steps, 20),
+    defaultShift: number(info.default_shift, 1),
+    maxLyricBytes: number(info.max_lyric_bytes, 32768),
+  }
+  return limits.minDuration <= limits.maxDuration ? limits : undefined
+}
+
 export async function listModelInfo(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
   const response = await fetch(endpoint(baseUrl, "models"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown }> }
-  return (body.data || []).map(({ id, capabilities, image }) => {
+  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown; audio?: unknown }> }
+  return (body.data || []).map(({ id, capabilities, image, audio }) => {
     if (!Array.isArray(capabilities)) return { id }
     const list = capabilities.filter((item): item is string => typeof item === "string")
     const edit = list.includes("image_edit") ? editLimits(image) : undefined
-    return { id, capabilities: list, ...(edit ? { edit } : {}) }
+    const music = list.includes("music_generation") ? musicLimits(audio) : undefined
+    return { id, capabilities: list, ...(edit ? { edit } : {}), ...(music ? { music } : {}) }
   })
 }
 
@@ -252,6 +279,11 @@ export async function waitForModel(
 
 export function generatesImages(model: ModelInfo | undefined) {
   return !!model?.capabilities?.includes("image_generation")
+}
+
+/* A music model: it answers POST /v1/audio/music and refuses chat */
+export function generatesMusic(model: ModelInfo | undefined) {
+  return !!model?.capabilities?.includes("music_generation")
 }
 
 /* An image model whose engine can also edit pictures: POST /v1/images/edits */
@@ -662,5 +694,192 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
     seed: info?.seed ?? options.seed,
     url,
     ...(info?.timings ? { timings: info.timings } : {}),
+  }
+}
+
+/* ---- text-to-music ----------------------------------------------------------
+ * POST /v1/audio/music (docs/acestep.md): a caption and optional lyrics in, a WAV
+ * out. Like the image route it takes `stream: true`, and then sends named SSE
+ * events: progress while the engine works, completed with the same object the
+ * plain request returns. The WAV travels as base64 in `data[0].b64_json`. */
+
+export type MusicStage = "text" | "condition" | "denoise" | "decode"
+
+export interface MusicProgress {
+  stage: MusicStage
+  step: number
+  steps: number
+}
+
+export interface MusicTimings {
+  text?: number
+  condition?: number
+  denoise?: number
+  decode?: number
+}
+
+export interface MusicLimits {
+  sampleRate: number
+  minDuration: number
+  maxDuration: number
+  defaultDuration: number
+  defaultSteps: number
+  maxSteps: number
+  defaultShift: number
+  maxLyricBytes: number
+}
+
+export interface MusicGenerationResponse {
+  created: number
+  data: Array<{ b64_json?: string; format?: string }>
+  colibri?: {
+    sample_rate?: number; samples?: number; duration?: number; seed?: number; steps?: number; shift?: number
+    truncated?: boolean; timings?: MusicTimings
+  }
+}
+
+/* One song of the conversation. The request fields are known from the start; url,
+   seconds and timings arrive with the result, and seed and duration become the ones
+   the engine reports having made. */
+export interface GeneratedMusic {
+  prompt: string
+  lyrics?: string
+  language?: string
+  duration: number
+  steps: number
+  seed: number
+  url?: string
+  seconds?: number
+  timings?: MusicTimings
+  /* The caption or the lyrics were longer than the model reads and were cut. */
+  truncated?: boolean
+}
+
+export interface GenerateMusicOptions {
+  baseUrl: string
+  apiKey: string
+  model: string
+  prompt: string
+  lyrics?: string
+  language?: string
+  duration: number
+  steps: number
+  seed: number
+  signal: AbortSignal
+  onProgress?: (progress: MusicProgress) => void
+  /* Streaming was not available and the song is being made by one plain request:
+     nothing more will arrive until it is done. */
+  onPlainRequest?: () => void
+}
+
+const MUSIC_EVENT = {
+  progress: "music_generation.progress",
+  completed: "music_generation.completed",
+}
+
+function musicRequest(options: GenerateMusicOptions, stream: boolean): RequestInit {
+  const fields: Record<string, string | number | boolean> = {
+    model: options.model,
+    prompt: options.prompt,
+    duration: options.duration,
+    steps: options.steps,
+    seed: options.seed,
+    stream,
+  }
+  if (options.lyrics?.trim()) fields.lyrics = options.lyrics
+  if (options.language) fields.language = options.language
+  return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
+}
+
+async function streamMusic(options: GenerateMusicOptions): Promise<MusicGenerationResponse> {
+  const response = await fetch(endpoint(options.baseUrl, "audio/music"), musicRequest(options, true))
+  if (!response.ok) throw await imageError(response)
+  /* A server that ignores `stream` answers with the plain object: that is the result,
+     not a failure, and asking again would make a second song. */
+  if ((response.headers.get("content-type") || "").includes("application/json")) {
+    return (await response.json()) as MusicGenerationResponse
+  }
+  if (!response.body) throw new StreamUnavailable("The server returned an empty stream.")
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let seen = false
+  let finished = false
+  let result: MusicGenerationResponse | null = null
+
+  const consume = ({ event, data }: SSEEvent) => {
+    seen = true
+    if (data === "[DONE]") { finished = true; return }
+    if (event === "error") throw streamError(data)
+    const payload = JSON.parse(data) as Record<string, unknown>
+    if (payload.error) throw streamError(data)
+    if (event === MUSIC_EVENT.progress) options.onProgress?.(payload as unknown as MusicProgress)
+    else if (event === MUSIC_EVENT.completed) result = payload as unknown as MusicGenerationResponse
+  }
+
+  try {
+    while (!finished) {
+      const { value, done } = await reader.read()
+      const before = buffer.length
+      buffer += decoder.decode(value, { stream: !done })
+      /* The finished song is megabytes of base64 in one frame: only a chunk that brings a
+         blank line can complete a frame, so the pending one is not re-split on every chunk. */
+      if (done || /\r?\n\r?\n/.test(buffer.slice(Math.max(0, before - 3)))) {
+        const parsed = extractSSEEvents(buffer)
+        buffer = parsed.rest
+        parsed.events.forEach(consume)
+      }
+      if (done) break
+    }
+  } catch (cause) {
+    reader.cancel().catch(() => undefined)
+    throw cause
+  }
+  if (finished) reader.cancel().catch(() => undefined)
+  if (result) return result
+  if (!seen) throw new StreamUnavailable("The server closed the stream without sending anything.")
+  throw new Error("The server closed the stream before the song was finished.")
+}
+
+async function requestMusic(options: GenerateMusicOptions): Promise<MusicGenerationResponse> {
+  const response = await fetch(endpoint(options.baseUrl, "audio/music"), musicRequest(options, false))
+  if (!response.ok) throw await imageError(response)
+  return (await response.json()) as MusicGenerationResponse
+}
+
+/* The WAV as a playable object URL: a data URI of several megabytes is a poor thing to keep
+   in a React state and to hand to an <audio>, and a Blob is what the download wants anyway. */
+export function wavUrl(b64: string) {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }))
+}
+
+/* Streams when it can, so the page can show the stage; falls back to one plain request
+   when streaming is not available. */
+export async function generateMusic(options: GenerateMusicOptions): Promise<GeneratedMusic> {
+  let answer: MusicGenerationResponse
+  try {
+    answer = await streamMusic(options)
+  } catch (cause) {
+    if (!(cause instanceof StreamUnavailable) || options.signal.aborted) throw cause
+    options.onPlainRequest?.()
+    answer = await requestMusic(options)
+  }
+  const song = answer.data?.[0]
+  if (!song?.b64_json) throw new Error("The server answered without a song.")
+  const info = answer.colibri
+  return {
+    prompt: options.prompt,
+    ...(options.lyrics?.trim() ? { lyrics: options.lyrics } : {}),
+    ...(options.language ? { language: options.language } : {}),
+    duration: info?.duration ?? options.duration,
+    steps: info?.steps ?? options.steps,
+    seed: info?.seed ?? options.seed,
+    url: wavUrl(song.b64_json),
+    ...(info?.timings ? { timings: info.timings } : {}),
+    ...(info?.truncated ? { truncated: true } : {}),
   }
 }

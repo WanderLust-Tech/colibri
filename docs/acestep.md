@@ -7,7 +7,7 @@ reference by an oracle that compares tensors, not just the final audio.
 
 **Using it:** `coli music "calm piano with soft strings"` writes a song, `coli serve` answers `POST /v1/audio/music`
 (see [In colibri](#in-colibri)). The engine itself is `acestep --model DIR --caption "calm piano" --out clip.wav`, and
-every part of it is held to upstream's handler by an oracle. The dashboard has no player yet.
+every part of it is held to upstream's handler by an oracle. `coli web` has a player for it.
 
 | stage | what | state |
 |---|---|---|
@@ -17,7 +17,7 @@ every part of it is held to upstream's handler by an oracle. The dashboard has n
 | 3 | the text encoder (Qwen3-Embedding-0.6B), its tokenizer and the prompt templates, `c/acestep_text.h` | done, oracle-checked |
 | 4a | the engine proper in C: a request in, audio out; one-shot and `--serve`; `c/acestep_gen.h`, `c/acestep_serve.h` | done, oracle-checked |
 | 4b | around it: the registry's audio modality, `music_engine.py`, `POST /v1/audio/music`, `coli music`, `coli info` / `plan` / `doctor`, `coli setup`, `make install` | done, tested against a stub engine and smoke-tested on the real one |
-| 4c | the dashboard's music player | |
+| 4c | the dashboard's music player: `web/src/components/MusicTurn.tsx`, `web/src/lib/useMusic.ts` | done, tested in a real browser |
 | 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
 
 ## The model, as measured from the checkpoint
@@ -311,6 +311,14 @@ weights dominate; the working buffers are a few hundred MB at most). Measured on
 
 **Speed.** The engine uses every core, so another busy process slows it a lot: the same 10 s clip took 16 s on an idle
 24-core i9 and 68 to 75 s while a Qwen-Image server was drawing on the same machine. Quote the first.
+
+**The dashboard.** `coli web` (or the page `coli serve` serves) shows the music composer when the selected model lists
+`music_generation`: a lyrics box, length, steps, language, seed, a progress bar with Cancel, then the browser's audio player
+with Download WAV, Copy seed and New seed (docs: `web/README.md`). The model switcher offers a music model like any other.
+`web/tests/music_ui.py` runs it in a real browser (Playwright) against the real gateway and the stub engine: a song whose
+length the browser reads back from the audio element, the downloaded file, a new seed, lyrics and a language on the wire,
+a failure, an invalid length held back, a cancel; and `web/src/lib/music.test.ts` holds the client (`generateMusic`'s
+request and its stream, the fallback to a plain request, every error) and the page's strings.
 
 **What is tested without the weights.** `tools/acestep_stub.py` speaks the protocol and makes a synthetic clip that
 depends on the request, the way `qwenimage_stub.py` does for pictures. `tests/test_acestep_engine_client.py` holds

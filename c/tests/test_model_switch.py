@@ -167,10 +167,8 @@ class WhyNotTest(unittest.TestCase):
         reason = model_switch.why_not(family, self.ctx(kv_slots=family.limits.max_kv_slots + 1), engines_built)
         self.assertIn("KV slot", reason)
 
-    def test_a_music_model_is_not_offered_until_the_dashboard_has_a_player(self):
-        reason = model_switch.why_not(family_by_id("ace_step"), self.ctx(), engines_built)
-        self.assertIn("music player", reason)
-        self.assertIn("coli music", reason)
+    def test_a_music_model_can_be_switched_to_like_any_other(self):
+        self.assertIsNone(model_switch.why_not(family_by_id("ace_step"), self.ctx(), engines_built))
 
     def test_cluster_mode_is_for_glm_only(self):
         self.assertIsNone(model_switch.why_not(family_by_id("glm"), self.ctx(cluster=True), engines_built))

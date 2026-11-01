@@ -152,9 +152,9 @@ export function progressFraction(progress: ImageProgress | null) {
   }
 }
 
-/* The turns a text model is shown: everything but the image exchanges. */
+/* The turns a text model is shown: everything but the image and music exchanges. */
 export function chatTurns(messages: ChatMessage[]) {
-  return messages.filter((item) => item.mode !== "image")
+  return messages.filter((item) => item.mode !== "image" && item.mode !== "music")
 }
 
 export function elapsedClock(seconds: number) {

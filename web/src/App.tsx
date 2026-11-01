@@ -24,26 +24,29 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Camera, Grid3x3, Palette} from "lucide-react"
+  Zap, ImagePlus, Camera, Grid3x3, Palette, Music, Waves, Guitar} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
-  editsImages, generateImage, generatesImages, getHealth, listModelInfo, streamChat,
-  type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type StreamChatResult,
+  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, streamChat,
+  type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type StreamChatResult,
 } from "@/lib/api"
 import {
   DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, derivedSize, imageFileName, loadPicture, parseSeed,
   parseSize, presetOf, randomSeed, sizeKey, validSide, type EditPicture, type ImageSize,
 } from "@/lib/images"
 import { resendFrom } from "@/lib/chat"
+import { DEFAULT_MUSIC_LIMITS } from "@/lib/music"
+import { useMusic } from "@/lib/useMusic"
 import { activeRequests, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
 import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
 import { Brand } from "./components/Brand"
 import { ImageControls, ImageProgressCard, ImageResultCard, ImageStoppedCard, type ImageRun } from "./components/ImageTurn"
+import { MusicControls, MusicLyrics, MusicProgressCard, MusicResultCard, MusicStoppedCard } from "./components/MusicTurn"
 import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
@@ -77,6 +80,9 @@ export default function App() {
   /* Of those, the ones whose engine also edits pictures (the image_edit capability),
      with what /v1/images/edits accepts. */
   const [editLimits, setEditLimits] = useState<Record<string, NonNullable<ModelInfo["edit"]>>>({})
+  /* Models marked music_generation, with the limits of their /v1/models `audio` block. With one of
+     them selected the conversation makes songs instead of text. */
+  const [musicModels, setMusicModels] = useState<Record<string, MusicLimits>>({})
   const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
@@ -147,6 +153,11 @@ export default function App() {
       [cacheSlot]: typeof next === "function" ? next(current[cacheSlot] || []) : next,
     }))
 
+  const music = useMusic({
+    baseUrl, apiKey, model, limits: musicModels[model], draft, setDraft, loading, setLoading, abortRef,
+    updateMessages, setError, setConnected, newMessage: message,
+  })
+
   // EFFECT #1
   useEffect(() => {
     persistPublicSettings(localStorage, baseUrl, model)
@@ -208,6 +219,7 @@ export default function App() {
       setModels(found)
       setImageModels(info.filter(generatesImages).map((item) => item.id))
       setEditLimits(Object.fromEntries(info.flatMap((item) => editsImages(item) && item.edit ? [[item.id, item.edit] as const] : [])))
+      setMusicModels(Object.fromEntries(info.filter(generatesMusic).map((item) => [item.id, item.music ?? DEFAULT_MUSIC_LIMITS] as const)))
       if (found.length && !found.includes(model)) setModel(found[0])
       setConnected(true)
       try {
@@ -271,9 +283,9 @@ export default function App() {
     return current.filter((picture) => picture.id !== id)
   })
 
-  const canSend = useMemo(() => imageMode
+  const canSend = useMemo(() => music.mode ? music.canSend : imageMode
     ? Boolean(draft.trim() && model && !loading && seed !== undefined && ((attached.length && sizeAuto) || (validSide(imageSize.width) && validSide(imageSize.height))))
-    : (draft.trim() || pending.length) && model && !loading, [attached.length, draft, imageMode, imageSize, loading, model, pending, seed, sizeAuto])
+    : (draft.trim() || pending.length) && model && !loading, [attached.length, draft, imageMode, imageSize, loading, model, music.mode, music.canSend, pending, seed, sizeAuto])
 
   /* The shared streaming core. POSTs `payload` and appends every delta into the
      message `targetId`, with the same live metrics and abort/error wiring whether
@@ -473,7 +485,7 @@ export default function App() {
     try { await navigator.clipboard.writeText(String(item.generated.seed)); setCopied(`${item.id}:seed`) } catch { setError(t("ui.copyError")) }
   }
 
-  const submit = () => { if (imageMode) void sendImage(); else void send() }
+  const submit = () => { if (music.mode) void music.send(); else if (imageMode) void sendImage(); else void send() }
 
   const openSettings = (page = "general") => { setSettingsPage(page); setView("settings") }
   const clearChat = () => { updateMessages([]); setLastRun(null); setTokPerSec(null); setTtft(null); setTokenCount(0); setTotalTokens({ prompt: 0, completion: 0 }); setError("") }
@@ -510,7 +522,7 @@ export default function App() {
   const inferenceControls = (<fieldset disabled={loading}><section className="side-section">
           <div className="section-title"><SlidersHorizontal className="size-3.5" /> {t("sidebar.inference")}</div>
           <label>{t("sidebar.model")}<select id="model-select" value={model} onChange={(event) => setModel(event.target.value)}>{models.length ? models.map((id) => <option key={id}>{id}</option>) : <option>{model}</option>}</select></label>
-          {imageMode ? <p className="field-help">{t("image.modelNote")}</p> : <>
+          {music.mode ? <p className="field-help">{t("music.modelNote")}</p> : imageMode ? <p className="field-help">{t("image.modelNote")}</p> : <>
           {health?.kv_slots && health.kv_slots > 1 ? <label>{t("sidebar.kvSession")}<select id="kv-slot" value={cacheSlot} onChange={(event) => setCacheSlot(Number(event.target.value))} disabled={loading}>
             {Array.from({ length: kvSlots }, (_, slot) => <option key={slot} value={slot}>{t("sidebar.sessionLabel", { slot: slot + 1 })}</option>)}
           </select><span className="field-help">{t("sidebar.kvSessionHelp")}</span></label> : null}
@@ -564,7 +576,7 @@ export default function App() {
               {!loading && lastRun?.usage ? <Badge><Layers className="size-3" /> {lastRun.usage.prompt_tokens}→{lastRun.usage.completion_tokens}</Badge> : null}
               {!loading && lastRun?.finishReason === "length" ? <Badge className="badge-warn" title={t("topbar.truncatedHelp")}><AlertTriangle className="size-3" /> {t("topbar.truncated")}</Badge> : null}
               {lastRun?.queueWaitMs != null ? <Badge><Clock className="size-3" /> queue {Math.round(lastRun.queueWaitMs)}ms</Badge> : null}
-              {!imageMode && <Badge><MonitorDot className="size-3" /> {t("topbar.slot", { n: cacheSlot + 1 })}</Badge>}
+              {!imageMode && !music.mode && <Badge><MonitorDot className="size-3" /> {t("topbar.slot", { n: cacheSlot + 1 })}</Badge>}
 </div>)
 
   const imageCard = (item: ChatMessage) => {
@@ -574,7 +586,16 @@ export default function App() {
     if (imageRun?.targetId === item.id) return <ImageProgressCard request={image} run={imageRun} onCancel={() => abortRef.current?.abort()} />
     return <ImageStoppedCard request={image} finish={item.finish} busy={loading || !imageMode} onRetry={() => void imageRetry(item)} />
   }
-  const suggestions = imageMode
+  const musicCard = (item: ChatMessage) => {
+    const song = item.song!
+    if (song.url) return <MusicResultCard song={song} copied={music.copied === `${item.id}:seed`} busy={loading || !music.mode}
+      onDownload={() => music.download(song)} onCopySeed={() => void music.copySeed(item)} onAgain={() => void music.again(song)} />
+    if (music.run?.targetId === item.id) return <MusicProgressCard request={song} run={music.run} onCancel={music.cancel} />
+    return <MusicStoppedCard request={song} finish={item.finish} busy={loading || !music.mode} onRetry={() => void music.retry(item)} />
+  }
+  const suggestions = music.mode
+    ? [{ key: "music.prompt.piano", Icon: Music, label: "music.suggest.piano" }, { key: "music.prompt.synth", Icon: Waves, label: "music.suggest.synth" }, { key: "music.prompt.folk", Icon: Guitar, label: "music.suggest.folk" }]
+    : imageMode
     ? [{ key: "image.prompt.photo", Icon: Camera, label: "image.suggest.photo" }, { key: "image.prompt.pixel", Icon: Grid3x3, label: "image.suggest.pixel" }, { key: "image.prompt.poster", Icon: Palette, label: "image.suggest.poster" }]
     : [{ key: "prompts.routing", Icon: BrainCircuit, label: "ui.idea" }, { key: "prompts.benchmark", Icon: Code2, label: "ui.code" }, { key: "prompts.caching", Icon: Database, label: "ui.analyze" }]
 
@@ -620,7 +641,7 @@ export default function App() {
             {item.role !== "user" && <div className="assistant-brand"><Brand /><span>colibrì</span></div>}
             {item.images?.length ? <div className="message-images">{item.images.map((url, at) =>
               <img key={at} src={url} alt={t("ui.attachedImage", { n: at + 1 })} />)}</div> : null}
-            {item.role === "assistant" && item.generated ? imageCard(item) : <div className="message-body">{item.reasoning
+            {item.role === "assistant" && item.song ? musicCard(item) : item.role === "assistant" && item.generated ? imageCard(item) : <div className="message-body">{item.reasoning
               ? <details className="reasoning" open={!item.content}>
                   <summary>{t("sidebar.reasoning")}</summary>
                   <div className="reasoning-body">{item.reasoning}</div>
@@ -631,9 +652,9 @@ export default function App() {
         </div>}
         <div className="composer-wrap">
           {error && <div className="error-banner" role="alert">{t(error)}</div>}
-          <form className={cn("composer", imageMode && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
-            onDragOver={e => { if ((!imageMode || canEdit) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
-            onDrop={e => { if ((!imageMode || canEdit) && e.dataTransfer.files.length) { e.preventDefault(); void (imageMode ? attachPictures : attach)(e.dataTransfer.files) } }}>
+          <form className={cn("composer", (imageMode || music.mode) && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
+            onDragOver={e => { if (!music.mode && (!imageMode || canEdit) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
+            onDrop={e => { if (!music.mode && (!imageMode || canEdit) && e.dataTransfer.files.length) { e.preventDefault(); void (imageMode ? attachPictures : attach)(e.dataTransfer.files) } }}>
             {imageMode && attached.length > 0 && <div className="composer-attachments">
               {attached.map((picture, at) => <span key={picture.id} className="attachment">
                 <img src={picture.url} alt={t("image.attachedAlt", { n: at + 1 })} />
@@ -648,9 +669,13 @@ export default function App() {
                   onClick={() => setPending(list => list.filter((_, index) => index !== at))}><X /></button>
               </span>)}
             </div>}
-            <Textarea ref={draftRef} id="draft" aria-label={imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} onPaste={event => { if (imageMode && !canEdit) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void (imageMode ? attachPictures : attach)(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
+            {music.mode && music.lyricsOpen && <MusicLyrics value={music.lyrics} max={music.limits.maxLyricBytes} onChange={music.setLyrics} />}
+            <Textarea ref={draftRef} id="draft" aria-label={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} onPaste={event => { if (music.mode || (imageMode && !canEdit)) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void (imageMode ? attachPictures : attach)(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
             <div className="composer-foot">
-              {imageMode ? <>
+              {music.mode ? <MusicControls limits={music.limits} duration={music.duration} steps={music.steps} seed={music.seedText}
+                seedValid={music.seed !== undefined} language={music.language} lyricsOpen={music.lyricsOpen} lyricsFilled={music.lyrics.trim() !== ""}
+                onDuration={music.setDuration} onSteps={music.setSteps} onSeed={music.setSeedText} onLanguage={music.setLanguage} onLyrics={music.toggleLyrics} />
+              : imageMode ? <>
               {canEdit && <input ref={editRef} type="file" accept="image/*" multiple hidden
                 onChange={e => { void attachPictures(e.target.files); e.target.value = "" }} />}
               <ImageControls size={imageSize} custom={customSize} steps={imageSteps} seed={seedText} seedValid={seed !== undefined}
@@ -666,7 +691,7 @@ export default function App() {
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
               <button type="button" className="slot-chip" onClick={() => openSettings("model")}><Database />{t("topbar.slot", { n: cacheSlot + 1 })}</button>
               </>}
-              {loading ? <button type="button" className="send-button" aria-label={imageMode ? t("image.cancel") : t("chat.stop")} onClick={() => abortRef.current?.abort()}><CircleStop /></button> : <button type="submit" className="send-button" aria-label={imageMode ? t("image.generate") : t("chat.send")} disabled={!canSend}><ArrowUp /></button>}
+              {loading ? <button type="button" className="send-button" aria-label={music.mode || imageMode ? t("image.cancel") : t("chat.stop")} onClick={() => abortRef.current?.abort()}><CircleStop /></button> : <button type="submit" className="send-button" aria-label={music.mode ? t("music.generate") : imageMode ? t("image.generate") : t("chat.send")} disabled={!canSend}><ArrowUp /></button>}
             </div>
           </form>
           {empty && <div className="suggestions">{suggestions.map(({ key, Icon, label }) => <button key={key} onClick={() => { setDraft(t(key)); draftRef.current?.focus() }}><Icon />{t(label)}</button>)}</div>}
