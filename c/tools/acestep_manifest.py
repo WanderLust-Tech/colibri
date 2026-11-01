@@ -63,8 +63,7 @@ def collapse(table):
     """
     groups = collections.OrderedDict()
     for name in sorted(table):
-        pattern = re.sub(r"\.\d+(?=\.)", ".N", name)
-        groups.setdefault(pattern, []).append(name)
+        groups.setdefault(index_pattern(name), []).append(name)
     out = collections.OrderedDict()
     for pattern, names in groups.items():
         shapes = {(table[n]["dtype"], tuple(table[n]["shape"])) for n in names}
@@ -85,9 +84,24 @@ def build(model_dir):
     return manifest
 
 
-def structure(patterns):
-    """What a tiny fixture must share with the real checkpoint: the pattern names, dtypes and ranks."""
-    return {p: (e["dtype"], len(e["shape"])) for p, e in patterns.items()}
+def index_pattern(name):
+    return re.sub(r"\.\d+(?=\.)", ".N", name)
+
+
+def structure(tensors):
+    """What a tiny fixture must share with the real checkpoint: {pattern: (dtype, rank)}.
+
+    `tensors` is either a header table ({name: {"dtype", "shape", ...}}) or a manifest component
+    ({pattern or name: {"dtype", "shape", "count"}}); either way every name is reduced to its pattern
+    and shapes are dropped except for their rank, because the widths and the layer counts are what a
+    fixture shrinks. Tensors of one pattern must agree on dtype and rank (a stack is one kind of layer).
+    """
+    out = {}
+    for name, info in tensors.items():
+        key, value = index_pattern(name), (info["dtype"], len(info["shape"]))
+        if out.setdefault(key, value) != value:
+            raise ValueError(f"{key}: {value} differs from {out[key]}")
+    return out
 
 
 def main():

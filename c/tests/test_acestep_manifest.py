@@ -113,6 +113,15 @@ class Directory(unittest.TestCase):
         patterns = am.collapse({"a.0.w": {"dtype": "BF16", "shape": [4, 4]}, "a.1.w": {"dtype": "BF16", "shape": [4, 4]}})
         self.assertEqual(am.structure(patterns), {"a.N.w": ("BF16", 2)})
 
+    def test_structure_ignores_widths_and_layer_counts_but_not_dtype_or_rank(self):
+        wide = {f"l.{i}.w": {"dtype": "BF16", "shape": [64, 64]} for i in range(24)}
+        narrow = {f"l.{i}.w": {"dtype": "BF16", "shape": [8, 8]} for i in range(2)}
+        self.assertEqual(am.structure(wide), am.structure(narrow))
+        self.assertNotEqual(am.structure(wide), am.structure({"l.0.w": {"dtype": "F32", "shape": [8, 8]}}))
+        self.assertNotEqual(am.structure(wide), am.structure({"l.0.w": {"dtype": "BF16", "shape": [8]}}))
+        with self.assertRaises(ValueError):
+            am.structure({"l.0.w": {"dtype": "BF16", "shape": [8]}, "l.1.w": {"dtype": "BF16", "shape": [8, 8]}})
+
     def test_a_missing_component_is_an_error_not_an_empty_manifest(self):
         with tempfile.TemporaryDirectory() as d:
             self.make_dir(d)
