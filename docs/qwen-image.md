@@ -180,7 +180,11 @@ one that rounds to nothing, such as 4000x1, is refused.
 - **Size**: both sides a multiple of 32, from 256 to 2048. The engine groups
   image tokens 2x2, which is why 32 and not 16: 16:9 is 1024x576 or 512x288,
   never 768x432. The default is 768x512. The presets, the same ones the web UI
-  offers: 512x512, 768x512, 512x768, 1024x576, 576x1024, 1024x1024.
+  offers, by ratio and smallest first: 1:1 512, 768, 1024 and 1536 squared;
+  3:2 768x512, 1152x768, 1536x1024; 2:3 the same turned; 4:3 768x576,
+  1024x768; 3:4 the same turned; 16:9 1024x576, 1536x864; 9:16 the same turned.
+  A bigger picture costs more than its pixel count in time, so go up by one
+  step before the largest.
 - **Steps**: default 8, from 2 to 200. Eight is a good draft for photographs;
   16 gives visibly better anatomy and colour and is what text inside the
   picture needs to come out legible (compared on the reference pipeline at

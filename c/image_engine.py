@@ -46,7 +46,17 @@ DEFAULT_INFO = {"model": "qwen-image-2.1", "default_width": 768, "default_height
 # The sizes both front ends offer (the web UI shows the same six), all
 # multiples of 32: the engine snaps to 32 because image tokens come in 2x2
 # groups, so 16:9 is 1024x576, never 768x432.
-SIZE_PRESETS = ((512, 512), (768, 512), (512, 768), (1024, 576), (576, 1024), (1024, 1024))
+# Grouped by ratio, smallest first; the same list, in the same order, as the web
+# UI's (web/src/lib/images.ts).
+SIZE_PRESETS = (
+    (512, 512), (768, 768), (1024, 1024), (1536, 1536),
+    (768, 512), (1152, 768), (1536, 1024),
+    (512, 768), (768, 1152), (1024, 1536),
+    (768, 576), (1024, 768),
+    (576, 768), (768, 1024),
+    (1024, 576), (1536, 864),
+    (576, 1024), (864, 1536),
+)
 MAX_STEPS = 200
 # One step is refused: the schedule's terminal stretch divides by zero there, and
 # the reference pipeline gives NaN too.

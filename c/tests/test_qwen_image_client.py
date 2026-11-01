@@ -160,6 +160,16 @@ class RequestRulesTest(unittest.TestCase):
         for preset in ie.SIZE_PRESETS:
             self.assertIsNone(ie.check_size(*preset, INFO), preset)
 
+    def test_the_cli_and_the_web_ui_offer_the_same_presets(self):
+        import re
+        source = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "images.ts"
+        if not source.exists():
+            self.skipTest("no web sources beside this checkout")
+        text = source.read_text(encoding="utf-8")
+        block = text.split("export const SIZE_PRESETS", 1)[1].split("\n]", 1)[0]
+        web = tuple((int(w), int(h)) for w, h in re.findall(r"width:\s*(\d+),\s*height:\s*(\d+)", block))
+        self.assertEqual(web, ie.SIZE_PRESETS)
+
     def test_each_parameter_names_itself(self):
         cases = (({"prompt": ""}, "prompt"), ({"prompt": "x", "n": 2}, "n"),
                  ({"prompt": "x", "steps": 0}, "steps"), ({"prompt": "x", "seed": -5}, "seed"),

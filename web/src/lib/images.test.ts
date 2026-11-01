@@ -13,6 +13,32 @@ describe("image sizes", () => {
     }
   })
 
+  it("labels every preset with its true ratio, and lists none twice", () => {
+    const keys = new Set<string>()
+    for (const { width, height, ratio } of SIZE_PRESETS) {
+      const [w, h] = ratio.split(":").map(Number)
+      expect(width * h, `${width}x${height} is not ${ratio}`).toBe(height * w)
+      keys.add(`${width}x${height}`)
+    }
+    expect(keys.size).toBe(SIZE_PRESETS.length)
+  })
+
+  it("keeps each ratio's presets together, smallest first", () => {
+    const seen: string[] = []
+    let last = ""
+    let area = 0
+    for (const { width, height, ratio } of SIZE_PRESETS) {
+      if (ratio !== last) {
+        expect(seen, `${ratio} is split into two groups`).not.toContain(ratio)
+        seen.push(ratio)
+        last = ratio
+        area = 0
+      }
+      expect(width * height, `${width}x${height} is out of order`).toBeGreaterThan(area)
+      area = width * height
+    }
+  })
+
   it("snaps a typed side to the nearest multiple of 32 inside 256..2048", () => {
     expect([1000, 432, 100, 5000, 768].map(snapSide)).toEqual([992, 448, 256, 2048, 768])
     expect(validSide(432)).toBe(false)

@@ -10,14 +10,29 @@ export interface ImageSize {
 }
 
 /* Every preset is a multiple of 32 on both sides, so none of them can be
-   refused. 16:9 at that granularity exists only as multiples of 512x288. */
+   refused. 16:9 at that granularity exists only as multiples of 512x288.
+   The select groups them by ratio, in the order a ratio first appears here,
+   and each group runs from the smallest picture to the largest: a bigger
+   picture costs more than its pixel count in time, so the order is the cost. */
 export const SIZE_PRESETS: ReadonlyArray<ImageSize & { ratio: string }> = [
   { width: 512, height: 512, ratio: "1:1" },
-  { width: 768, height: 512, ratio: "3:2" },
-  { width: 512, height: 768, ratio: "2:3" },
-  { width: 1024, height: 576, ratio: "16:9" },
-  { width: 576, height: 1024, ratio: "9:16" },
+  { width: 768, height: 768, ratio: "1:1" },
   { width: 1024, height: 1024, ratio: "1:1" },
+  { width: 1536, height: 1536, ratio: "1:1" },
+  { width: 768, height: 512, ratio: "3:2" },
+  { width: 1152, height: 768, ratio: "3:2" },
+  { width: 1536, height: 1024, ratio: "3:2" },
+  { width: 512, height: 768, ratio: "2:3" },
+  { width: 768, height: 1152, ratio: "2:3" },
+  { width: 1024, height: 1536, ratio: "2:3" },
+  { width: 768, height: 576, ratio: "4:3" },
+  { width: 1024, height: 768, ratio: "4:3" },
+  { width: 576, height: 768, ratio: "3:4" },
+  { width: 768, height: 1024, ratio: "3:4" },
+  { width: 1024, height: 576, ratio: "16:9" },
+  { width: 1536, height: 864, ratio: "16:9" },
+  { width: 576, height: 1024, ratio: "9:16" },
+  { width: 864, height: 1536, ratio: "9:16" },
 ]
 
 export const DEFAULT_SIZE: ImageSize = { width: 768, height: 512 }
