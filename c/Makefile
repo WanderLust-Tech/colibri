@@ -1331,6 +1331,15 @@ endif
 qwenimage$(EXE): qwenimage.c $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) qwenimage.c $(VK_OBJ) -o qwenimage$(EXE) $(LDFLAGS)
 
+# ACE-Step 1.5 text-to-music, built stage by stage (acestep.c says where it is). Not in `install` yet: until
+# the serve protocol exists it is an oracle (acestep --model DIR --vae-ref REFDIR), not an engine to ship.
+ifneq ($(EXE),)
+.PHONY: acestep
+acestep: acestep$(EXE)
+endif
+acestep$(EXE): acestep.c acestep_vae.h st.h json.h qi_gemm.h .build-config
+	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
+
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision
 # head, served on POST /v1/systemone through the DECIDE command (docs/laya.md).
 # One file; qi_gemm.h is its matrix kernel, decide_serve.h its serve loop.

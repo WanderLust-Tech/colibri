@@ -9,7 +9,7 @@ tiny fixture of make_acestep_tiny.py). The handler is upstream's, run as upstrea
 CPU, float32: the bf16 weights are widened exactly, which is what the C engine does), and every stage is observed
 through hooks rather than reimplemented, so the numbers cannot drift from the real pipeline:
 
-    <case>.safetensors   f32 (ids and masks keep their type)
+    OUTDIR/<case>/ref.safetensors   f32 (ids keep their type; masks, bool in torch, are stored as U8: 1 or 0)
         text.ids, text.hidden        caption tokens and Qwen3-Embedding's last_hidden_state
         lyric.ids, lyric.hidden      lyric tokens and their embedding-table rows (the lyric path uses no layers)
         encoder.hidden, encoder.mask condition encoder output: text, lyric and timbre tokens, packed
@@ -20,8 +20,11 @@ through hooks rather than reimplemented, so the numbers cannot drift from the re
         latents                      generate_audio's target_latents
         vae{k}.in, vae{k}.out        the k-th VAE decode: [1, 64, frames] in, [1, 2, samples] out
         audio                        what the handler returns: [2, samples] f32 at 48 kHz
-    <case>.json          the case's settings, the versions, upstream's commit, the config hash
-    <case>.wav           the audio as 16-bit PCM, to listen to
+    OUTDIR/<case>/ref.json          the case's settings, the versions, upstream's commit, the config hash
+    OUTDIR/<case>/audio.wav         the audio as 16-bit PCM, to listen to
+
+Each case has its own directory, as the other engines' oracles do, so the C loader (st.h reads a directory)
+opens one case without meeting the tensor names of the others.
 
 Reproducibility, measured: on the real checkpoint a second capture in a new process is bit-identical in every
 tensor (inst10 and long30 compared, the latter with its six VAE chunks). On the tiny fixture the DiT stages and
@@ -273,14 +276,18 @@ def capture(a):
             if not same:
                 sys.exit(1)
         steps = sum(1 for k in tensors if k.startswith("dit") and k.endswith(".xt"))
-        save_file({k: v for k, v in tensors.items()}, os.path.join(a.outdir, f"{name}.safetensors"),
+        case_dir = os.path.join(a.outdir, name)
+        os.makedirs(case_dir, exist_ok=True)
+        # masks are bool in torch; the C loader (st.h) reads the dtypes its engines use, and bool is not one: U8, 1 or 0
+        save_file({k: (v.to(torch.uint8) if v.dtype == torch.bool else v) for k, v in tensors.items()},
+                  os.path.join(case_dir, "ref.safetensors"),
                   metadata={"case": name})
-        with open(os.path.join(a.outdir, f"{name}.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(case_dir, "ref.json"), "w", encoding="utf-8") as f:
             json.dump({"case": name, "params": CASES[name], "sample_rate": rate, "dit_calls": steps,
                        "vae_calls": sum(1 for k in tensors if k.startswith("vae") and k.endswith(".in")),
                        "shapes": {k: list(v.shape) for k, v in tensors.items() if not k.startswith("dit") or k.startswith("dit0")},
                        "versions": versions, "recorded": meta}, f, indent=1, default=str)
-        write_wav(os.path.join(a.outdir, f"{name}.wav"), wave, rate)
+        write_wav(os.path.join(case_dir, "audio.wav"), wave, rate)
         print(f"{name}: {steps} DiT calls, latents {tuple(tensors['latents'].shape)}, audio {tuple(wave.shape)} "
               f"{wave.shape[-1] / rate:.2f} s, rms {wave.pow(2).mean().sqrt():.4f}, peak {wave.abs().max():.3f} ({secs:.1f} s)")
 

@@ -79,6 +79,13 @@ TINY_TEXT = {"hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 2,
 
 SILENCE_FRAMES = 1500   # 60 seconds at 25 Hz; the real file holds 15000 (10 minutes)
 
+# Strength of each VAE residual unit's output convolution. A random stack of 15 residual units with Snake
+# activations at full strength is chaotic: activations reach 200 and float32 itself is 2e-4 (relative) from the
+# float64 answer, so an oracle could only be as sharp as that and two correct decoders disagree by about as much.
+# At 0.25 the activations stay near 4 and float32 is within 1e-6 of float64 (measured, tools/../tests), which lets
+# the oracle's tolerance be 20 times that and still catch a wrong tap, dilation or padding.
+RES_BRANCH = 0.25
+
 # Text the tokenizer is trained on: the prompt template, the lyric template, and some words.
 CORPUS = [
     "# Instruction\nFill the audio semantic mask based on the given conditions:\n\n# Caption\n\n# Metas\n- bpm: 120\n"
@@ -192,6 +199,10 @@ def main():
     from diffusers.models import AutoencoderOobleck
     vae = AutoencoderOobleck(**{k: v for k, v in VAE_CONFIG.items() if not k.startswith("_")})
     randomize(vae, a.seed + 2)
+    with torch.no_grad():
+        for name, p in vae.named_parameters():
+            if "res_unit" in name and ".conv2." in name and name.endswith("weight_g"):
+                p.mul_(RES_BRANCH)
     calibrate_decoder(vae, a.seed + 5)
     with open(os.path.join(vae_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump({**VAE_CONFIG, "_diffusers_version": "0.34.0"}, f, indent=2)

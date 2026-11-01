@@ -1517,6 +1517,67 @@ jobs:
           grep -q "vl-oracle\] all cases within tolerance" qwenimage-san.log
           grep -q "e2e-oracle\] all cases within tolerance" qwenimage-san.log
 
+  acestep-tiny-check:
+    name: ACE-Step tiny oracle (VAE decoder vs upstream's own handler)
+    runs-on: ubuntu-latest
+    env:
+      ACESTEP_UPSTREAM: ${{ github.workspace }}/acestep-upstream
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c/tools/requirements-acestep-ref.txt
+      - name: Install the pinned reference environment and upstream at the commit the numbers were captured with
+        run: |
+          pip install -r c/tools/requirements-acestep-ref.txt
+          git init -q "$ACESTEP_UPSTREAM"
+          git -C "$ACESTEP_UPSTREAM" fetch -q --depth 1 https://github.com/ace-step/ACE-Step-1.5 ca1e85fe9430179831e6bc6be790c332190a3866
+          git -C "$ACESTEP_UPSTREAM" checkout -q FETCH_HEAD
+      - name: A tiny random checkpoint in the real layout, and what upstream's handler does with it
+        run: |
+          cd c
+          # The fixture has the real checkpoint's tensor names, dtypes and ranks (the manifest test holds it to
+          # that). The capture runs upstream's handler on the CPU in float32 and records every stage; it never
+          # downloads and never rewrites the checkpoint (it fingerprints the directory and fails if one file moved).
+          python3 tools/make_acestep_tiny.py acestep_tiny
+          python3 tools/acestep_ref.py capture acestep_tiny acestep_tiny_ref --cases inst10,odd9_nodcw,long30 --check-determinism
+          ACESTEP_TINY=acestep_tiny python3 -m unittest -v tests.test_acestep_manifest tests.test_acestep_fixture tests.test_acestep_ref
+      - name: The VAE decoder against the handler's own decodes, window by window and tiled
+        run: |
+          cd c
+          make acestep
+          # Each decode the handler made, then the whole clip the way its tiled decode does it (inst10: one window;
+          # odd9_nodcw: 225 frames, odd; long30: six windows of 192, 256, 256, 256, 256 and 174 frames).
+          for case in inst10 odd9_nodcw long30; do
+            ./acestep --model acestep_tiny --vae-ref acestep_tiny_ref/$case
+          done
+          # chunk <= 2*overlap: upstream halves the overlap, and the audio is the same
+          ./acestep --model acestep_tiny --vae-ref acestep_tiny_ref/long30 --chunk 100 --overlap 64
+          ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 python3 -m unittest -v tests.test_acestep_vae_load tests.test_acestep_vae_mutants
+      - name: Every mutation of the decoder is caught by the oracle
+        run: |
+          cd c
+          python3 tools/mutate_acestep_vae.py acestep_tiny acestep_tiny_ref/long30
+      - name: The oracle and the refusal tests again under ASan and UBSan
+        run: |
+          cd c
+          make -B acestep EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          export ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0 UBSAN_OPTIONS=print_stacktrace=1 OMP_NUM_THREADS=2
+          : > acestep-san.log
+          for case in inst10 odd9_nodcw long30; do
+            ./acestep --model acestep_tiny --vae-ref acestep_tiny_ref/$case >> acestep-san.log 2>&1 || true
+          done
+          ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 python3 -m unittest tests.test_acestep_vae_load >> acestep-san.log 2>&1 || true
+          if grep -qE "ERROR: AddressSanitizer|runtime error:" acestep-san.log; then
+            cat acestep-san.log
+            exit 1
+          fi
+          test "$(grep -c 'all .* comparison(s) within rel' acestep-san.log)" -ge 3
+          tail -n 3 acestep-san.log | grep -q "^OK"
+
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)
     runs-on: ubuntu-latest
