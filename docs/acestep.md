@@ -5,15 +5,15 @@ seconds to 10 minutes, from a diffusion transformer over 25 Hz latents and an au
 it to the same shape as [Qwen-Image](qwen-image.md): one C file, weights read as they are, every stage held to the
 reference by an oracle that compares tensors, not just the final audio.
 
-**Nothing here is user-facing yet.** The engine does not generate music. What exists is the first stage, the VAE
-decoder, and the tooling every later stage is checked with. `coli` does not know about it and `make install` does
-not ship it.
+**Nothing here is user-facing yet.** The engine does not generate music. What exists is the VAE decoder, the diffusion
+transformer with its sampler, and the tooling both are checked with; the text encoder and the engine that joins them are
+still to come. `coli` does not know about it and `make install` does not ship it.
 
 | stage | what | state |
 |---|---|---|
 | 0 | the reference: upstream's own handler, observed at every stage; a tiny random checkpoint of the real structure | done |
 | 1 | the VAE decoder, `c/acestep_vae.h`: latents to 48 kHz stereo, tiled as upstream tiles | done, oracle-checked |
-| 2 | the DiT, its condition encoders and the turbo sampler (DCW included) | next |
+| 2 | the DiT, its condition encoders and the turbo sampler (DCW included), `c/acestep_dit.h` | done, oracle-checked |
 | 3 | the text encoder (Qwen3-Embedding-0.6B) and the prompt template | |
 | 4 | the engine proper: serve protocol, gateway route, `coli music`, the web player | |
 | 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
@@ -90,5 +90,60 @@ overlap of 16; the default stays upstream's (256 and 64) until that is chosen on
 must be done in f32; folding to bf16 would move every weight by up to 0.4%) and a 256-frame window's activations are
 about 0.75 GB.
 
-CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracle,
-the refusal tests (`tests/test_acestep_vae_load.py`), the mutations, and the oracle again under ASan and UBSan.
+## The DiT oracle
+
+```sh
+./acestep --model acestep_tiny --dit-ref acestep_tiny_ref/inst10
+./acestep --model ~/models/ace-step-1.5 --dit-ref ace_ref/long30 --dump out/long30     # f32 velocities and hidden states
+```
+
+Its input is what the handler fed the DiT (the captured text and lyric hidden states, the reference timbre latents, the
+source latents and masks, the seed's noise), so it checks the DiT, its condition encoders and the sampler, not the text
+encoder. In order, each against the handler's own tensor: the packed condition tokens (lyric, timbre, text); the
+context; the timestep embedding and its six modulation vectors at every call; the RoPE table; every DiT call fed the
+latents and timesteps the handler fed it; each layer **alone**, fed the handler's hidden state, modulation and RoPE
+table (a case captured with `--taps`); the schedule; the sampler's update **alone** (`x - v dt`, the straight jump to
+x0 on the last step, DCW) fed the handler's latents and velocity; and finally the chained sampler from the captured
+noise. `acestep_ref.py capture` records what is needed; it does not rebuild upstream's tensors by hand.
+
+The limits are not one number, and the reason is the measurement. Chained, a deep network turns independent float32
+rounding into a larger difference, and a sampler loop turns that into a larger one again, so the pieces are held to
+what each can honestly reach and the whole to what is left:
+
+| compared | measured on the real checkpoint (11 cases) | held at (norm ratio, largest error / peak) |
+|---|---|---|
+| a layer alone | 1e-7 typical, 3.3e-7 worst, no growth with depth | 2e-6, 2e-5 |
+| a DiT call | 1e-6 typical, 8.2e-6 worst (at t = 1, where the network is most sensitive) | 5e-5, 1e-4 |
+| the sampler's update alone | 7e-8 (float32 arithmetic; DCW included) | 1e-6, 2e-6 |
+| the chained sampler | 4e-7 to 2.2e-5 final; in `steps5_nodcw`, 7.8e-5 final and 1.8e-4 mid-run | 5e-4, 2e-3 |
+
+The chained run needs the loose limit because its steps feed their rounding into the next: in `steps5_nodcw`, whose
+steps are the longest, the difference grows 8e-6, 2.6e-5, 3.8e-5, 1.8e-4 over five steps, though every call and every
+update in it is at the tight level. That is the sampler's dynamics, not an error in any operation. What was ruled out on
+the way, by measurement: the timestep embedding (matches torch at 3e-7 even at t = 1), the RoPE tables (6e-8, one ulp),
+`qi_gemm` (identical to torch's float32 matmul against float64, ratio 1.00 at every DiT shape), and the layers
+themselves (above). I could not fully explain why torch's own chain accumulates less than ours (torch fp32 is 1e-6 from
+float64 at the last layer, ours 5e-6) when every layer alone agrees to 1e-7; the numbers are what they are, and the
+limits above are set from them.
+
+End to end, from the handler's conditioning to a waveform in C (this DiT's latents through the C VAE), against the audio
+the handler returned: the largest sample error is 8e-6 for `inst10`, 4e-5 for the case with the noisiest latents, and
+9.7e-5 for the 30-second clip (9.7e-5 of a waveform normalised to peak 1.0 is -80 dBFS, about three steps of 16-bit
+audio).
+
+`tools/mutate_acestep_dit.py` shows the oracle can fail: 46 one-line breakages (the timbre frame, the window, RoPE, the
+norms, grouped-query head mapping, AdaLN, the gates, SwiGLU, the timestep embedding, the patch order, the schedule, the
+sampler, each part of DCW) are compiled and run against five cases, and all 46 are caught. Which case catches which is
+the point of passing several: the odd-tail DCW mutant survives every even-length clip and is caught by `odd9`;
+`sampler-r-zero` (the network is told `r = 0`) is invisible to every teacher-forced call, which use the captured `r`, and
+is caught only by the chained run.
+
+Cost on the real checkpoint (24-core i9): a DiT call is 1.0 to 1.5 s for a 10-second clip (125 tokens), 4 s for 30
+seconds (375), so 8 steps take 8 to 12 s and 32 s, against 5.9 s for torch's float32 on the same CPU for the 10-second
+clip: about 1.5 to 2 times slower, which the small M of these products (125 rows) makes plausible but which has not
+been tuned. The weights stay bf16 (4.4 GB resident, 4.2 GB peak for the whole oracle); `qi_gemm` widens them inside the
+product, which is exact. The condition (both encoders, 76 tokens) takes 1.1 s.
+
+CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs both oracles,
+the refusal tests (`tests/test_acestep_vae_load.py`, `tests/test_acestep_dit_load.py`), both mutation tools, and the oracles
+again under ASan and UBSan.

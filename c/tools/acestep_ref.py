@@ -17,6 +17,10 @@ through hooks rather than reimplemented, so the numbers cannot drift from the re
         noise                        the initial latents prepare_noise drew from the seed
         in.*                         every tensor handed to generate_audio (silence latent, masks, timbre reference)
         dit{i}.xt, .t, .r, .v        the i-th DiT call: latents in, t, r, velocity out
+        dit0.rope_cos, .rope_sin     the DiT's RoPE table of the first call, [1, tokens, head_dim]
+        dit0.tap.proj_in, .layer{k}  with --taps: the first call's hidden state after the patch embedding and each layer
+        dit{i}.temb_t, .proj_t       its timestep embedding of t ([1, D]) and the six modulation vectors ([1, 6, D]);
+        dit{i}.temb_r, .proj_r       and the same for t - r (the second embedding, which is of 0 in turbo)
         latents                      generate_audio's target_latents
         vae{k}.in, vae{k}.out        the k-th VAE decode: [1, 64, frames] in, [1, 2, samples] out
         audio                        what the handler returns: [2, samples] f32 at 48 kHz
@@ -106,7 +110,7 @@ def clean(t):
 class Recorder:
     """Hooks on one initialised handler that collect every stage's tensors for the current case."""
 
-    def __init__(self, h):
+    def __init__(self, h, taps=False):
         self.h, self.t, self.meta = h, {}, {}
         self.dit_calls = self.vae_calls = 0
         self.inside_text = False
@@ -115,6 +119,14 @@ class Recorder:
         enc.register_forward_hook(self._text_post)
         enc.embed_tokens.register_forward_hook(self._embed)
         h.model.decoder.register_forward_hook(self._dit, with_kwargs=True)
+        self.temb_calls = {"t": 0, "r": 0}
+        h.model.decoder.rotary_emb.register_forward_hook(self._rope)
+        h.model.decoder.time_embed.register_forward_hook(lambda m, a, o: self._temb("t", o))
+        h.model.decoder.time_embed_r.register_forward_hook(lambda m, a, o: self._temb("r", o))
+        if taps:        # the hidden state after the patch embedding and after every DiT layer, of the first call only
+            h.model.decoder.proj_in.register_forward_hook(lambda m, a, o: self._tap("proj_in", o))
+            for k, layer in enumerate(h.model.decoder.layers):
+                layer.register_forward_hook(lambda m, a, o, k=k: self._tap(f"layer{k}", o[0]))
         self._wrap(h.model, "prepare_condition", self._prepare_condition)
         self._wrap(h.model, "prepare_noise", self._prepare_noise)
         self._wrap(h.model, "generate_audio", self._generate_audio)
@@ -128,6 +140,21 @@ class Recorder:
     def reset(self):
         self.t, self.meta = {}, {}
         self.dit_calls = self.vae_calls = 0
+        self.temb_calls = {"t": 0, "r": 0}
+
+    def _rope(self, module, args, output):
+        if self.dit_calls == 0:                     # the DiT's RoPE table (cos, sin), [1, tokens, head_dim], of the first call
+            self.t["dit0.rope_cos"], self.t["dit0.rope_sin"] = clean(output[0]), clean(output[1])
+
+    def _tap(self, name, out):
+        if self.dit_calls == 0:                     # the decoder's own hook has not fired for call 0 yet
+            self.t[f"dit0.tap.{name}"] = clean(out)
+
+    def _temb(self, which, out):
+        """The timestep embedding of call i (temb [1, D], proj [1, 6, D]): `which` is the embedding of t or of t - r."""
+        i = self.temb_calls[which]
+        self.temb_calls[which] += 1
+        self.t[f"dit{i}.temb_{which}"], self.t[f"dit{i}.proj_{which}"] = clean(out[0]), clean(out[1])
 
     def _text_pre(self, module, args, kwargs):
         self.inside_text = True
@@ -253,7 +280,7 @@ def capture(a):
     versions = {"torch": torch.__version__, "transformers": transformers.__version__, "diffusers": diffusers.__version__,
                 "upstream_commit": upstream_commit(root), "dit_config_sha256": config_hash}
     os.makedirs(a.outdir, exist_ok=True)
-    rec = Recorder(h)
+    rec = Recorder(h, taps=a.taps)
 
     def run(name):
         rec.reset()
@@ -304,6 +331,7 @@ def main():
     c.add_argument("model_dir")
     c.add_argument("outdir")
     c.add_argument("--cases", help="comma-separated; default all (see `cases`)")
+    c.add_argument("--taps", action="store_true", help="also record the hidden state after the patch embedding and each DiT layer of the first call (for debugging; 25 MB a case)")
     c.add_argument("--check-determinism", action="store_true", help="run the first case twice and require identical tensors")
     sub.add_parser("cases")
     a = ap.parse_args()

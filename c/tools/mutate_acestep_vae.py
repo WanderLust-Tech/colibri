@@ -56,16 +56,20 @@ MUTANTS = {
 # of context the output is wrong, so the oracle does see the overlap when it matters.
 
 
-def build_and_run(cc, work, model, ref, source_edit=None):
+def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h", flag="--vae-ref"):
+    """Build acestep.c with `header` (a copy of c/<header>, with source_edit applied) and run the oracle `flag` on every
+    case in `refs`. Returns ("pass" | "fail" | "build-failed" | "bad-mutant", the last line of the failing run).
+    A mutant is (old, new) or (old, new, count): `old` must occur exactly `count` times (default 1) and all are replaced."""
+    refs = [refs] if isinstance(refs, str) else list(refs)
     shutil.copyfile(os.path.join(C_DIR, "acestep.c"), os.path.join(work, "acestep.c"))
-    with open(os.path.join(C_DIR, "acestep_vae.h"), encoding="utf-8", newline="") as f:
+    with open(os.path.join(C_DIR, header), encoding="utf-8", newline="") as f:
         text = f.read()
     if source_edit:
-        old, new = source_edit
-        if text.count(old) != 1:
-            return "bad-mutant", f"{old!r} occurs {text.count(old)} times in acestep_vae.h"
+        old, new, count = (*source_edit, 1)[:3] if len(source_edit) == 2 else source_edit
+        if text.count(old) != count:
+            return "bad-mutant", f"{old!r} occurs {text.count(old)} times in {header}, expected {count}"
         text = text.replace(old, new)
-    with open(os.path.join(work, "acestep_vae.h"), "w", encoding="utf-8", newline="") as f:
+    with open(os.path.join(work, header), "w", encoding="utf-8", newline="") as f:
         f.write(text)
     exe = os.path.join(work, "acestep_mut.exe" if os.name == "nt" else "acestep_mut")
     cmd = [cc, "-O2", "-march=native", "-fopenmp", "-D_GNU_SOURCE", "-D_FILE_OFFSET_BITS=64", "-I", C_DIR,
@@ -73,8 +77,13 @@ def build_and_run(cc, work, model, ref, source_edit=None):
     built = subprocess.run(cmd, capture_output=True, text=True)
     if built.returncode:
         return "build-failed", built.stderr[-400:]
-    run = subprocess.run([exe, "--model", model, "--vae-ref", ref], capture_output=True, text=True)
-    return ("pass" if run.returncode == 0 else "fail"), run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
+    last = ""
+    for ref in refs:
+        run = subprocess.run([exe, "--model", model, flag, ref], capture_output=True, text=True)
+        last = run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
+        if run.returncode != 0:
+            return "fail", f"{os.path.basename(ref)}: {last}"
+    return "pass", last
 
 
 def main():
