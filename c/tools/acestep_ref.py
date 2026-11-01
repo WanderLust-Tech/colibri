@@ -96,6 +96,12 @@ CASES["cut10"] = {**COMMON, "captions": "a slow cinematic piece with " + ", ".jo
 CASES["empty10"] = {**COMMON, "captions": "", "lyrics": "", "vocal_language": "unknown", "dcw_enabled": True}
 # 9.6 s is 240 latent frames, and upstream writes "9 seconds" in the metas (int() cuts, it does not round)
 CASES["frac96"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 9.6, "dcw_enabled": True}
+# What the engine's clip length (acestep_gen.h acg_clip) must reproduce, each a rule a request's duration goes through:
+# the duration is rounded to one decimal first (9.07 s is 9.1 s, 227 frames, not 226), the frames are the whole number of
+# 1920-sample hops in it (9.1 s is 227.5: 227, not 228), and a clip under 128 frames is run on 128 (5.0 s is 125).
+CASES["round907"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 9.07, "dcw_enabled": True}
+CASES["floor91"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 9.1, "dcw_enabled": True}
+CASES["short5"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 5.0, "dcw_enabled": True}
 
 
 def fingerprint(root):

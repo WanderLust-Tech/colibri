@@ -5,9 +5,9 @@ seconds to 10 minutes, from a diffusion transformer over 25 Hz latents and an au
 it to the same shape as [Qwen-Image](qwen-image.md): one C file, weights read as they are, every stage held to the
 reference by an oracle that compares tensors, not just the final audio.
 
-**Nothing here is user-facing yet.** The engine does not generate music. What exists is the VAE decoder, the diffusion
-transformer with its sampler, the text encoder with its tokenizer and prompts, and the tooling all are checked with; the
-engine that joins them is still to come. `coli` does not know about it and `make install` does not ship it.
+**Not user-facing yet.** The engine makes music from a command line (`acestep --model DIR --caption "calm piano" --out
+clip.wav`) and speaks a line protocol for the gateway to drive (`--serve`), and every part of it is held to upstream's
+handler. `coli` does not know about it yet, the gateway has no route for it and `make install` does not ship it.
 
 | stage | what | state |
 |---|---|---|
@@ -15,7 +15,8 @@ engine that joins them is still to come. `coli` does not know about it and `make
 | 1 | the VAE decoder, `c/acestep_vae.h`: latents to 48 kHz stereo, tiled as upstream tiles | done, oracle-checked |
 | 2 | the DiT, its condition encoders and the turbo sampler (DCW included), `c/acestep_dit.h` | done, oracle-checked |
 | 3 | the text encoder (Qwen3-Embedding-0.6B), its tokenizer and the prompt templates, `c/acestep_text.h` | done, oracle-checked |
-| 4 | the engine proper: serve protocol, gateway route, `coli music`, the web player | |
+| 4a | the engine proper in C: a request in, audio out; one-shot and `--serve`; `c/acestep_gen.h`, `c/acestep_serve.h` | done, oracle-checked |
+| 4b | around it: gateway route, `coli music`, the registry's audio modality, the web player, `make install` | |
 | 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
 
 ## The model, as measured from the checkpoint
@@ -198,6 +199,76 @@ cut at its limit, which is why several cases are passed.
 Cost: the caption's encoder is 0.6 s for 60 tokens and 1.5 s for 256 on the real checkpoint (24-core i9); the lyric
 path is a table lookup.
 
+## The engine
+
+```sh
+./acestep --model ~/models/ace-step-1.5 --caption "calm piano with soft strings" --duration 20 --out clip.wav
+./acestep --model ~/models/ace-step-1.5 --caption "upbeat pop" --lyrics "[Verse]
+walking down the street" --language en --seed 7 --out song.wav
+./acestep --model ~/models/ace-step-1.5 --serve          # the gateway's way in
+./acestep --model acestep_tiny --gen-ref acestep_tiny_ref/inst10    # the oracle
+```
+
+`acestep_gen.h` joins the three networks as upstream's handler does for text-to-music with the turbo DiT and no planner:
+prompts, token ids, the caption's hidden states and the lyrics' embedding rows, the condition encoders (lyric, timbre, text),
+`steps` Euler steps with DCW, the tiled VAE decode, the peak limit. Defaults: instrumental, 30 s, 8 steps, shift 1, DCW on.
+Every weight stays in memory for the life of the process (6.4 GB: the DiT 4.8, the text encoder 1.2, the VAE 0.3).
+
+What upstream does that a port would get wrong, each held by the oracle:
+
+- **The seed is torch's.** The noise comes from `acg_randn`, a Mersenne Twister and Box-Muller on blocks of 16 exactly as
+  ATen's CPU kernel makes `torch.randn(..., generator=Generator().manual_seed(seed))`, so a seed gives the clip upstream's
+  own handler gives for it. Measured against the handler's noise: 1.8e-7 relative (a few float32 ulps; ATen's AVX2 build
+  uses Sleef's `log`, `cos` and `sin`, this uses libm's). A seed is 0 to 2^32 - 1.
+- **The clip's length** goes through three rules: the duration is rounded to one decimal first (9.07 s is 9.1 s, 227
+  frames, not 226), the frames are the whole 1920-sample hops in it (9.1 s is 227.5, so 227), and a clip under 128 frames
+  is run on 128 (5.0 s is 125). Each has its own captured case (`round907`, `floor91`, `short5`).
+- **The source latents and the timbre reference are the silence latent** (`silence_latent.pt`, a torch file: a stored zip
+  holding a float32 `[1][64][N]` tensor, read here without torch and transposed to `[N][64]`). The first `frames` of it are
+  the source, the first 750 the timbre reference, and the mask is all true.
+- **Lyrics are used as given.** No lyrics at all means `[Instrumental]`; an empty string is an empty lyric, which upstream
+  also does and which makes different music (`empty10`).
+- One difference on purpose: a clip asked for under 5.12 s is made on its 128 frames and then cut to the length asked, where
+  the handler returns all 128.
+
+The protocol (`acestep_serve.h`, the same shape as the image engine's): `READY {...}` once with the limits; `GEN {id, caption,
+lyrics, language, duration, steps, shift, seed, bpm, key, timesig, dcw}`; `PROGRESS {id, stage, step, steps}` for the stages
+`text`, `condition`, `denoise` (one per step) and `decode` (one per VAE window); `AUDIO {id, ..., bytes}` followed by that
+many bytes of 16-bit little-endian interleaved PCM at 48 kHz and a newline; `ERROR {id, message}`, after which the engine is
+ready for the next request; `CANCEL {id}`, honoured between stages and between sampler steps and VAE windows, answered
+`ERROR "cancelled"`. A `GEN` that arrives while one runs is kept and run after it. Limits: duration 1 to 600 s, 1 to 20 steps,
+caption 4096 bytes, lyrics 32768 bytes (the prompts are then cut at the handler's 256 and 2048 tokens, and the result says
+`truncated`).
+
+`--gen-ref` runs a captured case's own parameters through all of it and compares: the silence latent (exactly), the source
+latents and timbre reference cut from it (exactly), the noise, the length asked, and the audio.
+
+| compared | measured on the real checkpoint (19 cases) | held at |
+|---|---|---|
+| the silence latent and its slices | identical | 1e-9 |
+| the noise from the seed | 1.8e-7 relative, 1.7e-6 absolute | 1e-6, 1e-6 |
+| the audio, caption to waveform | norm ratio 8.2e-6 to 1.6e-4 (the worst is `steps5_nodcw`); largest sample 2e-7 to 4.8e-4 (the 30 s clip) | 5e-4, 2e-3 |
+
+The audio is what the whole chain leaves: the text encoder's 1e-5, eight sampler steps and the decoder each pass on what they
+were given, so it is looser than any piece (the DiT with the handler's own conditioning gave 9.7e-5 on the same clip). 2e-3 is
+-54 dBFS at the single worst sample of a waveform in [-1, 1]; the norm ratio is the bound on the whole. A wrong prompt, clip
+length, seed or schedule is wrong by 0.1 to 1.
+
+`tools/mutate_acestep_gen.py` shows the oracle can fail: 34 one-line breakages (each part of the generator, the
+transpose and offset of the silence latent, the timbre length, each clip-length rule, the mask, the lyric default, the
+metas, the shift, DCW, the arguments the network is called with, the peak limit, the VAE overlap) are compiled and run against ten
+cases and all are caught. Two are deliberately absent because they are equivalent: the generator's tail branch (a clip's noise
+is a multiple of 16 values, so it never runs) and a VAE overlap of 12 or more.
+
+`tests/test_acestep_serve.py` holds the protocol itself (the frame sizes, the same seed giving the same bytes and another
+not, every refusal naming its reason and leaving the engine alive, a CANCEL behind its GEN and on the first denoise frame,
+queued requests answered in order, a line over 1 MiB refused by its id, end of input a clean exit, and the one-shot command
+line making the same samples as the protocol); `tests/test_acestep_gen_load.py` the refusals (every way the silence latent
+can be wrong, a missing component, a latent width the VAE does not share, a reference without its parameters, the command line).
+
+Cost on the real checkpoint (24-core i9, 10 s of music): text 0.7 s, condition 1.1 s, eight steps 12 s, decode 2 s, about 16 s
+in all after a 5 s load; 30 s of music is about 50 s.
+
 CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracles,
-the refusal tests (`tests/test_acestep_{vae,dit,text}_load.py`), the three mutation tools, and the oracles again under ASan
+the refusal tests (`tests/test_acestep_{vae,dit,text,gen}_load.py`, `tests/test_acestep_serve.py`), the four mutation tools, and the oracles again under ASan
 and UBSan.

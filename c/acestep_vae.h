@@ -419,11 +419,17 @@ static int acv_decode(const AcVae *v, const float *z, int T, float *out){
 
 /* Upstream's tiled decode (acestep/core/generation/handler/vae_decode_chunks.py): windows of `chunk` frames with
  * `overlap` frames of context on each side, only each window's core of chunk-2*overlap frames kept. The overlap is
- * halved while the stride would be empty, but never below 4. out [F*hop][ach]. 0 on success. */
+ * halved while the stride would be empty, but never below 4. out [F*hop][ach]. 0 on success. `progress` is called before each
+ * window (done, total) and once at the end; a nonzero return from a call before a window stops the decode with -2. */
 static int acv_decode_tiled(const AcVae *v, const float *z, int F, int chunk, int overlap, float *out,
-                            void (*progress)(int done, int total, void *ud), void *ud){
+                            int (*progress)(int done, int total, void *ud), void *ud){
     if (F < 1 || chunk < 1 || overlap < 0) return -1;
-    if (F <= chunk) { if (progress) progress(0, 1, ud); int r = acv_decode(v, z, F, out); if (progress) progress(1, 1, ud); return r; }
+    if (F <= chunk) {
+        if (progress && progress(0, 1, ud)) return -2;
+        int r = acv_decode(v, z, F, out);
+        if (progress) progress(1, 1, ud);
+        return r;
+    }
     const int min_overlap = 4;
     int ov = overlap;
     while (chunk - 2 * ov <= 0 && ov > min_overlap) ov /= 2;
@@ -437,7 +443,7 @@ static int acv_decode_tiled(const AcVae *v, const float *z, int F, int chunk, in
     if (!w || !win) { acv_work_free(w); free(win); return -1; }
     size_t pos = 0;
     for (int i = 0; i < steps; i++) {
-        if (progress) progress(i, steps, ud);
+        if (progress && progress(i, steps, ud)) { acv_work_free(w); free(win); return -2; }       /* asked to stop */
         int cs = i * stride, ce = cs + stride < F ? cs + stride : F;
         int ws = cs - ov > 0 ? cs - ov : 0, we = ce + ov < F ? ce + ov : F;
         acv_decode_ws(v, w, z + (size_t)ws * v->zdim, we - ws, win);

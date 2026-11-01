@@ -1331,13 +1331,14 @@ endif
 qwenimage$(EXE): qwenimage.c $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) qwenimage.c $(VK_OBJ) -o qwenimage$(EXE) $(LDFLAGS)
 
-# ACE-Step 1.5 text-to-music, built stage by stage (acestep.c says where it is). Not in `install` yet: until
-# the serve protocol exists it is an oracle (acestep --model DIR --vae-ref REFDIR), not an engine to ship.
+# ACE-Step 1.5 text-to-music, built stage by stage (acestep.c says where it is). The engine is complete on its own
+# (acestep --model DIR --caption TEXT --out FILE.wav, or --serve); it is not in `install` until the gateway, `coli music`
+# and the registry know it.
 ifneq ($(EXE),)
 .PHONY: acestep
 acestep: acestep$(EXE)
 endif
-acestep$(EXE): acestep.c acestep_vae.h acestep_dit.h acestep_text.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
+acestep$(EXE): acestep.c acestep_vae.h acestep_dit.h acestep_text.h acestep_gen.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
 	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
 
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision
@@ -2926,7 +2927,7 @@ check:
 	$(MAKE) portable
 	$(MAKE) test
 
-install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) qwenimage$(EXE) laya$(EXE) gliner_decide$(EXE) \
+install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) qwenimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
 	$(if $(filter 1,$(COLI_V4_SUPPORTED)),deepseek-v4,)
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)
@@ -2940,6 +2941,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	$(INSTALL) -m 755 qwen36$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen36$(EXE)
 	$(INSTALL) -m 755 qwen38$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen38$(EXE)
 	$(INSTALL) -m 755 qwenimage$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwenimage$(EXE)
+	$(INSTALL) -m 755 acestep$(EXE) $(DESTDIR)$(LIBEXECDIR)/acestep$(EXE)
 	$(INSTALL) -m 755 laya$(EXE) $(DESTDIR)$(LIBEXECDIR)/laya$(EXE)
 	$(INSTALL) -m 755 gliner_decide$(EXE) $(DESTDIR)$(LIBEXECDIR)/gliner_decide$(EXE)
 	$(INSTALL) -m 755 deepseek_v41$(EXE) $(DESTDIR)$(LIBEXECDIR)/deepseek_v41$(EXE)

@@ -558,7 +558,7 @@ jobs:
         run: |
           cd c
           rc=0
-          ENGINES="colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage laya gliner_decide"
+          ENGINES="colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage acestep laya gliner_decide"
           if [ "${{ matrix.v4 }}" = "1" ]; then ENGINES="$ENGINES deepseek-v4"; fi
           for t in $ENGINES; do
             echo "::group::$t"
@@ -1518,7 +1518,7 @@ jobs:
           grep -q "e2e-oracle\] all cases within tolerance" qwenimage-san.log
 
   acestep-tiny-check:
-    name: ACE-Step tiny oracle (VAE decoder, DiT and text encoder vs upstream's own handler)
+    name: ACE-Step tiny oracle (VAE decoder, DiT, text encoder and the whole pipeline vs upstream's own handler)
     runs-on: ubuntu-latest
     env:
       ACESTEP_UPSTREAM: ${{ github.workspace }}/acestep-upstream
@@ -1546,8 +1546,9 @@ jobs:
           # DCW on and off, an odd length, shift 3, a 5-step schedule, a 30 s clip; --taps also records every DiT layer's
           # hidden state, so a layer can be checked alone
           # (vocal10, meta10, cjk10, cut10, empty10 and frac96 are the text encoder's: lyrics, set metas, other scripts and
-          # accents, a caption cut at 256 tokens, nothing at all, a fractional duration)
-          python3 tools/acestep_ref.py capture acestep_tiny acestep_tiny_ref --cases inst10,odd9,odd9_nodcw,shift3,steps5,long30,vocal10,meta10,cjk10,cut10,empty10,frac96 --taps --check-determinism
+          # accents, a caption cut at 256 tokens, nothing at all, a fractional duration; round907, floor91 and short5 are the clip length's rules: rounding to a decimal, whole hops, the
+          # 128-frame floor)
+          python3 tools/acestep_ref.py capture acestep_tiny acestep_tiny_ref --cases inst10,odd9,odd9_nodcw,shift3,steps5,long30,vocal10,meta10,cjk10,cut10,empty10,frac96,round907,floor91,short5 --taps --check-determinism
           python3 tools/make_acestep_tok_ref.py acestep_tiny acestep_tiny_tok_ref.json
           ACESTEP_TINY=acestep_tiny python3 -m unittest -v tests.test_acestep_manifest tests.test_acestep_fixture tests.test_acestep_ref
       - name: The VAE decoder against the handler's own decodes, window by window and tiled
@@ -1582,12 +1583,22 @@ jobs:
             ./acestep --model acestep_tiny --text-ref acestep_tiny_ref/$case
           done
           ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 ACESTEP_TINY_TOKREF=acestep_tiny_tok_ref.json python3 -m unittest -v tests.test_acestep_text_load tests.test_acestep_text_mutants
-      - name: Every mutation of the decoder, of the DiT and of the text path is caught by its oracle
+      - name: The whole pipeline, caption to audio, against the handler, and the engine's protocol
+        run: |
+          cd c
+          # The case's own parameters through acestep_gen.h: torch's noise from the seed, the silence latent slices, the
+          # clip length, then the audio against what the handler returned.
+          for case in inst10 vocal10 odd9_nodcw shift3 steps5 long30 meta10 cjk10 empty10 round907 floor91 short5; do
+            ./acestep --model acestep_tiny --gen-ref acestep_tiny_ref/$case
+          done
+          ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 python3 -m unittest -v tests.test_acestep_serve tests.test_acestep_gen_load tests.test_acestep_gen_mutants
+      - name: Every mutation of the decoder, of the DiT, of the text path and of the pipeline is caught by its oracle
         run: |
           cd c
           python3 tools/mutate_acestep_vae.py acestep_tiny acestep_tiny_ref/long30
           python3 tools/mutate_acestep_dit.py acestep_tiny acestep_tiny_ref/inst10 acestep_tiny_ref/odd9 acestep_tiny_ref/shift3 acestep_tiny_ref/steps5 acestep_tiny_ref/long30
           python3 tools/mutate_acestep_text.py acestep_tiny acestep_tiny_tok_ref.json acestep_tiny_ref/inst10 acestep_tiny_ref/vocal10 acestep_tiny_ref/meta10 acestep_tiny_ref/cjk10 acestep_tiny_ref/cut10 acestep_tiny_ref/empty10 acestep_tiny_ref/frac96
+          python3 tools/mutate_acestep_gen.py acestep_tiny acestep_tiny_ref/inst10 acestep_tiny_ref/vocal10 acestep_tiny_ref/odd9_nodcw acestep_tiny_ref/shift3 acestep_tiny_ref/round907 acestep_tiny_ref/floor91 acestep_tiny_ref/short5 acestep_tiny_ref/meta10 acestep_tiny_ref/empty10 acestep_tiny_ref/long30
       - name: The oracle and the refusal tests again under ASan and UBSan
         run: |
           cd c
@@ -1607,11 +1618,15 @@ jobs:
             ./acestep --model acestep_tiny --text-ref acestep_tiny_ref/$case >> acestep-san.log 2>&1 || true
           done
           ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 ACESTEP_TINY_TOKREF=acestep_tiny_tok_ref.json python3 -m unittest tests.test_acestep_text_load >> acestep-san.log 2>&1 || true
+          for case in inst10 short5 empty10; do
+            ./acestep --model acestep_tiny --gen-ref acestep_tiny_ref/$case >> acestep-san.log 2>&1 || true
+          done
+          ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 python3 -m unittest tests.test_acestep_gen_load tests.test_acestep_serve >> acestep-san.log 2>&1 || true
           if grep -qE "ERROR: AddressSanitizer|runtime error:" acestep-san.log; then
             cat acestep-san.log
             exit 1
           fi
-          test "$(grep -c 'all .* comparison(s) within' acestep-san.log)" -ge 11
+          test "$(grep -c 'all .* comparison(s) within' acestep-san.log)" -ge 14
           grep -q 'tok-oracle\] all .* cases identical' acestep-san.log
           tail -n 3 acestep-san.log | grep -q "^OK"
 

@@ -11,10 +11,20 @@
  *
  *   1. the VAE decoder        acestep --model DIR --vae-ref REFDIR           (acestep_vae.h)
  *   2. the DiT and its sampler  acestep --model DIR --dit-ref REFDIR         (acestep_dit.h)
- *   3. the text encoder
- *   4. the engine proper: a serve protocol, WAV output
+ *   3. the text encoder and its tokenizer  acestep --model DIR --tok-ref FILE / --text-ref REFDIR   (acestep_text.h)
+ *   4. the engine proper                   acestep --model DIR --gen-ref REFDIR / --serve / --caption ... --out FILE.wav
+ *                                          (acestep_gen.h joins the three networks, acestep_serve.h speaks the line protocol)
  *
  * Usage:
+ *   acestep --model DIR --caption TEXT --out FILE.wav [--lyrics TEXT] [--language CODE] [--duration S] [--steps N] [--shift X]
+ *           [--seed N] [--bpm N] [--key K] [--timesig T] [--no-dcw]
+ *       Makes a clip and writes it as a 16-bit stereo WAV at 48 kHz. Defaults: instrumental, 30 s, 8 steps, shift 1, DCW on,
+ *       a seed taken from the clock (printed). The same seed gives the same clip as upstream's handler (acg_randn is torch's generator).
+ *   acestep --model DIR --serve
+ *       The line protocol of acestep_serve.h on stdin and stdout, for the gateway and `coli music`.
+ *   acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]
+ *       The whole pipeline from a captured case's own parameters (caption, lyrics, metas, duration, seed, steps, shift, DCW)
+ *       against what the handler returned: the noise, the silence latent slices, and the audio.
  *   acestep --model DIR --dit-ref REFDIR [--dump PREFIX] [--threads N]
  *       DIR is the checkpoint (it holds acestep-v15-turbo/); REFDIR one captured case. Compares, in order: the condition
  *       encoders' packed tokens with the handler's, the context, the timestep embedding and modulation of every call,
@@ -49,11 +59,18 @@
 #include "acestep_vae.h"
 #include "acestep_dit.h"
 #include "acestep_text.h"
+#include "acestep_gen.h"          /* the three networks joined: a request in, audio out */
+#include "acestep_serve.h"        /* and its line protocol */
 
 static void usage(void){
     fprintf(stderr,
         "usage: acestep --model DIR --dit-ref REFDIR [--dump PREFIX] [--threads N]\n"
         "       acestep --model DIR --vae-ref REFDIR [--chunk N] [--overlap N] [--wav OUT.wav] [--dump PREFIX] [--threads N]\n"
+        "       acestep --model DIR --tok-ref FILE.json | --text-ref REFDIR\n"
+        "       acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]\n"
+        "       acestep --model DIR --caption TEXT --out FILE.wav [--lyrics TEXT] [--language CODE] [--duration S] [--steps N]\n"
+        "               [--shift X] [--seed N] [--bpm N] [--key K] [--timesig T] [--no-dcw]\n"
+        "       acestep --model DIR --serve\n"
         "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/)\n"
         "  REFDIR  one case captured by tools/acestep_ref.py (REFDIR/ref.safetensors)\n");
 }
@@ -142,10 +159,11 @@ static int write_wav16(const char *path, const float *x, size_t frames, int chan
     return fclose(f);
 }
 
-static void tile_progress(int done, int total, void *ud){
+static int tile_progress(int done, int total, void *ud){
     (void)ud;
     if (total > 1 && done < total) fprintf(stderr, "\r[vae-oracle] tiled decode: window %d/%d", done + 1, total);
     else if (total > 1) fprintf(stderr, "\r%60s\r", "");
+    return 0;
 }
 
 static int run_vae_oracle(const char *model, const char *refdir, int chunk, int overlap, const char *wav, const char *dump){
@@ -720,12 +738,159 @@ static int run_text_oracle(const char *model, const char *refdir){
     return 0;
 }
 
+/* The whole pipeline against the handler. The case's own parameters go through acestep_gen.h and the audio comes out; what
+ * is compared is what the handler's tensors can say: the noise (torch's generator, reproduced), the silence latent that
+ * the source latents and the timbre reference are cut from, and the audio. The pieces in between are the other oracles'. */
+/* Limits from the real checkpoint (all 19 captured cases through here): the audio's norm ratio is 8.2e-6 to 1.6e-4 (the
+ * worst is the 5-step case without DCW) and its largest sample error 2e-7 to 4.8e-4 (the 30 s clip, the longest chain: the text encoder's own 1e-5, then 8
+ * sampler steps and the decoder, each passing on what it was given). A waveform lives in [-1, 1], so 2e-3 is -54 dBFS at the
+ * very worst sample and the norm ratio, 5e-4, is the real bound on the whole; a wrong prompt, a wrong clip length, a wrong
+ * seed or a wrong schedule is wrong by 0.1 to 1 (the mutants of tools/mutate_acestep_gen.py are). */
+#define GEN_REL 5e-4
+#define GEN_ABS 2e-3
+
+static int run_gen_oracle(const char *model, const char *refdir, const char *wav){
+    g_tag = "gen-oracle";
+    char err[512] = "";
+    int fails = 0, checks = 0;
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    if (R.n == 0) { fprintf(stderr, "[gen-oracle] no safetensors in %s\n", refdir); return 2; }
+    char path[4300]; snprintf(path, sizeof path, "%s/ref.json", refdir);
+    char *meta_text = NULL; jval *root = NULL, *p = NULL;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+        meta_text = (char *)malloc(len > 0 ? (size_t)len + 1 : 1);
+        if (meta_text && len > 0 && len < (16 << 20) && fread(meta_text, 1, len, f) == (size_t)len) { meta_text[len] = 0; root = json_parse_checked(meta_text); p = root ? json_get(root, "params") : NULL; }
+        fclose(f);
+    }
+    const char *caption = json_str(p, "captions"), *lyrics = json_str(p, "lyrics");
+    if (!p || !caption || !lyrics) { fprintf(stderr, "[gen-oracle] ref.json needs params.captions and params.lyrics\n"); json_free(root); free(meta_text); st_destroy(&R); return 2; }
+    AceRequest rq; memset(&rq, 0, sizeof rq);
+    /* An instrumental case in an unnamed language is asked for the way a user asks: with no lyrics and no language, so that
+     * the engine's defaults are what the oracle checks ("[Instrumental]" and "unknown" are the handler's own words for them). */
+    const char *lang = json_str(p, "vocal_language");
+    rq.caption = caption; rq.lyrics = strcmp(lyrics, "[Instrumental]") ? lyrics : NULL; rq.language = lang && strcmp(lang, "unknown") ? lang : NULL;
+    rq.key = json_str(p, "key_scale"); rq.timesig = json_str(p, "time_signature");
+    jval *jb = json_get(p, "bpm"); rq.bpm = jb && jb->t == J_NUM && jb->num > 0 ? (int)jb->num : 0;
+    rq.duration = acd_json_num(p, "audio_duration", 30);
+    rq.steps = acd_json_int(p, "inference_steps", 8);
+    rq.shift = acd_json_num(p, "shift", 1.0);
+    jval *dc = json_get(p, "dcw_enabled"); rq.dcw = dc && dc->t == J_BOOL ? dc->boolean : 1;
+    rq.seed = (uint64_t)acd_json_num(p, "seed", 42);
+    fprintf(stderr, "[gen-oracle] case: %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", rq.duration, rq.steps, rq.shift, rq.dcw ? "on" : "off", (unsigned long long)rq.seed);
+
+    double t0 = now();
+    AceEngine *e = ace_open(model, err, sizeof err);
+    if (!e) { fprintf(stderr, "[gen-oracle] %s\n", err); json_free(root); free(meta_text); st_destroy(&R); return 2; }
+    fprintf(stderr, "[gen-oracle] loaded in %.1fs (silence latent: %d frames)\n", now() - t0, e->silence_frames);
+
+    int T, want_samples; acg_clip(rq.duration, &T, &want_samples);
+    const int A = e->dit->acdim;
+    int64_t n; int rk; int64_t sh[ST_MAX_RANK];
+    float *rsil = ref_tensor(&R, "in.silence_latent", &n, sh, &rk);
+    if (rsil && rk == 3 && sh[2] == A) {                                  /* the file the handler loaded, against ours, exactly */
+        int fr = (int)sh[1];
+        if (fr != e->silence_frames) { fprintf(stderr, "[gen-oracle] silence latent: %d frames, the handler's has %d\n", e->silence_frames, fr); fails++; }
+        else fails += cmp_tol("silence latent", e->silence, rsil, (size_t)fr * A, 1e-9, 1e-9);
+        checks++;
+    }
+    free(rsil);
+    float *slice = (float *)malloc((size_t)(T > ACG_TIMBRE_FRAMES ? T : ACG_TIMBRE_FRAMES) * A * sizeof(float));
+    float *rsrc = ref_tensor(&R, "in.src_latents", &n, sh, &rk);
+    if (rsrc && rk == 3 && sh[1] == T && sh[2] == A) { acg_silence_slice(e, T, slice); fails += cmp_tol("source latents", slice, rsrc, (size_t)T * A, 1e-9, 1e-9); checks++; }
+    else if (rsrc) { fprintf(stderr, "[gen-oracle] the handler ran %lld frames, this engine %d\n", (long long)(rk == 3 ? sh[1] : -1), T); fails++; checks++; }
+    free(rsrc);
+    float *rtim = ref_tensor(&R, "in.refer_audio_acoustic_hidden_states_packed", &n, sh, &rk);
+    if (rtim && rk == 3 && sh[1] == ACG_TIMBRE_FRAMES && sh[2] == A) { acg_silence_slice(e, ACG_TIMBRE_FRAMES, slice); fails += cmp_tol("timbre reference", slice, rtim, (size_t)ACG_TIMBRE_FRAMES * A, 1e-9, 1e-9); checks++; }
+    else if (rtim) { fprintf(stderr, "[gen-oracle] the timbre reference is not the silence latent's first %d frames\n", ACG_TIMBRE_FRAMES); fails++; checks++; }
+    free(rtim);
+    float *rnoise = ref_tensor(&R, "noise", &n, sh, &rk);
+    if (rnoise && n == (int64_t)T * A) {
+        acg_randn((uint32_t)rq.seed, (size_t)T * A, slice);
+        fails += cmp_tol("noise (torch's generator)", slice, rnoise, (size_t)T * A, 1e-6, 1e-6); checks++;
+    } else if (rnoise) { fprintf(stderr, "[gen-oracle] noise has %lld values, expected %d\n", (long long)n, T * A); fails++; checks++; }
+    free(rnoise); free(slice);
+
+    float *pcm = NULL; AceInfo info;
+    t0 = now();
+    int rc = ace_generate(e, &rq, NULL, &pcm, &info, err, sizeof err);
+    double dt = now() - t0;
+    if (rc) { fprintf(stderr, "[gen-oracle] generation failed: %s\n", err); fails++; checks++; }
+    else {
+        fprintf(stderr, "[gen-oracle] %d frames, %d samples; text %.1fs (%d + %d tokens), condition %.1fs, denoise %.1fs, decode %.1fs, total %.1fs, peak %.4f\n",
+                info.frames, info.samples, info.t_text, info.caption_tokens, info.lyric_tokens, info.t_cond, info.t_denoise, info.t_decode, dt, info.peak);
+        float *aud = ref_tensor(&R, "audio", &n, sh, &rk);
+        const int ach = e->vae->ach;
+        /* The handler returns every frame it ran (at least 128); this engine cuts a short clip to the length asked, so what
+         * it must return is the shorter of the two, and that prefix of each channel is what is compared. */
+        const int64_t per = aud && ach > 0 && n % ach == 0 ? n / ach : -1;
+        const int64_t expect = per < 0 ? -1 : per < want_samples ? per : want_samples;
+        if (aud && per > 0 && info.samples == expect) {
+            float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)info.samples * ach * sizeof(float));
+            if (!want) { fprintf(stderr, "out of memory\n"); exit(1); }
+            for (int ch = 0; ch < ach; ch++) memcpy(want + (size_t)ch * info.samples, aud + (size_t)ch * per, (size_t)info.samples * sizeof(float));
+            fails += cmp_tol("audio, end to end", pl, want, (size_t)info.samples * ach, GEN_REL, GEN_ABS); checks++;
+            free(pl); free(want);
+        } else if (aud) {
+            fprintf(stderr, "[gen-oracle] the handler's audio is %lld samples a channel and %d were asked for: expected %lld back, this engine made %d\n",
+                    (long long)per, want_samples, (long long)expect, info.samples);
+            fails++; checks++;
+        }
+        free(aud);
+        if (wav && write_wav16(wav, pcm, (size_t)info.samples, ach, e->vae->rate)) { fprintf(stderr, "[gen-oracle] cannot write %s\n", wav); fails++; }
+        else if (wav) fprintf(stderr, "[gen-oracle] wrote %s (%.2f s)\n", wav, (double)info.samples / e->vae->rate);
+    }
+    free(pcm);
+    ace_close(e); json_free(root); free(meta_text); st_destroy(&R);
+    if (!checks) { fprintf(stderr, "[gen-oracle] nothing to compare in %s\n", refdir); return 2; }
+    if (fails) { fprintf(stderr, "[gen-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
+    fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, GEN_REL, GEN_ABS);
+    return 0;
+}
+
+/* acestep --model DIR --caption TEXT --out FILE.wav ...: one clip, no protocol. */
+static int run_make(const char *model, AceRequest *rq, const char *out){
+    char err[512] = "";
+    if (ace_check(rq, err, sizeof err)) { fprintf(stderr, "acestep: %s\n", err); return 2; }
+    AceEngine *e = ace_open(model, err, sizeof err);
+    if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
+    float *pcm = NULL; AceInfo info;
+    fprintf(stderr, "[acestep] %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", rq->duration, rq->steps, rq->shift, rq->dcw ? "on" : "off", (unsigned long long)rq->seed);
+    double t0 = now();
+    int rc = ace_generate(e, rq, NULL, &pcm, &info, err, sizeof err);
+    if (rc) { fprintf(stderr, "acestep: %s\n", err); ace_close(e); return 1; }
+    if (write_wav16(out, pcm, (size_t)info.samples, e->vae->ach, e->vae->rate)) { fprintf(stderr, "acestep: cannot write %s\n", out); free(pcm); ace_close(e); return 1; }
+    fprintf(stderr, "[acestep] wrote %s: %.2f s of %d Hz stereo in %.1fs (text %.1f, condition %.1f, denoise %.1f, decode %.1f)%s\n", out,
+            (double)info.samples / e->vae->rate, e->vae->rate, now() - t0, info.t_text, info.t_cond, info.t_denoise, info.t_decode,
+            info.caption_cut || info.lyric_cut ? "; the caption or the lyrics were cut at their token limit" : "");
+    free(pcm); ace_close(e);
+    return 0;
+}
+
 int main(int argc, char **argv){
-    const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *wav = NULL, *dump = NULL;
-    int chunk = 256, overlap = 64;
+    const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
+    int chunk = 256, overlap = 64, serve = 0, make = 0;
+    AceRequest rq; memset(&rq, 0, sizeof rq);
+    rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
+    rq.seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--model") && v) { model = v; i++; }
+        else if (!strcmp(a, "--gen-ref") && v) { gen_ref = v; i++; }
+        else if (!strcmp(a, "--serve")) serve = 1;
+        else if (!strcmp(a, "--out") && v) { out = v; i++; }
+        else if (!strcmp(a, "--caption") && v) { rq.caption = v; make = 1; i++; }
+        else if (!strcmp(a, "--lyrics") && v) { rq.lyrics = v; i++; }
+        else if (!strcmp(a, "--language") && v) { rq.language = v; i++; }
+        else if (!strcmp(a, "--key") && v) { rq.key = v; i++; }
+        else if (!strcmp(a, "--timesig") && v) { rq.timesig = v; i++; }
+        else if (!strcmp(a, "--bpm") && v) { rq.bpm = atoi(v); i++; }
+        else if (!strcmp(a, "--duration") && v) { rq.duration = atof(v); i++; }
+        else if (!strcmp(a, "--steps") && v) { rq.steps = atoi(v); i++; }
+        else if (!strcmp(a, "--shift") && v) { rq.shift = atof(v); i++; }
+        else if (!strcmp(a, "--seed") && v) { rq.seed = (uint64_t)strtoull(v, NULL, 10); i++; }
+        else if (!strcmp(a, "--no-dcw")) rq.dcw = 0;
         else if (!strcmp(a, "--vae-ref") && v) { vae_ref = v; i++; }
         else if (!strcmp(a, "--dit-ref") && v) { dit_ref = v; i++; }
         else if (!strcmp(a, "--tok-ref") && v) { tok_ref = v; i++; }
@@ -742,6 +907,18 @@ int main(int argc, char **argv){
         }
         else { usage(); return 2; }
     }
+    if (serve + make + (gen_ref != NULL) > 1) { fprintf(stderr, "acestep: --serve, --caption and --gen-ref are separate modes\n"); return 2; }
+    if (model && make && !out) { fprintf(stderr, "acestep: --caption needs --out FILE.wav\n"); return 2; }
+    if (model && serve) {
+        char err[512] = "";
+        AceEngine *e = ace_open(model, err, sizeof err);
+        if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
+        int r = acs_serve(e);
+        ace_close(e);
+        return r;
+    }
+    if (model && make) return run_make(model, &rq, out);
+    if (model && gen_ref) return run_gen_oracle(model, gen_ref, wav);
     if (!model || (!vae_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
     int rc = 0;
     if (tok_ref) rc = run_tok_oracle(model, tok_ref);
