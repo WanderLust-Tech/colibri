@@ -130,7 +130,7 @@ class FamilyRegistryTest(unittest.TestCase):
         for family_id, expected in (("glm53", True), ("qwen38", True), ("qwen36", True),
                                     ("deepseek_v41", True), ("mimo", True), ("glm", False), ("kimi", False),
                                     ("inkling", False), ("olmoe", False),
-                                    ("deepseek_v4", False), ("qwen_image", False)):
+                                    ("deepseek_v4", False), ("qwen_image", False), ("ace_step", False)):
             with self.subTest(family=family_id):
                 self.assertIs(by_id[family_id].capabilities.image, expected)
                 self.assertIs(public_metadata(by_id[family_id])["capabilities"]["image"],
@@ -1054,6 +1054,8 @@ class FamilyRegistryTest(unittest.TestCase):
             # An image model has no chat template and nothing to tune; the
             # template is the identity and `coli tune` refuses the modality.
             "qwen_image": "hello {world}",
+            # The same for a music model: the caption is the prompt, nothing to replay.
+            "ace_step": "hello {world}",
             # A decision model answers questions; it has no prompt to replay.
             "laya": "hello {world}",
             "gliner_decide": "hello {world}",

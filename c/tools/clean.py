@@ -42,6 +42,7 @@ FILES = [
     "deepseek_v41", "deepseek_v41.exe",
     "mimo", "mimo.exe",
     "qwenimage", "qwenimage.exe",
+    "acestep", "acestep.exe",
     "laya", "laya.exe",
     "gliner_decide", "gliner_decide.exe",
     "native_quant.o", "native_quant_parallel.o", "native_quant_dual.o",

@@ -1,0 +1,4073 @@
+{
+ "dit": {
+  "decoder.condition_embedder.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.condition_embedder.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.layers.N.cross_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.cross_attn_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6144
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.mlp_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.scale_shift_table": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    6,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.layers.N.self_attn_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 24
+  },
+  "decoder.norm_out.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.proj_in.N.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.proj_in.N.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    192,
+    2
+   ],
+   "count": 1
+  },
+  "decoder.proj_out.N.bias": {
+   "dtype": "BF16",
+   "shape": [
+    64
+   ],
+   "count": 1
+  },
+  "decoder.proj_out.N.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    64,
+    2
+   ],
+   "count": 1
+  },
+  "decoder.scale_shift_table": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    2,
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.linear_1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.linear_1.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    256
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.linear_2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.linear_2.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.time_proj.bias": {
+   "dtype": "BF16",
+   "shape": [
+    12288
+   ],
+   "count": 1
+  },
+  "decoder.time_embed.time_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    12288,
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.linear_1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.linear_1.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    256
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.linear_2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.linear_2.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.time_proj.bias": {
+   "dtype": "BF16",
+   "shape": [
+    12288
+   ],
+   "count": 1
+  },
+  "decoder.time_embed_r.time_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    12288,
+    2048
+   ],
+   "count": 1
+  },
+  "detokenizer.embed_tokens.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "detokenizer.embed_tokens.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 1
+  },
+  "detokenizer.layers.N.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6144
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.post_attention_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 2
+  },
+  "detokenizer.norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "detokenizer.proj_out.bias": {
+   "dtype": "BF16",
+   "shape": [
+    64
+   ],
+   "count": 1
+  },
+  "detokenizer.proj_out.weight": {
+   "dtype": "BF16",
+   "shape": [
+    64,
+    2048
+   ],
+   "count": 1
+  },
+  "detokenizer.special_tokens": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    5,
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.lyric_encoder.embed_tokens.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.lyric_encoder.embed_tokens.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.lyric_encoder.layers.N.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6144
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.post_attention_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 8
+  },
+  "encoder.lyric_encoder.norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.text_projector.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.timbre_encoder.embed_tokens.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.timbre_encoder.embed_tokens.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    64
+   ],
+   "count": 1
+  },
+  "encoder.timbre_encoder.layers.N.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6144
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.post_attention_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 4
+  },
+  "encoder.timbre_encoder.norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.timbre_encoder.special_token": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1,
+    2048
+   ],
+   "count": 1
+  },
+  "null_condition_emb": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1,
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.attention_pooler.embed_tokens.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.attention_pooler.embed_tokens.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.attention_pooler.layers.N.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6144
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6144,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.post_attention_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 2
+  },
+  "tokenizer.attention_pooler.norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.attention_pooler.special_token": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1,
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.audio_acoustic_proj.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.audio_acoustic_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    64
+   ],
+   "count": 1
+  },
+  "tokenizer.quantizer.project_in.bias": {
+   "dtype": "BF16",
+   "shape": [
+    6
+   ],
+   "count": 1
+  },
+  "tokenizer.quantizer.project_in.weight": {
+   "dtype": "BF16",
+   "shape": [
+    6,
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.quantizer.project_out.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "tokenizer.quantizer.project_out.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    6
+   ],
+   "count": 1
+  }
+ },
+ "vae": {
+  "decoder.block.0.conv_t1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.conv_t1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.conv_t1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.conv_t1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.conv_t1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.conv_t1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.conv_t1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.conv_t1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.conv_t1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.conv_t1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.conv_t1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1024,
+    20
+   ],
+   "count": 1
+  },
+  "decoder.block.1.conv_t1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    512,
+    12
+   ],
+   "count": 1
+  },
+  "decoder.block.2.conv_t1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    256,
+    8
+   ],
+   "count": 1
+  },
+  "decoder.block.3.conv_t1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    128,
+    8
+   ],
+   "count": 1
+  },
+  "decoder.block.4.conv_t1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    4
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    2048,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.0.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    2048,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.block.4.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "decoder.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    64,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    2,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    2,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "decoder.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "decoder.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.4.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    2048
+   ],
+   "count": 1
+  },
+  "encoder.block.0.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    4
+   ],
+   "count": 1
+  },
+  "encoder.block.1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    128,
+    8
+   ],
+   "count": 1
+  },
+  "encoder.block.2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    256,
+    8
+   ],
+   "count": 1
+  },
+  "encoder.block.3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    512,
+    12
+   ],
+   "count": 1
+  },
+  "encoder.block.4.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1024,
+    20
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit1.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit2.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    256
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    512
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    256,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.snake2.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.res_unit3.snake2.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.0.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.1.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    128,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.2.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    256,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.3.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    512,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.block.4.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    1024,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.conv1.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.conv1.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.conv1.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    2,
+    7
+   ],
+   "count": 1
+  },
+  "encoder.conv2.bias": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 1
+  },
+  "encoder.conv2.weight_g": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    1,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.conv2.weight_v": {
+   "dtype": "BF16",
+   "shape": [
+    128,
+    2048,
+    3
+   ],
+   "count": 1
+  },
+  "encoder.snake1.alpha": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    2048,
+    1
+   ],
+   "count": 1
+  },
+  "encoder.snake1.beta": {
+   "dtype": "BF16",
+   "shape": [
+    1,
+    2048,
+    1
+   ],
+   "count": 1
+  }
+ },
+ "text": {
+  "embed_tokens.weight": {
+   "dtype": "BF16",
+   "shape": [
+    151669,
+    1024
+   ],
+   "count": 1
+  },
+  "layers.N.input_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.mlp.down_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    3072
+   ],
+   "count": 28
+  },
+  "layers.N.mlp.gate_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    3072,
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.mlp.up_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    3072,
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.post_attention_layernorm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.k_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.k_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.o_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    2048
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.q_norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    128
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.q_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    2048,
+    1024
+   ],
+   "count": 28
+  },
+  "layers.N.self_attn.v_proj.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024,
+    1024
+   ],
+   "count": 28
+  },
+  "norm.weight": {
+   "dtype": "BF16",
+   "shape": [
+    1024
+   ],
+   "count": 1
+  }
+ }
+}

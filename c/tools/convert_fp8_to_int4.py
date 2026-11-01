@@ -74,6 +74,8 @@ OTHER_FAMILY_PATHS = {
                        "see docs/mimo.md",
     "qwenimage21pipeline": "Qwen-Image-2.1 is NOT converted: the image engine reads the "
                            "diffusers checkpoint as downloaded; see docs/qwen-image.md",
+    "acestep":         "ACE-Step 1.5 is NOT converted: the music engine reads the "
+                       "release as downloaded (bf16 safetensors); see docs/acestep.md",
     "laya_modernbert": "Laya is NOT converted: the decision engine reads the release "
                        "as downloaded; see docs/laya.md",
     "gliner2_span_deberta-v2": "GLiNER2.5-Decide is NOT converted: the decision engine reads "

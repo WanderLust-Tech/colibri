@@ -24,6 +24,7 @@ import uuid
 import v4_dsml                      # vendored DeepSeek V4 DSML reference primitives
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
+import music_engine                 # the acestep serve protocol, WAV and request rules
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
 from family_registry import default_model_id as registry_default_model_id
@@ -6004,6 +6005,12 @@ def is_image_engine(engine):
     return getattr(engine, "modality", "text") == "image"
 
 
+def is_music_engine(engine):
+    """True when the server fronts a text-to-music engine (ACE-Step): decided by the engine
+    object, like is_image_engine."""
+    return getattr(engine, "modality", "text") == "audio"
+
+
 # The endpoints that only make sense for a chat model, refused with a pointer
 # when the model draws images instead.
 # POST /v1/images/edits: the request's pictures and fields. multipart/form-data (what OpenAI's SDKs send)
@@ -6090,6 +6097,10 @@ TEXT_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v
 GENERATING_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages")
 IMAGE_OPTION_KEYS = ("default_width", "default_height", "default_steps", "min_side",
                      "max_side", "multiple")
+# What a music engine announced in READY and a client needs to build a valid request.
+MUSIC_OPTION_KEYS = ("sample_rate", "channels", "default_duration", "min_duration", "max_duration",
+                     "default_steps", "max_steps", "default_shift", "max_caption_bytes", "max_lyric_bytes")
+MUSIC_ENDPOINT = "/v1/audio/music"
 
 
 def cors_origin_list(given):
@@ -6177,6 +6188,9 @@ class APIServer(ThreadingHTTPServer):
         entry = model_object(self.model_id, self.created)
         entry["input_modalities"] = self.input_modalities()
         entry["capabilities"] = self.capabilities()
+        if is_music_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["audio"] = {key: info.get(key) for key in MUSIC_OPTION_KEYS}
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6203,6 +6217,8 @@ class APIServer(ThreadingHTTPServer):
         """What the served model does, for /v1/models and /health: an image model
         draws (image_generation); every text engine answers POST /v1/systemone
         (systemone), and a decision engine does only that (decision)."""
+        if is_music_engine(self.engine):
+            return ["music_generation"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -6791,6 +6807,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     payload["capabilities"] = self.server.capabilities()
                     if is_image_engine(self.server.engine):
                         payload["image"] = dict(getattr(self.server.engine, "info", None) or {})
+                    if is_music_engine(self.server.engine):
+                        payload["audio"] = dict(getattr(self.server.engine, "info", None) or {})
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -6874,12 +6892,18 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` is an image generation model and "
                                     "does not chat: POST /v1/images/generations instead.",
                                "model", "unsupported_endpoint")
+            if is_music_engine(self.server.engine) and path in TEXT_ENDPOINTS:
+                raise APIError(400, f"`{self.server.model_id}` is a music generation model and "
+                                    f"does not chat: POST {MUSIC_ENDPOINT} instead.",
+                               "model", "unsupported_endpoint")
             if not engine_chats(self.server.engine) and path in GENERATING_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a decision model: it answers typed "
                                     "questions with calibrated probabilities and does not generate "
                                     "text. POST /v1/systemone instead.",
                                "model", "unsupported_endpoint")
-            if path == "/v1/images/generations":
+            if path == MUSIC_ENDPOINT:
+                self.music_generation(body, request_id)
+            elif path == "/v1/images/generations":
                 self.image_generation(body, request_id)
             elif path == "/v1/images/edits":
                 self.image_generation(body, request_id, blobs)
@@ -7338,6 +7362,10 @@ class APIHandler(BaseHTTPRequestHandler):
     def image_generation(self, body, request_id, blobs=None):
         engine = self.server.engine
         if not is_image_engine(engine):
+            if is_music_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
+                                    f"music (POST {MUSIC_ENDPOINT}).",
+                               "model", "unsupported_endpoint")
             if not engine_chats(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it is a "
                                     "decision model (POST /v1/systemone).",
@@ -7520,6 +7548,178 @@ class APIHandler(BaseHTTPRequestHandler):
             return
         event("image_generation.completed", self._image_payload(result, created))
         write(b"data: [DONE]\n\n")
+
+    # POST /v1/audio/music: ACE-Step text-to-music. The body is music_engine.music_request's
+    # (prompt, lyrics, language, duration, steps, shift, seed, bpm, key, time_signature, dcw,
+    # stream, response_format). The answer has the images route's shape: {"created", "data":
+    # [{"b64_json": a WAV, "format": "wav"}], "colibri": {...}}, or with `response_format`
+    # "wav" the WAV itself, or with `stream` an SSE of progress events and the same payload.
+    # The queue, its limits, the 503 for a full queue and /metrics mean what they mean for images.
+    def music_generation(self, body, request_id):
+        engine = self.server.engine
+        if not is_music_engine(engine):
+            if is_image_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not make music: it draws pictures "
+                                    "(POST /v1/images/generations).",
+                               "model", "unsupported_endpoint")
+            if not engine_chats(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not make music: it is a "
+                                    "decision model (POST /v1/systemone).",
+                               "model", "unsupported_endpoint")
+            raise APIError(400, f"`{self.server.model_id}` does not make music: it is a "
+                                "chat model (POST /v1/chat/completions).",
+                           "model", "unsupported_endpoint")
+        try:
+            request = music_engine.music_request(body, engine.info)
+        except music_engine.MusicRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        stream = body.get("stream", False)
+        if not isinstance(stream, bool):
+            raise APIError(400, "`stream` must be a boolean.", "stream")
+        if stream and request["response_format"] == "wav":
+            raise APIError(400, "`stream` sends events; `response_format` \"wav\" sends the file: pick one.",
+                           "response_format")
+        created = int(time.time())
+        with contextlib.ExitStack() as stack:
+            try:
+                queue_wait, _slot = stack.enter_context(
+                    self.server.scheduler.admit(self.client_disconnected))
+            except APIError as error:
+                if error.status == 429:
+                    # A song takes minutes: a client that retries after a second, as 429
+                    # invites, only refills the queue (the images route says the same).
+                    raise APIError(503, error.message, None, error.code, "server_error",
+                                   error.headers) from None
+                raise
+            if not engine.alive:
+                raise APIError(503, f"The music engine is not running ({engine.dead or 'exited'}).",
+                               None, "engine_unavailable", "server_error")
+            queue_headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
+            if stream:
+                self._music_stream(engine, request, request_id, created, queue_headers)
+                return
+            try:
+                result = self._music_run(engine, request, cancelled=self.client_disconnected)
+            except music_engine.MusicCancelled:
+                raise ClientCancelled() from None
+            except music_engine.MusicEngineError as error:
+                raise APIError(500, f"The music engine failed: {error}", None, "engine_error",
+                               "server_error") from None
+            if request["response_format"] == "wav":
+                wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+                queue_headers.update({"x-colibri-seed": str(result.get("seed")),
+                                      "x-colibri-duration": str(result.get("duration"))})
+                self.send_bytes(200, wav, "audio/wav", request_id, queue_headers)
+                return
+            self.send_json(200, self._music_payload(result, created), request_id, queue_headers)
+
+    @staticmethod
+    def _music_run(engine, request, **hooks):
+        return engine.generate(request["caption"], duration=request["duration"], lyrics=request["lyrics"],
+                               language=request["language"], steps=request["steps"], shift=request["shift"],
+                               seed=request["seed"], bpm=request["bpm"], key=request["key"],
+                               time_signature=request["time_signature"], dcw=request["dcw"], **hooks)
+
+    @staticmethod
+    def _music_payload(result, created):
+        import base64
+        wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+        keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings")
+        return {"created": created,
+                "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
+                "colibri": {key: result.get(key) for key in keys}}
+
+    def _music_stream(self, engine, request, request_id, created, queue_headers):
+        """SSE: progress events, then completed, then [DONE]. Committed on the engine's first frame,
+        not before, so an engine that refuses the request outright still answers with a real HTTP
+        error instead of an error event inside a stream that already said OK."""
+        lock = threading.Lock()
+        state = {"started": False, "connected": True, "last": time.monotonic()}
+
+        def start():
+            if state["started"]:
+                return
+            state["started"] = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.send_header("x-request-id", request_id)
+            for name, value in queue_headers.items():
+                self.send_header(name, value)
+            self.send_cors_headers()
+            try:
+                self.end_headers()
+            except OSError:
+                # The client left between admission and the first frame: count it as gone, so the
+                # song is cancelled like any hang-up instead of this exception abandoning it.
+                state["connected"] = False
+
+        def write(data):
+            with lock:
+                if not state["connected"]:
+                    return
+                try:
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                    state["last"] = time.monotonic()
+                except OSError:
+                    state["connected"] = False
+
+        def event(name, data):
+            start()
+            write(f"event: {name}\ndata: "
+                  f"{json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n".encode())
+
+        def cancelled():
+            return not state["connected"] or self.client_disconnected()
+
+        def on_progress(frame):
+            event("music_generation.progress", {key: frame.get(key) for key in ("stage", "step", "steps")})
+
+        def on_idle():
+            # SSE comments keep proxies and idle timers from closing a stream that is legitimately
+            # silent through a long step.
+            if state["started"] and time.monotonic() - state["last"] >= 10:
+                write(b": keepalive\n\n")
+
+        try:
+            result = self._music_run(engine, request, on_progress=on_progress, cancelled=cancelled, on_idle=on_idle)
+        except music_engine.MusicCancelled:
+            if not state["started"]:
+                raise ClientCancelled() from None
+            # Once the 200 is out, every ending is an event: a client still listening is told the
+            # song will not come, then the stream closes the way every stream closes.
+            event("error", {"error": {"message": "cancelled", "type": "cancelled",
+                                      "param": None, "code": "cancelled"}})
+            write(b"data: [DONE]\n\n")
+            raise ClientCancelled() from None       # counted as cancelled, not completed
+        except music_engine.MusicEngineError as error:
+            if not state["started"]:
+                raise APIError(500, f"The music engine failed: {error}", None, "engine_error",
+                               "server_error") from None
+            event("error", {"error": {"message": f"The music engine failed: {error}",
+                                      "type": "server_error", "param": None, "code": "engine_error"}})
+            write(b"data: [DONE]\n\n")
+            return
+        event("music_generation.completed", self._music_payload(result, created))
+        write(b"data: [DONE]\n\n")
+
+    def send_bytes(self, status, data, content_type, request_id=None, headers=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        if request_id:
+            self.send_header("x-request-id", request_id)
+            self.send_header("x-typesafe-request-id", request_id)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_cors_headers()
+        self.end_headers()
+        self.wfile.write(data)
 
     def _fail(self, error, request_id):
         """Report an error, unless the response is already on the wire. Once a streaming 200
@@ -8435,7 +8635,15 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
         if kv_slots > family.limits.max_kv_slots:
             raise ValueError(f"{family.id} engine supports at most "
                              f"{family.limits.max_kv_slots} KV slot(s)")
-        if family.modality == "image":
+        if family.modality == "audio":
+            # The music engine speaks the image engine's kind of protocol (lines of JSON,
+            # PCM frames): its own process class, no byte stream.
+            runtime = music_engine.MusicEngine(engine, model, env=env)
+            runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
+            print(f"[music] {model_id}: default {runtime.info['default_duration']} s, "
+                  f"{runtime.info['default_steps']} steps, {runtime.info['sample_rate']} Hz",
+                  file=sys.stderr)
+        elif family.modality == "image":
             # Its own process class: the image engine speaks a line-and-JSON
             # protocol with binary frames, not the text engines' byte stream.
             runtime = image_engine.ImageEngine(engine, model, env=env)
@@ -8455,7 +8663,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
                       file=sys.stderr)
                 sys.exit(1)
         server.engine = runtime
-        if family.modality != "image":
+        if family.modality not in ("image", "audio"):
             # Said once at start-up, so a checkpoint that declares a tower it does
             # not carry is visible in the log and not only in a client's 400.
             print(f"[gateway] input modalities: {', '.join(server.input_modalities())}"

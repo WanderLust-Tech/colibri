@@ -149,6 +149,18 @@ CATALOG = (
         modality="image", summary="text to image (pictures, not chat)",
         license_note="Qwen Research License: non-commercial use only",
         prebuilt_since="2.0.0", doc="docs/qwen-image.md"),
+    CatalogModel(
+        id="ace-step-1.5", family="ace_step", name="ACE-Step 1.5",
+        repo="ACE-Step/Ace-Step1.5", disk_gb=6.4,
+        # docs/acestep.md: every weight stays loaded (the DiT 4.8 GB, the text encoder 1.2, the VAE
+        # decoder widened to f32): 6.9 GB peak resident set for a 10 s clip and 6.95 GB for 60 s.
+        ram_min_gb=9, ram_good_gb=12, dense_gb=6.4, rank=1, size_class="small",
+        modality="audio", summary="text to music (songs with or without lyrics, not chat)",
+        license_note="MIT",
+        # The repository also holds the 5 Hz language-model planners (3.7 GB and more),
+        # which the engine does not use.
+        exclude=("acestep-5Hz-lm-*/*",),
+        prebuilt_since="2.1.0", doc="docs/acestep.md"),
 )
 
 

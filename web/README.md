@@ -43,6 +43,18 @@ says how many pictures it was edited from, and "New seed" sends the same
 pictures again; they live only in the page, so after a reload an old edit
 cannot be redone without attaching them again.
 
+When the model is marked `"capabilities": ["music_generation"]` (ACE-Step 1.5), the chat view makes songs. The composer
+offers a **Lyrics** switch that opens a box above the prompt (with the byte count the engine limits), the length in
+seconds, the sampler's steps, the language of the vocals and a seed; the limits come from the model entry's `audio` block, an
+empty seed draws a new one for every song, and a length or a number of steps the engine would refuse holds Send back until it
+is fixed (a field left is put inside the range). The request goes to `POST /v1/audio/music` with `"stream": true`: the turn
+shows the stage (reading the description, composing step k of N, decoding), the elapsed time and a bar, with Cancel; if the
+stream never starts, the same request is made once without it. A finished song is the browser's own audio player, with its
+length, steps, seed and time under it, and can be downloaded as a WAV named after the caption and seed, have its seed copied,
+or be made again with a new seed. Music turns stay on screen when you switch to a text model but are never sent to it, and the
+songs live only in the page (an object URL), so a reload loses them: download what you want to keep.
+`tests/music_ui.py` drives it in a real browser against the real gateway with a stub engine behind it.
+
 The test suite stays browser-light: API requests use a mocked `fetch`, while
 runtime capability and storage behavior are covered through pure helpers. It
 checks that `/health` and `/profile` are resolved next to (not below) the OpenAI `/v1` prefix,
