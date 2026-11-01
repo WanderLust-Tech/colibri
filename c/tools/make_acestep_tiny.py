@@ -97,17 +97,32 @@ CORPUS = [
 ] * 4
 
 
+# Qwen2/Qwen3's pre-tokenizer regex, copied from the real Qwen3-Embedding-0.6B tokenizer.json: contractions in either case,
+# letters with at most one leading non-letter, ONE digit at a time (cl100k takes up to three), punctuation runs, newline and
+# whitespace runs. The tiny tokenizer has to split text the way the real one does, or a port tested on it proves nothing.
+QWEN_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
+
+
 def make_tokenizer(path):
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+    """A 600-entry byte-level BPE with the real tokenizer's pipeline: an NFC normalizer, the Qwen split regex, and a
+    post-processor that appends <|endoftext|> to every sequence (so a prompt ending in the literal token ends in two)."""
+    from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers
     from transformers import PreTrainedTokenizerFast
 
     tok = Tokenizer(models.BPE())
-    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.normalizer = normalizers.NFC()
+    tok.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(Regex(QWEN_SPLIT), behavior="isolated", invert=False),
+        pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
     tok.decoder = decoders.ByteLevel()
     special = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
     tok.train_from_iterator(CORPUS, trainers.BpeTrainer(
         vocab_size=600, special_tokens=special, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
-    fast = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="<|endoftext|>", eos_token="<|endoftext|>",
+    tok.post_processor = processors.Sequence([
+        processors.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False),
+        processors.TemplateProcessing(single="$A <|endoftext|>", pair="$A <|endoftext|> $B:1 <|endoftext|>:1",
+                                      special_tokens=[("<|endoftext|>", tok.token_to_id("<|endoftext|>"))])])
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="<|endoftext|>", eos_token="<|im_end|>",
                                    clean_up_tokenization_spaces=False)
     fast.save_pretrained(path)
     return len(fast)

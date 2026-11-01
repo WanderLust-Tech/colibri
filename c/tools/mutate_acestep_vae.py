@@ -79,10 +79,11 @@ def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h
         return "build-failed", built.stderr[-400:]
     last = ""
     for ref in refs:
-        run = subprocess.run([exe, "--model", model, flag, ref], capture_output=True, text=True)
+        use_flag, target = ref if isinstance(ref, tuple) else (flag, ref)          # (oracle flag, reference) to mix oracles
+        run = subprocess.run([exe, "--model", model, use_flag, target], capture_output=True, text=True)
         last = run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
         if run.returncode != 0:
-            return "fail", f"{os.path.basename(ref)}: {last}"
+            return "fail", f"{use_flag[2:]} {os.path.basename(target)}: {last}"
     return "pass", last
 
 

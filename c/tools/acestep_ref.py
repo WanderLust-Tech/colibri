@@ -19,6 +19,8 @@ through hooks rather than reimplemented, so the numbers cannot drift from the re
         dit{i}.xt, .t, .r, .v        the i-th DiT call: latents in, t, r, velocity out
         dit0.rope_cos, .rope_sin     the DiT's RoPE table of the first call, [1, tokens, head_dim]
         dit0.tap.proj_in, .layer{k}  with --taps: the first call's hidden state after the patch embedding and each layer
+        text.tap.embed, .layer{k}    with --taps: the text encoder's first hidden state and each of its layers' outputs,
+        text.rope_cos, .rope_sin     and its RoPE table, for the caption pass
         dit{i}.temb_t, .proj_t       its timestep embedding of t ([1, D]) and the six modulation vectors ([1, 6, D]);
         dit{i}.temb_r, .proj_r       and the same for t - r (the second embedding, which is of 0 in turbo)
         latents                      generate_audio's target_latents
@@ -82,6 +84,18 @@ for _name, _extra in (
 # 750 latent frames: the VAE decodes it in overlapping chunks (upstream's chunk is 256 frames, overlap 64), and the
 # DiT's sliding window of 128 has a long sequence to cut across.
 CASES["long30"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 30.0, "dcw_enabled": True}
+# What the text side must get right, through the whole pipeline (the tokenizer has its own much longer list of strings,
+# tools/make_acestep_tok_ref.py): the metas formatting with every field given, other scripts and an emoji, a prompt cut
+# at the handler's 256-token limit (and lyrics at 2048), and no text at all.
+CASES["meta10"] = {**COMMON, **INSTRUMENTAL, "bpm": 120, "key_scale": "C Major", "time_signature": "4", "dcw_enabled": True}
+CASES["cjk10"] = {**COMMON, "captions": "ミニマルなテクノ、深いベース、暗い雰囲気 🎧",
+                  "lyrics": "[Verse]\n你好，世界\n我们一起唱歌\n[Chorus]\nla la la 1 2 3", "vocal_language": "zh", "dcw_enabled": True}
+CASES["cut10"] = {**COMMON, "captions": "a slow cinematic piece with " + ", ".join(f"layered texture number {i}" for i in range(90)),
+                  "lyrics": "\n".join(f"[Verse {i}]\nline one of verse {i}\nline two of verse {i}" for i in range(400)),
+                  "vocal_language": "en", "dcw_enabled": True}
+CASES["empty10"] = {**COMMON, "captions": "", "lyrics": "", "vocal_language": "unknown", "dcw_enabled": True}
+# 9.6 s is 240 latent frames, and upstream writes "9 seconds" in the metas (int() cuts, it does not round)
+CASES["frac96"] = {**COMMON, **INSTRUMENTAL, "audio_duration": 9.6, "dcw_enabled": True}
 
 
 def fingerprint(root):
@@ -111,7 +125,7 @@ class Recorder:
     """Hooks on one initialised handler that collect every stage's tensors for the current case."""
 
     def __init__(self, h, taps=False):
-        self.h, self.t, self.meta = h, {}, {}
+        self.h, self.t, self.meta, self.taps = h, {}, {}, taps
         self.dit_calls = self.vae_calls = 0
         self.inside_text = False
         enc = h.text_encoder
@@ -127,6 +141,11 @@ class Recorder:
             h.model.decoder.proj_in.register_forward_hook(lambda m, a, o: self._tap("proj_in", o))
             for k, layer in enumerate(h.model.decoder.layers):
                 layer.register_forward_hook(lambda m, a, o, k=k: self._tap(f"layer{k}", o[0]))
+            # and the text encoder's: each layer's output and its RoPE table, of the caption pass
+            for k, layer in enumerate(h.text_encoder.layers):
+                layer.register_forward_hook(lambda m, a, o, k=k: self._text_tap(f"layer{k}", o))
+            h.text_encoder.rotary_emb.register_forward_hook(
+                lambda m, a, o: self.t.update({"text.rope_cos": clean(o[0]), "text.rope_sin": clean(o[1])}) if self.inside_text else None)
         self._wrap(h.model, "prepare_condition", self._prepare_condition)
         self._wrap(h.model, "prepare_noise", self._prepare_noise)
         self._wrap(h.model, "generate_audio", self._generate_audio)
@@ -168,6 +187,12 @@ class Recorder:
     def _embed(self, module, args, output):
         if not self.inside_text:                       # the lyric path calls the table itself, outside the encoder
             self.t["lyric.ids"], self.t["lyric.hidden"] = clean(args[0]), clean(output)
+        elif self.taps:                                # inside the text encoder: its first hidden state
+            self.t["text.tap.embed"] = clean(output)
+
+    def _text_tap(self, name, out):
+        """A text-encoder layer's output (a tensor, or a tuple whose first element is it, by transformers version)."""
+        self.t[f"text.tap.{name}"] = clean(out[0] if isinstance(out, tuple) else out)
 
     def _dit(self, module, args, kwargs, output):
         i = self.dit_calls

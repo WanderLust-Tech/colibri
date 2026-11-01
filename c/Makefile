@@ -1337,7 +1337,7 @@ ifneq ($(EXE),)
 .PHONY: acestep
 acestep: acestep$(EXE)
 endif
-acestep$(EXE): acestep.c acestep_vae.h acestep_dit.h st.h json.h qi_gemm.h .build-config
+acestep$(EXE): acestep.c acestep_vae.h acestep_dit.h acestep_text.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
 	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
 
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision

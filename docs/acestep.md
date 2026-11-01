@@ -6,15 +6,15 @@ it to the same shape as [Qwen-Image](qwen-image.md): one C file, weights read as
 reference by an oracle that compares tensors, not just the final audio.
 
 **Nothing here is user-facing yet.** The engine does not generate music. What exists is the VAE decoder, the diffusion
-transformer with its sampler, and the tooling both are checked with; the text encoder and the engine that joins them are
-still to come. `coli` does not know about it and `make install` does not ship it.
+transformer with its sampler, the text encoder with its tokenizer and prompts, and the tooling all are checked with; the
+engine that joins them is still to come. `coli` does not know about it and `make install` does not ship it.
 
 | stage | what | state |
 |---|---|---|
 | 0 | the reference: upstream's own handler, observed at every stage; a tiny random checkpoint of the real structure | done |
 | 1 | the VAE decoder, `c/acestep_vae.h`: latents to 48 kHz stereo, tiled as upstream tiles | done, oracle-checked |
 | 2 | the DiT, its condition encoders and the turbo sampler (DCW included), `c/acestep_dit.h` | done, oracle-checked |
-| 3 | the text encoder (Qwen3-Embedding-0.6B) and the prompt template | |
+| 3 | the text encoder (Qwen3-Embedding-0.6B), its tokenizer and the prompt templates, `c/acestep_text.h` | done, oracle-checked |
 | 4 | the engine proper: serve protocol, gateway route, `coli music`, the web player | |
 | 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
 
@@ -50,8 +50,10 @@ python3 tools/acestep_ref.py capture ~/models/ace-step-1.5 ace_ref --cases inst1
 
 `acestep_ref.py` never downloads and never rewrites the checkpoint directory (upstream's handler would do both: it
 counts the 1.7B planner as part of the "main model"); it fingerprints the directory and fails if a file changed.
-Eleven cases are captured, each in its own directory (`ref.safetensors`, `ref.json`, `audio.wav`): DCW on and off,
-with lyrics, an odd frame count, shift 3, a 5-step schedule, and a 30-second clip. Read the DCW-off cases with care:
+Sixteen cases are captured, each in its own directory (`ref.safetensors`, `ref.json`, `audio.wav`): DCW on and off,
+with lyrics, an odd frame count, shift 3, a 5-step schedule, and a 30-second clip (eleven cases, which the DiT and VAE
+oracles use), then set metas, other scripts and accents, a caption cut at 256 tokens, nothing at all, and a fractional
+duration (five more, which only the text oracle needs; it runs on all sixteen). Read the DCW-off cases with care:
 on the real checkpoint turbo without DCW often collapses to the silence latent (0.001 rms), which is upstream's
 behaviour and so what the port reproduces, but it makes the final waveform a weak check there.
 
@@ -144,6 +146,58 @@ clip: about 1.5 to 2 times slower, which the small M of these products (125 rows
 been tuned. The weights stay bf16 (4.4 GB resident, 4.2 GB peak for the whole oracle); `qi_gemm` widens them inside the
 product, which is exact. The condition (both encoders, 76 tokens) takes 1.1 s.
 
-CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs both oracles,
-the refusal tests (`tests/test_acestep_vae_load.py`, `tests/test_acestep_dit_load.py`), both mutation tools, and the oracles
-again under ASan and UBSan.
+## The text encoder oracle
+
+```sh
+python3 tools/make_acestep_tok_ref.py acestep_tiny tok_ref.json          # 118 strings through upstream's tokenizer
+./acestep --model acestep_tiny --tok-ref tok_ref.json
+./acestep --model acestep_tiny --text-ref acestep_tiny_ref/cut10
+./acestep --model ~/models/ace-step-1.5 --text-ref ace_ref/meta10
+```
+
+`--tok-ref` holds the tokenizer to `AutoTokenizer(text, truncation=True, max_length=N)` on strings chosen to break a
+port: other scripts and emoji, accents in both Unicode forms, digits, whitespace runs, contractions, text that looks like
+a special token, and texts cut at the 256 and 2048 limits. `--text-ref` builds the caption prompt (instruction, caption,
+metas) and the lyric prompt (language, lyrics) from the case's parameters and compares, in order: the prompt token ids
+(exactly), the embedding rows, each of the 28 layers **alone** fed torch's own residual stream and RoPE table, and the
+whole encoder chained, caption and lyric, against the handler's hidden states.
+
+What upstream does that is easy to miss, each of which a mutant below breaks:
+
+- the tokenizer NFC-normalizes first, splits digits one at a time, and treats a literal `<|endoftext|>` in the text as one
+  token;
+- its post-processor appends one more `<|endoftext|>` to every sequence, so a prompt that already ends with one ends with
+  two, and truncation (256 for the caption, 2048 for the lyrics) keeps the first N-1 tokens to leave room for it;
+- the caption's last hidden state is taken after the final norm, with causal attention; the lyrics skip the transformer
+  and use only the embedding rows;
+- the duration in the metas is `int(seconds)`, not rounded (`frac96` is 9.6 s), and every missing meta reads `N/A`.
+
+On the real checkpoint all 16 cases have identical ids and exactly identical embedding rows. The limits again follow the
+measurements:
+
+| compared | measured on the real checkpoint (16 cases) | held at (norm ratio, largest error / peak) |
+|---|---|---|
+| a layer alone | 5.8e-9 to 9.2e-7 (the largest is layer 27), no growth with depth | 5e-6, 5e-6 of the larger peak going in or out |
+| the whole encoder, 28 layers chained | 1.7e-6 to 2.1e-6 typical; 1.1e-5 worst (`cut10`, 256 tokens) | 5e-5, 2e-4 |
+
+The absolute limit of a layer is a fraction of the larger of its input's and its output's peak, not of its output's alone,
+because Qwen3-Embedding has **massive activations**: layers 7 to 26 carry a few channels of about 6000 (against a typical
+value near 1), and layer 27 collapses them to 247. Its output is small, but its arithmetic is done on 6000-sized values,
+so its rounding is 3e-3 absolute: 4.8e-7 of its input's scale and 1.2e-5 of its own output's. Holding it to its output
+would have asked for more than float32 gives; the relative norm ratio (8.8e-7) never needed the correction.
+
+`tools/mutate_acestep_text.py` shows both oracles can fail: 26 one-line breakages (a blank line, the trailing newline or
+the `<|endoftext|>` of the caption or the lyric prompt, the order and the defaults of the metas, a rounded duration,
+dropped bpm or key, the appended token, truncation one short, no NFC, a wrong special token id, a wrong embedding row,
+bidirectional attention, RoPE theta, the final norm, the query or key norm, unrotated keys, a swapped SwiGLU, an epsilon,
+the wrong norm weight, a dropped residual) are compiled and run against the tokenizer reference and seven cases. All 26
+are caught, on the tiny fixture and on the real checkpoint. The duration mutant needs `frac96`, the bpm and key
+mutants need `meta10`, the NFC mutant needs strings with decomposed accents, and the truncation mutant needs a string
+cut at its limit, which is why several cases are passed.
+
+Cost: the caption's encoder is 0.6 s for 60 tokens and 1.5 s for 256 on the real checkpoint (24-core i9); the lyric
+path is a table lookup.
+
+CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracles,
+the refusal tests (`tests/test_acestep_{vae,dit,text}_load.py`), the three mutation tools, and the oracles again under ASan
+and UBSan.

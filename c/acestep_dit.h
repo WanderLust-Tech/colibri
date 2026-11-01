@@ -429,11 +429,12 @@ static void acd_rope(float *x, int rows, int heads, int hd, const float *cs, con
     }
 }
 
-/* out[Tq][heads*hd] = softmax(Q K^T / sqrt(hd)) V, bidirectional. Q rows have stride ldq, K and V stride ldk; query
- * head h reads kv head h / (heads/kvheads). window < 0: every key; else key j is visible to query i when |i-j| <= window.
- * Done in blocks of ACD_QB queries: a block only multiplies against the keys its band can reach. */
-static void acd_attention(float *out, int ldo, const float *Q, int ldq, int Tq, const float *K, const float *V, int ldk, int Tk,
-                          int heads, int kvheads, int hd, int window){
+/* out[Tq][heads*hd] = softmax(Q K^T / sqrt(hd)) V. Q rows have stride ldq, K and V stride ldk; query head h reads kv head
+ * h / (heads/kvheads). window < 0: every key; else key j is visible to query i when |i-j| <= window. causal: only keys
+ * j <= i (the text encoder; the DiT and its condition encoders are bidirectional). Done in blocks of ACD_QB queries: a
+ * block only multiplies against the keys its band can reach. */
+static void acd_attention_ex(float *out, int ldo, const float *Q, int ldq, int Tq, const float *K, const float *V, int ldk, int Tk,
+                             int heads, int kvheads, int hd, int window, int causal){
     const float scale = 1.f / sqrtf((float)hd);
     const int group = heads / kvheads;
     int maxnk = Tk;
@@ -445,6 +446,7 @@ static void acd_attention(float *out, int ldo, const float *Q, int ldq, int Tq, 
         const int rows = Tq - q0 < ACD_QB ? Tq - q0 : ACD_QB;
         int lo = 0, hi = Tk;
         if (window >= 0) { lo = q0 - window > 0 ? q0 - window : 0; hi = q0 + rows - 1 + window + 1 < Tk ? q0 + rows + window : Tk; }
+        if (causal && hi > q0 + rows) hi = q0 + rows;                          /* no query of this block sees past its own row */
         const int nk = hi - lo;
         if (nk <= 0) { for (int i = 0; i < rows; i++) memset(out + (size_t)(q0 + i) * ldo, 0, (size_t)heads * hd * sizeof(float)); continue; }
         for (int kh = 0; kh < kvheads; kh++) {
@@ -460,6 +462,7 @@ static void acd_attention(float *out, int ldo, const float *Q, int ldq, int Tq, 
                     float *r = S + (size_t)i * nk;
                     int gi = q0 + i, a = 0, b = nk;
                     if (window >= 0) { a = gi - window - lo > 0 ? gi - window - lo : 0; b = gi + window + 1 - lo < nk ? gi + window + 1 - lo : nk; }
+                    if (causal && b > gi + 1 - lo) b = gi + 1 - lo;
                     float mx = -INFINITY;
                     for (int j = a; j < b; j++) { r[j] *= scale; if (r[j] > mx) mx = r[j]; }
                     double sum = 0;
@@ -475,6 +478,12 @@ static void acd_attention(float *out, int ldo, const float *Q, int ldq, int Tq, 
         }
     }
     free(S); free(vt);
+}
+
+/* bidirectional: the DiT, its condition encoders, and its cross-attention */
+static void acd_attention(float *out, int ldo, const float *Q, int ldq, int Tq, const float *K, const float *V, int ldk, int Tk,
+                          int heads, int kvheads, int hd, int window){
+    acd_attention_ex(out, ldo, Q, ldq, Tq, K, V, ldk, Tk, heads, kvheads, hd, window, 0);
 }
 
 /* A debugging tap: when set, acd_forward calls it with the hidden state [Tp][D] after the patch embedding (layer -1),
