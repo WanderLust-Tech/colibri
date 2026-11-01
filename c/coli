@@ -192,6 +192,8 @@ def model_banner_line(model):
         return generic
     if is_image_model(model):
         return image_banner_line(model) or generic
+    if is_music_model(model):
+        return music_banner_line(model) or generic
     if is_decision_model(model):
         try:
             resolved = resolve_model(model)
@@ -265,6 +267,14 @@ def is_image_model(model):
     except (OSError, TypeError):
         return False
 
+def is_music_model(model):
+    """An ACE-Step checkpoint (model_type acestep): `coli music` and `coli run` make a song,
+    `coli serve` answers POST /v1/audio/music."""
+    try:
+        return resolve_model(model).descriptor.modality == "audio"
+    except (FamilyConfigError, UnknownFamilyError, OSError, TypeError, ValueError):
+        return False
+
 def is_decision_model(model):
     """A decision checkpoint (Laya: rl_agent_config.json, no root config.json;
     GLiNER2.5-Decide: a GLiNER2 extractor config.json): served by coli serve /
@@ -327,6 +337,25 @@ def image_banner_line(model):
         except OSError:
             pass
     bits = [name, "text-to-image"]
+    if size >= 1e9: bits.append(f"{size/1e9:.1f} GB on disk")
+    elif size: bits.append(f"{size/1e6:.0f} MB on disk")
+    return " · ".join(bits)
+
+def music_banner_line(model):
+    """Banner line of a music model: name, what it does, bytes on disk. stat() alone, like the image one."""
+    try:
+        name = resolve_model(model).descriptor.display_name
+    except (FamilyConfigError, UnknownFamilyError, OSError):
+        return None
+    size = 0
+    for part in ("Qwen3-Embedding-0.6B", "acestep-v15-turbo", "vae"):
+        folder = os.path.join(model, part)
+        try:
+            size += sum(os.path.getsize(os.path.join(folder, x)) for x in os.listdir(folder)
+                        if x.endswith(".safetensors"))
+        except OSError:
+            pass
+    bits = [name, "text-to-music"]
     if size >= 1e9: bits.append(f"{size/1e9:.1f} GB on disk")
     elif size: bits.append(f"{size/1e6:.0f} MB on disk")
     return " · ".join(bits)
@@ -469,8 +498,8 @@ def need_model(model, engine=None):
     # An image pipeline keeps its tokenizer in processor/, not at the root.
     require_model(model, file=None)
     tokenizer = "tokenizer.json"
-    if is_image_model(model) or is_decision_model(model):
-        # a decision checkpoint keeps it in tokenizer/ (Laya)
+    if is_image_model(model) or is_decision_model(model) or is_music_model(model):
+        # a decision checkpoint keeps it in tokenizer/ (Laya), a music one in Qwen3-Embedding-0.6B/
         try: tokenizer = resolve_model(model).descriptor.tokenizer_file
         except (FamilyConfigError, UnknownFamilyError): pass   # engine_for says why, below
     require_model(model, file=tokenizer)
@@ -544,6 +573,9 @@ def env_for_engine(a, arch, plan=None):
     if family.modality == "image" and getattr(a, "ctx", None):
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} an image model has "
                  f"no context window (the prompt goes through its text encoder once)")
+    if family.modality == "audio" and getattr(a, "ctx", None):
+        sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a music model has "
+                 f"no context window (the caption goes through its text encoder once)")
     if family.modality == "decision" and getattr(a, "ctx", None):
         reads, knob = DECISION_LENGTH.get(family.id, ("what its engine allows", "its engine's own variable"))
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a decision model reads "
@@ -676,7 +708,7 @@ def env_for_engine(a, arch, plan=None):
             sys.exit(f"{C.yel}--vram needs the CUDA build:{C.r} the engine binary is CPU-only")
         env["COLI_CUDA"] = "1"
         env["CUDA_EXPERT_GB"] = str(vram)
-    if getattr(a, "auto_tier", False) and family.modality in ("image", "decision"):
+    if getattr(a, "auto_tier", False) and family.modality in ("image", "audio", "decision"):
         # The tier plan places experts and KV state; an image or decision model
         # has neither, and build_plan would stop on "no safetensors shards".
         print(f"  {C.dim}[PLAN] --auto-tier has nothing to place for "
@@ -1310,6 +1342,9 @@ def cmd_info(a):
     if family is not None and family.modality == "image":
         info_image_model(a, family, row)
         return
+    if family is not None and family.modality == "audio":
+        info_music_model(a, family, row)
+        return
     if family is not None and family.modality == "decision":
         info_decision_model(a, resolved, row)
         return
@@ -1363,6 +1398,34 @@ def cmd_info(a):
     if a.topk: knobs.append(f"topk {a.topk}")
     if knobs: row("tuning", " · ".join(knobs))
     print()
+
+def info_music_model(a, family, row):
+    """`coli info` for a text-to-music checkpoint: its parts and their weight on disk, what it
+    produces and where it goes, instead of layers and experts."""
+    from music_engine import inspect_music_model, music_dir, COMPONENTS, TOKENIZER_FILE, SILENCE_FILE
+    try:
+        inv = inspect_music_model(a.model)
+    except (OSError, ValueError) as error:
+        sys.exit(f"{C.yel}cannot read the music model:{C.r} {error}")
+    comps = inv["components"]
+    row("model", a.model)
+    row("type", f"{family.display_name} · text-to-music · 48 kHz stereo, 1 to 600 s")
+    labels = {COMPONENTS[0]: "text enc.", COMPONENTS[1]: "DiT", COMPONENTS[2]: "VAE"}
+    for key in COMPONENTS:
+        comp = comps[key]
+        if not comp["present"]:
+            row(labels[key], f"{C.yel}missing: {key}/ is not in the model directory{C.r}"); continue
+        dtypes = "/".join(d.lower() for d in comp["dtypes"]) or "no weights"
+        extra = f" · the encoder ({comp['unloaded_params']/1e6:.0f}M) stays on disk" if comp.get("unloaded_params") else ""
+        row(labels[key], f"{key} · {comp['disk_bytes']/1e9:.1f} GB {dtypes} · {comp['params']/1e9:.2f}B params{extra}")
+    row("tokenizer", f"{TOKENIZER_FILE} " + ("✓" if inv["tokenizer"] else f"{C.yel}missing{C.r}"))
+    row("silence", f"{SILENCE_FILE} " + ("✓" if inv["silence_latent"] else f"{C.yel}missing{C.r}"))
+    if inv["planner"]:
+        row("unused", f"{', '.join(inv['planner'])} ({inv['planner_bytes']/1e9:.1f} GB): the language-model planner, not used")
+    row("on disk", f"{inv['disk_bytes']/1e9:.1f} GB used by the engine")
+    row("output", f"WAV (16-bit, 48 kHz, stereo) · saved to {music_dir()} (COLI_MUSIC_DIR)")
+    row("use", "coli music \"calm piano\" [--lyrics TEXT] [--duration S] [--out song.wav] · "
+               "coli serve (POST /v1/audio/music)")
 
 def info_image_model(a, family, row):
     """`coli info` for a text-to-image pipeline: its parts and their weight on
@@ -1502,12 +1565,34 @@ def plan_image_command(a):
     print(textwrap.indent(format_image_plan(plan), "  "))
     print()
 
+def plan_music_command(a):
+    """`coli plan` for a music model: weights per component, all resident."""
+    from music_engine import plan_music_model, format_music_plan
+    from resource_plan import memory_available
+    if getattr(a, "ctx", 0):
+        sys.exit(f"{C.yel}--ctx does not apply to a music model{C.r}")
+    try:
+        disk = shutil.disk_usage(a.model).free
+    except OSError:
+        disk = None
+    try:
+        plan = plan_music_model(a.model, memory_available() or None, disk)
+    except (OSError, ValueError) as error:
+        sys.exit(f"{C.yel}cannot create resource plan:{C.r} {error}")
+    if a.json:
+        print(json.dumps(plan, indent=2)); return
+    banner("plan · RAM for text encoder, DiT and VAE decoder", model=a.model)
+    print(textwrap.indent(format_music_plan(plan), "  "))
+    print()
+
 def cmd_plan(a):
     from resource_plan import build_plan, format_plan
     if not a.model:
         sys.exit(f"{C.yel}no model directory given.{C.r}\n  {NO_MODEL_HINT}")
     if is_image_model(a.model):
         return plan_image_command(a)
+    if is_music_model(a.model):
+        return plan_music_command(a)
     if is_decision_model(a.model):
         return plan_decision_command(a)
     try:
@@ -1559,6 +1644,11 @@ def cmd_doctor(a):
         report=run_image_doctor(a.model, engine)
         print(json.dumps(report,indent=2) if a.json else format_doctor(report))
         return exit_code(report)
+    if is_music_model(a.model) and engine_error is None:
+        from doctor import run_music_doctor
+        report=run_music_doctor(a.model, engine)
+        print(json.dumps(report,indent=2) if a.json else format_doctor(report))
+        return exit_code(report)
     if is_decision_model(a.model) and engine_error is None:
         from doctor import run_decision_doctor
         report=run_decision_doctor(a.model, engine)
@@ -1580,6 +1670,9 @@ def cmd_doctor(a):
 def cmd_tune(a):
     """Measure this exact model/hardware pair and persist the fastest safe path."""
     need_model(a.model)
+    if is_music_model(a.model):
+        sys.exit(f"{C.yel}coli tune measures text engines;{C.r} a music model has no expert cache or "
+                 f"decode loop to tune")
     if a.tokens < 4:
         sys.exit(f"{C.yel}--tokens must be at least 4{C.r}")
     if a.timeout < 1:
@@ -1603,7 +1696,7 @@ def cmd_tune(a):
     # family it then mis-dispatched.
     family=resolve_model(a.model).descriptor
     arch=family.id
-    if family.modality in ("image","decision"):
+    if family.modality in ("image","audio","decision"):
         sys.exit(f"{C.yel}coli tune measures text engines;{C.r} {family.display_name} has no "
                  f"expert cache or decode loop to tune")
     if not family.has_gateway_adapter:
@@ -1671,6 +1764,8 @@ def cmd_run(a):
     banner("run", model=a.model)
     if family.modality=="image":
         return run_image(a, family, engine, prompt)
+    if family.modality=="audio":
+        return run_music(a, family, engine, prompt)
     if family.modality=="decision":
         sys.exit(decision_refusal(family))
     if not family.has_cli_adapter:
@@ -2827,6 +2922,163 @@ def run_image(a, family, engine, prompt):
     finally:
         backend.close()
 
+class MusicProgress:
+    """The live line under a generation:  ⠹ composing 3/8 · 41s · seed 1234  (one line, redrawn in place
+    on a terminal; nothing at all when the output is a pipe)."""
+    FRAMES = Spinner.FRAMES
+    STAGES = {"text": "reading the caption", "condition": "preparing the conditioning",
+              "denoise": "composing", "decode": "decoding the audio"}
+
+    def __init__(self, stream, seed):
+        self.out = stream
+        self.live = bool(stream) and (stream.isatty() or os.environ.get("COLI_COLOR") == "1")
+        self.seed = seed
+        self.stage, self.step, self.steps, self.note = "starting", 0, 0, ""
+        self.t0 = time.time()
+        self.tick = 0
+        self.lock = threading.Lock()
+
+    def _draw(self):
+        if not self.live:
+            return
+        stage = self.STAGES.get(self.stage, self.stage)
+        count = f" {self.step}/{self.steps}" if self.stage in ("denoise", "decode") and self.steps > 1 else ""
+        note = f" · {C.yel}{self.note}{C.r}" if self.note else ""
+        frame = self.FRAMES[self.tick % len(self.FRAMES)]
+        self.out.write(f"\r  {C.teal}{frame}{C.r} {C.dim}{stage}{count} · {time.time()-self.t0:.0f}s · "
+                       f"seed {self.seed}{C.r}{note}\033[K")
+        self.out.flush()
+
+    def progress(self, frame):
+        with self.lock:
+            self.stage = frame.get("stage") or self.stage
+            self.step, self.steps = int(frame.get("step") or 0), int(frame.get("steps") or 0)
+            self.tick += 1
+            self._draw()
+
+    def interrupted(self):
+        with self.lock:
+            self.note = "cancelling… (Ctrl-C again to quit)"
+            self._draw()
+
+    def stop(self):
+        with self.lock:
+            if self.live:
+                self.out.write("\r\033[K"); self.out.flush()
+                self.live = False
+
+def music_lyrics(value):
+    """--lyrics TEXT, or --lyrics @FILE to read them from a file."""
+    if value and value.startswith("@"):
+        try:
+            with open(os.path.expanduser(value[1:]), encoding="utf-8") as handle:
+                return handle.read()
+        except (OSError, UnicodeDecodeError) as error:
+            sys.exit(f"{C.yel}--lyrics: cannot read {value[1:]}: {error}{C.r}")
+    return value
+
+def music_settings(a, prompt, info):
+    """The request for the engine, from the prompt and the flags (the engine's defaults for what is not given).
+    Exits with the engine's own rule when a flag is out of range."""
+    from music_engine import music_request, MusicRequestError
+    body = {"prompt": prompt, "lyrics": music_lyrics(getattr(a, "lyrics", None)), "language": getattr(a, "language", None),
+            "duration": getattr(a, "duration", None), "steps": getattr(a, "steps", None), "shift": getattr(a, "shift", None),
+            "seed": getattr(a, "seed", None), "bpm": getattr(a, "bpm", None), "key": getattr(a, "key", None),
+            "time_signature": getattr(a, "time_signature", None), "dcw": False if getattr(a, "no_dcw", False) else None}
+    try:
+        return music_request({k: v for k, v in body.items() if v is not None}, info)
+    except MusicRequestError as error:
+        flag = {"prompt": "the prompt", "time_signature": "--time-signature"}.get(error.param, f"--{error.param}" if error.param else "the request")
+        sys.exit(f"{C.yel}{flag}: {error}{C.r}")
+
+def generate_music(engine, request, out=None, stream=None):
+    """One song: progress, the WAV on disk. Returns the saved path, or None when it was cancelled or failed (said)."""
+    from music_engine import MusicCancelled, MusicEngineError, encode_wav, save_wav, music_dir
+    stream = stream or sys.stdout
+    progress = MusicProgress(stream, request["seed"])
+    t0 = time.time()
+    try:
+        result = engine.generate(request["caption"], duration=request["duration"], lyrics=request["lyrics"],
+                                 language=request["language"], steps=request["steps"], shift=request["shift"],
+                                 seed=request["seed"], bpm=request["bpm"], key=request["key"],
+                                 time_signature=request["time_signature"], dcw=request["dcw"],
+                                 on_progress=progress.progress, interruptible=True, on_interrupt=progress.interrupted)
+    except MusicCancelled:
+        progress.stop()
+        print(f"  {C.yel}■ cancelled{C.r}\n", file=stream)
+        return None
+    except MusicEngineError as error:
+        progress.stop()
+        print(f"  {C.yel}✗ {error}{C.r}\n", file=stream)
+        return None
+    finally:
+        progress.stop()
+    elapsed = time.time() - t0
+    wav = encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+    try:
+        if out:
+            os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+            with open(out, "wb") as handle: handle.write(wav)
+            path = out
+        else:
+            path = save_wav(wav, request["caption"] or request["lyrics"] or "", result["seed"], music_dir())
+    except OSError as error:
+        print(f"  {C.yel}✗ cannot save the song: {error}{C.r}", file=stream)
+        return None
+    timings = result.get("timings") or {}
+    parts = " · ".join(f"{k} {v:.1f}s" for k, v in timings.items() if isinstance(v, (int, float)))
+    print(f"  {C.dgray}└─ {result['samples']/result['sample_rate']:.1f}s · seed {result['seed']} · "
+          f"{result['steps']} steps · {elapsed:.0f}s{(' (' + parts + ')') if parts else ''}{C.r}", file=stream)
+    if result.get("truncated"):
+        print(f"  {C.yel}the caption or the lyrics were longer than the model reads and were cut{C.r}", file=stream)
+    print(f"  {C.grn}✓{C.r} saved {path}\n", file=stream)
+    return path
+
+def run_music(a, family, engine, prompt):
+    """coli music / coli run on a music model: one song, written to --out (or the music folder)."""
+    from music_engine import MusicEngine, MusicEngineError
+    log = []
+    def keep(line):
+        log.append(line)
+        del log[:-40]
+    sp = Spinner(f"loading {family.display_name}…"); sp.start()
+    try:
+        # as for the image engine: its stderr is read by a thread from the first byte, except on Windows,
+        # where the engine keeps the console's stderr
+        runtime = MusicEngine(engine, a.model, env=env_for_engine(a, family.id),
+                              on_stderr=keep if sys.platform != "win32" else None, on_log=keep)
+    except MusicEngineError as error:
+        sp.stop()
+        sys.exit(f"{C.yel}{error}{C.r}")
+    except KeyboardInterrupt:
+        sp.stop(); sys.exit(130)
+    sp.stop()
+    try:
+        request = music_settings(a, prompt, runtime.info)
+        interactive = sys.stdout.isatty()
+        stream = sys.stdout if interactive else sys.stderr
+        path = generate_music(runtime, request, out=getattr(a, "out", None), stream=stream)
+        if path and not interactive:
+            print(path)                            # the one line a script wants
+        return 0 if path else 1
+    finally:
+        runtime.close()
+
+def cmd_music(a):
+    """coli music "calm piano with soft strings" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]"""
+    require_model(a.model, file=None)
+    family = resolve_model(a.model).descriptor
+    if family.modality != "audio":
+        sys.exit(f"{C.yel}coli music needs a text-to-music model;{C.r} {family.display_name} is not one "
+                 f"(ACE-Step 1.5 is: coli setup, or --model DIR)")
+    engine = engine_for(a.model)
+    need_model(a.model, engine)
+    prompt = " ".join(a.prompt) if a.prompt else ""
+    if not prompt.strip() and not getattr(a, "lyrics", None):
+        sys.exit('usage: coli music "what the music is like" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]')
+    banner("music", model=a.model)
+    return run_music(a, family, engine, prompt)
+
 def server_model_entry(base, api_key=None, timeout=1.5):
     """The first /v1/models entry of a running server, or {}."""
     import urllib.request
@@ -2878,6 +3130,9 @@ def cmd_chat(a):
         sys.exit(f"{family.display_name}: gateway adapter is not wired")
     if family.modality=="decision":
         sys.exit(decision_refusal(family))
+    if family.modality=="audio":
+        sys.exit(f"{C.yel}coli chat does not make music;{C.r} use: coli music \"calm piano\" "
+                 f"(or coli serve, POST /v1/audio/music)")
     if family.modality=="image":
         engine=engine_for(a.model)
         need_model(a.model,engine)
@@ -3362,6 +3617,9 @@ def cmd_stop(a):
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""
     need_model(a.model)
+    if is_music_model(a.model):
+        sys.exit(f"{C.yel}the dashboard has no music player yet;{C.r} make songs with: coli music \"calm piano\" "
+                 f"(or coli serve, POST /v1/audio/music)")
     # Same two layouts openai_server.py resolves: next to this script (release
     # archive / installed tree) or one level up (source checkout, where this is c/coli).
     cands = [os.path.join(HERE, "web", "dist"),
@@ -3704,7 +3962,24 @@ def main():
                                           help="side, in pixels, the pictures are worked on at when editing "
                                                "(default: the engine's; larger is slower and needs more memory)")))
     for flag,kw in image_flags: pr.add_argument(flag,**kw)
-    pr.add_argument("--out",default=None,help="PNG path for an image model (default: the images folder)")
+    pr.add_argument("--out",default=None,help="PNG path for an image model, WAV path for a music model (default: the images or music folder)")
+    # Music models (ACE-Step): what to make. Ignored by text and image models; --steps and --seed are shared above.
+    music_flags=(("--lyrics",dict(default=None,metavar="TEXT|@FILE",help="the lyrics (music models; default: instrumental); @FILE reads them from a file")),
+                 ("--language",dict(default=None,metavar="CODE",help="language of the vocals, like en, zh, ja (music models; default: unknown)")),
+                 ("--duration",dict(type=float,default=None,metavar="S",help="seconds of music, 1 to 600 (music models; default 30)")),
+                 ("--shift",dict(type=float,default=None,help="the sampler's timestep shift (music models; default 1)")),
+                 ("--bpm",dict(type=int,default=None,help="tempo in beats per minute (music models; default: left to the model)")),
+                 ("--key",dict(default=None,metavar="KEY",help='musical key, like "C Major" (music models)')),
+                 ("--time-signature",dict(default=None,metavar="N",help='time signature, like 4 or 3/4 (music models)')))
+    for flag,kw in music_flags: pr.add_argument(flag,**kw)
+    pr.add_argument("--no-dcw",action="store_true",help="turn off the sampler's wavelet correction (music models)")
+    pmu=sub.add_parser("music",parents=[common],help="make a song from a description (ACE-Step 1.5)")
+    pmu.add_argument("prompt",nargs="*")
+    pmu.add_argument("--steps",type=int,default=None,help="sampler steps, 1 to 20 (default 8)")
+    pmu.add_argument("--seed",type=int,default=None,help="seed (default: random); the same seed gives upstream's clip")
+    pmu.add_argument("--out",default=None,help="WAV path (default: the music folder, COLI_MUSIC_DIR)")
+    for flag,kw in music_flags: pmu.add_argument(flag,**kw)
+    pmu.add_argument("--no-dcw",action="store_true",help="turn off the sampler's wavelet correction")
     pc=sub.add_parser("chat", parents=[common])
     for flag,kw in image_flags: pc.add_argument(flag,**kw)
     pc.add_argument("--attach", nargs="?", const="http://127.0.0.1:8000", default=None,
@@ -3828,7 +4103,7 @@ def main():
     a=ap.parse_args()
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
-             "run":cmd_run,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
+             "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
              "convert":cmd_convert,"web":cmd_web}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow

@@ -147,6 +147,7 @@ Starting colibri
 | **Qwen3.6-35B-A3B**：聊天，支持思考和工具调用 | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA、Vulkan（含集成显卡） | CPU 上 6.0 tok/s，在集成显卡上用 Vulkan 9.9（A）；用 CUDA 30.0（C） |
 | Qwen3-Coder-30B-A3B：写代码和工具调用，不带思考 | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA、Vulkan（含集成显卡） | 全部专家都在内存中时 8.5-9.6 tok/s，每层 32 个时 5.1（A，CPU） |
 | **Qwen-Image-2.1**：文生图，非商业许可 | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 一张 768x512 的图片用时 2 分 40 秒（8 个 Zen 4 核心，CPU） |
+| **ACE-Step 1.5**：文生音乐，MIT 许可 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音乐用时 16 秒（24 核 i9，CPU） |
 
 **大模型，专家从磁盘流式读取**（速度由磁盘决定：快速的 NVMe 硬盘帮助最大）
 
@@ -290,6 +291,7 @@ curl -s http://127.0.0.1:8000/v1/systemone -H 'Content-Type: application/json' -
 - **兼容 Anthropic**：`/v1/messages`，因此 Claude Code 和 Anthropic SDK 可以直接连接它；
 - **工具调用**：除 Inkling 和 OLMoE 之外的每个聊天引擎都支持，各自使用其模型的原生格式（[各引擎对照表](docs/api.md#tool-calling-support)）；
 - **图像输入**：GLM-5.3-Flash、DeepSeek V4.1 Flash、MiMo-V2.6、Qwen3.8-Flash-Next 和 Qwen3.8-27B 支持，方式可以是 `coli chat` 消息中的一个路径、`coli web` 中的一个附件，或一个 `image_url` 部分；
+- **音乐输出**：ACE-Step 1.5 通过 `POST /v1/audio/music` 和 `coli music "calm piano"` 提供，可带歌词也可纯音乐，输出 48 kHz 立体声 WAV（[acestep.md](docs/acestep.md)）；
 - **图像输出**：Qwen-Image-2.1 通过 `POST /v1/images/generations` 提供，`coli chat` 还能直接在终端中显示图片（[qwen-image.md](docs/qwen-image.md)）；
 - **决策**：通过 `POST /v1/systemone`（[见上文](#system-one-a-decision-with-a-probability)）。
 - **同时进行多个对话**：在每个文本引擎上，`coli serve --kv-slots N` 最多保留 16 个对话，每个都有自己的缓存，并把它们的下一个 token 一起解码（[api.md](docs/api.md#isolated-kv-contexts)）。
@@ -418,6 +420,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

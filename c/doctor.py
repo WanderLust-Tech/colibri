@@ -860,6 +860,61 @@ def run_image_doctor(model, engine_path, available_memory=None):
             "checks": checks, "plan": None, "image_plan": plan}
 
 
+def run_music_doctor(model, engine_path, available_memory=None):
+    """doctor for a text-to-music checkpoint (ACE-Step): no experts and no KV state. What can be
+    wrong is a missing component, a missing tokenizer or silence latent, an engine that is not
+    built, or weights that do not fit in RAM (they all stay loaded between songs)."""
+    from music_engine import COMPONENTS, SILENCE_FILE, TOKENIZER_FILE, plan_music_model
+    model = Path(model).expanduser().resolve()
+    checks = []
+    readable = model.is_dir() and os.access(model, os.R_OK)
+    checks.append(_check("model.path", "pass" if readable else "fail",
+                         "model directory is readable" if readable else
+                         "model directory is missing or not readable", path=str(model)))
+    try:
+        resolved = resolve_model(model)
+        checks.append(_check("model.family", "pass",
+                             f"{resolved.descriptor.display_name} music model is registered",
+                             family_id=resolved.descriptor.id, model_type=resolved.model_type,
+                             descriptor=public_metadata(resolved.descriptor)))
+    except (FamilyConfigError, UnknownFamilyError) as error:
+        checks.append(_check("model.family", "fail", str(error)))
+    missing = [name for name in COMPONENTS if not (model / name).is_dir()]
+    checks.append(_check("model.components", "fail" if missing else "pass",
+                         "missing: " + ", ".join(f"{name}/" for name in missing) if missing
+                         else "text encoder, DiT and VAE present"))
+    for name, label in ((TOKENIZER_FILE, "model.tokenizer"), (SILENCE_FILE, "model.silence_latent")):
+        present = (model / name).is_file()
+        checks.append(_check(label, "pass" if present else "fail",
+                             f"{name} found" if present else f"{name} is missing"))
+    engine = Path(engine_path)
+    engine_ok = engine.is_file() and (sys.platform == "win32" or os.access(engine, os.X_OK))
+    checks.append(_check("engine.binary", "pass" if engine_ok else "fail",
+                         "engine executable is ready" if engine_ok else "engine is not built",
+                         path=str(engine)))
+    available_memory = memory_available() if available_memory is None else available_memory
+    plan = None
+    try:
+        plan = plan_music_model(model, available_memory or None)
+        resident = plan["modes"]["resident"]
+        if not available_memory:
+            status, summary = "warn", "available RAM could not be measured"
+        elif resident.get("fits"):
+            status, summary = "pass", "all weights fit in RAM together"
+        else:
+            status, summary = "fail", "the weights do not fit in the available RAM"
+        checks.append(_check("memory.ram", status, summary, available_bytes=available_memory,
+                             resident_bytes=resident["peak_bytes"]))
+        for warning in plan["warnings"]:
+            checks.append(_check("model.weights", "warn", warning))
+    except (OSError, ValueError, KeyError) as error:
+        checks.append(_check("model.weights", "fail", str(error)))
+    statuses = {item["status"] for item in checks}
+    status = "error" if "fail" in statuses else "warning" if "warn" in statuses else "ok"
+    return {"schema_version": 1, "status": status, "model": str(model), "mode": "standard",
+            "checks": checks, "plan": None, "music_plan": plan}
+
+
 def run_decision_doctor(model, engine_path, available_memory=None):
     """doctor for a decision model (Laya, GLiNER2.5-Decide): no experts and no
     KV state. What can be wrong is a missing file of the checkpoint, an engine

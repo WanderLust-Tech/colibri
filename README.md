@@ -19,11 +19,11 @@ parameters uses only a small part of itself for each token, so colibri keeps
 that part in RAM and reads the rest, the experts, from the disk when the model
 asks for them. Pure C, one file per model family, no GPU required.
 
-Thirteen engines run today. Ten are for language models: **GLM-5.2/5.3**,
+Fourteen engines run today. Ten are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B) and
-**OLMoE**. One draws pictures: **Qwen-Image-2.1**. Two answer decisions:
+**OLMoE**. One draws pictures: **Qwen-Image-2.1**. One makes music: **ACE-Step 1.5**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 
@@ -205,6 +205,7 @@ downloads are the sizes Hugging Face lists for each repository.
 | **Qwen3.6-35B-A3B**: chat with thinking and tools | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (integrated too) | 6.0 tok/s on the CPU, 9.9 with Vulkan on the integrated GPU (A); 30.0 with CUDA (C) |
 | Qwen3-Coder-30B-A3B: code and tool calls, no thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (integrated too) | 8.5-9.6 tok/s with every expert in RAM, 5.1 with 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: text to picture, non-commercial licence | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | one 768x512 picture in 2 min 40 s (8 Zen 4 cores, CPU) |
+| **ACE-Step 1.5**: text to music, MIT licence | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s of music in 16 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:
 a fast NVMe drive helps most)
@@ -457,6 +458,8 @@ with the last 30 turns as a trend.
 - **images in** on GLM-5.3-Flash, DeepSeek V4.1 Flash, MiMo-V2.6,
   Qwen3.8-Flash-Next and Qwen3.8-27B: a path in a `coli chat` message, an
   attachment in `coli web`, or an `image_url` part;
+- **music out** with ACE-Step 1.5 on `POST /v1/audio/music` and `coli music "calm piano"`:
+  a song, with or without lyrics, as a 48 kHz stereo WAV ([acestep.md](docs/acestep.md));
 - **pictures out** with Qwen-Image-2.1 on `POST /v1/images/generations`,
   and drawn inside the terminal by `coli chat`; the same model **edits** a
   picture you give it from an instruction (`coli run --image`, `/image` in
@@ -663,6 +666,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

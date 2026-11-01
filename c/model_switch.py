@@ -121,6 +121,9 @@ def why_not(family, ctx, engine_ready):
         return "the engine for this model is not built"
     if not family.has_gateway_adapter:
         return "the server has no adapter for this model"
+    if family.modality == "audio":
+        # the engine and the route exist (coli music, POST /v1/audio/music); the dashboard has no player for it yet
+        return "the dashboard has no music player yet: coli music, or coli serve (POST /v1/audio/music)"
     if ctx.kv_slots > family.limits.max_kv_slots:
         return f"it supports at most {family.limits.max_kv_slots} KV slot(s); the server runs {ctx.kv_slots}"
     if ctx.cluster and family.id != "glm":

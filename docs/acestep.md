@@ -1,13 +1,13 @@
-# ACE-Step 1.5 in C (work in progress)
+# ACE-Step 1.5 in C
 
 [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) turns a caption and lyrics into a song: 48 kHz stereo, 10
 seconds to 10 minutes, from a diffusion transformer over 25 Hz latents and an audio VAE. This directory of work ports
 it to the same shape as [Qwen-Image](qwen-image.md): one C file, weights read as they are, every stage held to the
 reference by an oracle that compares tensors, not just the final audio.
 
-**Not user-facing yet.** The engine makes music from a command line (`acestep --model DIR --caption "calm piano" --out
-clip.wav`) and speaks a line protocol for the gateway to drive (`--serve`), and every part of it is held to upstream's
-handler. `coli` does not know about it yet, the gateway has no route for it and `make install` does not ship it.
+**Using it:** `coli music "calm piano with soft strings"` writes a song, `coli serve` answers `POST /v1/audio/music`
+(see [In colibri](#in-colibri)). The engine itself is `acestep --model DIR --caption "calm piano" --out clip.wav`, and
+every part of it is held to upstream's handler by an oracle. The dashboard has no player yet.
 
 | stage | what | state |
 |---|---|---|
@@ -16,7 +16,8 @@ handler. `coli` does not know about it yet, the gateway has no route for it and 
 | 2 | the DiT, its condition encoders and the turbo sampler (DCW included), `c/acestep_dit.h` | done, oracle-checked |
 | 3 | the text encoder (Qwen3-Embedding-0.6B), its tokenizer and the prompt templates, `c/acestep_text.h` | done, oracle-checked |
 | 4a | the engine proper in C: a request in, audio out; one-shot and `--serve`; `c/acestep_gen.h`, `c/acestep_serve.h` | done, oracle-checked |
-| 4b | around it: gateway route, `coli music`, the registry's audio modality, the web player, `make install` | |
+| 4b | around it: the registry's audio modality, `music_engine.py`, `POST /v1/audio/music`, `coli music`, `coli info` / `plan` / `doctor`, `coli setup`, `make install` | done, tested against a stub engine and smoke-tested on the real one |
+| 4c | the dashboard's music player | |
 | 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
 
 ## The model, as measured from the checkpoint
@@ -268,6 +269,55 @@ can be wrong, a missing component, a latent width the VAE does not share, a refe
 
 Cost on the real checkpoint (24-core i9, 10 s of music): text 0.7 s, condition 1.1 s, eight steps 12 s, decode 2 s, about 16 s
 in all after a 5 s load; 30 s of music is about 50 s.
+
+## In colibri
+
+The checkpoint is Hugging Face `ACE-Step/Ace-Step1.5`; `coli setup` offers it (6.4 GB: the turbo DiT, the text
+encoder and the VAE; the repository's 5 Hz planners are not downloaded, since this engine does not use them). The
+family is `ace_step`, modality `audio`, found by `"model_type": "acestep"` in the checkpoint's root `config.json`.
+
+```sh
+coli music "calm piano with soft strings" --duration 20            # ~/colibri-music/<date>-<caption>-s<seed>.wav
+coli music "upbeat pop" --lyrics @words.txt --language en --bpm 120 --key "C Major" --seed 7 --out song.wav
+coli plan --model ~/models/ace-step-1.5       # the three weight sets, all resident, against the RAM free now
+coli info --model ~/models/ace-step-1.5       # what is on disk and what the engine will hold
+coli doctor --model ~/models/ace-step-1.5
+coli serve --model ~/models/ace-step-1.5      # POST /v1/audio/music
+```
+
+`coli run "prompt"` on a music model does the same as `coli music`; `coli chat` and `coli tune` refuse it with a
+pointer (there is no conversation and no decode loop to tune); `--ctx` does not apply. `coli music` prints the song's
+path as its last line of stdout, so a script can read it; progress goes to the terminal's line (stderr when piped).
+Ctrl-C asks the engine to stop at its next step and waits for it; a second one quits.
+
+**The route.** `POST /v1/audio/music` takes `model`, `prompt` (the caption; `caption` is the same), `lyrics` (none or empty
+is instrumental), `language`, `duration` (1 to 600 s, default 30), `steps` (1 to 20, default 8), `shift` (default 1),
+`seed` (default random, 0 to 4294967295), `bpm`, `key`, `time_signature`, `dcw`, `stream`, `response_format`. The answer has
+the images route's shape: `{"created", "data": [{"b64_json": <a WAV>, "format": "wav"}], "colibri": {sample_rate, channels,
+samples, duration, seed, steps, shift, frames, truncated, peak, caption_tokens, lyric_tokens, timings}}`; with
+`response_format: "wav"` the body is the WAV itself (`audio/wav`, the seed in `x-colibri-seed`); with `stream: true` it is
+SSE: `music_generation.progress` events (`stage`: `text`, `condition`, `denoise`, `decode`; `step`, `steps`), then
+`music_generation.completed` with the same payload, then `[DONE]`. A bad field is a 400 naming it (`param`); a full queue
+is a 503 (a song takes minutes, so 429's invitation to retry at once would only refill the queue); a client that hangs up
+cancels the song at the engine's next step. `GET /v1/models` lists `"capabilities": ["music_generation"]` and an `audio`
+block with the limits above, so a client can build a valid request. The text endpoints and the images routes answer a music
+model with a 400 that points at this one.
+
+Measured through the real gateway on the real checkpoint: a 6 s clip as JSON and as a raw WAV for the same seed are the
+same bytes, and the same as `coli music` and `acestep --caption` make for it.
+
+**Memory.** Every weight stays loaded between songs: 6.9 GB peak resident set for a 10 s clip, 6.95 GB for 60 s (the
+weights dominate; the working buffers are a few hundred MB at most). Measured on Windows with `PeakWorkingSet64`.
+
+**Speed.** The engine uses every core, so another busy process slows it a lot: the same 10 s clip took 16 s on an idle
+24-core i9 and 68 to 75 s while a Qwen-Image server was drawing on the same machine. Quote the first.
+
+**What is tested without the weights.** `tools/acestep_stub.py` speaks the protocol and makes a synthetic clip that
+depends on the request, the way `qwenimage_stub.py` does for pictures. `tests/test_acestep_engine_client.py` holds
+`music_engine.py` (the client, the request rules, WAV, saving, the plan) to it, `tests/test_acestep_gateway.py` holds
+the route (real `APIServer`, real `MusicEngine`, the stub behind them: the framing, determinism, every refusal, SSE, the
+raw WAV, hang-up cancellation, queueing, the model card), and `tests/test_acestep_cli.py` the commands as a user types
+them. The real engine is held to the same protocol by `tests/test_acestep_serve.py`.
 
 CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracles,
 the refusal tests (`tests/test_acestep_{vae,dit,text,gen}_load.py`, `tests/test_acestep_serve.py`), the four mutation tools, and the oracles again under ASan

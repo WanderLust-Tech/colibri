@@ -160,7 +160,9 @@ class FamilyDescriptor:
     # banner stampa display_scale come sempre.
     reference_experts: int = 0
     # "text" for the chat engines, "image" for a text-to-image pipeline,
-    # "decision" for a decision model. An image family has no KV cache, no
+    # "audio" for a text-to-music model (served by POST /v1/audio/music and
+    # `coli music`, with the image family's shape: no KV cache, no experts, no
+    # chat template), "decision" for a decision model. An image family has no KV cache, no
     # experts and no chat template: coli routes it to the image REPL, the image
     # planner and POST /v1/images/generations, and every text-only invariant
     # (context variable, segment conformance, tuning) is scoped to modality
@@ -1697,6 +1699,40 @@ FAMILIES = (
         tokenizer_file="processor/tokenizer.json",
     ),
     FamilyDescriptor(
+        id="ace_step",
+        # ACE-Step 1.5 text-to-music. The checkpoint root carries the DiT's config.json, whose
+        # model_type is "acestep"; the text encoder (Qwen3-Embedding-0.6B/), the turbo DiT
+        # (acestep-v15-turbo/) and the VAE (vae/) sit in their own directories.
+        model_types=("acestep",),
+        display_name="ACE-Step 1.5",
+        display_scale="",
+        engine_artifact="acestep",
+        engine_aliases=(),
+        engine_group="acestep",
+        internal_arch="acestep",
+        build_target="acestep",
+        process_names=("acestep",),
+        default_model_id="ace-step-1.5-colibri",
+        cli_adapter="ace_step",
+        gateway_adapter="ace_step",
+        planner_id="ace_step",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "a music model has no KV cache and no experts; coli plan sizes its "
+            "text encoder, DiT and VAE instead (music_engine.plan_music_model)"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="root",
+        # One song at a time, and no context or output-token budget: the limits exist
+        # because every descriptor has them. No context variable either (empty).
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="audio",
+        tokenizer_file="Qwen3-Embedding-0.6B/tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="laya",
         # A Laya checkpoint has no config.json at its root: resolve_model reads
         # rl_agent_config.json and the encoder's own config.json, and names it
@@ -1811,7 +1847,7 @@ def _build_registry(families):
                 not isinstance(family.has_cli_adapter, bool) or
                 not isinstance(family.tune_prompt_template, str) or
                 "{prompt}" not in family.tune_prompt_template or
-                family.modality not in ("text", "image", "decision") or
+                family.modality not in ("text", "image", "audio", "decision") or
                 family.capabilities.decision != (family.modality == "decision") or
                 not isinstance(family.tokenizer_file, str) or not family.tokenizer_file or
                 not isinstance(family.checkpoint_files, tuple) or

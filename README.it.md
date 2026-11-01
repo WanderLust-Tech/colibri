@@ -217,6 +217,7 @@ Hugging Face indica per ciascun repository.
 | **Qwen3.6-35B-A3B**: chat con thinking e tool | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (anche integrata) | 6.0 tok/s sulla CPU, 9.9 con Vulkan sulla GPU integrata (A); 30.0 con CUDA (C) |
 | Qwen3-Coder-30B-A3B: codice e chiamate ai tool, senza thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (anche integrata) | 8.5-9.6 tok/s con tutti gli expert in RAM, 5.1 con 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: da testo a immagine, licenza non commerciale | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | un'immagine 768x512 in 2 min 40 s (8 core Zen 4, CPU) |
+| **ACE-Step 1.5**: da testo a musica, licenza MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s di musica in 16 s (i9 a 24 core, CPU) |
 
 **Modelli grandi, i cui expert vengono letti dal disco in streaming** (la
 velocità la decide il disco: un NVMe veloce è ciò che aiuta di più)
@@ -480,6 +481,7 @@ API:
 - **immagini in ingresso** su GLM-5.3-Flash, DeepSeek V4.1 Flash, MiMo-V2.6,
   Qwen3.8-Flash-Next e Qwen3.8-27B: un percorso in un messaggio di `coli chat`,
   un allegato in `coli web` o una parte `image_url`;
+- **musica in uscita** con ACE-Step 1.5 su `POST /v1/audio/music` e `coli music "calm piano"`: un brano, con o senza testo, come WAV stereo a 48 kHz ([acestep.md](docs/acestep.md));
 - **immagini in uscita** con Qwen-Image-2.1 su `POST /v1/images/generations`,
   disegnate anche dentro il terminale da `coli chat`
   ([qwen-image.md](docs/qwen-image.md));
@@ -695,6 +697,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

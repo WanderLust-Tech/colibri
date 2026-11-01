@@ -224,6 +224,7 @@ ukuran yang dicantumkan Hugging Face untuk setiap repository.
 | **Qwen3.6-35B-A3B**: chat dengan thinking dan tools | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (termasuk terintegrasi) | 6.0 tok/s pada CPU, 9.9 dengan Vulkan pada GPU terintegrasi (A); 30.0 dengan CUDA (C) |
 | Qwen3-Coder-30B-A3B: kode dan tool calls, tanpa thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (termasuk terintegrasi) | 8.5-9.6 tok/s dengan semua pakar di RAM, 5.1 dengan 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: teks ke gambar, lisensi nonkomersial | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | satu gambar 768x512 dalam 2 min 40 s (8 core Zen 4, CPU) |
+| **ACE-Step 1.5**: teks ke musik, lisensi MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 detik musik dalam 16 detik (i9 24 core, CPU) |
 
 **Model besar, yang pakarnya melakukan streaming dari disk** (disk menentukan
 kecepatan: drive NVMe yang cepat paling membantu)
@@ -500,6 +501,7 @@ dengan beberapa API:
 - **input gambar** pada GLM-5.3-Flash, DeepSeek V4.1 Flash, MiMo-V2.6,
   Qwen3.8-Flash-Next, dan Qwen3.8-27B: sebuah path dalam pesan `coli chat`,
   attachment di `coli web`, atau bagian `image_url`;
+- **output musik** dengan ACE-Step 1.5 pada `POST /v1/audio/music` dan `coli music "calm piano"`: sebuah lagu, dengan atau tanpa lirik, sebagai WAV stereo 48 kHz ([acestep.md](docs/acestep.md));
 - **output gambar** dengan Qwen-Image-2.1 pada `POST /v1/images/generations`,
   dan digambar langsung di terminal oleh `coli chat`
   ([qwen-image.md](docs/qwen-image.md));
@@ -721,6 +723,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

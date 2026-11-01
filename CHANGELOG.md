@@ -3,6 +3,27 @@
 All notable changes to colibrì are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### ACE-Step 1.5, text to music
+
+A fourteenth engine, `acestep`, makes songs from a description and optional
+lyrics: 48 kHz stereo WAV, 1 to 600 seconds, the turbo DiT with no planner. It
+is one C file family (`acestep.c` with the VAE decoder, the DiT and sampler, the
+text encoder and tokenizer, and the pipeline that joins them), and every part is
+held to upstream's own handler by an oracle that compares tensors. The seed is
+torch's: the same seed gives the clip upstream makes. [docs/acestep.md](docs/acestep.md)
+
+- `coli music "calm piano with soft strings" --duration 20` (or `coli run`) writes a WAV
+  to `~/colibri-music` (`COLI_MUSIC_DIR`); `--lyrics TEXT|@FILE`, `--language`, `--bpm`,
+  `--key`, `--time-signature`, `--steps`, `--shift`, `--seed`, `--no-dcw`.
+- `coli serve` answers `POST /v1/audio/music` (JSON with the WAV in base64, the WAV
+  itself with `response_format: "wav"`, or SSE progress with `stream: true`), with the
+  images route's queue, cancellation on hang-up and structured errors.
+- `coli info`, `coli plan` and `coli doctor` know the checkpoint; `coli setup` offers
+  it (6.4 GB, 9 GB of RAM); `make install` and the release archives carry the engine.
+- ACE-Step 1.5 is MIT licensed.
+
 ## [2.0.0] - 2026-10-06
 
 169 pull requests since v1.12.1, 88 of them from contributors. Every MoE
