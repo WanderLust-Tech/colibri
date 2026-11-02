@@ -24,6 +24,11 @@ torch's: the same seed gives the clip upstream makes. [docs/acestep.md](docs/ace
   it (6.4 GB, 9 GB of RAM); `make install` and the release archives carry the engine.
 - The dashboard has a music mode: a lyrics box, length, steps, language and seed in the composer, progress with
   Cancel, and the browser's audio player with Download WAV and New seed (`web/README.md`).
+- ACE-Step 1.5 takes audio in: a reference clip that lends its sound and style, a cover of a song, and a repaint of a stretch of one
+  (`coli music --ref/--cover/--repaint`, `POST /v1/audio/music` with `src_audio` and `reference_audio` as JSON or multipart, a
+  Compose / Cover / Repaint switch in the dashboard), WAV and MP3 up to 10 minutes. Built as the rest of it: the VAE encoder, the audio
+  tokenizer and the WAV and MP3 loader are each held to upstream's handler by an oracle with mutants that prove it can fail, and twenty
+  whole generations match it end to end ([docs/acestep.md](docs/acestep.md#audio-in-a-reference-clip-a-cover-a-repaint)).
 - ACE-Step 1.5 is MIT licensed.
 
 ## [2.0.0] - 2026-10-06

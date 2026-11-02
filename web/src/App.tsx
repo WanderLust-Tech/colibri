@@ -46,7 +46,7 @@ import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
 import { Brand } from "./components/Brand"
 import { ImageControls, ImageProgressCard, ImageResultCard, ImageStoppedCard, type ImageRun } from "./components/ImageTurn"
-import { MusicControls, MusicLyrics, MusicProgressCard, MusicResultCard, MusicStoppedCard } from "./components/MusicTurn"
+import { MusicClips, MusicControls, MusicLyrics, MusicProgressCard, MusicResultCard, MusicStoppedCard } from "./components/MusicTurn"
 import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
@@ -589,7 +589,7 @@ export default function App() {
   const musicCard = (item: ChatMessage) => {
     const song = item.song!
     if (song.url) return <MusicResultCard song={song} copied={music.copied === `${item.id}:seed`} busy={loading || !music.mode}
-      onDownload={() => music.download(song)} onCopySeed={() => void music.copySeed(item)} onAgain={() => void music.again(song)} />
+      onDownload={() => music.download(song)} onCopySeed={() => void music.copySeed(item)} onAgain={() => void music.again(item)} />
     if (music.run?.targetId === item.id) return <MusicProgressCard request={song} run={music.run} onCancel={music.cancel} />
     return <MusicStoppedCard request={song} finish={item.finish} busy={loading || !music.mode} onRetry={() => void music.retry(item)} />
   }
@@ -653,8 +653,14 @@ export default function App() {
         <div className="composer-wrap">
           {error && <div className="error-banner" role="alert">{t(error)}</div>}
           <form className={cn("composer", (imageMode || music.mode) && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
-            onDragOver={e => { if (!music.mode && (!imageMode || canEdit) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
-            onDrop={e => { if (!music.mode && (!imageMode || canEdit) && e.dataTransfer.files.length) { e.preventDefault(); void (imageMode ? attachPictures : attach)(e.dataTransfer.files) } }}>
+            onDragOver={e => { if (((music.mode && music.audioIn) || (!music.mode && (!imageMode || canEdit))) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
+            onDrop={e => {
+              if (music.mode && music.audioIn && e.dataTransfer.files.length) {
+                e.preventDefault()
+                const file = e.dataTransfer.files[0]
+                void music.chooseClip(music.task !== "text2music" && !music.source ? "source" : "reference", file)
+              } else if (!music.mode && (!imageMode || canEdit) && e.dataTransfer.files.length) { e.preventDefault(); void (imageMode ? attachPictures : attach)(e.dataTransfer.files) }
+            }}>
             {imageMode && attached.length > 0 && <div className="composer-attachments">
               {attached.map((picture, at) => <span key={picture.id} className="attachment">
                 <img src={picture.url} alt={t("image.attachedAlt", { n: at + 1 })} />
@@ -669,10 +675,18 @@ export default function App() {
                   onClick={() => setPending(list => list.filter((_, index) => index !== at))}><X /></button>
               </span>)}
             </div>}
+            {music.mode && music.audioIn && <MusicClips task={music.task} source={music.source} reference={music.reference}
+              sourceProblem={music.sourceProblem} referenceProblem={music.referenceProblem} onChoose={(role, file) => void music.chooseClip(role, file)}
+              onClear={music.clearClip} />}
             {music.mode && music.lyricsOpen && <MusicLyrics value={music.lyrics} max={music.limits.maxLyricBytes} onChange={music.setLyrics} />}
             <Textarea ref={draftRef} id="draft" aria-label={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} onPaste={event => { if (music.mode || (imageMode && !canEdit)) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void (imageMode ? attachPictures : attach)(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
             <div className="composer-foot">
-              {music.mode ? <MusicControls limits={music.limits} duration={music.duration} steps={music.steps} seed={music.seedText}
+              {music.mode ? <MusicControls limits={music.limits} task={music.task} onTask={music.setTask}
+                cover={{ strength: music.coverStrength, noise: music.coverNoise, onStrength: music.setCoverStrength, onNoise: music.setCoverNoise }}
+                repaint={{ from: music.repaintFrom, to: music.repaintTo, mode: music.repaintMode, strength: music.repaintStrength, spanOk: music.spanOk,
+                  onFrom: music.setRepaintFrom, onTo: music.setRepaintTo, onMode: music.setRepaintMode, onStrength: music.setRepaintStrength }}
+                hasReference={music.reference !== null} onReferenceFile={(file) => void music.chooseClip("reference", file)}
+                duration={music.duration} steps={music.steps} seed={music.seedText}
                 seedValid={music.seed !== undefined} language={music.language} lyricsOpen={music.lyricsOpen} lyricsFilled={music.lyrics.trim() !== ""}
                 onDuration={music.setDuration} onSteps={music.setSteps} onSeed={music.setSeedText} onLanguage={music.setLanguage} onLyrics={music.toggleLyrics} />
               : imageMode ? <>

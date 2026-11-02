@@ -85,3 +85,13 @@ not copy Swiftlet or huggingface_hub source code.
 emitted by Swiftlet's `scripts/verify_container.py`. They are new Python
 implementations with stricter path, transport, credential, resume, and digest
 validation; no Swiftlet source code is copied.
+
+## minimp3 (`c/third_party/minimp3.h`, used by `c/acestep_audio.h`)
+
+minimp3 (https://github.com/lieff/minimp3), the single-header MPEG-1/2/2.5 Layer I/II/III decoder, is vendored unmodified at
+commit `ea99364f61c14656440e8d77e9c233ccf3124633`. It is dedicated to the public domain under CC0 1.0
+(http://creativecommons.org/publicdomain/zero/1.0/): "to the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the public domain worldwide. This software is distributed
+without any warranty." It decodes the MP3 input of the ACE-Step engine; the WAV reader, the gapless trimming and the
+resampler in `c/acestep_audio.h` are new code, the resampler a port of the algorithm documented in torchaudio's
+`functional.resample` (BSD-2-Clause) with no torchaudio source copied.

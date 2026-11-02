@@ -39,6 +39,13 @@ class Gateway:
         self.tmp = tempfile.TemporaryDirectory()
         model = make_fake_checkpoint(Path(self.tmp.name) / "ace-step")
         self.engine = music_engine.MusicEngine(STUB, model, env=stub_env(delay), on_log=lambda _m: None)
+        self.calls = []                    # what the gateway asked the engine, by keyword: the upload as the gateway decoded it
+        generate = self.engine.generate
+
+        def spy(*args, **kwargs):
+            self.calls.append({"caption": args[0] if args else kwargs.get("caption"), **kwargs})
+            return generate(*args, **kwargs)
+        self.engine.generate = spy
         self.server = APIServer(("127.0.0.1", 0), self.engine, MODEL_ID, "", 16, max_queue=8, queue_timeout=30)
         self.thread = threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True)
         self.thread.start()
@@ -65,7 +72,9 @@ def open_page(browser, url):
 
     def on_request(request):
         if request.method == "POST" and request.url.endswith("/v1/audio/music"):
-            posts.append(json.loads(request.post_data or "{}"))
+            kind = request.headers.get("content-type", "")
+            # an upload with files in it is multipart, whose body a browser does not show: Gateway.calls holds what it carried
+            posts.append({"_multipart": True} if kind.startswith("multipart/form-data") else json.loads(request.post_data or "{}"))
     page.on("request", on_request)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -104,6 +113,128 @@ def make_one(page, posts, caption, duration="2", steps="3", seed="7"):
     before = len(posts)
     send(page, caption)
     return before
+
+
+def write_wav(path, seconds, rate=48000):
+    """A stereo 16-bit tone: a real WAV the browser can decode and the stub engine can measure."""
+    import math
+    import struct
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        frames = int(seconds * rate)
+        w.writeframes(b"".join(struct.pack("<hh", v, v) for v in (int(8000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(frames))))
+    return Path(path)
+
+
+def run_audio_in(browser, gateway, workdir):
+    """Cover, repaint and a reference clip: the switch, the clip cards and what they refuse, the multipart request, and what the song says it was made from."""
+    clip = write_wav(workdir / "clip.wav", 3.0)
+    voice = write_wav(workdir / "voice.wav", 1.5)
+    junk = workdir / "notes.ogg"
+    junk.write_bytes(b"OggS" + bytes(64))
+    context, page, posts, errors = open_page(browser, gateway.url)
+    form = composer(page)
+    group = form.get_by_role("group", name="What to make")
+    for name in ("Compose", "Cover", "Repaint"):
+        expect(group.get_by_role("button", name=name)).to_be_visible()
+    expect(form.get_by_role("button", name="Reference clip")).to_be_visible()
+    expect(page.locator(".music-clip")).to_have_count(0)                      # composing needs no clip
+    shot(page, "audio-compose")
+
+    # ---- a cover: no length (the clip's is the song's), no prompt needed, but a clip is
+    group.get_by_role("button", name="Cover").click()
+    expect(form.get_by_label("Length of the song, in seconds")).to_have_count(0)
+    expect(page.get_by_role("button", name="Make music")).to_be_disabled()
+    source_input = form.locator(".music-clip[data-role=source] input[type=file]")
+    source_input.set_input_files(str(junk))                                   # not WAV or MP3: said on the page, and sending is held back
+    expect(page.locator(".music-clip[data-role=source]").get_by_role("alert")).to_contain_text("WAV or MP3 files only")
+    expect(page.get_by_role("button", name="Make music")).to_be_disabled()
+    page.locator(".music-clip[data-role=source] button[aria-label='Remove the clip']").click()
+    source_input = form.locator(".music-clip[data-role=source] input[type=file]")
+    source_input.set_input_files(str(clip))
+    card = page.locator(".music-clip[data-role=source]")
+    expect(card.locator(".music-clip-name")).to_have_text("clip.wav")
+    expect(card.locator("time")).to_have_text("0:03", timeout=10000)          # the browser read its length
+    expect(page.get_by_role("button", name="Make music")).to_be_enabled()
+    form.get_by_label("Sampler steps").fill("3")
+    form.get_by_label("Seed", exact=True).fill("7")
+    form.get_by_label("How closely the cover follows the song, from 0 to 1").fill("0.5")
+    shot(page, "audio-cover")
+    before = len(gateway.calls)
+    page.get_by_role("button", name="Make music").click()
+    expect(page.locator("audio.music-player")).to_have_count(1, timeout=20000)
+    call = gateway.calls[before]
+    assert call["task"] == "cover" and call["cover_strength"] == 0.5 and call["steps"] == 3 and call["seed"] == 7, call
+    assert call["caption"] == "" and call["cover_noise"] is None and call["ref_audio"] is None, call
+    assert call["src_audio"] == clip.read_bytes(), len(call["src_audio"] or b"")
+    player = page.locator("audio.music-player").first
+    seconds = page.wait_for_function("(el) => (el.readyState >= 1 && Number.isFinite(el.duration)) ? el.duration : false", arg=player.element_handle(), timeout=10000).json_value()
+    assert abs(seconds - 3.0) < 0.05, f"a cover is the clip's length: the browser reads {seconds}s"
+    expect(page.locator(".music-request").last).to_contain_text("Cover of clip.wav")
+    shot(page, "audio-cover-result")
+
+    # ---- New seed makes it again from the same clip, kept in the page
+    page.get_by_role("button", name="New seed").first.click()
+    expect(page.locator("audio.music-player")).to_have_count(2, timeout=20000)
+    again = gateway.calls[-1]
+    assert again["task"] == "cover" and again["src_audio"] == clip.read_bytes() and again["seed"] != 7, again
+
+    # ---- a repaint: a span that runs backwards is refused, a good one goes out with upstream's names
+    group.get_by_role("button", name="Repaint").click()
+    start = form.get_by_label("Repaint from, in seconds")
+    end = form.get_by_label("Repaint to, in seconds (empty: the end of the clip)")
+    start.fill("2")
+    end.fill("1")
+    expect(start).to_have_attribute("aria-invalid", "true")
+    expect(page.get_by_role("button", name="Make music")).to_be_disabled()
+    start.fill("1")
+    end.fill("2")
+    expect(page.get_by_role("button", name="Make music")).to_be_enabled()
+    form.get_by_label("Repaint strength, from 0 to 1").fill("0.8")
+    before = len(gateway.calls)
+    page.locator("#draft").fill("with strings")
+    page.get_by_role("button", name="Make music").click()
+    expect(page.locator("audio.music-player")).to_have_count(3, timeout=20000)
+    call = gateway.calls[before]
+    assert call["task"] == "repaint" and call["repaint_start"] == 1 and call["repaint_end"] == 2, call
+    assert call["repaint_strength"] == 0.8 and call["caption"] == "with strings" and call["src_audio"] == clip.read_bytes(), call
+    expect(page.locator(".music-request").last).to_contain_text("Repaint of clip.wav, 1 to 2 s")
+    # the end left empty is the clip's: no repainting_end is sent, and a mode other than balanced has no strength
+    end.fill("")
+    form.get_by_label("How the repaint joins the clip").select_option("conservative")
+    before = len(gateway.calls)
+    page.get_by_role("button", name="Make music").click()
+    expect(page.locator("audio.music-player")).to_have_count(4, timeout=20000)
+    call = gateway.calls[before]
+    assert call["repaint_end"] is None and call["repaint_mode"] == "conservative" and call["repaint_strength"] is None, call
+
+    # ---- a reference clip goes with composing, which keeps its length
+    group.get_by_role("button", name="Compose").click()
+    expect(form.get_by_label("Length of the song, in seconds")).to_be_visible()
+    expect(page.locator(".music-clip[data-role=source]")).to_have_count(0)
+    form.locator("input[type=file][aria-label='Reference clip']").set_input_files(str(voice))
+    expect(page.locator(".music-clip[data-role=reference] .music-clip-name")).to_have_text("voice.wav")
+    form.get_by_label("Length of the song, in seconds").fill("2")
+    before = len(gateway.calls)
+    page.locator("#draft").fill("a gentle ballad")
+    page.get_by_role("button", name="Make music").click()
+    expect(page.locator("audio.music-player")).to_have_count(5, timeout=20000)
+    call = gateway.calls[before]
+    assert call["duration"] == 2 and call.get("task") in (None, "text2music") and call["src_audio"] is None, call
+    assert call["ref_audio"] == voice.read_bytes(), call
+    expect(page.locator(".music-request").last).to_contain_text("Style of voice.wav")
+    shot(page, "audio-reference")
+
+    # ---- an engine's refusal is a message, and the page goes on
+    group.get_by_role("button", name="Cover").click()
+    page.locator("#draft").fill("__stub_error__ cover")
+    page.get_by_role("button", name="Make music").click()
+    expect(page.get_by_role("alert").first).to_contain_text("asked to fail", timeout=20000)
+    assert not errors, errors
+    context.close()
 
 
 def run(browser, gateway, slow_gateway):
@@ -217,6 +348,8 @@ def main():
             browser = p.chromium.launch(**launch)
             try:
                 run(browser, gateway, slow)
+                with tempfile.TemporaryDirectory() as work:
+                    run_audio_in(browser, gateway, Path(work))
             finally:
                 browser.close()
     finally:

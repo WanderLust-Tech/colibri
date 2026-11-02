@@ -53,7 +53,21 @@ stream never starts, the same request is made once without it. A finished song i
 length, steps, seed and time under it, and can be downloaded as a WAV named after the caption and seed, have its seed copied,
 or be made again with a new seed. Music turns stay on screen when you switch to a text model but are never sent to it, and the
 songs live only in the page (an object URL), so a reload loses them: download what you want to keep.
-`tests/music_ui.py` drives it in a real browser against the real gateway with a stub engine behind it.
+
+When the model's `audio` block lists more than `text2music` (`"tasks"`, with `"audio_in": {"max_seconds", "ref_seconds"}`), the
+composer also offers what the engine can do with a clip you give it: a **Compose / Cover / Repaint** switch and a **Reference clip**
+chip. A *cover* needs a clip (WAV or MP3, chosen with the button above the prompt or dropped on the composer) and makes it again in
+the style of the description, with two numbers: how closely it follows the song and how near the original it starts. A *repaint*
+needs a clip and a span (from and to, in seconds; empty "to" is the end; a negative start or an end past the clip adds silence there,
+which is how a clip is extended), with a mode (balanced, conservative, aggressive) and, in balanced mode, a strength. A *reference*
+clip goes with any of them and lends its sound and style. A chosen clip shows its name and length (read by the browser) with its own
+player and a way to remove it, and is refused on the page when it is not WAV or MP3, is over the size the gateway takes or is longer
+than the engine reads; a repaint's span is checked against the clip's length. A cover or a repaint has no length field: the clip's length
+is the song's. The request is then a multipart upload (`src_audio`, `reference_audio` and the same fields as the JSON body, with
+upstream's names `repainting_start`, `repainting_end`, `repaint_mode`, `repaint_strength`, `audio_cover_strength`,
+`cover_noise_strength`); the turn shows a "Reading the clip" stage first, and the finished song says what it was made from. The
+files stay in the page for the **New seed** and **Try again** buttons, not across a reload (the buttons say so).
+`tests/music_ui.py` drives all of it in a real browser against the real gateway with a stub engine behind it.
 
 The test suite stays browser-light: API requests use a mocked `fetch`, while
 runtime capability and storage behavior are covered through pure helpers. It

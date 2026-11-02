@@ -358,7 +358,7 @@ class Model(unittest.TestCase):
             self.assertEqual(comps[music_engine.TEXT_DIR]["resident_bytes"], (50 * 20 + 20) * 2)
             vae = comps[music_engine.VAE_DIR]
             self.assertEqual(vae["resident_bytes"], (10 * 10 + 4) * 4)       # the decoder, widened to f32
-            self.assertEqual(vae["unloaded_params"], 10000)                  # the encoder stays on disk
+            self.assertEqual(vae["on_demand_params"], 10000)                  # the encoder loads on first use of audio in
             self.assertEqual(inv["planner"], ["acestep-5Hz-lm-1.7B"])
             self.assertEqual(inv["planner_bytes"], 5000)
             self.assertTrue(inv["tokenizer"] and inv["silence_latent"])

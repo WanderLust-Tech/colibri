@@ -429,6 +429,64 @@ behavior.
 > its system prompt and tool catalog are large, and on a disk-streaming CPU path
 > that is a long silent wait before the first token. Read it before you connect.
 
+## Music (`/v1/audio/music`)
+
+When the served model is ACE-Step (`coli serve --model <ace-step dir>`), `POST /v1/audio/music` makes a song: from a
+description, as a **cover** of a clip you send, as a **repaint** of one span of it, and any of them in the style of a
+**reference** clip. `GET /v1/models` says what the model takes (`audio.tasks`, `audio.audio_in`, and the capability
+`audio_input`); the engine itself is described in [acestep.md](acestep.md).
+
+```bash
+# text to music: a 20 s clip, as the WAV file
+curl http://127.0.0.1:8000/v1/audio/music -H 'content-type: application/json' \
+  -d '{"model":"ace-step-1.5-colibri","prompt":"calm piano with soft strings","duration":20,"seed":7,
+       "response_format":"wav"}' -o piano.wav
+
+# a cover: the same song in a new style. Send the clip as a file (multipart); the song is as long as the clip
+curl http://127.0.0.1:8000/v1/audio/music -o cover.wav \
+  -F model=ace-step-1.5-colibri -F task=cover -F 'prompt=bright ukulele and light percussion' \
+  -F src_audio=@song.mp3 -F audio_cover_strength=0.8 -F response_format=wav
+
+# a repaint: make 20 s to 35 s of the clip again and keep the rest (a start below 0 or an end past the clip adds silence)
+curl http://127.0.0.1:8000/v1/audio/music -o repaint.wav \
+  -F model=ace-step-1.5-colibri -F task=repaint -F 'prompt=add a soaring guitar solo' \
+  -F src_audio=@song.wav -F repainting_start=20 -F repainting_end=35 -F repaint_mode=balanced -F response_format=wav
+
+# a reference clip: a new song in the voice and style of a recording
+curl http://127.0.0.1:8000/v1/audio/music -o styled.wav \
+  -F model=ace-step-1.5-colibri -F 'prompt=an upbeat pop song' -F 'lyrics=la la la, sing it back to me' \
+  -F reference_audio=@voice.wav -F duration=30 -F response_format=wav
+```
+
+The request's fields, with upstream's own names for the audio ones:
+
+| field | meaning |
+|---|---|
+| `prompt` (or `caption`), `lyrics`, `language`, `duration`, `steps`, `shift`, `seed`, `bpm`, `key`, `time_signature`, `dcw` | as for text to music; a cover or a repaint may leave `prompt` empty, and for them `duration` is not read: the clip's length is the song's |
+| `task` | `text2music` (default), `cover` or `repaint` |
+| `src_audio` | the clip to cover or repaint (required for those two, refused for text to music) |
+| `reference_audio` | a clip to take the voice and style from, with any task. A clip under 30 s is repeated to 30 s; a longer one is sampled in three places |
+| `audio_cover_strength` | cover: above 0, at most 1 (default 1): the share of the steps that follow the clip's structure; less lets the text lead the last steps |
+| `cover_noise_strength` | cover: 0 to 1 (default 0): how near the clip the first step starts; 0 starts from noise |
+| `repainting_start`, `repainting_end` | repaint: the span in seconds of the clip (default 0 and the end). A start below 0 adds silence before the clip, an end past it silence after; the whole may not pass 600 s |
+| `repaint_mode` | repaint: `balanced` (default), `conservative` (keeps the most of the source around the span) or `aggressive` (the span is freest, no splice back of the source's own samples) |
+| `repaint_strength` | repaint, balanced mode: above 0, at most 1 (default 0.5): higher is freer. For the conservative end of the range, say `repaint_mode: conservative` |
+
+A clip is a **WAV** (PCM 8 to 32 bit, or float; any rate and channel count) or an **MP3**, 1 to 600 seconds; the
+format is told from the bytes, not the file name, and anything else (FLAC, Ogg, M4A, AIFF) is refused by name. It
+may be sent as a file in a `multipart/form-data` body (fields named `src_audio` and `reference_audio`, every other
+field a text field with the JSON body's names) or as base64 or a `data:audio/...;base64,` URL in a JSON body. Nothing
+is fetched from a URL and no path on the server is read. At most **128 MiB** per clip and **192 MiB** together; the
+body limit follows (a multipart body may be 193 MiB, a JSON body 4/3 of the pair as base64 and a MiB more), which
+is why a long clip should go as a file. A server whose engine takes no audio in keeps the 4 MiB limit of every other
+route and answers a clip with 400.
+
+With `"stream": true` the answer is server-sent events: `music_generation.progress` events carrying `stage`, `step`
+and `steps`, then `music_generation.completed` with the same payload as the plain answer, then `[DONE]`. The stages
+are `encode` (reading the clip, only when a clip was sent), `text`, `condition`, `denoise` (the sampler's steps) and
+`decode`. The `colibri` block of the answer says the `task` and the `src_seconds` of the clip (0 for text to music).
+A client that hangs up cancels the song, and the clips the gateway wrote for the engine are removed at once.
+
 ## Connect a coding CLI or editor
 
 The API is OpenAI-compatible, so most coding CLIs and editor extensions work by

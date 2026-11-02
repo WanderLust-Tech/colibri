@@ -213,14 +213,14 @@ class MusicEndpointTest(unittest.TestCase):
         status, _, raw = self.gw.request("/v1/models", method="GET")
         self.assertEqual(status, 200)
         entry = json.loads(raw)["data"][0]
-        self.assertEqual(entry["capabilities"], ["music_generation"])
+        self.assertEqual(entry["capabilities"], ["music_generation", "audio_input"])
         audio = entry["audio"]
         self.assertEqual((audio["sample_rate"], audio["channels"], audio["max_duration"], audio["max_steps"]), (RATE, 2, 600, 20))
         self.assertNotIn("image", entry)
         status, _, raw = self.gw.request("/health", method="GET")          # the detail is for a client that has the key
         self.assertEqual(status, 200)
         health = json.loads(raw)
-        self.assertEqual(health["capabilities"], ["music_generation"])
+        self.assertEqual(health["capabilities"], ["music_generation", "audio_input"])
         self.assertEqual(health["audio"]["sample_rate"], RATE)
 
     def test_a_text_engine_refuses_the_music_route(self):

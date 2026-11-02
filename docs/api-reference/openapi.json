@@ -13,6 +13,7 @@
   ],
   "tags": [
     { "name": "Inference", "description": "Generate text through OpenAI- or Anthropic-compatible request shapes." },
+    { "name": "Music", "description": "Make music with an ACE-Step model: from a description, as a cover of a clip, as a repaint of a span of one, or in the style of a reference clip." },
     { "name": "Models", "description": "Inspect the model loaded by the persistent server." },
     { "name": "Operations", "description": "Inspect liveness, queue state, hardware, routing, and per-turn telemetry." }
   ],
@@ -107,6 +108,43 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "429": { "$ref": "#/components/responses/QueueFull" }
+        }
+      }
+    },
+    "/v1/audio/music": {
+      "post": {
+        "tags": ["Music"],
+        "summary": "Make a song",
+        "description": "Text to music, a cover of a clip, a repaint of a span of a clip, any of them in the style of a reference clip (ACE-Step; `GET /v1/models` lists `audio.tasks` and `audio.audio_in`). The answer is a 48 kHz stereo WAV: base64 in JSON, or the file itself with `response_format: \"wav\"`, or with `stream` an SSE of `music_generation.progress` events (stages `encode`, `text`, `condition`, `denoise`, `decode`) and a `music_generation.completed` event. A clip is a WAV or an MP3 of 1 to 600 s, sent as a file in a multipart/form-data body (`src_audio`, `reference_audio`) or as base64 or a `data:` URL in a JSON body; at most 128 MiB each and 192 MiB together (a multipart body may be that large, a JSON body 4/3 of it). Nothing is fetched from a URL or read from a path. The request names the clips and settings with upstream's own names.",
+        "operationId": "createMusic",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/MusicRequest" } },
+            "multipart/form-data": {
+              "schema": {
+                "allOf": [{ "$ref": "#/components/schemas/MusicRequest" }],
+                "properties": {
+                  "src_audio": { "type": "string", "format": "binary", "description": "The clip to cover or repaint, as a file." },
+                  "reference_audio": { "type": "string", "format": "binary", "description": "A clip to take the style from, as a file." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The song.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/MusicResponse" } },
+              "audio/wav": { "schema": { "type": "string", "format": "binary" } },
+              "text/event-stream": { "schema": { "type": "string" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "description": "The queue is full or the music engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -379,7 +417,51 @@
           "thinking": { "type": "object", "additionalProperties": true }
         }
       },
-      "Usage": {
+      "MusicRequest": {
+      "type": "object",
+      "description": "A request for a song. `prompt` or `lyrics` must say something unless this is a cover or a repaint, which work from a clip. For a cover or a repaint the song is as long as the clip (a repaint's silence added) and `duration` is not read.",
+      "properties": {
+        "model": { "type": "string" },
+        "prompt": { "type": "string", "description": "What the music is like (`caption` is an alias)." },
+        "lyrics": { "type": "string", "description": "The lyrics; none is instrumental." },
+        "language": { "type": "string", "description": "Language of the vocals, like en, zh, ja." },
+        "duration": { "type": "number", "minimum": 1, "maximum": 600, "default": 30, "description": "Seconds, for text to music." },
+        "steps": { "type": "integer", "minimum": 1, "maximum": 20, "default": 8 },
+        "shift": { "type": "number", "exclusiveMinimum": 0, "maximum": 10, "default": 1 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "The same seed gives the same song." },
+        "bpm": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "key": { "type": "string", "example": "C Major" },
+        "time_signature": { "type": "string", "example": "4" },
+        "dcw": { "type": "boolean", "default": true },
+        "response_format": { "type": "string", "enum": ["b64_json", "wav"] },
+        "stream": { "type": "boolean", "default": false },
+        "task": { "type": "string", "enum": ["text2music", "cover", "repaint"], "default": "text2music", "description": "`cover` makes the whole clip again in the new style; `repaint` makes only a span of it again and keeps the rest." },
+        "src_audio": { "type": "string", "description": "The clip to cover or repaint (required for those tasks): base64 or a `data:` URL of a WAV or MP3, or a file in multipart/form-data." },
+        "reference_audio": { "type": "string", "description": "A clip to take the voice and style from, with any task: base64 or a `data:` URL, or a file in multipart/form-data. Clips shorter than 30 s are repeated, longer ones sampled." },
+        "audio_cover_strength": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1, "description": "Cover only: the share of the steps that follow the clip's structure." },
+        "cover_noise_strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 0, "description": "Cover only: how near the clip the first step starts; 0 starts from noise." },
+        "repainting_start": { "type": "number", "default": 0, "description": "Repaint only: where the span starts, in seconds; below 0 adds silence before the clip." },
+        "repainting_end": { "type": "number", "description": "Repaint only: where the span ends, in seconds; 0 or less (the default) is the end of the clip, past it adds silence after." },
+        "repaint_mode": { "type": "string", "enum": ["balanced", "conservative", "aggressive"], "default": "balanced", "description": "Repaint only: how much of the source the span's edges keep." },
+        "repaint_strength": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.5, "description": "Repaint, balanced mode: higher is freer." }
+      }
+    },
+    "MusicResponse": {
+      "type": "object",
+      "properties": {
+        "created": { "type": "integer" },
+        "data": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "b64_json": { "type": "string", "description": "A WAV file, base64." }, "format": { "type": "string", "example": "wav" } } }
+        },
+        "colibri": {
+          "type": "object",
+          "description": "What was made: sample_rate, channels, samples, duration, seed, steps, shift, frames, peak, timings, and `task` and `src_seconds` (the source clip's length; 0 for text to music).",
+          "additionalProperties": true
+        }
+      }
+    },
+    "Usage": {
         "type": "object",
         "properties": {
           "prompt_tokens": { "type": "integer" },

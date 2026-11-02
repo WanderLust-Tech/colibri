@@ -161,6 +161,14 @@ function editLimits(image: unknown): ModelInfo["edit"] {
   return { maxImages: Number(edit.max_images), ...(refResolution ? { refResolution } : {}) }
 }
 
+/* The tasks a /v1/models `audio` block lists: the ones this page knows, in its order, and composing
+   always (an engine that says nothing only composes). */
+function musicTasks(value: unknown): MusicTask[] {
+  const listed = Array.isArray(value) ? value : []
+  const known = MUSIC_TASKS.filter((task) => task === "text2music" || listed.includes(task))
+  return known.length ? known : ["text2music"]
+}
+
 /* /v1/models: `audio` on a music model. Every number must be there and positive; a
    server that states less gets the contract's defaults for the rest (the engine's
    own, music_engine.DEFAULT_INFO), and one that states nothing is left out. */
@@ -177,6 +185,11 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
     maxSteps: number(info.max_steps, 20),
     defaultShift: number(info.default_shift, 1),
     maxLyricBytes: number(info.max_lyric_bytes, 32768),
+    tasks: musicTasks(info.tasks),
+  }
+  const audioIn = info.audio_in as { max_seconds?: unknown; ref_seconds?: unknown } | undefined
+  if (audioIn && positive(audioIn.max_seconds) && positive(audioIn.ref_seconds) && limits.tasks.length > 1) {
+    limits.audioIn = { maxSeconds: Number(audioIn.max_seconds), refSeconds: Number(audioIn.ref_seconds) }
   }
   return limits.minDuration <= limits.maxDuration ? limits : undefined
 }
@@ -703,7 +716,13 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
  * events: progress while the engine works, completed with the same object the
  * plain request returns. The WAV travels as base64 in `data[0].b64_json`. */
 
-export type MusicStage = "text" | "condition" | "denoise" | "decode"
+export type MusicStage = "encode" | "text" | "condition" | "denoise" | "decode"
+
+/* What the engine can be asked to make: new music from a description (the default), a cover of a
+   clip, or a clip with a span of it repainted. A reference clip, for the style, goes with any. */
+export type MusicTask = "text2music" | "cover" | "repaint"
+export type RepaintMode = "balanced" | "conservative" | "aggressive"
+export const MUSIC_TASKS: readonly MusicTask[] = ["text2music", "cover", "repaint"]
 
 export interface MusicProgress {
   stage: MusicStage
@@ -712,6 +731,7 @@ export interface MusicProgress {
 }
 
 export interface MusicTimings {
+  encode?: number
   text?: number
   condition?: number
   denoise?: number
@@ -727,6 +747,10 @@ export interface MusicLimits {
   maxSteps: number
   defaultShift: number
   maxLyricBytes: number
+  /* The tasks the engine reports (an older one reports none: it only composes) and, when it takes
+     audio in, the longest clip and the length a reference is cut to. */
+  tasks: MusicTask[]
+  audioIn?: { maxSeconds: number; refSeconds: number }
 }
 
 export interface MusicGenerationResponse {
@@ -734,6 +758,7 @@ export interface MusicGenerationResponse {
   data: Array<{ b64_json?: string; format?: string }>
   colibri?: {
     sample_rate?: number; samples?: number; duration?: number; seed?: number; steps?: number; shift?: number
+    task?: MusicTask; src_seconds?: number
     truncated?: boolean; timings?: MusicTimings
   }
 }
@@ -748,6 +773,13 @@ export interface GeneratedMusic {
   duration: number
   steps: number
   seed: number
+  /* What was asked: absent is a plain composition. The clips are named, not kept: the files live in
+     the page (lib/useMusic.ts) for the buttons that make the song again. */
+  task?: MusicTask
+  source?: { name: string; seconds?: number }
+  reference?: { name: string }
+  repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
+  cover?: { strength: number; noise: number }
   url?: string
   seconds?: number
   timings?: MusicTimings
@@ -765,6 +797,12 @@ export interface GenerateMusicOptions {
   duration: number
   steps: number
   seed: number
+  task?: MusicTask
+  /* The clips, as files the user chose: sent as an upload, the way the picture edit sends its pictures. */
+  source?: File
+  reference?: File
+  repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
+  cover?: { strength: number; noise: number }
   signal: AbortSignal
   onProgress?: (progress: MusicProgress) => void
   /* Streaming was not available and the song is being made by one plain request:
@@ -777,17 +815,44 @@ const MUSIC_EVENT = {
   completed: "music_generation.completed",
 }
 
-function musicRequest(options: GenerateMusicOptions, stream: boolean): RequestInit {
+/* The fields of a request, with upstream's names for the audio ones (docs/acestep.md). A cover or a
+   repaint has no `duration`: its length is the clip's. */
+export function musicFields(options: GenerateMusicOptions, stream: boolean) {
+  const task = options.task ?? "text2music"
   const fields: Record<string, string | number | boolean> = {
     model: options.model,
     prompt: options.prompt,
-    duration: options.duration,
     steps: options.steps,
     seed: options.seed,
     stream,
   }
+  if (task === "text2music") fields.duration = options.duration
+  else fields.task = task
   if (options.lyrics?.trim()) fields.lyrics = options.lyrics
   if (options.language) fields.language = options.language
+  if (task === "repaint" && options.repaint) {
+    fields.repainting_start = options.repaint.from
+    if (options.repaint.to !== undefined) fields.repainting_end = options.repaint.to
+    if (options.repaint.mode !== "balanced") fields.repaint_mode = options.repaint.mode
+    if (options.repaint.mode === "balanced" && options.repaint.strength !== undefined) fields.repaint_strength = options.repaint.strength
+  }
+  if (task === "cover" && options.cover) {
+    if (options.cover.strength !== 1) fields.audio_cover_strength = options.cover.strength
+    if (options.cover.noise !== 0) fields.cover_noise_strength = options.cover.noise
+  }
+  return fields
+}
+
+function musicRequest(options: GenerateMusicOptions, stream: boolean): RequestInit {
+  const fields = musicFields(options, stream)
+  if (options.source || options.reference) {
+    const form = new FormData()
+    for (const [name, value] of Object.entries(fields)) form.append(name, String(value))
+    if (options.source) form.append("src_audio", options.source, options.source.name)
+    if (options.reference) form.append("reference_audio", options.reference, options.reference.name)
+    const auth: Record<string, string> = options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}
+    return { method: "POST", headers: auth, signal: options.signal, body: form }
+  }
   return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
 }
 
@@ -878,6 +943,11 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
     duration: info?.duration ?? options.duration,
     steps: info?.steps ?? options.steps,
     seed: info?.seed ?? options.seed,
+    ...(options.task && options.task !== "text2music" ? { task: options.task } : {}),
+    ...(options.source ? { source: { name: options.source.name, ...(info?.src_seconds ? { seconds: info.src_seconds } : {}) } } : {}),
+    ...(options.reference ? { reference: { name: options.reference.name } } : {}),
+    ...(options.task === "repaint" && options.repaint ? { repaint: options.repaint } : {}),
+    ...(options.task === "cover" && options.cover ? { cover: options.cover } : {}),
     url: wavUrl(song.b64_json),
     ...(info?.timings ? { timings: info.timings } : {}),
     ...(info?.truncated ? { truncated: true } : {}),

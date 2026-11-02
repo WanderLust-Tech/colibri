@@ -28,11 +28,11 @@ FLAG = "--gen-ref"
 # name: (text in acestep_gen.h, its replacement[, how many times it occurs])
 MUTANTS = {
     # --- torch's generator -----------------------------------------------------------------------------------------
-    "noise-seed-offset": ("acg_mt_seed(&m, seed);\n    if (n < 16)", "acg_mt_seed(&m, seed + 1);\n    if (n < 16)"),
+    "noise-seed-offset": ("acg_mt_seed(&m, seed);\n    acg_randn_mt(&m, n, out);", "acg_mt_seed(&m, seed + 1);\n    acg_randn_mt(&m, n, out);"),
     "noise-seed-recurrence": ("1812433253u * (m->s[j - 1]", "1812433252u * (m->s[j - 1]"),
     "noise-tempering": ("y ^= y >> 11; y ^= (y << 7) & 0x9d2c5680u;", "y ^= y >> 10; y ^= (y << 7) & 0x9d2c5680u;"),
     "noise-twist-constant": ("0x9908b0dfu", "0x9908b0deu"),
-    "noise-24-bits": ("(float)(acg_mt_next(&m) & 0xffffff) * (1.0f / 16777216.0f)", "(float)(acg_mt_next(&m) & 0x7fffff) * (1.0f / 8388608.0f)", 2),
+    "noise-24-bits": ("(float)(acg_mt_next(m) & 0xffffff) * (1.0f / 16777216.0f)", "(float)(acg_mt_next(m) & 0x7fffff) * (1.0f / 8388608.0f)", 2),
     "noise-sin-cos-swapped": ("d[j] = radius * cosf(theta);\n        d[j + 8] = radius * sinf(theta);", "d[j] = radius * sinf(theta);\n        d[j + 8] = radius * cosf(theta);"),
     "noise-uniforms-swapped": ("const float u1 = 1.0f - d[j], u2 = d[j + 8];", "const float u1 = 1.0f - d[j + 8], u2 = d[j];"),
     "noise-radius-factor": ("sqrtf(-2.0f * logf(u1))", "sqrtf(-1.0f * logf(u1))"),
@@ -51,18 +51,18 @@ MUTANTS = {
     "clip-not-cut-to-the-length-asked": ("info->samples = (int)total < want_samples ? (int)total : want_samples;", "info->samples = (int)total;"),
     # --- the context and the prompts --------------------------------------------------------------------------------
     "mask-not-true": ("ctx[(size_t)f * 2 * A + A + c] = 1.0f;", "ctx[(size_t)f * 2 * A + A + c] = 0.0f;"),
-    "source-not-silence": ("memcpy(ctx + (size_t)f * 2 * A, src + (size_t)f * A, (size_t)A * sizeof(float));", "memcpy(ctx + (size_t)f * 2 * A, noise + (size_t)f * A, (size_t)A * sizeof(float));"),
+    "source-not-silence": ("memcpy(ctx + (size_t)f * 2 * A, dit_src + (size_t)f * A, (size_t)A * sizeof(float));", "memcpy(ctx + (size_t)f * 2 * A, noise + (size_t)f * A, (size_t)A * sizeof(float));"),
     "lyrics-default": ("rq->lyrics ? rq->lyrics : \"[Instrumental]\"", "rq->lyrics ? rq->lyrics : \"\""),
     "language-default": ("rq->language && *rq->language ? rq->language : \"unknown\"", "rq->language && *rq->language ? rq->language : \"en\""),
     "empty-lyrics-replaced": ("rq->lyrics ? rq->lyrics : \"[Instrumental]\"", "rq->lyrics && *rq->lyrics ? rq->lyrics : \"[Instrumental]\""),
-    "duration-in-metas": ("cp = act_caption_prompt(NULL, rq->caption, bpm, rq->key, rq->timesig, rq->duration);", "cp = act_caption_prompt(NULL, rq->caption, bpm, rq->key, rq->timesig, rq->duration + 1.0);"),
+    "duration-in-metas": ("cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration);", "cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration + 1.0);"),
     "bpm-dropped": ("if (rq->bpm > 0) snprintf(bpm, sizeof bpm, \"%d\", rq->bpm);", ""),
     # --- the sampler's arguments and the decode ------------------------------------------------------------------
-    "shift-ignored": ("acd_schedule(rq->steps, (float)rq->shift, sched)", "acd_schedule(rq->steps, 1.0f, sched)"),
+    "shift-ignored": ("acd_schedule(rq->steps, (float)rq->shift, sched_all)", "acd_schedule(rq->steps, 1.0f, sched_all)"),
     "dcw-always-on": ("AcdSampleOpts so = { rq->dcw ? 1 : 0, 0.05, 0.02 };", "AcdSampleOpts so = { 1, 0.05, 0.02 };"),
     "dcw-strengths": ("AcdSampleOpts so = { rq->dcw ? 1 : 0, 0.05, 0.02 };", "AcdSampleOpts so = { rq->dcw ? 1 : 0, 0.02, 0.05 };"),
-    "network-told-r-zero": ("acd_forward(d, cond, x, ctx, T, sched[i], sched[i], v);", "acd_forward(d, cond, x, ctx, T, sched[i], 0.0f, v);"),
-    "network-told-the-wrong-time": ("acd_forward(d, cond, x, ctx, T, sched[i], sched[i], v);", "acd_forward(d, cond, x, ctx, T, sched[n - 1 - i], sched[n - 1 - i], v);"),
+    "network-told-r-zero": ("acd_forward(d, cur, x, cur_ctx, T, sched[i], sched[i], v);", "acd_forward(d, cur, x, cur_ctx, T, sched[i], 0.0f, v);"),
+    "network-told-the-wrong-time": ("acd_forward(d, cur, x, cur_ctx, T, sched[i], sched[i], v);", "acd_forward(d, cur, x, cur_ctx, T, sched[n - 1 - i], sched[n - 1 - i], v);"),
     "step-index": ("acd_sample_step(x, v, i, n, sched, T, A, &so, nx);", "acd_sample_step(x, v, i, n + 1, sched, T, A, &so, nx);"),
     "peak-limit-skipped": ("info->peak = acv_normalize(wav, total * e->vae->ach);", "info->peak = 0;"),
     "decode-overlap-too-small": ("#define ACG_VAE_OVERLAP 64", "#define ACG_VAE_OVERLAP 1"),

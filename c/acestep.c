@@ -20,6 +20,11 @@
  *           [--seed N] [--bpm N] [--key K] [--timesig T] [--no-dcw]
  *       Makes a clip and writes it as a 16-bit stereo WAV at 48 kHz. Defaults: instrumental, 30 s, 8 steps, shift 1, DCW on,
  *       a seed taken from the clock (printed). The same seed gives the same clip as upstream's handler (acg_randn is torch's generator).
+ *       With audio in (a WAV or an MP3; docs/acestep.md): --ref CLIP takes the timbre and style from a clip, in any task;
+ *       --cover CLIP makes a cover of it (--cover-strength 0..1 and --cover-noise 0..1 steer how near it stays; --caption is
+ *       then optional); --repaint CLIP --from S --to S makes that stretch of it again and keeps the rest (--to 0 or absent: its
+ *       end; a negative --from or a --to past the end adds silence there; --repaint-mode balanced|conservative|aggressive,
+ *       --repaint-strength 0..1 for balanced). The result is the clip's length.
  *   acestep --model DIR --serve
  *       The line protocol of acestep_serve.h on stdin and stdout, for the gateway and `coli music`.
  *   acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]
@@ -57,7 +62,9 @@
 #include "json.h"
 #include "qi_gemm.h"
 #include "acestep_vae.h"
+#include "acestep_vae_enc.h"
 #include "acestep_dit.h"
+#include "acestep_tok.h"
 #include "acestep_text.h"
 #include "acestep_gen.h"          /* the three networks joined: a request in, audio out */
 #include "acestep_serve.h"        /* and its line protocol */
@@ -66,10 +73,13 @@ static void usage(void){
     fprintf(stderr,
         "usage: acestep --model DIR --dit-ref REFDIR [--dump PREFIX] [--threads N]\n"
         "       acestep --model DIR --vae-ref REFDIR [--chunk N] [--overlap N] [--wav OUT.wav] [--dump PREFIX] [--threads N]\n"
+        "       acestep --model DIR --vae-enc-ref REFDIR | --cover-ref REFDIR\n"
         "       acestep --model DIR --tok-ref FILE.json | --text-ref REFDIR\n"
         "       acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]\n"
         "       acestep --model DIR --caption TEXT --out FILE.wav [--lyrics TEXT] [--language CODE] [--duration S] [--steps N]\n"
         "               [--shift X] [--seed N] [--bpm N] [--key K] [--timesig T] [--no-dcw]\n"
+        "               [--ref CLIP] [--cover CLIP [--cover-strength X] [--cover-noise X]]\n"
+        "               [--repaint CLIP [--from S] [--to S] [--repaint-mode M] [--repaint-strength X]]\n"
         "       acestep --model DIR --serve\n"
         "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/)\n"
         "  REFDIR  one case captured by tools/acestep_ref.py (REFDIR/ref.safetensors)\n");
@@ -116,10 +126,17 @@ static int cmp(const char *what, const float *got, const float *want, size_t n){
 static float *ref_tensor(shards *S, const char *name, int64_t *n, int64_t *shape, int *rank){
     st_tensor *t = st_find(S, name);
     if (!t) return NULL;
-    if (t->dtype > 2 && t->dtype != 6) { fprintf(stderr, "[%s] %s is not a float or int64 tensor\n", g_tag, name); return NULL; }
+    if (t->dtype > 2 && t->dtype != 6 && t->dtype != 7) { fprintf(stderr, "[%s] %s is not a float, int32 or int64 tensor\n", g_tag, name); return NULL; }
     float *v = (float *)malloc((size_t)(t->numel > 0 ? t->numel : 1) * sizeof(float));
     if (!v) { fprintf(stderr, "[%s] out of memory\n", g_tag); exit(1); }
-    if (t->dtype == 6) {            /* int64 (token ids): exact in float below 2^24, far above any vocabulary here */
+    if (t->dtype == 7) {            /* int32 (the quantizer's codes): exact in float below 2^24, and a code is below 2^18 */
+        if (t->nbytes != t->numel * 4) { fprintf(stderr, "[%s] %s: shape and bytes disagree\n", g_tag, name); free(v); return NULL; }
+        int32_t *raw = (int32_t *)malloc((size_t)(t->nbytes > 0 ? t->nbytes : 1));
+        if (!raw) { fprintf(stderr, "[%s] out of memory\n", g_tag); exit(1); }
+        st_read_raw(S, name, raw, 0);
+        for (int64_t i = 0; i < t->numel; i++) v[i] = (float)raw[i];
+        free(raw);
+    } else if (t->dtype == 6) {     /* int64 (token ids): exact in float below 2^24, far above any vocabulary here */
         if (t->nbytes != t->numel * 8) { fprintf(stderr, "[%s] %s: shape and bytes disagree\n", g_tag, name); free(v); return NULL; }
         int64_t *raw = (int64_t *)malloc((size_t)(t->nbytes > 0 ? t->nbytes : 1));
         if (!raw) { fprintf(stderr, "[%s] out of memory\n", g_tag); exit(1); }
@@ -248,6 +265,260 @@ static int run_vae_oracle(const char *model, const char *refdir, int chunk, int 
     if (!cases) { fprintf(stderr, "[vae-oracle] nothing to compare in %s\n", refdir); return 2; }
     if (fails) { fprintf(stderr, "[vae-oracle] %d of %d comparison(s) FAILED\n", fails, cases); return 1; }
     fprintf(stderr, "[vae-oracle] all %d comparison(s) within rel %.0e and abs %.0e\n", cases, g_tol_rel, g_tol_abs);
+    return 0;
+}
+
+/* ---------------------------------------------------------- the VAE encoder oracle -- */
+
+/* The encoder's limits. The network alone (its parameters against upstream's, one pass) and the whole tiled encode (windows,
+ * trims, and the posterior draw from torch's own generator) are held separately, so a wrong layer and a wrong seam each show
+ * where they are. Measured on the real checkpoint (single10, single_odd, single28, tile_*), as the ratio of the norms of the
+ * error and the reference and as a fraction of the tensor's peak (the values peak near 6, the std below 1):
+ *
+ *   the network, one pass (parameters)  measured <= 6.0e-6 rel, 8.2e-5 of the peak (4.7e-4 abs)   held at 2e-5, 2e-4
+ *   the std the sampler uses            measured <= 6.6e-5 rel, 1.0e-6 abs (std is 1e-4 to 1e-2: its relative error is
+ *                                       the scale's absolute one)                                   held at 3e-4, 1e-5
+ *   the tiled encode, sampled           measured <= 3.0e-5 rel, 8.2e-5 of the peak                  held at 1e-4, 2e-4
+ *
+ * The error is torch's, not ours: the same network in float64 (`acestep_ref_audio.py enc ... --f64`) is 1.7e-6 rel from this
+ * encoder and 5.2e-6 from torch's float32 on a 10 s clip, 6.6e-7 and 2.1e-6 on a 28 s one. */
+#define VENC_REL 2e-5
+#define VENC_ABS 2e-4
+#define VENC_STD_REL 3e-4
+#define VENC_STD_ABS 1e-5
+#define VENC_TILE_REL 1e-4
+#define VENC_TILE_ABS 2e-4
+
+static void venc_eps(float *dst, size_t n, void *ud){ acg_randn_mt((AcgMt *)ud, n, dst); }
+
+/* wav [1][2][N] planar -> [N][2] interleaved */
+static float *interleave2(const float *p, size_t n){
+    float *x = (float *)malloc(n * 2 * sizeof(float));
+    if (!x) { fprintf(stderr, "out of memory\n"); exit(1); }
+    for (size_t i = 0; i < n; i++) { x[i * 2] = p[i]; x[i * 2 + 1] = p[n + i]; }
+    return x;
+}
+
+static int run_vae_enc_oracle(const char *model, const char *refdir){
+    char vdir[4096];
+    snprintf(vdir, sizeof vdir, "%s/vae", model);
+    AcvEnc *e = acve_load(vdir);
+    if (!e) return 2;
+    g_tag = "vae-enc-oracle";
+    fprintf(stderr, "[vae-enc-oracle] encoder: %d blocks, %d x %d Hz -> %d latent channels, hop %d\n", e->nblk, e->ach, e->rate, e->zdim, e->hop);
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    if (R.n == 0) { fprintf(stderr, "[vae-enc-oracle] no safetensors in %s\n", refdir); acve_free(e); return 2; }
+    int fails = 0, cases = 0;
+    const int z = e->zdim;
+
+    /* one pass: the posterior's parameters */
+    for (int k = 0;; k++) {
+        char nw[32], np[32]; int64_t nn, npar, sh[ST_MAX_RANK]; int rk;
+        snprintf(nw, sizeof nw, "enc%d.wav", k); snprintf(np, sizeof np, "enc%d.params", k);
+        float *wav = ref_tensor(&R, nw, &nn, sh, &rk);
+        if (!wav) break;
+        int64_t shp[ST_MAX_RANK]; int rp;
+        float *want = ref_tensor(&R, np, &npar, shp, &rp);
+        if (!want || rk != 3 || sh[1] != e->ach || rp != 3 || shp[1] != 2 * z) { fprintf(stderr, "[vae-enc-oracle] %s: unexpected shape\n", nw); fails++; free(wav); free(want); break; }
+        const int64_t N = sh[2], T = shp[2];
+        float *x = interleave2(wav, (size_t)N);
+        float *got = (float *)malloc((size_t)(T > 0 ? T : 1) * 2 * z * sizeof(float));
+        double t0 = now();
+        int64_t Tc = acve_encode_raw(e, x, N, got);
+        double dt = now() - t0;
+        if (Tc != T) { fprintf(stderr, "[vae-enc-oracle] %lld samples gave %lld frames, upstream %lld\n", (long long)N, (long long)Tc, (long long)T); fails++; }
+        else {
+            float *p = planar(got, (size_t)T, 2 * z);
+            char label[64];
+            snprintf(label, sizeof label, "params %d (%lld samples, %.1fs)", k, (long long)N, dt);
+            fails += cmp_tol(label, p, want, (size_t)T * 2 * z, VENC_REL, VENC_ABS);
+            /* the std the sampler uses, through the sampler itself: z(eps = 1) - z(eps = mean only) is std, against upstream's
+             * softplus of its own scale plus 1e-4 */
+            float *ones = (float *)malloc((size_t)T * z * sizeof(float)), *z1 = (float *)malloc((size_t)T * z * sizeof(float)), *z0 = (float *)malloc((size_t)T * z * sizeof(float));
+            float *gs = (float *)malloc((size_t)T * z * sizeof(float)), *ws = (float *)malloc((size_t)T * z * sizeof(float));
+            for (int64_t i = 0; i < (int64_t)T * z; i++) ones[i] = 1.0f;
+            acve_sample(got, T, z, ones, z1);                       /* z1[t][c]; eps is [z][T], here all ones */
+            acve_sample(got, T, z, NULL, z0);
+            for (int64_t t = 0; t < T; t++)
+                for (int c = 0; c < z; c++) {
+                    double b = want[(size_t)(z + c) * T + t];
+                    gs[(size_t)c * T + t] = z1[(size_t)t * z + c] - z0[(size_t)t * z + c];
+                    ws[(size_t)c * T + t] = (float)((b > 20.0 ? b : log1p(exp(b))) + 1e-4);
+                }
+            fails += cmp_tol("  std", gs, ws, (size_t)T * z, VENC_STD_REL, VENC_STD_ABS);
+            free(ones); free(z1); free(z0);
+            char n64[32]; snprintf(n64, sizeof n64, "enc%d.params64", k);
+            float *w64 = ref_tensor(&R, n64, NULL, NULL, NULL);
+            if (w64) {            /* captured with --f64: which of the two float32 results is nearer the float64 network */
+                cmp_tol("  C vs float64", p, w64, (size_t)T * 2 * z, 1.0, 1e9);
+                cmp_tol("  torch f32 vs float64", want, w64, (size_t)T * 2 * z, 1.0, 1e9);
+                free(w64);
+            }
+            free(gs); free(ws); free(p);
+        }
+        cases++;
+        free(wav); free(want); free(x); free(got);
+    }
+
+    /* tiled, sampled */
+    for (int k = 0;; k++) {
+        char nw[32], no[32], nc[32]; int64_t nn, nl, sh[ST_MAX_RANK], shl[ST_MAX_RANK]; int rk, rl;
+        snprintf(nw, sizeof nw, "tile%d.wav", k); snprintf(no, sizeof no, "tile%d.out", k); snprintf(nc, sizeof nc, "tile%d.cfg", k);
+        float *wav = ref_tensor(&R, nw, &nn, sh, &rk);
+        if (!wav) break;
+        float *want = ref_tensor(&R, no, &nl, shl, &rl);
+        float *cfg = ref_tensor(&R, nc, NULL, NULL, NULL);
+        if (!want || !cfg || rk != 3 || sh[1] != e->ach || rl != 3 || shl[1] != z) { fprintf(stderr, "[vae-enc-oracle] %s: unexpected shape\n", nw); fails++; free(wav); free(want); free(cfg); break; }
+        const int64_t N = sh[2], F = shl[2], chunk_s = (int64_t)cfg[0], overlap_s = (int64_t)cfg[1];
+        const uint32_t seed = (uint32_t)cfg[2];
+        float *x = interleave2(wav, (size_t)N);
+        float *got = (float *)malloc((size_t)(N / e->hop + 1) * z * sizeof(float));
+        AcgMt m; acg_mt_seed(&m, seed);
+        double t0 = now();
+        int64_t Fc = acve_encode_tiled(e, x, N, chunk_s, overlap_s, venc_eps, &m, got, NULL, NULL);
+        double dt = now() - t0;
+        if (Fc != F) { fprintf(stderr, "[vae-enc-oracle] tile %d: %lld frames, upstream %lld\n", k, (long long)Fc, (long long)F); fails++; }
+        else {
+            float *p = planar(got, (size_t)F, z);
+            char label[96];
+            snprintf(label, sizeof label, "tiled %d (%lld samples, chunk %lld, %.1fs)", k, (long long)N, (long long)chunk_s, dt);
+            fails += cmp_tol(label, p, want, (size_t)F * z, VENC_TILE_REL, VENC_TILE_ABS);
+            if (getenv("ACESTEP_DEBUG_ENC")) {           /* where the error is: the worst frames, and the error per tenth of the clip */
+                double worst[3] = {0, 0, 0}; int64_t wt[3] = {-1, -1, -1};
+                for (int64_t t = 0; t < F; t++) {
+                    double m = 0;
+                    for (int c = 0; c < z; c++) { double d = fabs((double)p[(size_t)c * F + t] - want[(size_t)c * F + t]); if (d > m) m = d; }
+                    for (int s = 0; s < 3; s++) if (m > worst[s]) { for (int u = 2; u > s; u--) { worst[u] = worst[u - 1]; wt[u] = wt[u - 1]; } worst[s] = m; wt[s] = t; break; }
+                }
+                fprintf(stderr, "[vae-enc-oracle]   worst frames: %lld (%.2e)  %lld (%.2e)  %lld (%.2e)\n", (long long)wt[0], worst[0], (long long)wt[1], worst[1], (long long)wt[2], worst[2]);
+                for (int s = 0; s < 10; s++) {
+                    int64_t a = F * s / 10, b = F * (s + 1) / 10; double m = 0, pk = 0, rel = 0;
+                    for (int64_t t = a; t < b; t++) for (int c = 0; c < z; c++) {
+                        double w = fabs((double)want[(size_t)c * F + t]), d = fabs((double)p[(size_t)c * F + t] - want[(size_t)c * F + t]);
+                        if (d > m) m = d;
+                        if (w > pk) pk = w;
+                        if (d / (w + 1.0) > rel) rel = d / (w + 1.0);
+                    }
+                    fprintf(stderr, "[vae-enc-oracle]   frames %4lld..%4lld  max|err| %.2e  peak|ref| %.2f  max err/(|ref|+1) %.2e\n", (long long)a, (long long)b, m, pk, rel);
+                }
+            }
+            free(p);
+        }
+        cases++;
+        free(wav); free(want); free(cfg); free(x); free(got);
+    }
+    st_destroy(&R);
+    acve_free(e);
+    if (!cases) { fprintf(stderr, "[vae-enc-oracle] nothing to compare in %s\n", refdir); return 2; }
+    if (fails) { fprintf(stderr, "[vae-enc-oracle] %d comparison(s) FAILED in %d case(s)\n", fails, cases); return 1; }
+    fprintf(stderr, "[vae-enc-oracle] all %d case(s) within the limits\n", cases);
+    return 0;
+}
+
+/* ------------------------------------------------- the cover tokenizer oracle -- */
+
+/* The limits of the tokenizer and detokenizer, each stage fed upstream's own input (so a stage's error is its own), then the
+ * whole path. Measured on the real checkpoint (cover10, cover_odd, cover_vocal, cover_half, cover_noise), as the ratio of the
+ * norms of the error and the reference and as a fraction of the tensor's peak:
+ *
+ *   the pooler (2 encoder layers over 6 tokens)   measured <= 1.4e-6 rel, 3.5e-5 abs   held at 5e-6, 1e-4
+ *   the quantizer, fed upstream's pooled vectors  codes identical in every window; output 6.1e-8 rel  (float rounding only)
+ *   the detokenizer                                measured <= 2.3e-7 rel, 2.4e-6 abs   held at 1e-6, 1e-5
+ *   the whole path, source latents -> context     measured <= 2.2e-7 rel, 2.4e-6 abs   held at 1e-6, 1e-5
+ *
+ * (The quantizer's floor makes one code of one window differ when a value is within float rounding of a boundary; none did in
+ * the 5 cases, 261 windows. Such a window is accepted when a value was within 1e-3 of a boundary, and only then.) */
+#define TOK_POOL_REL 5e-6
+#define TOK_POOL_ABS 1e-4
+#define TOK_DETOK_REL 1e-6
+#define TOK_DETOK_ABS 1e-5
+#define TOK_CHAIN_REL 1e-6
+#define TOK_CHAIN_ABS 1e-5
+
+/* The quantizer's integer codes (the FSQ index of a window) from the brackets atk_fsq returns: sum of floor(bracket_i) * basis_i,
+ * the basis the cumulative product of the levels before it (vector_quantize_pytorch's codes_to_indices). */
+static int64_t tok_index(const AcdTok *t, const float *bracket){
+    int64_t idx = 0, basis = 1;
+    for (int i = 0; i < t->nlev; i++) { idx += (int64_t)floorf(bracket[i]) * basis; basis *= t->levels[i]; }
+    return idx;
+}
+
+static int run_cover_oracle(const char *model, const char *refdir){
+    g_tag = "cover-oracle";
+    AceDit *d = acd_load(model);
+    if (!d) return 2;
+    AcdTok *t = atk_load(d, model);
+    if (!t) { acd_free(d); return 2; }
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    if (R.n == 0) { fprintf(stderr, "[cover-oracle] no safetensors in %s\n", refdir); atk_free(t); acd_free(d); return 2; }
+    int fails = 0, cases = 0;
+    const int D = d->D, A = d->acdim, P = t->P;
+    int64_t nx, sx[ST_MAX_RANK]; int rx;
+    float *x = ref_tensor(&R, "tok.x", &nx, sx, &rx);
+    if (!x) { fprintf(stderr, "[cover-oracle] %s has no tokenizer capture (tok.x)\n", refdir); st_destroy(&R); atk_free(t); acd_free(d); return 2; }
+    if (rx != 4 || sx[2] != P || sx[3] != A) { fprintf(stderr, "[cover-oracle] tok.x has an unexpected shape\n"); fails++; }
+    else {
+        const int W = (int)sx[1];
+        int64_t n;
+        float *pooled = ref_tensor(&R, "tok.pooled", &n, NULL, NULL);
+        float *q = ref_tensor(&R, "tok.q", NULL, NULL, NULL);
+        float *idx = ref_tensor(&R, "tok.idx", NULL, NULL, NULL);
+        float *dout = ref_tensor(&R, "detok.out", NULL, NULL, NULL);
+        if (!pooled || !q || !idx || !dout || n != (int64_t)W * D) { fprintf(stderr, "[cover-oracle] the tokenizer capture is incomplete\n"); fails++; }
+        else {
+            /* 1. the pooler, fed the padded source frames */
+            float *got = (float *)malloc((size_t)W * D * sizeof(float));
+            double t0 = now();
+            atk_pool(d, t, x, W, got);
+            char label[96]; snprintf(label, sizeof label, "pooler (%d windows, %.1fs)", W, now() - t0);
+            fails += cmp_tol(label, got, pooled, (size_t)W * D, TOK_POOL_REL, TOK_POOL_ABS); cases++;
+            free(got);
+            /* 2. the quantizer, fed upstream's pooled vectors: the codes must be upstream's except where a value sat on a boundary */
+            float *qq = (float *)malloc((size_t)W * D * sizeof(float)), *br = (float *)malloc((size_t)W * t->nlev * sizeof(float));
+            atk_fsq(d, t, pooled, W, qq, br);
+            int flips = 0, unexplained = 0;
+            for (int w = 0; w < W; w++) {
+                if (tok_index(t, br + (size_t)w * t->nlev) == (int64_t)idx[w]) continue;
+                flips++;
+                double nearest = 1e9;
+                for (int i = 0; i < t->nlev; i++) { double b = br[(size_t)w * t->nlev + i], f = fabs(b - floor(b + 0.5)); if (f < nearest) nearest = f; }
+                if (nearest > 1e-3) unexplained++;        /* a code that differs while no value was within 1e-3 of a boundary is a wrong quantizer */
+            }
+            fprintf(stderr, "[cover-oracle] %-30s %d of %d windows differ in code, %d of them with no value near a boundary%s\n", "quantizer codes", flips, W, unexplained, unexplained ? "  <-- FAIL" : "");
+            fails += unexplained ? 1 : 0; cases++;
+            if (!flips) { fails += cmp_tol("quantizer output", qq, q, (size_t)W * D, TOK_POOL_REL, TOK_POOL_ABS); cases++; }
+            free(qq); free(br);
+            /* 3. the detokenizer, fed upstream's quantized vectors */
+            float *dd = (float *)malloc((size_t)W * P * A * sizeof(float));
+            t0 = now();
+            atk_detok(d, t, q, W, dd);
+            snprintf(label, sizeof label, "detokenizer (%d windows, %.1fs)", W, now() - t0);
+            fails += cmp_tol(label, dd, dout, (size_t)W * P * A, TOK_DETOK_REL, TOK_DETOK_ABS); cases++;
+            free(dd);
+            /* 4. the whole path from the source latents the handler had, cut to its length, against what went into the DiT */
+            int64_t ns, ss[ST_MAX_RANK]; int rs;
+            float *src = ref_tensor(&R, "in.src_latents", &ns, ss, &rs);
+            float *sil = ref_tensor(&R, "in.silence_latent", NULL, NULL, NULL);
+            float *ctx = ref_tensor(&R, "context", NULL, NULL, NULL);
+            if (src && sil && ctx && rs == 3 && ss[2] == A) {
+                const int T = (int)ss[1];
+                float *h = (float *)malloc((size_t)T * A * sizeof(float)), *want = (float *)malloc((size_t)T * A * sizeof(float));
+                t0 = now();
+                atk_hints(d, t, src, T, sil, h);
+                for (int f = 0; f < T; f++) memcpy(want + (size_t)f * A, ctx + (size_t)f * 2 * A, (size_t)A * sizeof(float));   /* the context's first half is the hints */
+                snprintf(label, sizeof label, "whole path -> context (%d frames, %.1fs)", T, now() - t0);
+                fails += cmp_tol(label, h, want, (size_t)T * A, TOK_CHAIN_REL, TOK_CHAIN_ABS); cases++;
+                free(h); free(want);
+            }
+            free(src); free(sil); free(ctx);
+        }
+        free(pooled); free(q); free(idx); free(dout);
+    }
+    free(x);
+    st_destroy(&R); atk_free(t); acd_free(d);
+    if (!cases) { fprintf(stderr, "[cover-oracle] nothing to compare in %s\n", refdir); return 2; }
+    if (fails) { fprintf(stderr, "[cover-oracle] %d comparison(s) FAILED\n", fails); return 1; }
+    fprintf(stderr, "[cover-oracle] all %d comparison(s) within the limits\n", cases);
     return 0;
 }
 
@@ -748,6 +1019,50 @@ static int run_text_oracle(const char *model, const char *refdir){
  * seed or a wrong schedule is wrong by 0.1 to 1 (the mutants of tools/mutate_acestep_gen.py are). */
 #define GEN_REL 5e-4
 #define GEN_ABS 2e-3
+/* With audio in (20 captured cases: cover, reference, repaint, and a few edge cases of each) the audio carries the VAE encoder's own
+ * float32 error besides, and the sampler amplifies it: the worst case measured is 4.0e-4 of the norm and 6.7e-4 at one sample (a repaint
+ * that adds silence before the clip, whose span is the longest chain); the cover cases are as exact as text to music (5e-6), the
+ * reference ones 3.5e-5 to 1.2e-4. Held at 1.5e-3 and 4e-3: 3.8x and 6x above the worst; a wrong cover context, span, injection or
+ * crossfade is wrong by 1e-2 to 1 (tools/mutate_acestep_audioin.py). */
+#define GEN_AUDIO_REL 1.5e-3
+#define GEN_AUDIO_ABS 4e-3
+
+/* What each tap of ace_generate is compared with, and how closely. The stages that only copy (the silence latent's slices, the
+ * noise: torch's generator reproduced) are held to rounding; a stage fed by the VAE encoder carries the encoder's own error
+ * (VENC_TILE_*: torch's float32 against ours, 5e-5 to 3e-5 relative, the posterior draw included); the final latents carry the
+ * DiT's chain on top (DIT_CHAIN_*). */
+typedef struct { shards *R; int fails, checks, audio_in; } GenTap;
+
+static void gen_tap(void *ud, const char *name, const float *x, size_t n){
+    GenTap *g = (GenTap *)ud;
+    static const struct { const char *tap, *ref; int encoded; } map[] = {
+        { "noise", "noise", 0 },
+        { "timbre", "in.refer_audio_acoustic_hidden_states_packed", 1 },
+        { "src_latents", "in.src_latents", 1 },
+        { "clean_src_latents", "in.clean_src_latents", 1 },
+        { "context", "context", 1 },
+        { "encoder_hidden", "encoder.hidden", 3 },
+        { "noncover_hidden", "noncover.hidden", 3 },
+        { "noncover_context", "noncover.context", 4 },
+        { "latents", "latents", 2 },
+    };
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+        if (strcmp(name, map[i].tap)) continue;
+        int64_t m = 0;
+        float *w = ref_tensor(g->R, map[i].ref, &m, NULL, NULL);
+        if (!w) return;
+        char label[96]; snprintf(label, sizeof label, "%s", name);
+        if (m != (int64_t)n) { fprintf(stderr, "[gen-oracle] %-30s has %zu values, the handler's %lld\n", label, n, (long long)m); g->fails++; }
+        else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? DIT_CHAIN_REL : 1e-4, g->audio_in ? DIT_CHAIN_ABS : 2e-3);
+        else if (map[i].encoded == 3) g->fails += cmp_tol(label, x, w, n, g->audio_in ? 1e-4 : 1e-5, g->audio_in ? 1e-3 : 1e-4);      /* the condition encoders, from the text and the timbre */
+        else if (map[i].encoded == 4) g->fails += cmp_tol(label, x, w, n, 1e-6, 1e-6);       /* the silence latent and ones: copies */
+        else if (map[i].encoded == 1) g->fails += g->audio_in ? cmp_tol(label, x, w, n, VENC_TILE_REL, VENC_TILE_ABS) : cmp_tol(label, x, w, n, 1e-6, 1e-6);
+        else g->fails += cmp_tol(label, x, w, n, 1e-6, 1e-6);
+        g->checks++;
+        free(w);
+        return;
+    }
+}
 
 static int run_gen_oracle(const char *model, const char *refdir, const char *wav){
     g_tag = "gen-oracle";
@@ -778,7 +1093,30 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     rq.shift = acd_json_num(p, "shift", 1.0);
     jval *dc = json_get(p, "dcw_enabled"); rq.dcw = dc && dc->t == J_BOOL ? dc->boolean : 1;
     rq.seed = (uint64_t)acd_json_num(p, "seed", 42);
-    fprintf(stderr, "[gen-oracle] case: %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", rq.duration, rq.steps, rq.shift, rq.dcw ? "on" : "off", (unsigned long long)rq.seed);
+    /* audio in: the clips the capture wrote beside the tensors (src.wav, ref.wav), asked for the way a user asks (a default is left unset) */
+    const char *task = json_str(p, "task_type");
+    rq.task = task && !strcmp(task, "cover") ? ACG_TASK_COVER : task && !strcmp(task, "repaint") ? ACG_TASK_REPAINT : ACG_TASK_TEXT2MUSIC;
+    char src_path[4300], ref_path[4300];
+    snprintf(src_path, sizeof src_path, "%s/src.wav", refdir); snprintf(ref_path, sizeof ref_path, "%s/ref.wav", refdir);
+    { FILE *t = fopen(ref_path, "rb"); if (t) { fclose(t); rq.ref_path = ref_path; } }
+    if (rq.task != ACG_TASK_TEXT2MUSIC) rq.src_path = src_path;
+    if (rq.task == ACG_TASK_REPAINT) {
+        rq.repaint_start = acd_json_num(p, "repainting_start", 0);
+        const double re = acd_json_num(p, "repainting_end", -1);
+        rq.repaint_end = re > 0 ? re : 0;
+        const char *mode = json_str(p, "repaint_mode");
+        rq.repaint_mode = mode && !strcmp(mode, "conservative") ? ACG_REPAINT_CONSERVATIVE : mode && !strcmp(mode, "aggressive") ? ACG_REPAINT_AGGRESSIVE : ACG_REPAINT_BALANCED;
+        const double rs = acd_json_num(p, "repaint_strength", 0.5);
+        rq.repaint_strength = rs == 0.5 ? 0 : rs;
+    }
+    if (rq.task == ACG_TASK_COVER) {
+        const double cs = acd_json_num(p, "audio_cover_strength", 1.0);
+        rq.cover_strength = cs == 1.0 ? 0 : cs;
+        rq.cover_noise = acd_json_num(p, "cover_noise_strength", 0.0);
+    }
+    const int audio_in = rq.task != ACG_TASK_TEXT2MUSIC || rq.ref_path;
+    fprintf(stderr, "[gen-oracle] case: %s%s, %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", task ? task : "text2music", rq.ref_path ? " + reference" : "",
+            rq.duration, rq.steps, rq.shift, rq.dcw ? "on" : "off", (unsigned long long)rq.seed);
 
     double t0 = now();
     AceEngine *e = ace_open(model, err, sizeof err);
@@ -796,45 +1134,54 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
         checks++;
     }
     free(rsil);
-    float *slice = (float *)malloc((size_t)(T > ACG_TIMBRE_FRAMES ? T : ACG_TIMBRE_FRAMES) * A * sizeof(float));
-    float *rsrc = ref_tensor(&R, "in.src_latents", &n, sh, &rk);
-    if (rsrc && rk == 3 && sh[1] == T && sh[2] == A) { acg_silence_slice(e, T, slice); fails += cmp_tol("source latents", slice, rsrc, (size_t)T * A, 1e-9, 1e-9); checks++; }
-    else if (rsrc) { fprintf(stderr, "[gen-oracle] the handler ran %lld frames, this engine %d\n", (long long)(rk == 3 ? sh[1] : -1), T); fails++; checks++; }
-    free(rsrc);
-    float *rtim = ref_tensor(&R, "in.refer_audio_acoustic_hidden_states_packed", &n, sh, &rk);
-    if (rtim && rk == 3 && sh[1] == ACG_TIMBRE_FRAMES && sh[2] == A) { acg_silence_slice(e, ACG_TIMBRE_FRAMES, slice); fails += cmp_tol("timbre reference", slice, rtim, (size_t)ACG_TIMBRE_FRAMES * A, 1e-9, 1e-9); checks++; }
-    else if (rtim) { fprintf(stderr, "[gen-oracle] the timbre reference is not the silence latent's first %d frames\n", ACG_TIMBRE_FRAMES); fails++; checks++; }
-    free(rtim);
-    float *rnoise = ref_tensor(&R, "noise", &n, sh, &rk);
-    if (rnoise && n == (int64_t)T * A) {
-        acg_randn((uint32_t)rq.seed, (size_t)T * A, slice);
-        fails += cmp_tol("noise (torch's generator)", slice, rnoise, (size_t)T * A, 1e-6, 1e-6); checks++;
-    } else if (rnoise) { fprintf(stderr, "[gen-oracle] noise has %lld values, expected %d\n", (long long)n, T * A); fails++; checks++; }
-    free(rnoise); free(slice);
+    if (!audio_in) {          /* plain text to music: the source latents and the timbre are slices of the silence latent, and the clip's length is acg_clip's */
+        float *slice = (float *)malloc((size_t)(T > ACG_TIMBRE_FRAMES ? T : ACG_TIMBRE_FRAMES) * A * sizeof(float));
+        float *rsrc = ref_tensor(&R, "in.src_latents", &n, sh, &rk);
+        if (rsrc && rk == 3 && sh[1] == T && sh[2] == A) { acg_silence_slice(e, T, slice); fails += cmp_tol("source latents", slice, rsrc, (size_t)T * A, 1e-9, 1e-9); checks++; }
+        else if (rsrc) { fprintf(stderr, "[gen-oracle] the handler ran %lld frames, this engine %d\n", (long long)(rk == 3 ? sh[1] : -1), T); fails++; checks++; }
+        free(rsrc);
+        float *rtim = ref_tensor(&R, "in.refer_audio_acoustic_hidden_states_packed", &n, sh, &rk);
+        if (rtim && rk == 3 && sh[1] == ACG_TIMBRE_FRAMES && sh[2] == A) { acg_silence_slice(e, ACG_TIMBRE_FRAMES, slice); fails += cmp_tol("timbre reference", slice, rtim, (size_t)ACG_TIMBRE_FRAMES * A, 1e-9, 1e-9); checks++; }
+        else if (rtim) { fprintf(stderr, "[gen-oracle] the timbre reference is not the silence latent's first %d frames\n", ACG_TIMBRE_FRAMES); fails++; checks++; }
+        free(rtim);
+        float *rnoise = ref_tensor(&R, "noise", &n, sh, &rk);
+        if (rnoise && n == (int64_t)T * A) {
+            acg_randn((uint32_t)rq.seed, (size_t)T * A, slice);
+            fails += cmp_tol("noise (torch's generator)", slice, rnoise, (size_t)T * A, 1e-6, 1e-6); checks++;
+        } else if (rnoise) { fprintf(stderr, "[gen-oracle] noise has %lld values, expected %d\n", (long long)n, T * A); fails++; checks++; }
+        free(rnoise); free(slice);
+    }
 
     float *pcm = NULL; AceInfo info;
+    GenTap gt = { &R, 0, 0, audio_in };
+    AceHooks hk = { NULL, NULL, NULL, gen_tap };
+    hk.ud = &gt;
     t0 = now();
-    int rc = ace_generate(e, &rq, NULL, &pcm, &info, err, sizeof err);
+    int rc = ace_generate(e, &rq, &hk, &pcm, &info, err, sizeof err);
     double dt = now() - t0;
+    fails += gt.fails; checks += gt.checks;
     if (rc) { fprintf(stderr, "[gen-oracle] generation failed: %s\n", err); fails++; checks++; }
     else {
-        fprintf(stderr, "[gen-oracle] %d frames, %d samples; text %.1fs (%d + %d tokens), condition %.1fs, denoise %.1fs, decode %.1fs, total %.1fs, peak %.4f\n",
-                info.frames, info.samples, info.t_text, info.caption_tokens, info.lyric_tokens, info.t_cond, info.t_denoise, info.t_decode, dt, info.peak);
+        fprintf(stderr, "[gen-oracle] %d frames, %d samples; encode %.1fs, text %.1fs (%d + %d tokens), condition %.1fs, denoise %.1fs, decode %.1fs, total %.1fs, peak %.4f\n",
+                info.frames, info.samples, info.t_encode, info.t_text, info.caption_tokens, info.lyric_tokens, info.t_cond, info.t_denoise, info.t_decode, dt, info.peak);
         float *aud = ref_tensor(&R, "audio", &n, sh, &rk);
         const int ach = e->vae->ach;
         /* The handler returns every frame it ran (at least 128); this engine cuts a short clip to the length asked, so what
-         * it must return is the shorter of the two, and that prefix of each channel is what is compared. */
+         * it must return is the shorter of the two, and that prefix of each channel is what is compared. For audio in, the
+         * length asked is the source's (with a repaint's silence added). */
         const int64_t per = aud && ach > 0 && n % ach == 0 ? n / ach : -1;
-        const int64_t expect = per < 0 ? -1 : per < want_samples ? per : want_samples;
-        if (aud && per > 0 && info.samples == expect) {
-            float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)info.samples * ach * sizeof(float));
-            if (!want) { fprintf(stderr, "out of memory\n"); exit(1); }
-            for (int ch = 0; ch < ach; ch++) memcpy(want + (size_t)ch * info.samples, aud + (size_t)ch * per, (size_t)info.samples * sizeof(float));
-            fails += cmp_tol("audio, end to end", pl, want, (size_t)info.samples * ach, GEN_REL, GEN_ABS); checks++;
-            free(pl); free(want);
+        const int ask = audio_in && rq.task != ACG_TASK_TEXT2MUSIC ? (int)((int64_t)info.frames * ACG_HOP) : want_samples;
+        const int64_t expect = per < 0 ? -1 : per < ask ? per : ask;
+        if (aud && per > 0 && (info.samples == expect || (rq.task != ACG_TASK_TEXT2MUSIC && info.samples <= per))) {
+            const int64_t cmpn = info.samples < per ? info.samples : per;
+            float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)cmpn * ach * sizeof(float)), *got = (float *)malloc((size_t)cmpn * ach * sizeof(float));
+            if (!want || !got) { fprintf(stderr, "out of memory\n"); exit(1); }
+            for (int ch = 0; ch < ach; ch++) { memcpy(want + (size_t)ch * cmpn, aud + (size_t)ch * per, (size_t)cmpn * sizeof(float)); memcpy(got + (size_t)ch * cmpn, pl + (size_t)ch * info.samples, (size_t)cmpn * sizeof(float)); }
+            fails += cmp_tol("audio, end to end", got, want, (size_t)cmpn * ach, audio_in ? GEN_AUDIO_REL : GEN_REL, audio_in ? GEN_AUDIO_ABS : GEN_ABS); checks++;
+            free(pl); free(want); free(got);
         } else if (aud) {
             fprintf(stderr, "[gen-oracle] the handler's audio is %lld samples a channel and %d were asked for: expected %lld back, this engine made %d\n",
-                    (long long)per, want_samples, (long long)expect, info.samples);
+                    (long long)per, ask, (long long)expect, info.samples);
             fails++; checks++;
         }
         free(aud);
@@ -845,7 +1192,7 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     ace_close(e); json_free(root); free(meta_text); st_destroy(&R);
     if (!checks) { fprintf(stderr, "[gen-oracle] nothing to compare in %s\n", refdir); return 2; }
     if (fails) { fprintf(stderr, "[gen-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
-    fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, GEN_REL, GEN_ABS);
+    fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, audio_in ? GEN_AUDIO_REL : GEN_REL, audio_in ? GEN_AUDIO_ABS : GEN_ABS);
     return 0;
 }
 
@@ -856,7 +1203,9 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
     AceEngine *e = ace_open(model, err, sizeof err);
     if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
     float *pcm = NULL; AceInfo info;
-    fprintf(stderr, "[acestep] %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", rq->duration, rq->steps, rq->shift, rq->dcw ? "on" : "off", (unsigned long long)rq->seed);
+    fprintf(stderr, "[acestep] %s%s, %d steps, shift %g, DCW %s, seed %llu\n",
+            rq->task == ACG_TASK_COVER ? "cover" : rq->task == ACG_TASK_REPAINT ? "repaint" : "text to music", rq->ref_path ? " with a reference" : "",
+            rq->steps, rq->shift, rq->dcw ? "on" : "off", (unsigned long long)rq->seed);
     double t0 = now();
     int rc = ace_generate(e, rq, NULL, &pcm, &info, err, sizeof err);
     if (rc) { fprintf(stderr, "acestep: %s\n", err); ace_close(e); return 1; }
@@ -869,7 +1218,7 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
 }
 
 int main(int argc, char **argv){
-    const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
+    const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *venc_ref = NULL, *cover_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
     int chunk = 256, overlap = 64, serve = 0, make = 0;
     AceRequest rq; memset(&rq, 0, sizeof rq);
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
@@ -891,7 +1240,24 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--shift") && v) { rq.shift = atof(v); i++; }
         else if (!strcmp(a, "--seed") && v) { rq.seed = (uint64_t)strtoull(v, NULL, 10); i++; }
         else if (!strcmp(a, "--no-dcw")) rq.dcw = 0;
+        else if (!strcmp(a, "--ref") && v) { rq.ref_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--cover") && v) { rq.task = ACG_TASK_COVER; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--repaint") && v) { rq.task = ACG_TASK_REPAINT; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--from") && v) { rq.repaint_start = atof(v); i++; }
+        else if (!strcmp(a, "--to") && v) { rq.repaint_end = atof(v); i++; }
+        else if (!strcmp(a, "--repaint-mode") && v) {
+            if (!strcmp(v, "balanced")) rq.repaint_mode = ACG_REPAINT_BALANCED;
+            else if (!strcmp(v, "conservative")) rq.repaint_mode = ACG_REPAINT_CONSERVATIVE;
+            else if (!strcmp(v, "aggressive")) rq.repaint_mode = ACG_REPAINT_AGGRESSIVE;
+            else { fprintf(stderr, "acestep: --repaint-mode is balanced, conservative or aggressive\n"); return 2; }
+            i++;
+        }
+        else if (!strcmp(a, "--repaint-strength") && v) { rq.repaint_strength = atof(v); i++; }
+        else if (!strcmp(a, "--cover-strength") && v) { rq.cover_strength = atof(v); i++; }
+        else if (!strcmp(a, "--cover-noise") && v) { rq.cover_noise = atof(v); i++; }
         else if (!strcmp(a, "--vae-ref") && v) { vae_ref = v; i++; }
+        else if (!strcmp(a, "--vae-enc-ref") && v) { venc_ref = v; i++; }
+        else if (!strcmp(a, "--cover-ref") && v) { cover_ref = v; i++; }
         else if (!strcmp(a, "--dit-ref") && v) { dit_ref = v; i++; }
         else if (!strcmp(a, "--tok-ref") && v) { tok_ref = v; i++; }
         else if (!strcmp(a, "--text-ref") && v) { text_ref = v; i++; }
@@ -908,7 +1274,8 @@ int main(int argc, char **argv){
         else { usage(); return 2; }
     }
     if (serve + make + (gen_ref != NULL) > 1) { fprintf(stderr, "acestep: --serve, --caption and --gen-ref are separate modes\n"); return 2; }
-    if (model && make && !out) { fprintf(stderr, "acestep: --caption needs --out FILE.wav\n"); return 2; }
+    if (model && make && !rq.caption) rq.caption = "";                  /* a cover or a repaint needs no description: its style is the clip's */
+    if (model && make && !out) { fprintf(stderr, "acestep: --caption, --cover, --repaint and --ref need --out FILE.wav\n"); return 2; }
     if (model && serve) {
         char err[512] = "";
         AceEngine *e = ace_open(model, err, sizeof err);
@@ -919,11 +1286,13 @@ int main(int argc, char **argv){
     }
     if (model && make) return run_make(model, &rq, out);
     if (model && gen_ref) return run_gen_oracle(model, gen_ref, wav);
-    if (!model || (!vae_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
+    if (!model || (!vae_ref && !venc_ref && !cover_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
     int rc = 0;
     if (tok_ref) rc = run_tok_oracle(model, tok_ref);
     if (text_ref) { int r0 = run_text_oracle(model, text_ref); if (r0 > rc) rc = r0; }
     if (dit_ref) { int r1 = run_dit_oracle(model, dit_ref, dump); if (r1 > rc) rc = r1; }
+    if (cover_ref) { int r4 = run_cover_oracle(model, cover_ref); if (r4 > rc) rc = r4; }
+    if (venc_ref) { int r3 = run_vae_enc_oracle(model, venc_ref); if (r3 > rc) rc = r3; }
     if (vae_ref) { g_tag = "vae-oracle"; g_tol_rel = TOL_REL; g_tol_abs = TOL_ABS; int r2 = run_vae_oracle(model, vae_ref, chunk, overlap, wav, dump); if (r2 > rc) rc = r2; }
     return rc;
 }

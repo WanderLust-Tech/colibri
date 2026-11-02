@@ -2,11 +2,17 @@
  *
  * One line per control message: a keyword, one space and a JSON object. Two of them are followed by raw bytes.
  *
- *   READY {...}                    once, after the weights are loaded: the model, the audio format, the limits and defaults
+ *   READY {...}                    once, after the weights are loaded: the model, the audio format, the limits and defaults,
+ *                                  "tasks" (text2music, cover, repaint) and "audio_in" {formats, max_seconds, ref_seconds}
  *   GEN {...}                      client, one request at a time:
  *                                    id, caption (required), lyrics, language, duration (s), steps, shift, seed,
- *                                    bpm, key, timesig, dcw
- *   PROGRESS {...}                 any number: {"id", "stage": "text"|"condition"|"denoise"|"decode", "step", "steps"}
+ *                                    bpm, key, timesig, dcw, and for audio in:
+ *                                    task ("text2music" | "cover" | "repaint"), src_path (the clip to cover or repaint),
+ *                                    ref_path (a reference clip, any task), repaint_start, repaint_end (s; an end of 0 or less
+ *                                    is the clip's end), repaint_mode ("balanced" | "conservative" | "aggressive"),
+ *                                    repaint_strength (0..1), cover_strength (0..1), cover_noise (0..1).
+ *                                  The paths are files the GATEWAY wrote (WAV or MP3); a client of the gateway never names one.
+ *   PROGRESS {...}                 any number: {"id", "stage": "encode"|"text"|"condition"|"denoise"|"decode", "step", "steps"}
  *   AUDIO {..."bytes":N} + N + \n  signed 16-bit little-endian PCM, channels interleaved, 48 kHz
  *   ERROR {"id", "message"}        the engine stays alive for the next GEN
  *   CANCEL {"id"}                  client; answered with ERROR "cancelled" once the running request has stopped
@@ -179,6 +185,29 @@ static int acs_request(jval *j, AceRequest *rq, char *err, size_t errn){
     jval *d = json_get(j, "dcw");
     if (d && d->t != J_NULL) { if (d->t != J_BOOL) { snprintf(err, errn, "dcw must be true or false"); return -1; } rq->dcw = d->boolean; }
     rq->seed &= 0xffffffffu;
+    /* audio in */
+    const char *task = NULL, *mode = NULL;
+    if (acs_string(j, "task", &task, err, errn) < 0) return -1;
+    if (task) {
+        if (!strcmp(task, "text2music")) rq->task = ACG_TASK_TEXT2MUSIC;
+        else if (!strcmp(task, "cover")) rq->task = ACG_TASK_COVER;
+        else if (!strcmp(task, "repaint")) rq->task = ACG_TASK_REPAINT;
+        else { snprintf(err, errn, "task must be text2music, cover or repaint"); return -1; }
+    }
+    if (acs_string(j, "src_path", &rq->src_path, err, errn) < 0) return -1;
+    if (acs_string(j, "ref_path", &rq->ref_path, err, errn) < 0) return -1;
+    if (acs_number(j, "repaint_start", &rq->repaint_start, err, errn) < 0) return -1;
+    if (acs_number(j, "repaint_end", &rq->repaint_end, err, errn) < 0) return -1;
+    if (acs_number(j, "repaint_strength", &rq->repaint_strength, err, errn) < 0) return -1;
+    if (acs_number(j, "cover_strength", &rq->cover_strength, err, errn) < 0) return -1;
+    if (acs_number(j, "cover_noise", &rq->cover_noise, err, errn) < 0) return -1;
+    if (acs_string(j, "repaint_mode", &mode, err, errn) < 0) return -1;
+    if (mode) {
+        if (!strcmp(mode, "balanced")) rq->repaint_mode = ACG_REPAINT_BALANCED;
+        else if (!strcmp(mode, "conservative")) rq->repaint_mode = ACG_REPAINT_CONSERVATIVE;
+        else if (!strcmp(mode, "aggressive")) rq->repaint_mode = ACG_REPAINT_AGGRESSIVE;
+        else { snprintf(err, errn, "repaint_mode must be balanced, conservative or aggressive"); return -1; }
+    }
     return 0;
 }
 
@@ -197,9 +226,10 @@ static int acs_serve(AceEngine *e){
     coli_serve_binary_mode();
     printf("READY {\"model\":\"%s\",\"sample_rate\":%d,\"channels\":%d,\"format\":\"s16le\",\"default_duration\":%g,\"min_duration\":%g,"
            "\"max_duration\":%g,\"default_steps\":%d,\"max_steps\":%d,\"default_shift\":%g,\"max_caption_bytes\":%d,\"max_lyric_bytes\":%d,"
-           "\"max_seed\":4294967295,\"protocol\":1}\n",
+           "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"],"
+           "\"audio_in\":{\"formats\":[\"wav\",\"mp3\"],\"max_seconds\":%g,\"ref_seconds\":%d}}\n",
            ACS_MODEL_NAME, e->vae->rate, e->vae->ach, ACS_DEFAULT_DURATION, ACG_MIN_SECONDS, ACG_MAX_SECONDS, ACS_DEFAULT_STEPS,
-           ACG_MAX_STEPS, ACS_DEFAULT_SHIFT, ACG_MAX_CAPTION_BYTES, ACG_MAX_LYRIC_BYTES);
+           ACG_MAX_STEPS, ACS_DEFAULT_SHIFT, ACG_MAX_CAPTION_BYTES, ACG_MAX_LYRIC_BYTES, ACG_MAX_SECONDS, ACG_REF_SECONDS);
     fflush(stdout);
     char *line;
     for (;;) {
@@ -218,7 +248,7 @@ static int acs_serve(AceEngine *e){
         else {
             acs_cancel_pending = 0;
             AcsRun run = { id };
-            AceHooks hk = { acs_progress, acs_cancelled_run, &run };
+            AceHooks hk = { acs_progress, acs_cancelled_run, &run, NULL };
             float *pcm = NULL; AceInfo info;
             int rc = ace_generate(e, &rq, &hk, &pcm, &info, msg, sizeof msg);
             int16_t *s16 = rc == 0 ? acs_pcm16(pcm, (size_t)info.samples * e->vae->ach) : NULL;
@@ -229,10 +259,13 @@ static int acs_serve(AceEngine *e){
                 printf("AUDIO {\"id\":\""); acs_escape(id);
                 printf("\",\"sample_rate\":%d,\"channels\":%d,\"samples\":%d,\"bytes\":%zu,\"seed\":%llu,\"steps\":%d,\"shift\":%g,\"duration\":%.3f,"
                        "\"frames\":%d,\"caption_tokens\":%d,\"lyric_tokens\":%d,\"truncated\":%s,\"peak\":%.4f,"
-                       "\"timings\":{\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
+                       "\"task\":\"%s\",\"src_seconds\":%.3f,"
+                       "\"timings\":{\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
                        e->vae->rate, e->vae->ach, info.samples, bytes, (unsigned long long)rq.seed, rq.steps, rq.shift,
                        (double)info.samples / e->vae->rate, info.frames, info.caption_tokens, info.lyric_tokens,
-                       info.caption_cut || info.lyric_cut ? "true" : "false", info.peak, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
+                       info.caption_cut || info.lyric_cut ? "true" : "false", info.peak,
+                       rq.task == ACG_TASK_COVER ? "cover" : rq.task == ACG_TASK_REPAINT ? "repaint" : "text2music", info.src_seconds,
+                       info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
                 fwrite(s16, 1, bytes, stdout);
                 putchar('\n');
                 fflush(stdout);

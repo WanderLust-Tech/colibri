@@ -18,7 +18,8 @@ every part of it is held to upstream's handler by an oracle. `coli web` has a pl
 | 4a | the engine proper in C: a request in, audio out; one-shot and `--serve`; `c/acestep_gen.h`, `c/acestep_serve.h` | done, oracle-checked |
 | 4b | around it: the registry's audio modality, `music_engine.py`, `POST /v1/audio/music`, `coli music`, `coli info` / `plan` / `doctor`, `coli setup`, `make install` | done, tested against a stub engine and smoke-tested on the real one |
 | 4c | the dashboard's music player: `web/src/components/MusicTurn.tsx`, `web/src/lib/useMusic.ts` | done, tested in a real browser |
-| 5, 6 | optional: the 5 Hz language-model planner; cover, repaint, reference audio, the base and XL models | |
+| 5 | audio in: WAV and MP3 loading, the VAE encoder, the audio tokenizer and detokenizer; a reference clip, a cover, a repaint | done, oracle-checked ([below](#audio-in-a-reference-clip-a-cover-a-repaint)) |
+| 6 | optional, not built: the 5 Hz language-model planner and the audio codes it makes; lego, extract and complete (they need the base or SFT checkpoints); the XL models | |
 
 ## The model, as measured from the checkpoint
 
@@ -270,6 +271,80 @@ can be wrong, a missing component, a latent width the VAE does not share, a refe
 Cost on the real checkpoint (24-core i9, 10 s of music): text 0.7 s, condition 1.1 s, eight steps 12 s, decode 2 s, about 16 s
 in all after a 5 s load; 30 s of music is about 50 s.
 
+## Audio in: a reference clip, a cover, a repaint
+
+Three things the checkpoint does with a clip you give it. Upstream calls them reference audio, the `cover` task and the `repaint`
+task; the turbo model does all three. WAV and MP3 are read (WAV: PCM 8, 16, 24 and 32 bit, float 32 and 64, any rate and
+channel count; MP3: MPEG-1, 2 and 2.5 layer III, with or without tags), up to 10 minutes, decoded from the bytes (never from the
+extension) by `c/acestep_audio.h` and made 48 kHz stereo the way upstream's `_normalize_audio_to_stereo_48k` does it, with
+torchaudio's own resampler ported (sinc interpolation, a Hann window, width 6, roll-off 0.99).
+
+- **Reference.** The timbre encoder is given the clip's latents where text to music gives it the silence latent's first
+  750 frames (30 s). A clip shorter than 30 s is repeated to reach it; a longer one is cut in thirds and 10 s are taken from
+  each, joined. Works with every task. The clip must not be silent.
+- **Cover.** The source is encoded to latents, and what conditions the DiT is not those latents but what survives a trip through
+  a 5 Hz bottleneck: the audio tokenizer (`tokenizer.*` in the DiT's checkpoint: an attention pooler over windows of 5 frames, then
+  a six-dimensional finite scalar quantizer with levels 8, 8, 8, 5, 5, 5) and the detokenizer back to 25 Hz (`acestep_tok.h`).
+  So a cover keeps a song's musical structure, not its exact sound, and the description decides the rest. The clip's length is
+  the result's, the prompt's instruction is upstream's cover one. `cover_strength` (0 to 1, default 1) is the share of the steps that
+  follow the source; the remaining steps run as text to music, on the text-to-music instruction (upstream builds this prompt
+  at the cover prompt's token count, which cuts its last token, and so does the engine). `cover_noise` (0 to 1, default 0)
+  starts the sampler from the source renoised to that level instead of from noise, which keeps it nearer the original.
+- **Repaint.** A span of the source, `start` to `end` seconds, is generated again and the rest is kept: the DiT is conditioned on
+  the source with the span's frames replaced by the silence latent, and during the first part of the steps the source,
+  noised to the level of the step, is put back outside the span. The span's edges are crossfaded in latent space, and after
+  the decode the source's own samples are spliced back outside it with a short crossfade (so the unchanged part is the original,
+  not its VAE reconstruction). `mode` balances all this: `balanced` (default, with a `strength` of 0 to 1: 0.5 is the default and
+  higher lets the span change more), `conservative` (the source is put back for every step, longer crossfades) and `aggressive`
+  (nothing is put back and nothing spliced: the span is free and the rest is only reconstructed). A start before 0 adds that much
+  silence before the clip and an end past its length adds silence after it, and music is made there: that is how a clip is extended.
+
+What each is held to. Every number below is the engine against upstream's own handler on the real checkpoint, the reference
+run on the CPU in float32 (`tools/acestep_ref_audio.py`), and each oracle has mutants (`tools/mutate_acestep_*.py`) that prove it can fail.
+
+| oracle | what it compares | measured | held at | mutants |
+|---|---|---|---|---|
+| `--vae-enc-ref` | the VAE encoder's parameters and the tiled, sampled latents of 7 clips (one pass, an odd length, a clip of exactly one chunk, windows with a tail, the 30 s window) | 6e-6 relative one pass, 3e-5 tiled | 2e-5, 1e-4 | 29 of 29 |
+| `--cover-ref` | the pooler, the quantizer's codes, the detokenizer, each fed upstream's input, and the whole path (5 clips) | 1.4e-6, codes identical in 261 windows, 2.3e-7, 2.2e-7 | 5e-6, exact, 1e-6, 1e-6 | 24 of 24 |
+| `--gen-ref` | 20 whole generations: every intermediate (noise, timbre, source and clean latents, the cover and non-cover contexts, the final latents) and the audio | audio 4e-6 to 1.2e-4 of the norm, 4.0e-4 at worst (a repaint that adds silence) | 1.5e-3 | 45 of 45 |
+| `tests/test_acestep_audio.py` | WAV and MP3 loading and the resampler, 26 fixtures against upstream's own code | bit-exact WAV; 2.4e-7 resampled, 1.4e-6 MP3 | 0, 6e-7, 2e-5 | 70 of 70 |
+
+The VAE encoder's float32 is closer to the float64 network than torch's float32 is (1.7e-6 against 5.2e-6 on a 10 s clip), so what
+the oracle sees is torch's rounding, not the engine's.
+
+What the engine does differently from upstream, each on purpose:
+
+- **The posterior draw.** Upstream's `latent_dist.sample()` takes torch's global generator, which nothing seeds: two runs on one
+  clip differ by the posterior's width (about 1e-2 of a latent). The engine draws from torch's generator seeded with the request's seed
+  xor `0x5EED0001`, source first, then reference, so a seed means one song; the oracle gives upstream the same draw.
+- **The reference's 10 s segments** start in the middle of their third's range, where upstream picks a random start. A clip of exactly
+  30 s, or one that leaves no range, has no choice to make.
+- **The encoder's window** is 30 s with 2 s of context (what upstream picks on a GPU with more than 8 GB; with no GPU it picks 15 s, a choice
+  about memory), so a 30 s reference is one pass.
+- **A clip under 128 frames** (5.12 s) is made on 128 and cut to its length, as in text to music.
+- **A repaint that ends before it starts** is refused; upstream quietly regenerates the whole clip.
+
+Not built, and said so: the 5 Hz planner (it turns a caption into audio codes, and the cover-from-codes path with them), and the
+tasks that need the base or SFT checkpoints (lego, extract, complete).
+
+Cost, 24-core i9, a 10 s clip: reading and encoding the source 1.9 s, the tokenizer and detokenizer 2 s on top of the condition
+for a cover, so a cover is about 16 s against 11 s for text to music; a 30 s reference adds 5 s. The encoder (0.4 GB) and the
+tokenizer (0.4 GB) are loaded the first time a request needs them, and stay.
+
+Reproduce:
+
+```sh
+cd c && make acestep
+python3 tools/acestep_ref_audio.py enc ~/models/ace-step-1.5 enc_ref wavs                # wavs/: a 10 s and a 30 s stereo 48 kHz wav
+python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 task_ref wavs             # reference, cover and repaint cases
+./acestep --model ~/models/ace-step-1.5 --vae-enc-ref enc_ref/tile_small
+./acestep --model ~/models/ace-step-1.5 --cover-ref task_ref/cover10
+./acestep --model ~/models/ace-step-1.5 --gen-ref task_ref/repaint_mid
+python3 tools/mutate_acestep_venc.py ~/models/ace-step-1.5 enc_ref/single10 enc_ref/tile_small ...
+python3 tools/mutate_acestep_tok.py ~/models/ace-step-1.5 task_ref/cover10 task_ref/cover_odd task_ref/cover_pad4
+python3 tools/mutate_acestep_audioin.py ~/models/ace-step-1.5 task_ref/cover10 task_ref/repaint_mid ...
+```
+
 ## In colibri
 
 The checkpoint is Hugging Face `ACE-Step/Ace-Step1.5`; `coli setup` offers it (6.4 GB: the turbo DiT, the text
@@ -279,6 +354,9 @@ family is `ace_step`, modality `audio`, found by `"model_type": "acestep"` in th
 ```sh
 coli music "calm piano with soft strings" --duration 20            # ~/colibri-music/<date>-<caption>-s<seed>.wav
 coli music "upbeat pop" --lyrics @words.txt --language en --bpm 120 --key "C Major" --seed 7 --out song.wav
+coli music "with strings" --cover song.mp3 --cover-strength 0.6    # a cover: the song's structure, the description's style
+coli music "a bright chorus" --repaint song.wav --from 41 --to 52 --out fixed.wav   # make 41 s to 52 s again, keep the rest
+coli music "warm lo-fi" --ref voice.wav --duration 40                # a reference clip lends its sound and style
 coli plan --model ~/models/ace-step-1.5       # the three weight sets, all resident, against the RAM free now
 coli info --model ~/models/ace-step-1.5       # what is on disk and what the engine will hold
 coli doctor --model ~/models/ace-step-1.5
@@ -296,12 +374,25 @@ is instrumental), `language`, `duration` (1 to 600 s, default 30), `steps` (1 to
 the images route's shape: `{"created", "data": [{"b64_json": <a WAV>, "format": "wav"}], "colibri": {sample_rate, channels,
 samples, duration, seed, steps, shift, frames, truncated, peak, caption_tokens, lyric_tokens, timings}}`; with
 `response_format: "wav"` the body is the WAV itself (`audio/wav`, the seed in `x-colibri-seed`); with `stream: true` it is
-SSE: `music_generation.progress` events (`stage`: `text`, `condition`, `denoise`, `decode`; `step`, `steps`), then
+SSE: `music_generation.progress` events (`stage`: `encode` (reading a clip; only when one is given), `text`, `condition`, `denoise`, `decode`; `step`, `steps`), then
 `music_generation.completed` with the same payload, then `[DONE]`. A bad field is a 400 naming it (`param`); a full queue
 is a 503 (a song takes minutes, so 429's invitation to retry at once would only refill the queue); a client that hangs up
 cancels the song at the engine's next step. `GET /v1/models` lists `"capabilities": ["music_generation"]` and an `audio`
 block with the limits above, so a client can build a valid request. The text endpoints and the images routes answer a music
 model with a 400 that points at this one.
+
+**Audio in, on the route.** The same endpoint takes `task` (`text2music`, the default, `cover` or `repaint`), `src_audio` (the clip to
+cover or repaint) and `reference_audio` (a style reference, any task), each a base64 string (a `data:audio/...;base64,` URL is fine) in a
+JSON body, or a file part in a `multipart/form-data` body whose other fields have the same names; WAV or MP3, the format read from the bytes,
+at most 128 MiB each and 192 MiB together. A cover or a repaint takes its length from the clip (`duration` is ignored) and its caption
+may be empty. The task's own fields, with upstream's names: `repainting_start`, `repainting_end` (seconds; no end is the clip's end; a
+start below 0 or an end past the clip adds silence there), `repaint_mode` (`balanced`, `conservative`, `aggressive`), `repaint_strength`
+(above 0 and at most 1: the default is 0.5, and `conservative` is the mode for the small end), `audio_cover_strength` (the same range,
+default 1) and `cover_noise_strength` (0 to 1, default 0). Each is refused with a 400 naming it when it does not apply to the task. The
+answer is the same, with `task` and `src_seconds` added to its `colibri` block; `/v1/models` lists `audio.tasks` and `audio.audio_in`
+(`formats`, `max_seconds`, `ref_seconds`, `max_clip_bytes`, `max_total_bytes`) and the capability `audio_input`, so a client can offer the
+clips only where they work. The clips are written to a private temporary directory for the engine, which reads them from there, and the
+directory is removed when the request ends, however it ends. The examples are in [api.md](api.md).
 
 Measured through the real gateway on the real checkpoint: a 6 s clip as JSON and as a raw WAV for the same seed are the
 same bytes, and the same as `coli music` and `acestep --caption` make for it.
@@ -314,7 +405,8 @@ weights dominate; the working buffers are a few hundred MB at most). Measured on
 
 **The dashboard.** `coli web` (or the page `coli serve` serves) shows the music composer when the selected model lists
 `music_generation`: a lyrics box, length, steps, language, seed, a progress bar with Cancel, then the browser's audio player
-with Download WAV, Copy seed and New seed (docs: `web/README.md`). The model switcher offers a music model like any other.
+with Download WAV, Copy seed and New seed, and, when the engine takes audio in, a Compose / Cover / Repaint switch with clip
+cards and a Reference chip (docs: `web/README.md`). The model switcher offers a music model like any other.
 `web/tests/music_ui.py` runs it in a real browser (Playwright) against the real gateway and the stub engine: a song whose
 length the browser reads back from the audio element, the downloaded file, a new seed, lyrics and a language on the wire,
 a failure, an invalid length held back, a cancel; and `web/src/lib/music.test.ts` holds the client (`generateMusic`'s
@@ -325,7 +417,10 @@ depends on the request, the way `qwenimage_stub.py` does for pictures. `tests/te
 `music_engine.py` (the client, the request rules, WAV, saving, the plan) to it, `tests/test_acestep_gateway.py` holds
 the route (real `APIServer`, real `MusicEngine`, the stub behind them: the framing, determinism, every refusal, SSE, the
 raw WAV, hang-up cancellation, queueing, the model card), and `tests/test_acestep_cli.py` the commands as a user types
-them. The real engine is held to the same protocol by `tests/test_acestep_serve.py`.
+them. Audio in has its own files: `tests/test_acestep_audio_in.py` (every request rule and limit, base64, data URLs and multipart,
+format sniffing, the temporary files removed on success, error, cancel and hang-up, SSE with the encode stage, a cover, a repaint and
+a reference through the real gateway) and `tests/test_acestep_audio_in_cli.py` (each flag and each refusal). The real engine is held
+to the same protocol by `tests/test_acestep_serve.py`.
 
 CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracles,
 the refusal tests (`tests/test_acestep_{vae,dit,text,gen}_load.py`, `tests/test_acestep_serve.py`), the four mutation tools, and the oracles again under ASan
