@@ -313,7 +313,7 @@ class CommandsTest(unittest.TestCase):
                     self.assertIsNone(process.poll(), "coli serve exited: " + process.stderr.read())
                     time.sleep(0.3)
             self.assertIsNotNone(health, "the gateway never answered")
-            self.assertEqual((health["arch"], health["capabilities"]), ("ace_step", ["music_generation"]))
+            self.assertEqual((health["arch"], health["capabilities"]), ("ace_step", ["music_generation", "audio_input"]))
             body = jsonlib.dumps({"model": "ace-step-1.5-colibri", "prompt": "calm piano", "duration": 1, "steps": 1, "seed": 4}).encode()
             request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/audio/music", data=body, headers=headers)
             answer = jsonlib.load(urllib.request.urlopen(request, timeout=60))

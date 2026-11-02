@@ -81,3 +81,47 @@ def stub_env(delay=0.0, **extra):
     env.update({"ACESTEP_STUB_RATE": str(RATE), "ACESTEP_STUB_DELAY": str(delay)})
     env.update({k: str(v) for k, v in extra.items()})
     return env
+
+
+# ---------------------------------------------------------------- clips for audio in
+def make_wav(seconds=2.0, rate=8000, channels=2, silent=False, bits=16, frequency=440.0):
+    """A canonical PCM WAV of `seconds` (a sine, or zeros), built with the standard library's wave module."""
+    import io
+    import math
+    import wave
+    frames = int(round(seconds * rate))
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(bits // 8)
+        handle.setframerate(rate)
+        if silent:
+            handle.writeframes(bytes(frames * channels * (bits // 8)))
+        else:
+            samples = b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * frequency * n / rate))) * channels
+                               for n in range(frames))
+            handle.writeframes(samples)
+    return buffer.getvalue()
+
+
+def make_mp3(frames=40, id3=False, junk=0):
+    """The bytes of an MPEG-1 layer III stream of `frames` 128 kbps / 44.1 kHz frames (417 bytes, 26.1 ms each: 40 of
+    them are 1.045 s): a real header and an all-zero payload. Enough to be sniffed and measured by frame count; it is
+    not audio a decoder would find music in."""
+    frame = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
+    tag = b"ID3\x04\x00\x00\x00\x00\x00\x0a" + bytes(10) if id3 else b""
+    return bytes(junk) + tag + frame * frames
+
+
+def multipart_body(fields, files, boundary="----colitestboundary"):
+    """(content type, body) of a multipart/form-data request: text `fields` {name: value} and `files`
+    [(name, filename, bytes)]."""
+    out = []
+    for name, value in fields.items():
+        out.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'.encode() +
+                   (value if isinstance(value, bytes) else str(value).encode()) + b"\r\n")
+    for name, filename, data in files:
+        out.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                   f"Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n")
+    out.append(f"--{boundary}--\r\n".encode())
+    return f"multipart/form-data; boundary={boundary}", b"".join(out)

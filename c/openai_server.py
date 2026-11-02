@@ -6048,10 +6048,11 @@ def _edit_json_picture(item, where):
         raise APIError(400, f"`{where}` is not valid base64.", where, "invalid_value") from None
 
 
-def parse_multipart_edit(content_type, raw):
-    """(fields, [picture bytes]) of a multipart/form-data edit request: files named `image` or `image[]`
-    are the pictures, every other part is a text field, numbers and `stream` turned into what the JSON
-    form would have carried."""
+def _parse_multipart(content_type, raw, file_names, int_fields, float_fields=(), bool_fields=(), rejected=None):
+    """(fields, {file name: [bytes]}) of a multipart/form-data body, parsed with the standard library's email parser.
+    A part named in `file_names` is a file; `rejected` maps a part name to the error it earns; every other part is a
+    text field, with the names in `int_fields`, `float_fields` and `bool_fields` turned into what the JSON form would
+    have carried."""
     from email.parser import BytesParser
     from email.policy import HTTP
     message = BytesParser(policy=HTTP).parsebytes(
@@ -6061,34 +6062,77 @@ def parse_multipart_edit(content_type, raw):
         raise APIError(400, "The multipart body has no parts: check its boundary.")
     if len(parts) > _EDIT_MAX_PARTS:
         raise APIError(400, f"At most {_EDIT_MAX_PARTS} form parts.")
-    fields, blobs = {}, []
+    fields, files = {}, {}
     for part in parts:
         name = part.get_param("name", header="content-disposition")
         if not name:
             raise APIError(400, "A form part has no name.")
         payload = part.get_payload(decode=True) or b""
-        if name in ("image", "image[]"):
-            blobs.append(payload)
-        elif name in ("mask", "mask[]"):
-            raise APIError(400, "`mask` is not supported: this model edits by reference pictures.", "mask",
-                           "invalid_value")
+        if rejected and name in rejected:
+            raise APIError(400, rejected[name], name.rstrip("[]"), "invalid_value")
+        if name in file_names:
+            files.setdefault(name, []).append(payload)
         else:
             try:
                 fields[name] = payload.decode("utf-8")
             except UnicodeDecodeError:
                 raise APIError(400, f"`{name}` must be UTF-8 text.", name, "invalid_value") from None
-    for key in _EDIT_INT_FIELDS:
+    for key in int_fields:
         if key in fields:
             try:
                 fields[key] = int(fields[key].strip())
             except ValueError:
                 raise APIError(400, f"`{key}` must be an integer.", key, "invalid_value") from None
-    if "stream" in fields:
-        word = fields["stream"].strip().lower()
-        if word not in ("true", "false", "1", "0"):
-            raise APIError(400, "`stream` must be true or false.", "stream", "invalid_value")
-        fields["stream"] = word in ("true", "1")
-    return fields, blobs
+    for key in float_fields:
+        if key in fields:
+            try:
+                fields[key] = float(fields[key].strip())
+            except ValueError:
+                raise APIError(400, f"`{key}` must be a number.", key, "invalid_value") from None
+    for key in bool_fields:
+        if key in fields:
+            word = fields[key].strip().lower()
+            if word not in ("true", "false", "1", "0"):
+                raise APIError(400, f"`{key}` must be true or false.", key, "invalid_value")
+            fields[key] = word in ("true", "1")
+    return fields, files
+
+
+def parse_multipart_edit(content_type, raw):
+    """(fields, [picture bytes]) of a multipart/form-data edit request: files named `image` or `image[]`
+    are the pictures, every other part is a text field, numbers and `stream` turned into what the JSON
+    form would have carried."""
+    fields, files = _parse_multipart(
+        content_type, raw, ("image", "image[]"), _EDIT_INT_FIELDS, bool_fields=("stream",),
+        rejected={"mask": "`mask` is not supported: this model edits by reference pictures.",
+                  "mask[]": "`mask` is not supported: this model edits by reference pictures."})
+    return fields, files.get("image", []) + files.get("image[]", [])
+
+
+# POST /v1/audio/music as multipart/form-data: the clips are files named `src_audio` and `reference_audio`, the
+# rest text fields (the JSON body's own names).
+_MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm")
+_MUSIC_FLOAT_FIELDS = ("duration", "shift", "repainting_start", "repainting_end", "repaint_strength",
+                       "audio_cover_strength", "cover_noise_strength")
+_MUSIC_BOOL_FIELDS = ("stream", "dcw")
+# Body limits for audio in, from the clip caps: the pair may be 192 MiB, so a multipart body is that and a MiB of
+# fields; the same pair as base64 in a JSON body is 4/3 of it (the reason to send a file, not text, for a long clip).
+MUSIC_MAX_BODY_MULTIPART = music_engine.MAX_CLIPS_BYTES + (1 << 20)
+MUSIC_MAX_BODY_JSON = music_engine.MAX_CLIPS_BYTES * 4 // 3 + (1 << 20)
+
+
+def parse_multipart_music(content_type, raw):
+    """The body of a multipart/form-data music request as the dict the JSON form would have been: the files as
+    bytes under `src_audio` and `reference_audio`, numbers and booleans converted. A clip sent twice is refused."""
+    fields, files = _parse_multipart(content_type, raw, music_engine.CLIP_FIELDS, _MUSIC_INT_FIELDS,
+                                     _MUSIC_FLOAT_FIELDS, _MUSIC_BOOL_FIELDS)
+    for name, blobs in files.items():
+        if len(blobs) > 1:
+            raise APIError(400, f"`{name}` was sent {len(blobs)} times: one clip each.", name, "invalid_value")
+        if name in fields:
+            raise APIError(400, f"`{name}` was sent as a file and as a field.", name, "invalid_value")
+        fields[name] = blobs[0]
+    return fields
 
 
 TEXT_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone")
@@ -6191,6 +6235,8 @@ class APIServer(ThreadingHTTPServer):
         if is_music_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["audio"] = {key: info.get(key) for key in MUSIC_OPTION_KEYS}
+            entry["audio"]["tasks"] = list(info.get("tasks") or ["text2music"])
+            entry["audio"]["audio_in"] = self.music_audio_info()
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6201,6 +6247,15 @@ class APIServer(ThreadingHTTPServer):
                     "max_side": image_engine.MAX_EDIT_SIDE, "max_pixels": image_engine.MAX_EDIT_PIXELS,
                     "ref_resolution": info.get("ref_resolution")}
         return entry
+
+    def music_audio_info(self):
+        """What audio in takes, for /v1/models: the engine's READY limits and the byte caps of this gateway, or None
+        when the engine makes music from text only."""
+        limits = music_engine.audio_in_info(getattr(self.engine, "info", None))
+        if limits is None:
+            return None
+        return {**limits, "max_clip_bytes": music_engine.MAX_CLIP_BYTES, "max_total_bytes": music_engine.MAX_CLIPS_BYTES,
+                "multipart_fields": list(music_engine.CLIP_FIELDS)}
 
     def state_seen(self, state, capacity=256):
         """True if `state` was scored before (and remember it either way)."""
@@ -6218,7 +6273,9 @@ class APIServer(ThreadingHTTPServer):
         draws (image_generation); every text engine answers POST /v1/systemone
         (systemone), and a decision engine does only that (decision)."""
         if is_music_engine(self.engine):
-            return ["music_generation"]
+            # audio_input: the engine announced tasks (a cover, a repaint) and takes a reference clip
+            audio = music_engine.audio_in_info(getattr(self.engine, "info", None)) is not None
+            return ["music_generation", "audio_input"] if audio else ["music_generation"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -6639,6 +6696,21 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, "Request body must be a JSON object.")
         return body
 
+    def read_music_request(self):
+        """POST /v1/audio/music: the body as a dict, from JSON or multipart/form-data (the clips as files).
+
+        A body may be as large as the clips are allowed to be only when the engine takes audio in; for an engine
+        that makes music from text the limit is the one every route has."""
+        engine = self.server.engine
+        wide = is_music_engine(engine) and music_engine.audio_in_info(getattr(engine, "info", None)) is not None
+        content_type = self.headers.get("Content-Type", "")
+        multipart = content_type.split(";", 1)[0].strip().lower() == "multipart/form-data"
+        limit = (MUSIC_MAX_BODY_MULTIPART if multipart else MUSIC_MAX_BODY_JSON) if wide else MAX_BODY
+        raw = self.read_raw_body(limit)
+        if multipart:
+            return parse_multipart_music(content_type, raw)
+        return self.parse_json_object(raw)
+
     def read_edit_request(self):
         """POST /v1/images/edits: (fields, [picture bytes]).
 
@@ -6876,6 +6948,8 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 if path == "/v1/images/edits":
                     body, blobs = self.read_edit_request()
+                elif path == MUSIC_ENDPOINT:
+                    body = self.read_music_request()
                 else:
                     body = self.read_json()
             except TimeoutError:
@@ -7615,17 +7689,26 @@ class APIHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _music_run(engine, request, **hooks):
-        return engine.generate(request["caption"], duration=request["duration"], lyrics=request["lyrics"],
-                               language=request["language"], steps=request["steps"], shift=request["shift"],
-                               seed=request["seed"], bpm=request["bpm"], key=request["key"],
-                               time_signature=request["time_signature"], dcw=request["dcw"], **hooks)
+        audio = {}
+        if request.get("task", "text2music") != "text2music" or request.get("reference_audio") is not None:
+            audio = {"task": request["task"], "src_audio": request["src_audio"],
+                     "ref_audio": request["reference_audio"], "repaint_start": request["repainting_start"],
+                     "repaint_end": request["repainting_end"], "repaint_mode": request["repaint_mode"],
+                     "repaint_strength": request["repaint_strength"], "cover_strength": request["audio_cover_strength"],
+                     "cover_noise": request["cover_noise_strength"]}
+        result = engine.generate(request["caption"], duration=request["duration"], lyrics=request["lyrics"],
+                                 language=request["language"], steps=request["steps"], shift=request["shift"],
+                                 seed=request["seed"], bpm=request["bpm"], key=request["key"],
+                                 time_signature=request["time_signature"], dcw=request["dcw"], **audio, **hooks)
+        result["task"] = request.get("task", "text2music")
+        return result
 
     @staticmethod
     def _music_payload(result, created):
         import base64
         wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
-                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings")
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
                 "colibri": {key: result.get(key) for key in keys}}

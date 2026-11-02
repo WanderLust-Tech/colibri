@@ -1409,7 +1409,7 @@ def info_music_model(a, family, row):
         sys.exit(f"{C.yel}cannot read the music model:{C.r} {error}")
     comps = inv["components"]
     row("model", a.model)
-    row("type", f"{family.display_name} · text-to-music · 48 kHz stereo, 1 to 600 s")
+    row("type", f"{family.display_name} · text-to-music, covers and repaints of a WAV or MP3 · 48 kHz stereo, 1 to 600 s")
     labels = {COMPONENTS[0]: "text enc.", COMPONENTS[1]: "DiT", COMPONENTS[2]: "VAE"}
     for key in COMPONENTS:
         comp = comps[key]
@@ -1425,7 +1425,7 @@ def info_music_model(a, family, row):
     row("on disk", f"{inv['disk_bytes']/1e9:.1f} GB used by the engine")
     row("output", f"WAV (16-bit, 48 kHz, stereo) · saved to {music_dir()} (COLI_MUSIC_DIR)")
     row("use", "coli music \"calm piano\" [--lyrics TEXT] [--duration S] [--out song.wav] · "
-               "coli serve (POST /v1/audio/music)")
+               "--cover FILE | --repaint FILE --from S --to S · --ref FILE · coli serve (POST /v1/audio/music)")
 
 def info_image_model(a, family, row):
     """`coli info` for a text-to-image pipeline: its parts and their weight on
@@ -2926,7 +2926,7 @@ class MusicProgress:
     """The live line under a generation:  ⠹ composing 3/8 · 41s · seed 1234  (one line, redrawn in place
     on a terminal; nothing at all when the output is a pipe)."""
     FRAMES = Spinner.FRAMES
-    STAGES = {"text": "reading the caption", "condition": "preparing the conditioning",
+    STAGES = {"encode": "reading the clip", "text": "reading the caption", "condition": "preparing the conditioning",
               "denoise": "composing", "decode": "decoding the audio"}
 
     def __init__(self, stream, seed):
@@ -2977,6 +2977,45 @@ def music_lyrics(value):
             sys.exit(f"{C.yel}--lyrics: cannot read {value[1:]}: {error}{C.r}")
     return value
 
+def music_clip(a, flag, path):
+    """The bytes of a clip flag (--cover, --repaint, --ref): read here, checked by music_request like an upload."""
+    from music_engine import MAX_CLIP_BYTES
+    path = os.path.expanduser(path)
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_CLIP_BYTES:
+            sys.exit(f"{C.yel}{flag}: {path} is {size / (1 << 20):.0f} MiB; at most {MAX_CLIP_BYTES >> 20} MiB are read{C.r}")
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError as error:
+        sys.exit(f"{C.yel}{flag}: cannot read {path}: {error.strerror or error}{C.r}")
+
+def music_audio_flags(a):
+    """The audio-in flags of `coli music` as the request body's own fields, after the rules that need no engine:
+    --cover and --repaint are two tasks, each flag belongs to one of them, and the clip's length is the song's."""
+    cover, repaint, ref = getattr(a, "cover", None), getattr(a, "repaint", None), getattr(a, "ref", None)
+    if cover and repaint:
+        sys.exit(f"{C.yel}--cover and --repaint are two tasks:{C.r} a cover makes the whole clip again in a new style, "
+                 f"a repaint makes only a span of it again; pick one (--ref goes with either)")
+    for flag, dest, task in (("--cover-strength", "cover_strength", cover), ("--cover-noise", "cover_noise", cover),
+                             ("--from", "repaint_from", repaint), ("--to", "repaint_to", repaint),
+                             ("--repaint-mode", "repaint_mode", repaint), ("--repaint-strength", "repaint_strength", repaint)):
+        if getattr(a, dest, None) is not None and not task:
+            sys.exit(f"{C.yel}{flag} is for {'--cover' if 'cover' in dest else '--repaint'} FILE{C.r}")
+    if (cover or repaint) and getattr(a, "duration", None) is not None:
+        sys.exit(f"{C.yel}--duration does not apply to a {'cover' if cover else 'repaint'}:{C.r} the clip's own length is the song's")
+    body = {}
+    if cover:
+        body.update(task="cover", src_audio=music_clip(a, "--cover", cover),
+                    audio_cover_strength=getattr(a, "cover_strength", None), cover_noise_strength=getattr(a, "cover_noise", None))
+    if repaint:
+        body.update(task="repaint", src_audio=music_clip(a, "--repaint", repaint),
+                    repainting_start=getattr(a, "repaint_from", None), repainting_end=getattr(a, "repaint_to", None),
+                    repaint_mode=getattr(a, "repaint_mode", None), repaint_strength=getattr(a, "repaint_strength", None))
+    if ref:
+        body["reference_audio"] = music_clip(a, "--ref", ref)
+    return body
+
 def music_settings(a, prompt, info):
     """The request for the engine, from the prompt and the flags (the engine's defaults for what is not given).
     Exits with the engine's own rule when a flag is out of range."""
@@ -2984,11 +3023,17 @@ def music_settings(a, prompt, info):
     body = {"prompt": prompt, "lyrics": music_lyrics(getattr(a, "lyrics", None)), "language": getattr(a, "language", None),
             "duration": getattr(a, "duration", None), "steps": getattr(a, "steps", None), "shift": getattr(a, "shift", None),
             "seed": getattr(a, "seed", None), "bpm": getattr(a, "bpm", None), "key": getattr(a, "key", None),
-            "time_signature": getattr(a, "time_signature", None), "dcw": False if getattr(a, "no_dcw", False) else None}
+            "time_signature": getattr(a, "time_signature", None), "dcw": False if getattr(a, "no_dcw", False) else None,
+            **music_audio_flags(a)}
     try:
         return music_request({k: v for k, v in body.items() if v is not None}, info)
     except MusicRequestError as error:
-        flag = {"prompt": "the prompt", "time_signature": "--time-signature"}.get(error.param, f"--{error.param}" if error.param else "the request")
+        source = "--cover" if getattr(a, "cover", None) else "--repaint"
+        flag = {"prompt": "the prompt", "time_signature": "--time-signature", "src_audio": source, "reference_audio": "--ref",
+                "repainting_start": "--from", "repainting_end": "--to", "repaint_mode": "--repaint-mode",
+                "repaint_strength": "--repaint-strength", "audio_cover_strength": "--cover-strength",
+                "cover_noise_strength": "--cover-noise", "task": "the task"}.get(
+                    error.param, f"--{error.param}" if error.param else "the request")
         sys.exit(f"{C.yel}{flag}: {error}{C.r}")
 
 def generate_music(engine, request, out=None, stream=None):
@@ -3002,6 +3047,11 @@ def generate_music(engine, request, out=None, stream=None):
                                  language=request["language"], steps=request["steps"], shift=request["shift"],
                                  seed=request["seed"], bpm=request["bpm"], key=request["key"],
                                  time_signature=request["time_signature"], dcw=request["dcw"],
+                                 task=request.get("task"), src_audio=request.get("src_audio"),
+                                 ref_audio=request.get("reference_audio"), repaint_start=request.get("repainting_start"),
+                                 repaint_end=request.get("repainting_end"), repaint_mode=request.get("repaint_mode"),
+                                 repaint_strength=request.get("repaint_strength"),
+                                 cover_strength=request.get("audio_cover_strength"), cover_noise=request.get("cover_noise_strength"),
                                  on_progress=progress.progress, interruptible=True, on_interrupt=progress.interrupted)
     except MusicCancelled:
         progress.stop()
@@ -3027,7 +3077,8 @@ def generate_music(engine, request, out=None, stream=None):
         return None
     timings = result.get("timings") or {}
     parts = " · ".join(f"{k} {v:.1f}s" for k, v in timings.items() if isinstance(v, (int, float)))
-    print(f"  {C.dgray}└─ {result['samples']/result['sample_rate']:.1f}s · seed {result['seed']} · "
+    task = request.get("task") if request.get("task") != "text2music" else None
+    print(f"  {C.dgray}└─ {result['samples']/result['sample_rate']:.1f}s · {task + ' · ' if task else ''}seed {result['seed']} · "
           f"{result['steps']} steps · {elapsed:.0f}s{(' (' + parts + ')') if parts else ''}{C.r}", file=stream)
     if result.get("truncated"):
         print(f"  {C.yel}the caption or the lyrics were longer than the model reads and were cut{C.r}", file=stream)
@@ -3065,7 +3116,8 @@ def run_music(a, family, engine, prompt):
         runtime.close()
 
 def cmd_music(a):
-    """coli music "calm piano with soft strings" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]"""
+    """coli music "calm piano with soft strings" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]
+    [--cover FILE | --repaint FILE [--from S] [--to S]] [--ref FILE]"""
     require_model(a.model, file=None)
     family = resolve_model(a.model).descriptor
     if family.modality != "audio":
@@ -3074,8 +3126,10 @@ def cmd_music(a):
     engine = engine_for(a.model)
     need_model(a.model, engine)
     prompt = " ".join(a.prompt) if a.prompt else ""
-    if not prompt.strip() and not getattr(a, "lyrics", None):
-        sys.exit('usage: coli music "what the music is like" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]')
+    if not prompt.strip() and not getattr(a, "lyrics", None) and not (getattr(a, "cover", None) or getattr(a, "repaint", None)):
+        sys.exit('usage: coli music "what the music is like" [--lyrics TEXT|@FILE] [--duration S] [--out song.wav]\n'
+                 '       coli music "the new style" --cover song.mp3 | --repaint song.wav --from 20 --to 35   '
+                 '(--ref voice.wav takes a style from a clip)')
     banner("music", model=a.model)
     return run_music(a, family, engine, prompt)
 
@@ -3967,7 +4021,16 @@ def main():
                  ("--shift",dict(type=float,default=None,help="the sampler's timestep shift (music models; default 1)")),
                  ("--bpm",dict(type=int,default=None,help="tempo in beats per minute (music models; default: left to the model)")),
                  ("--key",dict(default=None,metavar="KEY",help='musical key, like "C Major" (music models)')),
-                 ("--time-signature",dict(default=None,metavar="N",help='time signature, like 4 or 3/4 (music models)')))
+                 ("--time-signature",dict(default=None,metavar="N",help='time signature, like 4 or 3/4 (music models)')),
+                 ("--cover",dict(default=None,metavar="FILE",help="make a cover of this clip (a WAV or MP3, 1 to 600 s): the prompt says the new style, the song is as long as the clip (music models)")),
+                 ("--repaint",dict(default=None,metavar="FILE",help="make a span of this clip again and keep the rest (a WAV or MP3); --from and --to say which span (music models)")),
+                 ("--from",dict(dest="repaint_from",type=float,default=None,metavar="S",help="with --repaint: where the span starts, in seconds (default 0; below 0 adds silence before the clip)")),
+                 ("--to",dict(dest="repaint_to",type=float,default=None,metavar="S",help="with --repaint: where the span ends, in seconds (default: the end of the clip; past it adds silence after)")),
+                 ("--repaint-mode",dict(choices=["balanced","conservative","aggressive"],default=None,help="with --repaint: how much of the source the span's edges keep (default balanced)")),
+                 ("--repaint-strength",dict(type=float,default=None,metavar="X",help="with --repaint, balanced mode: above 0 and at most 1, higher is freer (default 0.5)")),
+                 ("--cover-strength",dict(type=float,default=None,metavar="X",help="with --cover: above 0 and at most 1, the share of the steps that follow the clip's structure (default 1)")),
+                 ("--cover-noise",dict(type=float,default=None,metavar="X",help="with --cover: 0 to 1, how near the clip the start is; 0 starts from noise (default 0)")),
+                 ("--ref",dict(default=None,metavar="FILE",help="a clip (a WAV or MP3) to take the voice and style from; works alone or with --cover/--repaint (music models)")))
     for flag,kw in music_flags: pr.add_argument(flag,**kw)
     pr.add_argument("--no-dcw",action="store_true",help="turn off the sampler's wavelet correction (music models)")
     pmu=sub.add_parser("music",parents=[common],help="make a song from a description (ACE-Step 1.5)")
