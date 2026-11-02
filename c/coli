@@ -1760,7 +1760,8 @@ def cmd_run(a):
     arch=family.id
     engine=engine_for(a.model)
     need_model(a.model,engine)
-    prompt=" ".join(a.prompt) if a.prompt else sys.exit('usage: coli run "your prompt"')
+    audio_in=family.modality=="audio" and (getattr(a,"cover",None) or getattr(a,"repaint",None))     # a cover or a repaint needs no description
+    prompt=" ".join(a.prompt) if a.prompt else ("" if audio_in else sys.exit('usage: coli run "your prompt"'))
     banner("run", model=a.model)
     if family.modality=="image":
         return run_image(a, family, engine, prompt)
