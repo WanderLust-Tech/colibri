@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The gateway (`coli serve`, `coli web`) now saves every finished picture to `~/colibri-images` (`COLI_IMAGE_DIR`) before it
+  sends it, as `coli run` does. A long render could finish on the server while the browser, whose tab had been put to sleep,
+  never read the result, and the picture then existed nowhere. `COLI_IMAGE_SAVE=0` turns it off.
+
 ### ACE-Step 1.5, text to music
 
 A fourteenth engine, `acestep`, makes songs from a description and optional

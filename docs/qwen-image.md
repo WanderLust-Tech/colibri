@@ -208,6 +208,11 @@ second image with the same name gets `-2`, `-3`, ... The path is printed under
 every image, and `/save PATH` in `coli chat` keeps a copy of the last one where
 you choose (a Windows path such as `C:\Users\me\Desktop` works from WSL).
 
+The server does the same for the web UI and every API client: `coli serve` and `coli web` write each finished
+picture to that folder before they send it (the server's log says `[image] saved <path>`), so a render of an
+hour cannot be lost to a browser tab that was put to sleep, or closed, while it ran. A failed save is logged and
+the picture is still sent. `COLI_IMAGE_SAVE=0` turns this off.
+
 ## Terminal support
 
 coli picks the best way to draw that your terminal supports, and falls back to
