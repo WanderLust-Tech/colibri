@@ -850,6 +850,14 @@ def _slug(prompt, limit=48):
     return words[:limit].rstrip("-") or "image"
 
 
+def save_enabled(env=None):
+    """Does the gateway keep a copy of every finished picture? Yes, unless COLI_IMAGE_SAVE says no
+    (0, false, no or off): a render can take an hour, and a browser tab that stops reading, or is closed,
+    must not be able to lose it."""
+    env = os.environ if env is None else env
+    return env.get("COLI_IMAGE_SAVE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def save_png(png, prompt, seed, directory=None, now=None):
     """Write the PNG under a name that says what it is and never overwrites.
 

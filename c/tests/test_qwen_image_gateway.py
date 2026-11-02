@@ -8,6 +8,7 @@ determinism, the size actually drawn and the PNG framing.
 """
 import base64
 import http.client
+import io
 import json
 import os
 import socket
@@ -386,6 +387,78 @@ class TextModelImagesTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+class SavedImagesTest(unittest.TestCase):
+    """A finished picture is on disk before it is sent: a browser that stops reading, or is closed, cannot lose a render
+    that took an hour (the web UI sat on its last step while the server had long finished, and nothing kept the picture)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = GatewayHarness()
+        cls.out = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.server.save_images_to = None
+        cls.gw.close()
+        cls.out.cleanup()
+
+    def setUp(self):
+        for name in os.listdir(self.out.name):
+            os.remove(os.path.join(self.out.name, name))
+        self.gw.server.save_images_to = self.out.name
+
+    def saved(self):
+        return sorted(os.listdir(self.out.name))
+
+    def test_a_server_nobody_told_where_keeps_its_hands_off_the_disk(self):
+        self.assertIsNone(APIServer(("127.0.0.1", 0), None, MODEL_ID, KEY).save_images_to)
+        self.gw.server.save_images_to = None
+        status, _h, raw = self.gw.generate(prompt="a red fox", size="256x256", seed=7, steps=2)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(self.saved(), [])
+
+    def test_the_response_and_the_file_are_the_same_picture(self):
+        status, _h, raw = self.gw.generate(prompt="A red fox, in the snow!", size="256x256", seed=7, steps=2)
+        self.assertEqual(status, 200, raw)
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        names = self.saved()
+        self.assertEqual(len(names), 1, names)
+        self.assertRegex(names[0], r"^\d{8}-\d{6}-a-red-fox-in-the-snow-s7\.png$")     # the name `coli run` gives
+        self.assertEqual(Path(self.out.name, names[0]).read_bytes(), sent)
+        self.assertEqual(image_engine.decode_png(sent)[:3], (256, 256, 4))
+
+    def test_a_streamed_picture_is_saved_too_and_before_the_event_that_carries_it(self):
+        status, _h, events = self.gw.stream(prompt="a lighthouse", size="256x256", seed=3, steps=2)
+        self.assertEqual(status, 200)
+        completed = [data for name, data in events if name == "image_generation.completed"]
+        self.assertEqual(len(completed), 1, events)
+        names = self.saved()
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(names[0].endswith("-a-lighthouse-s3.png"), names)
+        self.assertEqual(Path(self.out.name, names[0]).read_bytes(), base64.b64decode(completed[0]["data"][0]["b64_json"]))
+
+    def test_two_pictures_of_one_prompt_and_seed_never_overwrite(self):
+        for _ in range(2):
+            status, _h, raw = self.gw.generate(prompt="a lighthouse", size="256x256", seed=3, steps=2)
+            self.assertEqual(status, 200, raw)
+        self.assertEqual(len(self.saved()), 2, self.saved())
+
+    def test_a_failed_save_is_logged_and_the_picture_is_still_sent(self):
+        blocker = os.path.join(self.out.name, "not-a-directory")
+        Path(blocker).write_bytes(b"x")
+        self.gw.server.save_images_to = os.path.join(blocker, "inside")           # cannot be made: its parent is a file
+        log = io.StringIO()
+        real = sys.stderr
+        sys.stderr = log
+        try:
+            status, _h, raw = self.gw.generate(prompt="a red fox", size="256x256", seed=7, steps=2)
+        finally:
+            sys.stderr = real
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(image_engine.decode_png(base64.b64decode(json.loads(raw)["data"][0]["b64_json"]))[:3], (256, 256, 4))
+        self.assertIn("could not save the picture", log.getvalue())
 
 
 if __name__ == "__main__":

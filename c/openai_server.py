@@ -6194,9 +6194,12 @@ class APIServer(ThreadingHTTPServer):
 
     def __init__(self, address, engine, model_id, api_key=None, max_tokens=1024,
                  cors_origins=DEFAULT_CORS_ORIGINS, max_queue=8, queue_timeout=300,
-                 kv_slots=1, allowed_hosts=()):
+                 kv_slots=1, allowed_hosts=(), save_images_to=None):
         super().__init__(address, APIHandler)
         self.engine = engine
+        # A directory to write every finished picture to before it is sent (None: do not). The launcher
+        # sets it (coli serve, coli web); a server built by a test or an embedder keeps its hands off the disk.
+        self.save_images_to = save_images_to
         self.model_id = model_id
         self.api_key = api_key
         self.max_tokens = max_tokens
@@ -7499,12 +7502,32 @@ class APIHandler(BaseHTTPRequestHandler):
             except image_engine.ImageEngineError as error:
                 raise APIError(500, f"The image engine failed: {error}", None, "engine_error",
                                "server_error") from None
-            self.send_json(200, self._image_payload(result, created), request_id, queue_headers)
+            png = self._finish_image(result, request, request_id)
+            self.send_json(200, self._image_payload(result, created, png), request_id, queue_headers)
+
+    def _finish_image(self, result, request, request_id):
+        """The finished picture as PNG bytes, written to disk first when the server was told where to.
+
+        A picture can take an hour, and everything after the engine's last step (the encode, the socket,
+        the browser) can still lose it: a tab the browser has put to sleep stops reading, and the finished
+        picture then exists nowhere. So it is saved before it is sent, under the name `coli run` would give
+        it (<date>-<time>-<prompt>-s<seed>.png, never overwriting). A failure to save is logged and does
+        not fail the request: the picture is still sent."""
+        png = image_engine.encode_png(result["width"], result["height"], result["rgba"], 4)
+        directory = getattr(self.server, "save_images_to", None)
+        if directory:
+            try:
+                path = image_engine.save_png(png, request["prompt"], result["seed"], directory)
+                sys.stderr.write(f"[image] saved {path}\n")
+            except OSError as error:
+                sys.stderr.write(f"[image] {request_id}: could not save the picture to {directory}: {error}\n")
+        return png
 
     @staticmethod
-    def _image_payload(result, created):
+    def _image_payload(result, created, png=None):
         import base64
-        png = image_engine.encode_png(result["width"], result["height"], result["rgba"], 4)
+        if png is None:
+            png = image_engine.encode_png(result["width"], result["height"], result["rgba"], 4)
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(png).decode("ascii"),
                           "revised_prompt": None}],
@@ -7620,7 +7643,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                       "code": "engine_error"}})
             write(b"data: [DONE]\n\n")
             return
-        event("image_generation.completed", self._image_payload(result, created))
+        event("image_generation.completed",
+              self._image_payload(result, created, self._finish_image(result, request, request_id)))
         write(b"data: [DONE]\n\n")
 
     # POST /v1/audio/music: ACE-Step text-to-music. The body is music_engine.music_request's
@@ -8693,6 +8717,8 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
     server = APIServer((host, port), None, model_id, api_key, max_tokens, origins,
                        max_queue, queue_timeout, kv_slots, allowed_hosts=allowed_hosts)
     server.switch = switch
+    if image_engine.save_enabled():
+        server.save_images_to = image_engine.image_dir()      # a finished picture is kept (COLI_IMAGE_DIR, COLI_IMAGE_SAVE=0 to stop)
     runtime = None
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:

@@ -289,6 +289,13 @@ class SavingTest(unittest.TestCase):
         self.assertTrue(ie.image_dir({}).endswith("colibri-images"))
         self.assertEqual(ie.image_dir({"COLI_IMAGE_DIR": "/x/y"}), "/x/y")
 
+    def test_the_gateway_saves_unless_told_not_to(self):
+        self.assertTrue(ie.save_enabled({}))
+        for value in ("1", "true", "yes", "anything else"):
+            self.assertTrue(ie.save_enabled({"COLI_IMAGE_SAVE": value}), value)
+        for value in ("0", "false", "No", " OFF "):
+            self.assertFalse(ie.save_enabled({"COLI_IMAGE_SAVE": value}), value)
+
 
 if __name__ == "__main__":
     unittest.main()
