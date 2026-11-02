@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { generateMusic, generatesMusic, listModelInfo, musicLimits, wavUrl, type GenerateMusicOptions, type MusicProgress } from "./api"
+import { generateMusic, generatesMusic, listModelInfo, musicFields, musicLimits, wavUrl, type GenerateMusicOptions, type MusicProgress, type MusicTask } from "./api"
 import { chatTurns } from "./images"
 import {
-  DEFAULT_MUSIC_LIMITS, MUSIC_LANGUAGES, clampDuration, clampMusicSteps, lyricBytes, musicFileName, musicProgressFraction,
-  songClock, validDuration, validLanguage,
+  DEFAULT_MUSIC_LIMITS, MAX_CLIP_BYTES, MUSIC_LANGUAGES, acceptedClip, clampDuration, clampMusicSteps, clampUnit, clipProblem, lyricBytes,
+  musicFileName, musicProgressFraction, offersTask, repaintValid, songClock, validDuration, validLanguage,
 } from "./music"
 import en from "../i18n/en"
 
@@ -39,12 +39,25 @@ describe("music limits", () => {
     expect(new Set(MUSIC_LANGUAGES).size).toBe(MUSIC_LANGUAGES.length)
   })
 
+  it("reads the tasks and the audio-in limits an engine reports, and offers composing alone when it reports none", () => {
+    const audio = { tasks: ["repaint", "cover", "text2music", "lego"], audio_in: { max_seconds: 600, ref_seconds: 30, formats: ["wav", "mp3"] } }
+    const limits = musicLimits(audio)!
+    expect(limits.tasks).toEqual(["text2music", "cover", "repaint"])                // this page's order; "lego" is not offered
+    expect(limits.audioIn).toEqual({ maxSeconds: 600, refSeconds: 30 })
+    expect(musicLimits({ tasks: ["cover"] })!.tasks).toEqual(["text2music", "cover"])        // composing is always there
+    expect(musicLimits({ audio_in: audio.audio_in })!.audioIn).toBeUndefined()            // clips with nothing to do with them are not offered
+    expect(musicLimits({ tasks: ["cover"], audio_in: { max_seconds: 0, ref_seconds: 30 } })!.audioIn).toBeUndefined()
+    expect(offersTask(limits, "cover")).toBe(true)
+    expect(offersTask(DEFAULT_MUSIC_LIMITS, "cover")).toBe(false)
+    expect(offersTask(undefined, "text2music")).toBe(true)
+  })
+
   it("reads /v1/models' audio block, filling what is missing with the contract's defaults", () => {
     expect(musicLimits(undefined)).toBeUndefined()
     expect(musicLimits("nope")).toBeUndefined()
     expect(musicLimits({})).toEqual(DEFAULT_MUSIC_LIMITS)
     expect(musicLimits({ sample_rate: 44100, min_duration: 5, max_duration: 60, default_duration: 20, default_steps: 4, max_steps: 10, default_shift: 3, max_lyric_bytes: 1000 }))
-      .toEqual({ sampleRate: 44100, minDuration: 5, maxDuration: 60, defaultDuration: 20, defaultSteps: 4, maxSteps: 10, defaultShift: 3, maxLyricBytes: 1000 })
+      .toEqual({ sampleRate: 44100, minDuration: 5, maxDuration: 60, defaultDuration: 20, defaultSteps: 4, maxSteps: 10, defaultShift: 3, maxLyricBytes: 1000, tasks: ["text2music"] })
     expect(musicLimits({ max_duration: -1, max_steps: "many" })).toEqual(DEFAULT_MUSIC_LIMITS)       // junk is not guessed at
     expect(musicLimits({ min_duration: 90, max_duration: 60 })).toBeUndefined()                      // an empty range is no range
   })
@@ -55,9 +68,9 @@ describe("music progress", () => {
 
   it("is empty before the engine says anything and grows through the stages", () => {
     expect(musicProgressFraction(null)).toBe(0)
-    const run = [at("text", 0, 1), at("condition", 0, 1), at("denoise", 0, 8), at("denoise", 4, 8), at("denoise", 8, 8), at("decode", 0, 3), at("decode", 3, 3)]
+    const run = [at("encode", 0, 2), at("encode", 2, 2), at("text", 0, 1), at("condition", 0, 1), at("denoise", 0, 8), at("denoise", 4, 8), at("denoise", 8, 8), at("decode", 0, 3), at("decode", 3, 3)]
     for (let i = 1; i < run.length; i++) expect(run[i]).toBeGreaterThanOrEqual(run[i - 1])     // never backwards (it rests between two stages)
-    expect(new Set(run).size).toBe(run.length - 2)         // two resting points: after the conditioning and after the last step
+    expect(new Set(run).size).toBe(run.length - 2)         // two resting points: the sampler's start meets the conditioning, its end meets the decoder's
     expect(run[0]).toBeGreaterThan(0)
     expect(run.at(-1)).toBeCloseTo(1, 10)
   })
@@ -244,6 +257,14 @@ describe("generateMusic", () => {
   })
 })
 
+/* The keys the page builds with a template, and what each ranges over. */
+const TEMPLATES: Record<string, string[]> = {
+  "music.stage": ["encode", "text", "condition", "decode"],
+  "music.mode": ["text2music", "cover", "repaint"],
+  "music.mode.help": ["text2music", "cover", "repaint"],
+  "music.repaint.mode": ["balanced", "conservative", "aggressive"],
+}
+
 describe("the music strings", () => {
   /* Every source file of the page, as text (the tests themselves left out). */
   const files = import.meta.glob(["../**/*.ts", "../**/*.tsx", "!../**/*.test.ts", "!../**/*.test.tsx"], { query: "?raw", import: "default", eager: true }) as Record<string, string>
@@ -253,7 +274,11 @@ describe("the music strings", () => {
     const wanted = new Set<string>()
     for (const text of texts) {
       for (const match of text.matchAll(/\bt\(\s*"(music\.[\w.]+)"/g)) wanted.add(match[1])
-      for (const match of text.matchAll(/\bt\(`(music\.[\w.]+)\.\$\{/g)) for (const stage of ["text", "condition", "decode"]) wanted.add(`${match[1]}.${stage}`)
+      for (const match of text.matchAll(/\bt\(`(music\.[\w.]+)\.\$\{/g)) {
+        const range = TEMPLATES[match[1]]
+        if (!range) throw new Error(`a template key under ${match[1]}: say what it ranges over in TEMPLATES`)
+        for (const value of range) wanted.add(`${match[1]}.${value}`)
+      }
       for (const match of text.matchAll(/(?:key|label):\s*"(music\.[\w.]+)"/g)) wanted.add(match[1])
     }
     expect(wanted.size).toBeGreaterThan(20)
@@ -264,5 +289,94 @@ describe("the music strings", () => {
     const text = texts.join("\n")
     const unused = Object.keys(en).filter((key) => key.startsWith("music.") && !text.includes(`"${key}"`) && !/music\.stage\.(text|condition|decode)/.test(key))
     expect(unused).toEqual([])
+  })
+})
+
+describe("audio in: clips, a repaint's span, and the request", () => {
+  const limits = { ...DEFAULT_MUSIC_LIMITS, tasks: ["text2music", "cover", "repaint"] as MusicTask[], audioIn: { maxSeconds: 600, refSeconds: 30 } }
+  const clip = (name: string, type = "", size = 1000) => ({ name, type, size })
+
+  it("accepts WAV and MP3 by name or by type, and nothing else", () => {
+    for (const file of [clip("a.wav"), clip("A.MP3"), clip("noname", "audio/wav"), clip("x", "audio/x-wav"), clip("x", "audio/mpeg"), clip("x", "audio/mp3")]) expect(acceptedClip(file)).toBe(true)
+    for (const file of [clip("a.ogg", "audio/ogg"), clip("a.flac"), clip("a.png", "image/png"), clip("a.wav.txt", "text/plain"), clip("wav", "")]) expect(acceptedClip(file)).toBe(false)
+  })
+
+  it("says why a clip cannot be sent, by the key of the sentence", () => {
+    expect(clipProblem(clip("a.wav"), 30, limits)).toBeUndefined()
+    expect(clipProblem(clip("a.wav"), undefined, limits)).toBeUndefined()           // a length the browser could not read is not a problem
+    expect(clipProblem(clip("a.ogg"), 30, limits)).toBe("music.clip.type")
+    expect(clipProblem(clip("a.wav", "", MAX_CLIP_BYTES + 1), 30, limits)).toBe("music.clip.large")
+    expect(clipProblem(clip("a.wav", "", MAX_CLIP_BYTES), 30, limits)).toBeUndefined()
+    expect(clipProblem(clip("a.mp3"), 601, limits)).toBe("music.clip.long")
+    expect(clipProblem(clip("a.mp3"), 600, limits)).toBeUndefined()
+    for (const key of ["music.clip.type", "music.clip.large", "music.clip.long"]) expect(key in en).toBe(true)
+  })
+
+  it("holds a repaint to a span that runs forwards, starts inside the clip and fits the engine's most", () => {
+    expect(repaintValid(3, 6, 10, limits)).toBe(true)
+    expect(repaintValid(3, undefined, 10, limits)).toBe(true)                        // to the end
+    expect(repaintValid(0, undefined, undefined, limits)).toBe(true)                 // a clip the browser could not read: the engine decides
+    expect(repaintValid(6, 3, 10, limits)).toBe(false)
+    expect(repaintValid(3, 3, 10, limits)).toBe(false)
+    expect(repaintValid(10, undefined, 10, limits)).toBe(false)                      // starts where the clip ends
+    expect(repaintValid(-2, 3, 10, limits)).toBe(true)                               // silence ahead of the clip
+    expect(repaintValid(8, 12, 10, limits)).toBe(true)                               // silence after it
+    expect(repaintValid(-300, 3, 400, limits)).toBe(false)                           // 400 + 300 s is past the engine's 600
+    expect(repaintValid(Number.NaN, 3, 10, limits)).toBe(false)
+    expect(repaintValid(1, Number.NaN, 10, limits)).toBe(false)
+  })
+
+  it("puts a 0-to-1 field inside its range, to hundredths, and says NaN for anything else", () => {
+    expect([0, 0.5, 1, 1.5, -1, 0.123].map(clampUnit)).toEqual([0, 0.5, 1, 1, 0, 0.12])
+    expect(clampUnit(Number.NaN)).toBeNaN()
+  })
+
+  const base = { baseUrl: "http://x/v1", apiKey: "", model: "m", prompt: "p", duration: 30, steps: 8, seed: 1, signal: new AbortController().signal }
+
+  it("sends a composition as it always did, with a length", () => {
+    expect(musicFields(base, true)).toEqual({ model: "m", prompt: "p", duration: 30, steps: 8, seed: 1, stream: true })
+  })
+
+  it("sends a cover or a repaint without a length, with upstream's names and only what differs from the default", () => {
+    expect(musicFields({ ...base, task: "cover", cover: { strength: 1, noise: 0 } }, false))
+      .toEqual({ model: "m", prompt: "p", steps: 8, seed: 1, stream: false, task: "cover" })
+    expect(musicFields({ ...base, task: "cover", cover: { strength: 0.5, noise: 0.3 } }, false))
+      .toMatchObject({ task: "cover", audio_cover_strength: 0.5, cover_noise_strength: 0.3 })
+    expect(musicFields({ ...base, task: "repaint", repaint: { from: 3, to: 6, mode: "balanced", strength: 0.8 } }, false))
+      .toMatchObject({ task: "repaint", repainting_start: 3, repainting_end: 6, repaint_strength: 0.8 })
+    const tail = musicFields({ ...base, task: "repaint", repaint: { from: 3, mode: "conservative" } }, false)
+    expect(tail).toMatchObject({ repainting_start: 3, repaint_mode: "conservative" })
+    expect(tail).not.toHaveProperty("repainting_end")
+    expect(tail).not.toHaveProperty("repaint_strength")                               // only balanced mode has one
+    expect(tail).not.toHaveProperty("duration")
+  })
+
+  const wavLike = () => new File([new Uint8Array([82, 73, 70, 70])], "clip.wav", { type: "audio/wav" })
+  const answer = () => new Response(JSON.stringify({ created: 1, data: [{ b64_json: btoa("abc") }], colibri: { duration: 10, seed: 1, steps: 8, task: "cover", src_seconds: 10 } }),
+    { status: 200, headers: { "content-type": "application/json" } })
+
+  it("uploads the clips as a multipart form, the way the picture edit does, and records what the song was made from", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(answer()))
+    vi.stubGlobal("fetch", fetchMock)
+    const song = await generateMusic({ ...base, task: "cover", cover: { strength: 0.5, noise: 0 }, source: wavLike(), reference: new File([new Uint8Array([1])], "voice.mp3") })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.body).toBeInstanceOf(FormData)
+    const form = init.body as FormData
+    expect(form.get("task")).toBe("cover")
+    expect(form.get("audio_cover_strength")).toBe("0.5")
+    expect((form.get("src_audio") as File).name).toBe("clip.wav")
+    expect((form.get("reference_audio") as File).name).toBe("voice.mp3")
+    expect(form.has("duration")).toBe(false)
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined()      // the browser sets the boundary
+    expect(song).toMatchObject({ task: "cover", source: { name: "clip.wav", seconds: 10 }, reference: { name: "voice.mp3" }, cover: { strength: 0.5, noise: 0 } })
+  })
+
+  it("keeps the JSON request when no clip goes with it", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(answer()))
+    vi.stubGlobal("fetch", fetchMock)
+    await generateMusic(base)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(typeof init.body).toBe("string")
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json")
   })
 })

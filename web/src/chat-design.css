@@ -215,6 +215,21 @@ button.image-chip:hover,.music-lyrics-chip.on{color:var(--foreground);border-col
 .music-lyrics>textarea:focus{border-color:color-mix(in srgb,var(--foreground) 40%,transparent)}
 .music-lyrics>textarea.invalid,.music-lyrics>small.invalid,.image-chip.invalid .music-duration{color:var(--destructive,#e5484d)}
 .music-lyrics>small{justify-self:end;font-size:10px;color:var(--muted-foreground);font-variant-numeric:tabular-nums}
+.music-tasks{display:inline-flex;gap:4px;flex-wrap:wrap}
+.music-tasks .image-chip{background:none;cursor:pointer}
+.music-tasks .image-chip.on{color:var(--foreground);border-color:color-mix(in srgb,var(--foreground) 55%,transparent);background:color-mix(in srgb,var(--foreground) 8%,transparent)}
+.music-unit{width:3.4ch;text-align:right}
+.music-clips{display:grid;gap:8px;padding:2px 0 0}
+.music-clip{display:grid;gap:6px;padding:8px 10px;border:1px solid var(--border);border-radius:12px;background:color-mix(in srgb,var(--foreground) 3%,transparent)}
+.music-clip.invalid{border-color:color-mix(in srgb,var(--destructive,#ff766f) 60%,transparent)}
+.music-clip-head{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px}
+.music-clip-role{flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground)}
+.music-clip-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.music-clip-head>time{flex-shrink:0;font-variant-numeric:tabular-nums;color:var(--muted-foreground)}
+.music-clip-player{display:block;width:100%;height:34px;border-radius:17px;color-scheme:light dark}
+.music-clip>small{font-size:11px;color:var(--muted-foreground)}
+.music-clip.invalid>small{color:var(--destructive,#ff766f)}
+.music-clip-add{justify-self:start;background:none;cursor:pointer}
 .image-custom{gap:4px}
 .image-custom input{width:4.4ch;text-align:center}
 .image-chip.invalid,.image-custom input.invalid{border-color:color-mix(in srgb,var(--destructive,#ff766f) 60%,transparent);color:var(--destructive,#ff766f)}
