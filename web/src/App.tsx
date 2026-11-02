@@ -50,7 +50,7 @@ import { MusicClips, MusicControls, MusicLyrics, MusicProgressCard, MusicResultC
 import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
-import { persistPublicSettings, stored } from "@/lib/storage"
+import { persistPublicSettings, stored, takeKeyFromLocation } from "@/lib/storage"
 import { appendDelta, continuable, continuation, setFinish } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
@@ -62,6 +62,9 @@ const message = (role: ChatMessage["role"], content: string, images?: string[]):
   return images?.length ? { id, role, content, images } : { id, role, content }
 }
 
+/* Read once when the page loads, so a development double render cannot lose it. */
+const linkKey = typeof window !== "undefined" ? takeKeyFromLocation(window.location, window.history) : ""
+
 export default function App() {
   const { t, locale, setLocale, locales } = useLocale()
 
@@ -72,7 +75,7 @@ export default function App() {
     if (servedByEngine && saved === "http://127.0.0.1:8000/v1" && defaultBase !== saved) return defaultBase
     return saved
   })
-  const [apiKey, setApiKey] = useState("")
+  const [apiKey, setApiKey] = useState(linkKey)
   const [models, setModels] = useState<string[]>([])
   /* Models the server marks with the image_generation capability. With one of
      them selected the conversation generates pictures instead of text. */
