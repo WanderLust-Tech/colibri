@@ -9,6 +9,7 @@ A request body may carry `sleep` (seconds the work takes) and `stream` (answer i
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -73,9 +74,11 @@ class Handler(BaseHTTPRequestHandler):
         if "multipart" in kind:
             body = {"model": args.id}
             seen = raw.count(b"Content-Disposition")
+            keys = sorted(m.decode() for m in re.findall(rb'name="([^"]+)"', raw))
         else:
             body = json.loads(raw)
             seen = 0
+            keys = sorted(body)
             if body.get("model") != args.id:
                 return self.reply(404, {"error": {"message": f"The model `{body.get('model')}` does not exist.",
                                                   "type": "invalid_request_error", "param": "model",
@@ -100,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(float(body.get("sleep", 0)))
                 self.reply(200, {"model": args.id, "pid": os.getpid(), "path": self.path, "parts": seen,
                                  "origin": origin[0], "authorization": origin[1], "x_test": origin[2],
-                                 "size": length})
+                                 "size": length, "keys": keys})
         except OSError:
             note(f"cut {args.id}")
             return

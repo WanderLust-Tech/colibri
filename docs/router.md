@@ -63,15 +63,61 @@ has runners.
 What the router learns is kept in `router.json` in the setup folder (`%LOCALAPPDATA%\colibri` on
 Windows): how much memory each model really took the last time it was loaded.
 
+## Keep-alive, per request
+
+`--keep-alive` is the default. A request can say how long its model stays loaded after it, as in Ollama:
+add `"keep_alive"` to the JSON body (or a `keep_alive` field to a multipart form) of any request that
+names a model.
+
+| `keep_alive` | Means |
+|---|---|
+| `"30s"`, `"10m"`, `"2h"` | that long after the last request |
+| a number, `90` | that many seconds |
+| `0` | unload as soon as the model is idle |
+| `-1`, `"-1"`, `"forever"` | never unload |
+| absent, or `null` | leave it as it is |
+
+It sticks: a request that says nothing keeps what an earlier one set, until the model is unloaded (the
+next load starts from `--keep-alive` again). The router reads it and does not pass it on to the worker. A
+value that is not a duration is a `400` with `param: "keep_alive"`, and nothing is loaded for it.
+
+```
+curl localhost:8000/v1/models/switch -d '{"model": "qwen3-coder-30b", "keep_alive": "-1"}' \
+     -H "Authorization: Bearer $COLI_API_KEY" -H "Content-Type: application/json"     # load it and keep it
+```
+
+## `coli ps` and `coli stop MODEL`
+
+```
+$ coli ps
+  NAME                          STATE    MEMORY    UNLOADS IN
+  qwen-image-2.1-colibri        loaded   13.3 GB   9m 41s
+  qwen3-coder-30b-a3b-colibri   loaded   2.4 GB    never
+
+$ coli stop qwen-image-2.1          # unload one; the server and the other models stay
+  ✓ unloaded qwen-image-2.1-colibri
+```
+
+Both take `--host`, `--port` (default 8000, or the port `coli setup` configured) and `--api-key`
+(`COLI_API_KEY`). `UNLOADS IN` says `in use` while the model is answering and `never` for `keep_alive -1`.
+Against a plain `coli serve`, `coli ps` names its one model and `coli stop MODEL` says it is not a router.
+The dashboard's Settings → Model has the same as an Unload button on each loaded model.
+
 ## What the API shows
 
-- `GET /v1/models` lists the models that are **loaded**, each with `"state": "loaded"` and the limits its
-  engine announced. A model that is installed but not loaded is not listed, but can still be asked for.
+- `GET /v1/models` lists every model that can be asked for, each with `"state": "loaded"` or `"idle"`. A
+  loaded one carries the limits its engine announced; one that is not loaded carries what it announced the
+  last time it ran (kept in `router.json`), or, if it never ran here, what its family can do.
 - `GET /v1/models/installed` lists every model on the machine with its `state` (`idle`, `starting`,
-  `ready`, `stopping`), its memory use, and how long until it is unloaded (`expires_in`). A model that
-  failed to load has `last_error`.
-- `POST /v1/models/switch` with a model's `key` loads it (the dashboard's Switch button) and answers when
-  it is ready. It does not stop the other models; the memory check does that when it must.
+  `ready`, `stopping`), its memory use, `keep_alive`, and how long until it is unloaded (`expires_in`). A
+  model that failed to load has `last_error`.
+- `POST /v1/models/switch` with a model's `key` (or its `model` name) loads it, as the dashboard's Load
+  button does, and answers when it is ready. It does not stop the other models; the memory check does that
+  when it must. Add `keep_alive` to preload with that keep-alive, or to change it on a model that is
+  already loaded.
+- `POST /v1/models/unload` with `key` or `model` stops a model and leaves the others and the server as
+  they are: `200` `{"status": "unloaded"}` (or `"not loaded"`). A model that is answering a request is not
+  cut off: it answers `202` `"unloading when idle"` and the model goes when the request has finished.
 - `GET /health` is the loaded model's own health plus a `router` block: the workers and their states,
   `max_loaded`, `keep_alive`, the queue, and the free memory. `GET /health?model=ID` is that model's.
 - Errors have the workers' shape. A model that does not start answers `503` with `model_load_failed` and
@@ -84,9 +130,8 @@ Windows): how much memory each model really took the last time it was loaded.
   (the large streamed ones) take most of what is free, so they push the others out.
 - A load has no deadline (a 500 GB model takes a long while); waiting for memory or for another model's
   turn does.
-- `keep_alive` per request, a `coli ps` and `coli stop MODEL` are not there yet.
-- `coli stop` does not know about the router: stop it with Ctrl+C, or by killing its process. Its workers
-  stop with it.
+- `coli stop` (no model name) stops the router and its workers, found by the pidfile the router writes;
+  `coli stop MODEL` unloads one model only.
 
 ## Tests
 

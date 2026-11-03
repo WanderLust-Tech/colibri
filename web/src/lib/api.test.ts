@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  listInstalledModels, listModelInfo, serverEndpoint, streamChat, switchModel, waitForModel,
+  listInstalledModels, listModelInfo, serverEndpoint, streamChat, switchModel, unloadModel, waitForModel,
   type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
@@ -439,6 +439,25 @@ describe("model switching", () => {
     expect(result.router).toBe(true)
     expect(result.models[0]).toMatchObject({ state: "ready", resident_bytes: 14e9, expires_in: 540 })
     expect(result.models[1].last_error).toBe("out of memory")
+  })
+
+  it("asks a router to unload a model by key, and tells a busy one from an unloaded one", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ status: "unloaded", key: "b2", id: "ace-step-1.5-colibri" }))
+      .mockResolvedValueOnce(json({ status: "unloading when idle", key: "b2", id: "ace-step-1.5-colibri" }, 202))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(unloadModel("http://localhost:8000/v1", "secret", "b2")).resolves.toEqual({ status: "unloaded", id: "ace-step-1.5-colibri" })
+    await expect(unloadModel("http://localhost:8000/v1", "secret", "b2")).resolves.toEqual({ status: "unloading when idle", id: "ace-step-1.5-colibri" })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("http://localhost:8000/v1/models/unload")
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(init.body)).toEqual({ key: "b2" })
+    expect(init.headers).toEqual(expect.objectContaining({ Authorization: "Bearer secret" }))
+  })
+
+  it("says why an unload failed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ error: { message: "No installed model has that key." } }, 404)))
+    await expect(unloadModel("http://localhost:8000/v1", "", "zz")).rejects.toThrow("No installed model has that key.")
   })
 
   it("asks for a switch by key and never sends a path", async () => {

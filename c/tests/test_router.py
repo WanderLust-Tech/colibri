@@ -387,7 +387,7 @@ class OneModelAtATimeTest(unittest.TestCase):
         rig = Rig(self, [entry("text-a")])
         rig.chat("text-a-colibri")
         open(rig.log, "w").close()
-        self.assertEqual(self.run_two(rig, "text-a-colibri", "text-a-colibri"), [200, 200])
+        self.assertEqual(self.run_two(rig, "text-a-colibri", "text-a-colibri", sleep=1.5), [200, 200])
         self.assertTrue(overlap(rig.events(), "text-a-colibri", "text-a-colibri"))
 
     def test_parallel_models_lets_them_overlap(self):
@@ -395,7 +395,7 @@ class OneModelAtATimeTest(unittest.TestCase):
         rig.chat("text-a-colibri")
         rig.chat("text-b-colibri")
         open(rig.log, "w").close()
-        self.run_two(rig, "text-a-colibri", "text-b-colibri")
+        self.run_two(rig, "text-a-colibri", "text-b-colibri", sleep=1.5)
         self.assertTrue(overlap(rig.events(), "text-a-colibri", "text-b-colibri"))
 
     def test_waiting_requests_are_served_in_order_and_the_queue_is_bounded(self):
@@ -549,6 +549,157 @@ class KeepAliveTest(unittest.TestCase):
         self.assertIsNone(router.parse_duration("forever"))
         with self.assertRaises(ValueError):
             router.parse_duration("soon")
+
+
+def multipart_raw(fields, boundary="bb"):
+    out = b""
+    for name, value in fields:
+        out += f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+    return out + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+class PerRequestKeepAliveTest(unittest.TestCase):
+    def wait_idle(self, rig, seconds=6.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and rig.states()["text-a-colibri"] != "idle":
+            time.sleep(0.2)
+        return rig.states()["text-a-colibri"]
+
+    def view(self, rig):
+        return rig.call("GET", "/health")[3]["router"]["loaded"][0]
+
+    def test_a_request_says_how_long_its_model_stays(self):
+        rig = Rig(self, [entry("text-a")], keep_alive=600.0)
+        rig.chat("text-a-colibri", keep_alive="1s")
+        self.assertEqual(self.view(rig)["keep_alive"], 1.0)
+        self.assertEqual(self.wait_idle(rig), "idle")
+
+    def test_a_number_is_seconds_and_minus_one_is_forever(self):
+        rig = Rig(self, [entry("text-a")], keep_alive=0.5)
+        rig.chat("text-a-colibri", keep_alive=-1)
+        time.sleep(2.5)
+        self.assertEqual(rig.states()["text-a-colibri"], "ready")
+        self.assertIsNone(self.view(rig)["keep_alive"])
+        self.assertIsNone(self.view(rig)["expires_in"])
+        rig.chat("text-a-colibri", keep_alive=1.5)
+        self.assertEqual(self.view(rig)["keep_alive"], 1.5)
+
+    def test_zero_unloads_as_soon_as_the_model_is_idle(self):
+        rig = Rig(self, [entry("text-a")], keep_alive=600.0)
+        began = time.monotonic()
+        rig.chat("text-a-colibri", keep_alive=0)
+        self.assertEqual(self.wait_idle(rig, 3.0), "idle")
+        self.assertLess(time.monotonic() - began, 3.5)
+
+    def test_it_sticks_until_a_request_says_otherwise(self):
+        rig = Rig(self, [entry("text-a")], keep_alive=600.0)
+        rig.chat("text-a-colibri", keep_alive="1s")
+        rig.chat("text-a-colibri")                                   # says nothing: the 1 s stays
+        self.assertEqual(self.view(rig)["keep_alive"], 1.0)
+        self.assertEqual(self.wait_idle(rig), "idle")
+        rig.chat("text-a-colibri")                                   # a new load starts from the server's default
+        self.assertEqual(self.view(rig)["keep_alive"], 600.0)
+
+    def test_a_bad_value_is_refused_before_anything_loads(self):
+        rig = Rig(self, [entry("text-a")])
+        for bad in ("soon", True, [1], {"a": 1}, "5x"):
+            status, _, _, body = rig.chat("text-a-colibri", keep_alive=bad)
+            self.assertEqual((status, body["error"]["param"], body["error"]["type"]),
+                             (400, "keep_alive", "invalid_request_error"), bad)
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle"})
+        self.assertEqual(rig.call("GET", "/health")[3]["router"]["loaded"], [])
+        self.assertEqual(rig.chat("text-a-colibri", keep_alive=None)[0], 200)      # null is the same as absent
+
+    def test_the_worker_never_sees_it(self):
+        rig = Rig(self, [entry("text-a"), entry("music-m", "audio")])
+        keys = rig.chat("text-a-colibri", keep_alive="5m")[3]["keys"]
+        self.assertEqual(keys, ["messages", "model"])
+        raw, kind = multipart_raw([("prompt", "hi"), ("keep_alive", "-1"), ("model", "music-m")])
+        status, _, _, body = rig.call("POST", "/v1/audio/music", raw=raw, headers={"Content-Type": kind})
+        self.assertEqual((status, body["keys"]), (200, ["model", "prompt"]))
+        worker = rig.pool.get(rig.entries[1]["key"])
+        self.assertIsNone(worker.keep_alive, "the multipart field still applies: -1 is forever")
+
+    def test_a_preload_can_set_it_and_an_already_loaded_model_can_change_it(self):
+        rig = Rig(self, [entry("text-a")], keep_alive=600.0)
+        status, _, _, body = rig.call("POST", "/v1/models/switch", {"model": "text-a", "keep_alive": "2m"})
+        self.assertEqual((status, body["status"], body["id"]), (200, "loaded", "text-a-colibri"))
+        self.assertEqual(self.view(rig)["keep_alive"], 120.0)
+        self.assertEqual(rig.call("POST", "/v1/models/switch", {"model": "text-a"})[0], 409)
+        self.assertEqual(rig.call("POST", "/v1/models/switch", {"model": "text-a", "keep_alive": "1s"})[0], 200)
+        self.assertEqual(self.view(rig)["keep_alive"], 1.0)
+        self.assertEqual(rig.call("POST", "/v1/models/switch", {"model": "text-a", "keep_alive": "soon"})[0], 400)
+
+    def test_keep_alive_value(self):
+        self.assertIs(router.keep_alive_value(None), router.UNSET)
+        self.assertEqual(router.keep_alive_value(30), 30.0)
+        self.assertEqual(router.keep_alive_value(0), 0.0)
+        self.assertIsNone(router.keep_alive_value(-1))
+        self.assertIsNone(router.keep_alive_value("-1"))
+        self.assertEqual(router.keep_alive_value("5m"), 300.0)
+        for bad in (True, False, [], {}, "x", "1d"):
+            with self.assertRaises(router.ApiError):
+                router.keep_alive_value(bad)
+
+    def test_a_multipart_part_is_removed_whole_and_the_rest_is_kept(self):
+        raw, kind = multipart_raw([("a", "1"), ("keep_alive", "5m"), ("b", "2")])
+        body = router.Body(kind, raw)
+        self.assertEqual(body.keep_alive, 300.0)
+        sent = body.for_worker("m")
+        self.assertEqual(sent, b'--bb\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n'
+                               b'--bb\r\nContent-Disposition: form-data; name="b"\r\n\r\n2\r\n--bb--\r\n')
+        only, kind = multipart_raw([("keep_alive", "5m")])
+        self.assertEqual(router.Body(kind, only).for_worker("m"), b"--bb--\r\n")
+        same, kind = multipart_raw([("a", "1")])
+        self.assertIs(router.Body(kind, same).for_worker("m"), same)
+
+
+class UnloadTest(unittest.TestCase):
+    def test_an_idle_model_is_stopped(self):
+        rig = Rig(self, [entry("text-a"), entry("text-b")])
+        rig.chat("text-b-colibri")                      # b first: the one to stop is not the first the router started
+        rig.chat("text-a-colibri")
+        worker = rig.pool.get(rig.entries[0]["key"])
+        status, _, _, body = rig.call("POST", "/v1/models/unload", {"model": "text-a"})
+        self.assertEqual((status, body["status"], body["id"]), (200, "unloaded", "text-a-colibri"))
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle", "text-b-colibri": "ready"})
+        self.assertFalse(worker.alive())
+
+    def test_by_key_and_for_a_model_that_is_not_loaded(self):
+        rig = Rig(self, [entry("text-a")])
+        status, _, _, body = rig.call("POST", "/v1/models/unload", {"key": rig.entries[0]["key"]})
+        self.assertEqual((status, body["status"]), (200, "not loaded"))
+        rig.chat("text-a-colibri")
+        self.assertEqual(rig.call("POST", "/v1/models/unload", {"key": rig.entries[0]["key"]})[3]["status"], "unloaded")
+
+    def test_a_model_that_is_answering_goes_when_it_has_finished(self):
+        rig = Rig(self, [entry("text-a")])
+        rig.chat("text-a-colibri")
+        answer = {}
+        thread = threading.Thread(target=lambda: answer.update(r=rig.chat("text-a-colibri", sleep=1.5)))
+        thread.start()
+        time.sleep(0.5)
+        status, _, _, body = rig.call("POST", "/v1/models/unload", {"model": "text-a"})
+        self.assertEqual((status, body["status"]), (202, "unloading when idle"))
+        self.assertEqual(rig.states()["text-a-colibri"], "ready", "it must not be cut off")
+        thread.join()
+        self.assertEqual(answer["r"][0], 200, "the running request was cut off")
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and rig.states()["text-a-colibri"] != "idle":
+            time.sleep(0.2)
+        self.assertEqual(rig.states()["text-a-colibri"], "idle")
+
+    def test_it_says_what_it_cannot_do(self):
+        rig = Rig(self, [entry("text-a")], api_key="sekrit")
+        auth = {"Authorization": "Bearer sekrit"}
+        self.assertEqual(rig.call("POST", "/v1/models/unload", {"model": "text-a"})[0], 401)
+        self.assertEqual(rig.call("POST", "/v1/models/unload", {"model": "nope"}, headers=auth)[0], 404)
+        self.assertEqual(rig.call("POST", "/v1/models/unload", {}, headers=auth)[0], 400)
+        self.assertEqual(rig.call("POST", "/v1/models/unload", raw=b"{}",
+                                  headers=dict(auth, **{"Content-Type": "text/plain"}))[0], 415)
+        status, _, _, body = rig.call("POST", "/v1/models/unload", {"model": "text-a"},
+                                      headers=dict(auth, Origin="http://evil.example"))
+        self.assertEqual((status, body["error"]["code"]), (403, "forbidden"))
 
 
 class FailureTest(unittest.TestCase):

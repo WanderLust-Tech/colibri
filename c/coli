@@ -3392,7 +3392,7 @@ def _serve_cmdline_matches_port(raw, port):
     argv=[part.decode("utf-8","replace") for part in raw.split(b"\0") if part]
     try: coli_i=next(i for i,arg in enumerate(argv) if os.path.basename(arg)=="coli")
     except StopIteration: return False
-    if coli_i+1>=len(argv) or argv[coli_i+1]!="serve":
+    if coli_i+1>=len(argv) or argv[coli_i+1] not in ("serve","router"):
         return False
     configured=8000
     for i,arg in enumerate(argv[coli_i+2:], start=coli_i+2):
@@ -3623,6 +3623,8 @@ def cmd_stop(a):
             a.port=configured_port(8000)
         except Exception:
             a.port=8000
+    if getattr(a,"name",None):
+        return _stop_one_model(a)
     targets={}  # pid -> descrizione
     pf=serve_pidfile(a.port)
     try:
@@ -3669,6 +3671,92 @@ def cmd_stop(a):
     except OSError: pass
     print(f"  {C.grn}✓ stopped{C.r} — RAM released")
 
+def _server_port(a):
+    """The port `coli ps` and `coli stop MODEL` talk to: --port, else the one `coli setup` configured, else 8000."""
+    if getattr(a,"port",None) is not None: return a.port
+    try:
+        from setup_flow import configured_port
+        return configured_port(8000)
+    except Exception:
+        return 8000
+
+def _api_call(a, method, path, body=None, timeout=60):
+    """(status, parsed JSON) from the server at --host:--port, or (None, None) when nothing answers."""
+    import urllib.error, urllib.request
+    url=f"http://{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}{path}"
+    data=json.dumps(body).encode() if body is not None else None
+    req=urllib.request.Request(url,data=data,method=method)
+    if data is not None: req.add_header("Content-Type","application/json")
+    if getattr(a,"api_key",None): req.add_header("Authorization",f"Bearer {a.api_key}")
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as r:
+            return r.status,json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as error:
+        try: return error.code,json.loads(error.read() or b"null")
+        except ValueError: return error.code,None
+    except (urllib.error.URLError,OSError):
+        return None,None
+
+def _duration_text(seconds):
+    seconds=int(seconds)
+    if seconds>=3600: return f"{seconds//3600}h {seconds%3600//60:02d}m"
+    if seconds>=60: return f"{seconds//60}m {seconds%60:02d}s"
+    return f"{seconds}s"
+
+def cmd_ps(a):
+    """The models a server has loaded: for a `coli router` each with its memory and when it unloads."""
+    banner("ps")
+    where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
+    status,body=_api_call(a,"GET","/v1/models/installed")
+    if status is None:
+        print(f"  no server answers on {where}"); return 1
+    if status==401:
+        print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
+    if status==200 and body and body.get("router"):
+        rows=[m for m in body["data"] if m.get("state") not in (None,"idle")]
+        if not rows:
+            print(f"  no models loaded on {where} (a model loads when a request asks for it)"); return 0
+        table=[("NAME","STATE","MEMORY","UNLOADS IN")]
+        for m in rows:
+            state={"ready":"loaded"}.get(m["state"],m["state"])
+            memory=f"{m['resident_bytes']/2**30:.1f} GB" if m.get("resident_bytes") else "-"
+            if m["state"]!="ready": left="-"
+            elif m.get("inflight"): left="in use"
+            elif m.get("keep_alive") is None: left="never"
+            else: left=_duration_text(m["expires_in"] or 0)
+            table.append((m["id"],state,memory,left))
+        widths=[max(len(row[i]) for row in table) for i in range(4)]
+        for row in table: print("  "+"   ".join(cell.ljust(widths[i]) for i,cell in enumerate(row)).rstrip())
+        return 0
+    status,body=_api_call(a,"GET","/v1/models")
+    ids=[m["id"] for m in (body or {}).get("data",[])] if status==200 else []
+    if not ids:
+        print(f"  could not read the models of the server on {where} (HTTP {status})"); return 1
+    print(f"  {where} is a single-model server (not `coli router`); it holds {', '.join(ids)} for as long as it runs")
+    return 0
+
+def _stop_one_model(a):
+    """`coli stop MODEL`: ask a `coli router` to unload one model, leaving the others and the server as they are."""
+    where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
+    status,body=_api_call(a,"POST","/v1/models/unload",{"model":a.name})
+    code=((body or {}).get("error") or {}).get("code") if isinstance(body,dict) else None
+    if status is None:
+        print(f"  no server answers on {where}"); return 1
+    if status==401:
+        print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
+    if status==404 and code=="model_not_found":
+        print(f"  {C.yel}no installed model is called {a.name}{C.r}"); return 1
+    if status==404:
+        print(f"  the server on {where} is not a `coli router`, so it has no model to unload on its own; "
+              "`coli stop` (no model name) stops the server"); return 1
+    if status==200 and body.get("status")=="unloaded":
+        print(f"  {C.grn}✓ unloaded{C.r} {body.get('id')}"); return 0
+    if status==200:
+        print(f"  {body.get('id')} was not loaded"); return 0
+    if status==202:
+        print(f"  {body.get('id')} is answering a request; it unloads when it has finished"); return 0
+    print(f"  {C.yel}could not unload {a.name}:{C.r} HTTP {status} {body}"); return 1
+
 def cmd_router(a):
     """Several models behind one port (router.py): each in its own `coli serve`, started when asked for."""
     import router
@@ -3680,6 +3768,16 @@ def cmd_router(a):
     if a.models_root:
         os.environ["COLI_MODELS_ROOT"]=os.pathsep.join(
             [os.path.abspath(os.path.expanduser(r)) for r in a.models_root]+[os.environ.get("COLI_MODELS_ROOT","")])
+    try:
+        with open(serve_pidfile(a.port),"w") as f: f.write(f"{os.getpid()} router\n")
+    except OSError: pass
+    try:
+        _run_router(a,router,keep_alive)
+    finally:
+        try: os.unlink(serve_pidfile(a.port))
+        except OSError: pass
+
+def _run_router(a,router,keep_alive):
     router.serve(host=a.host,port=a.port,api_key=a.api_key,roots=[] if a.models else None,models=a.models or (),
                  keep_alive=keep_alive,max_loaded=a.max_loaded,max_queue=a.max_queue,queue_timeout=a.queue_timeout,
                  parallel_models=a.parallel_models,cors_origins=a.cors_origin,allowed_hosts=a.allowed_host,
@@ -4127,6 +4225,13 @@ def main():
     pst.add_argument("--port",type=int,default=None,
                      help="port of the server to stop (default 8000, or the one `coli setup` configured)")
     pst.add_argument("--dry-run",action="store_true")
+    pst.add_argument("name",nargs="?",default=None,metavar="MODEL",
+                     help="a `coli router` model to unload (leave the server running); without it the whole server stops")
+    pst.add_argument("--host",default="127.0.0.1",help="with MODEL: the router's address")
+    pst.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"),help="with MODEL: the router's API key")
+    pps=sub.add_parser("ps",help="the models a server has loaded, their memory and when they unload")
+    pps.add_argument("--host",default="127.0.0.1"); pps.add_argument("--port",type=int,default=None)
+    pps.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pw=sub.add_parser("web", parents=[common], help="serve + open the dashboard in a browser")
     for arg,kw in (("--host",dict(default="127.0.0.1")),("--port",dict(type=int,default=8000)),
                    ("--model-id",dict(default=os.environ.get("COLI_MODEL_ID"))),
@@ -4208,7 +4313,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

@@ -76,8 +76,8 @@ MUTANTS = {
         [T + "KeepAliveTest.test_an_idle_model_is_stopped_after_its_keep_alive"]),
     # --- the request and the answer ------------------------------------------------------------------------------------
     "model-name-passed-as-given": (
-        '                raw = with_model(self.headers.get("Content-Type"), raw, entry["id"])\n',
-        "                pass\n",
+        'self.serve_model(entry, path, body.for_worker(entry["id"]), keep)',
+        "self.serve_model(entry, path, body.raw, keep)",
         [T + "RoutingTest.test_the_workers_get_the_model_by_its_own_id",
          T + "RoutingTest.test_a_single_model_is_used_when_the_request_names_none"]),
     "keys-are-not-aliases": (
@@ -115,6 +115,50 @@ MUTANTS = {
     "chunked-bodies-accepted": (
         '        if self.headers.get_all("Transfer-Encoding"):\n            raise ApiError(400, "Transfer-Encoding is not supported; send one Content-Length.")\n', "",
         [T + "GuardsTest.test_a_chunked_request_is_refused"]),
+    # --- keep_alive, unload ------------------------------------------------------------------------------------------
+    # (a keep_alive of 0 that waits for the reaper's next look instead of waking it is not a mutant: the look is at
+    # most a second away, so the model still goes and nothing a test can reasonably time changes.)
+    "keep-alive-ignored": (
+        "                worker.keep_alive = keep            # sticks until a request says otherwise, as Ollama's does\n",
+        "                pass\n",
+        [T + "PerRequestKeepAliveTest.test_a_request_says_how_long_its_model_stays"]),
+    "minus-one-is-zero": (
+        "        return None if value < 0 else float(value)", "        return float(max(value, 0))",
+        [T + "PerRequestKeepAliveTest.test_a_number_is_seconds_and_minus_one_is_forever"]),
+    "keep-alive-sent-to-the-worker": (
+        '        body = {k: v for k, v in self.json.items() if k != "keep_alive"}', "        body = dict(self.json)",
+        [T + "PerRequestKeepAliveTest.test_the_worker_never_sees_it"]),
+    "multipart-keep-alive-sent-to-the-worker": (
+        '            return _multipart_without(raw, "keep_alive", self.content_type)', "            return raw",
+        [T + "PerRequestKeepAliveTest.test_the_worker_never_sees_it",
+         T + "PerRequestKeepAliveTest.test_a_multipart_part_is_removed_whole_and_the_rest_is_kept"]),
+    "bad-keep-alive-checked-after-the-load": (
+        '            keep = body.keep_alive                  # read before anything loads: a bad value must not cost a load\n'
+        '            entry = self.resolve(path, body.model)\n'
+        '            self.serve_model(entry, path, body.for_worker(entry["id"]), keep)',
+        '            entry = self.resolve(path, body.model)\n'
+        '            self.serve_model(entry, path, body.for_worker(entry["id"]), UNSET)\n'
+        '            keep = body.keep_alive',
+        [T + "PerRequestKeepAliveTest.test_a_bad_value_is_refused_before_anything_loads"]),
+    "keep-alive-forgotten-after-a-request": (
+        "            worker.inflight = max(0, worker.inflight - 1)\n            worker.last_used = time.monotonic()\n            self.cv.notify_all()\n",
+        "            worker.inflight = max(0, worker.inflight - 1)\n            worker.last_used = time.monotonic()\n"
+        "            worker.keep_alive = self.keep_alive\n            self.cv.notify_all()\n",
+        [T + "PerRequestKeepAliveTest.test_it_sticks_until_a_request_says_otherwise"]),
+    "preload-keep-alive-ignored-when-loaded": (
+        "            current.keep_alive = keep                  # already there: only the keep-alive changes\n",
+        "            pass\n",
+        [T + "PerRequestKeepAliveTest.test_a_preload_can_set_it_and_an_already_loaded_model_can_change_it"]),
+    "unload-cuts-off-a-request": (
+        '            if worker.state == "starting" or worker.inflight:\n                return "busy"',
+        '            if worker.state == "starting":\n                return "busy"',
+        [T + "UnloadTest.test_a_model_that_is_answering_goes_when_it_has_finished"]),
+    "busy-model-is-never-unloaded": (
+        "                worker.keep_alive = 0\n                pool.release_wake()\n", "                pass\n",
+        [T + "UnloadTest.test_a_model_that_is_answering_goes_when_it_has_finished"]),
+    "unload-stops-the-wrong-model": (
+        '        outcome = pool.unload(key, "asked to")', '        outcome = pool.unload(next(iter(pool.workers), key), "asked to")',
+        [T + "UnloadTest.test_an_idle_model_is_stopped"]),
     # --- failures --------------------------------------------------------------------------------------------------------
     "failed-load-stays-registered": (
         "                if self.workers.get(worker.key) is worker:\n                    del self.workers[worker.key]\n                self.last_error[worker.key] = api.message",
@@ -140,12 +184,12 @@ MUTANTS = {
         '                item, card = None, None\n                item = self.stub(entry)',
         [T + "RoutingTest.test_a_model_that_is_not_loaded_is_listed_from_what_it_said_last_time"]),
     "switch-does-not-wait": (
-        "            worker = pool.acquire(entry)\n            pool.release(worker)\n",
+        "            worker = pool.acquire(entry)\n            if keep is not UNSET:\n                worker.keep_alive = keep\n            pool.release(worker)\n",
         "            pass\n",
         [T + "SwitchTest.test_switch_loads_a_model_and_answers_when_it_is_ready"]),
     "multipart-model-not-found": (
-        "        at = raw.find(b'name=\"model\"')\n        if at < 0:\n            return None",
-        "        at = raw.find(b'name=\"modelx\"')\n        if at < 0:\n            return None",
+        "    at = raw.find(b'name=\"%s\"' % name.encode())\n    if at < 0:\n        return None\n",
+        "    at = raw.find(b'name=\"x%s\"' % name.encode())\n    if at < 0:\n        return None\n",
         [T + "RoutingTest.test_multipart_bodies_are_routed_by_their_model_field"]),
 }
 

@@ -454,6 +454,7 @@ class Pool:
         self.cv = threading.Condition(threading.Lock())
         self.closed = False
         self.last_error = {}                             # key -> why the last load failed
+        self._wake = threading.Event()                   # a model that should go as soon as it is idle
         self._reaper = threading.Thread(target=self._reap_loop, daemon=True)
         self._reaper.start()
 
@@ -609,6 +610,12 @@ class Pool:
             worker.inflight = max(0, worker.inflight - 1)
             worker.last_used = time.monotonic()
             self.cv.notify_all()
+            if worker.keep_alive == 0 and worker.inflight == 0:
+                self._wake.set()                         # keep_alive 0: the reaper need not wait for its next look
+
+    def release_wake(self):
+        """Have the reaper look now (a model was told to go when idle)."""
+        self._wake.set()
 
     def _stop(self, worker, why):
         log(f"unloading `{worker.entry['id']}` ({why})")
@@ -637,7 +644,8 @@ class Pool:
     # ---- idle workers and dead ones
     def _reap_loop(self):
         while not self.closed:
-            time.sleep(1.0)
+            self._wake.wait(1.0)
+            self._wake.clear()
             try:
                 self.reap()
             except Exception as error:                    # the reaper must not die
@@ -742,46 +750,118 @@ class Gate:
 
 
 # ------------------------------------------------------------------------------- server
+UNSET = object()                    # a request that says nothing about keep_alive
+
+
+def keep_alive_value(value):
+    """A request's `keep_alive` as seconds, None for never unload, or UNSET when absent. Like Ollama's: a duration
+    string ('30s', '10m', '2h'), a number of seconds, 0 (unload as soon as the model is idle) or a negative number
+    (never)."""
+    if value is None or value is UNSET:
+        return UNSET
+    if isinstance(value, bool):
+        value = object()
+    if isinstance(value, (int, float)):
+        return None if value < 0 else float(value)
+    if isinstance(value, str):
+        try:
+            return parse_duration(value)
+        except ValueError as error:
+            raise ApiError(400, f"`keep_alive`: {error}", "invalid_request_error", "keep_alive")
+    raise ApiError(400, "`keep_alive` must be a duration such as 30s or 10m, a number of seconds, 0 or -1.",
+                   "invalid_request_error", "keep_alive")
+
+
+def _multipart_value(raw, name):
+    at = raw.find(b'name="%s"' % name.encode())
+    if at < 0:
+        return None
+    start = raw.find(b"\r\n\r\n", at)
+    if start < 0:
+        return None
+    end = raw.find(b"\r\n", start + 4)
+    return raw[start + 4:end if end >= 0 else None].decode("utf-8", "replace").strip()
+
+
+def _multipart_without(raw, name, content_type):
+    """The multipart body without the field `name` (its whole part), or the body itself when it has none."""
+    at = raw.find(b'name="%s"' % name.encode())
+    if at < 0:
+        return raw
+    boundary = ""
+    for piece in (content_type or "").split(";")[1:]:
+        key, _, value = piece.strip().partition("=")
+        if key.lower() == "boundary":
+            boundary = value.strip('"')
+    if not boundary:
+        return raw
+    delimiter = b"--" + boundary.encode()
+    start = raw.rfind(delimiter, 0, at)
+    end = raw.find(b"\r\n" + delimiter, at)
+    if start < 0 or end < 0:
+        return raw
+    return raw[:start] + raw[end + 2:]
+
+
+class Body:
+    """A request body read once for what the router needs from it: the `model` and the `keep_alive`. A JSON body is
+    parsed one time (a song's audio may make it many megabytes); a multipart body is searched, not parsed."""
+
+    def __init__(self, content_type, raw):
+        self.content_type, self.raw = content_type, raw
+        self.multipart = (content_type or "").split(";", 1)[0].strip().lower() == "multipart/form-data"
+        self.json = None
+        if not self.multipart:
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                parsed = None
+            self.json = parsed if isinstance(parsed, dict) else None
+
+    @property
+    def model(self):
+        if self.multipart:
+            return _multipart_value(self.raw, "model") or None
+        model = self.json.get("model") if self.json is not None else None
+        return model if isinstance(model, str) else None
+
+    @property
+    def keep_alive(self):
+        """The request's keep_alive as keep_alive_value() reads it: seconds, None for never, or UNSET."""
+        if self.multipart:
+            text = _multipart_value(self.raw, "keep_alive")
+            return keep_alive_value(text if text else None)
+        return keep_alive_value(self.json.get("keep_alive") if self.json is not None else None)
+
+    def for_worker(self, model_id):
+        """The body to send on: `model` set to the id the worker knows it by (a client may name it by its key, its
+        folder or the id without `-colibri`; a worker accepts only its own id) and without `keep_alive`, which is
+        the router's. The same bytes when there is nothing to change."""
+        if self.multipart:
+            raw = self.raw
+            at = raw.find(b'name="model"')
+            start = raw.find(b"\r\n\r\n", at) if at >= 0 else -1
+            if start >= 0:
+                end = raw.find(b"\r\n", start + 4)
+                end = len(raw) if end < 0 else end
+                if raw[start + 4:end] != model_id.encode():
+                    raw = raw[:start + 4] + model_id.encode() + raw[end:]
+            return _multipart_without(raw, "keep_alive", self.content_type)
+        if self.json is None or (self.json.get("model") == model_id and "keep_alive" not in self.json):
+            return self.raw
+        body = {k: v for k, v in self.json.items() if k != "keep_alive"}
+        body["model"] = model_id
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def extract_model(content_type, raw):
     """The `model` of a JSON or multipart/form-data request body, or None."""
-    kind = (content_type or "").split(";", 1)[0].strip().lower()
-    if kind == "multipart/form-data":
-        at = raw.find(b'name="model"')
-        if at < 0:
-            return None
-        start = raw.find(b"\r\n\r\n", at)
-        if start < 0:
-            return None
-        end = raw.find(b"\r\n", start + 4)
-        return raw[start + 4:end if end >= 0 else None].decode("utf-8", "replace").strip() or None
-    try:
-        body = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    model = body.get("model") if isinstance(body, dict) else None
-    return model if isinstance(model, str) else None
+    return Body(content_type, raw).model
 
 
 def with_model(content_type, raw, model_id):
-    """The body with its `model` set to the id the worker knows it by. A client may name the model by its key,
-    its folder or the id without `-colibri`; a worker accepts only its own id."""
-    kind = (content_type or "").split(";", 1)[0].strip().lower()
-    if kind == "multipart/form-data":
-        at = raw.find(b'name="model"')
-        start = raw.find(b"\r\n\r\n", at) if at >= 0 else -1
-        if start < 0:
-            return raw
-        end = raw.find(b"\r\n", start + 4)
-        end = len(raw) if end < 0 else end
-        return raw[:start + 4] + model_id.encode() + raw[end:]
-    try:
-        body = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return raw
-    if not isinstance(body, dict) or body.get("model") == model_id:
-        return raw
-    body["model"] = model_id
-    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    """The body to send to the worker that holds `model_id` (see Body.for_worker)."""
+    return Body(content_type, raw).for_worker(model_id)
 
 
 class RouterServer(ThreadingHTTPServer):
@@ -966,14 +1046,14 @@ class RouterHandler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == "/v1/models/switch":
                 return self.switch()
+            if path == "/v1/models/unload":
+                return self.unload()
             if path not in COMPUTE_PATHS:
                 raise ApiError(404, "Not found.", "not_found")
-            raw = self.read_body(path)
-            named = extract_model(self.headers.get("Content-Type"), raw)
-            entry = self.resolve(path, named)
-            if named != entry["id"]:
-                raw = with_model(self.headers.get("Content-Type"), raw, entry["id"])
-            self.serve_model(entry, path, raw)
+            body = Body(self.headers.get("Content-Type"), self.read_body(path))
+            keep = body.keep_alive                  # read before anything loads: a bad value must not cost a load
+            entry = self.resolve(path, body.model)
+            self.serve_model(entry, path, body.for_worker(entry["id"]), keep)
         except ApiError as error:
             self.fail(error)
         except (ConnectionError, TimeoutError):
@@ -1035,11 +1115,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(409, f"`{entry['id']}` cannot be started here: {entry['reason']}.", "not_switchable", "model")
         return entry
 
-    def serve_model(self, entry, path, raw):
+    def serve_model(self, entry, path, raw, keep=UNSET):
         gate, pool = self.server.gate, self.server.pool
         gate.acquire(entry["key"])
         try:
             worker = pool.acquire(entry)
+            if keep is not UNSET:
+                worker.keep_alive = keep            # sticks until a request says otherwise, as Ollama's does
             try:
                 self.relay(worker, "POST", self.path, self.forwardable_headers(), raw)
             finally:
@@ -1123,7 +1205,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         if worker.state == "ready" and worker.keep_alive is not None and worker.inflight == 0:
             left = max(0.0, worker.keep_alive - (time.monotonic() - worker.last_used))
         return {"id": worker.entry["id"], "key": worker.key, "state": worker.state, "port": worker.port,
-                "resident_bytes": worker.resident, "inflight": worker.inflight, "expires_in": left}
+                "resident_bytes": worker.resident, "inflight": worker.inflight, "expires_in": left,
+                "keep_alive": worker.keep_alive}
 
     def models_list(self):
         """Every model that can be asked for, so a client can find them. A loaded one says what its engine
@@ -1191,8 +1274,9 @@ class RouterHandler(BaseHTTPRequestHandler):
         out.sort(key=lambda item: (not item["current"], item["name"].lower()))
         return {"object": "list", "switch": True, "reason": None, "router": True, "data": out}
 
-    def switch(self):
-        """Load a model (the dashboard's Switch button). Answers when it is ready, or says why not."""
+    def management_request(self, path):
+        """The JSON body and the model of a request that manages models (switch, unload): from `key` (what
+        /v1/models/installed gives) or `model` (what a client names it). Same cross-origin rule as the dashboard's."""
         origin = self.headers.get("Origin")
         if origin and "*" not in self.server.cors_origins and origin not in self.server.cors_origins \
                 and urlsplit(origin).netloc != self.headers.get("Host", ""):
@@ -1200,30 +1284,59 @@ class RouterHandler(BaseHTTPRequestHandler):
         if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
             raise ApiError(415, "Send Content-Type: application/json.", "unsupported_media_type")
         try:
-            body = json.loads(self.read_body("/v1/models/switch"))
+            body = json.loads(self.read_body(path))
         except (ValueError, UnicodeDecodeError):
             raise ApiError(400, "Request body must be valid JSON.")
         if not isinstance(body, dict):
             raise ApiError(400, "Request body must be a JSON object.")
-        key = body.get("key")
-        if not isinstance(key, str) or not key:
-            raise ApiError(400, "`key` must be the key of an installed model.", "invalid_request_error", "key")
-        entry = self.server.catalog.by_key(key)
+        key, name = body.get("key"), body.get("model")
+        if isinstance(key, str) and key:
+            entry, param = self.server.catalog.by_key(key), "key"
+        elif isinstance(name, str) and name:
+            entry, param = self.server.catalog.find(name), "model"
+        else:
+            raise ApiError(400, "`key` (or `model`) must name an installed model.", "invalid_request_error", "key")
         if entry is None:
-            raise ApiError(404, "No installed model has that key.", "model_not_found", "key")
+            raise ApiError(404, "No installed model has that " + param + ".", "model_not_found", param)
+        return body, entry, param
+
+    def switch(self):
+        """Load a model (the dashboard's Switch button, or a preload with a `keep_alive`). Answers when it is ready,
+        or says why not."""
+        body, entry, param = self.management_request("/v1/models/switch")
+        keep = keep_alive_value(body.get("keep_alive"))
         if entry["reason"] is not None:
-            raise ApiError(409, f"That model cannot be started here: {entry['reason']}.", "not_switchable", "key")
-        pool = self.server.pool
+            raise ApiError(409, f"That model cannot be started here: {entry['reason']}.", "not_switchable", param)
+        pool, key = self.server.pool, entry["key"]
         current = pool.get(key)
         if current is not None and current.state == "ready":
-            raise ApiError(409, "That model is already loaded.", "already_current", "key")
+            if keep is UNSET:
+                raise ApiError(409, "That model is already loaded.", "already_current", param)
+            current.keep_alive = keep                  # already there: only the keep-alive changes
+            return self.send_json(200, {"status": "loaded", "key": key, "id": entry["id"], "name": entry["name"]})
         self.server.gate.acquire(key)
         try:
             worker = pool.acquire(entry)
+            if keep is not UNSET:
+                worker.keep_alive = keep
             pool.release(worker)
         finally:
             self.server.gate.release(key)
         self.send_json(200, {"status": "loaded", "key": key, "id": entry["id"], "name": entry["name"]})
+
+    def unload(self):
+        """Stop a model (`coli stop MODEL`, the dashboard's Unload). One that is answering is told to go as soon as
+        it has finished (202), so a request is never cut off."""
+        _body, entry, _param = self.management_request("/v1/models/unload")
+        pool, key = self.server.pool, entry["key"]
+        outcome = pool.unload(key, "asked to")
+        if outcome == "busy":
+            worker = pool.get(key)
+            if worker is not None:
+                worker.keep_alive = 0
+                pool.release_wake()
+            return self.send_json(202, {"status": "unloading when idle", "key": key, "id": entry["id"]})
+        self.send_json(200, {"status": outcome, "key": key, "id": entry["id"]})
 
 
 # ----------------------------------------------------------------------------- entry point

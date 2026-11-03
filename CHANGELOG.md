@@ -19,8 +19,14 @@ follows Ollama's scheduler. [docs/router.md](docs/router.md)
   use and when they unload, and nothing restarts. `POST /v1/models/switch` loads a model and answers when it is
   ready; `GET /v1/models` lists every model, with what each announced last time it ran; `GET /health` adds a
   `router` block.
-- `c/tests/test_router.py` (49 tests, real worker processes), `c/tests/test_router_serve.py` (real gateways
-  with the stub engines), `web/tests/router_ui.py`, and `c/tools/mutate_router.py` (33 mutants, all caught).
+- `keep_alive` on any request that names a model (`"10m"`, seconds, `0` to unload as soon as it is idle, `-1` to keep
+  it), as in Ollama; it sticks until a request says otherwise. `POST /v1/models/switch` can preload with one.
+  `coli ps` lists the loaded models with their memory and when they unload; `coli stop MODEL` (or
+  `POST /v1/models/unload`, or the dashboard's Unload button) unloads one and leaves the rest, without cutting off a
+  request in progress; plain `coli stop` also finds a router now.
+- `c/tests/test_router.py` (62 tests, real worker processes), `c/tests/test_router_serve.py` (real gateways
+  with the stub engines), `c/tests/test_router_cli.py` (`coli ps`, `coli stop MODEL`), `web/tests/router_ui.py`, and
+  `c/tools/mutate_router.py` (43 mutants, all caught).
 
 ### Fixed
 

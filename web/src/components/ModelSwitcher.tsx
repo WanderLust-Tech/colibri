@@ -4,7 +4,7 @@ import { HardDrive, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useLocale } from "@/i18n"
 import {
-  listInstalledModels, switchModel, waitForModel,
+  listInstalledModels, switchModel, unloadModel, waitForModel,
   type InstalledModel, type InstalledModels,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -36,7 +36,8 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
   const [loadError, setLoadError] = useState("")
   const [confirmKey, setConfirmKey] = useState<string | null>(null)
   const [switching, setSwitching] = useState<{ id: string; name: string } | null>(null)
-  const [result, setResult] = useState<{ kind: "error" | "fell-back"; text: string } | null>(null)
+  const [result, setResult] = useState<{ kind: "error" | "fell-back" | "info"; text: string } | null>(null)
+  const [unloading, setUnloading] = useState<string | null>(null)
   const waiting = useRef<AbortController | null>(null)
   const router = installed?.router === true
 
@@ -81,6 +82,22 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
     }
   }
 
+  /* Router only. A model that is answering is not cut off: it goes when it has finished. */
+  const unload = async (entry: InstalledModel) => {
+    setResult(null)
+    setUnloading(entry.key)
+    try {
+      const outcome = await unloadModel(baseUrl, apiKey, entry.key)
+      if (outcome.status !== "unloaded") setResult({ kind: "info", text: t("models.unloadBusy", { name: entry.name }) })
+      onSwitched()
+      await refresh()
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setUnloading(null)
+    }
+  }
+
   return (
     <section className="side-section model-switcher">
       <div className="section-title"><HardDrive className="size-3.5" /> {t("models.title")}</div>
@@ -107,12 +124,20 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
               <small>{[model.family, formatSize(model.size_bytes), model.verified ? "" : t("models.unverified"),
                 router && model.current && model.resident_bytes ? t("models.inMemory", { size: formatSize(model.resident_bytes) }) : "",
                 router && model.current && typeof model.expires_in === "number" ? t("models.unloadsIn", { minutes: Math.max(1, Math.ceil(model.expires_in / 60)) }) : "",
+                router && model.current && model.keep_alive === null && !model.inflight ? t("models.stays") : "",
               ].filter(Boolean).join(" · ")}</small>
               {!model.current && model.reason && <small className="model-reason">{model.reason}</small>}
               {router && !model.current && model.last_error && <small className="model-reason">{t("models.lastError", { message: model.last_error })}</small>}
             </div>
             {router && (model.state === "starting" || model.state === "stopping") ? <span className="model-current">{t(model.state === "starting" ? "models.starting" : "models.stopping")}</span>
-              : model.current ? <span className="model-current">{t(router ? "models.loaded" : "models.current")}</span>
+              : model.current && router ? (
+                <div className="model-confirm">
+                  <span className="model-current">{t("models.loaded")}</span>
+                  <Button type="button" size="sm" variant="secondary" disabled={unloading !== null || !!switching}
+                    onClick={() => void unload(model)}>{t(unloading === model.key ? "models.unloading" : "models.unload")}</Button>
+                </div>
+              )
+              : model.current ? <span className="model-current">{t("models.current")}</span>
               : router ? (
                 <Button type="button" size="sm" variant="secondary" disabled={!model.switchable || busy || !!switching}
                   onClick={() => void run(model)}>{t("models.load")}</Button>

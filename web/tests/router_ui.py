@@ -103,6 +103,12 @@ def run(browser, rig):
     expect(image.locator(".model-current")).to_have_text("Loaded", timeout=30000)
     expect(music.locator(".model-current")).to_have_text("Loaded")                    # both fit: both stay
     assert rig.states() == {"ACE-Step 1.5": "ready", "Qwen-Image-2.1": "ready"}, rig.states()
+    # Unload: the row goes back to Load, that model's process is gone, the other stays as it was
+    music.get_by_role("button", name="Unload", exact=True).click()
+    expect(music.get_by_role("button", name="Load", exact=True)).to_be_visible(timeout=30000)
+    expect(music.locator(".model-current")).to_have_count(0)
+    expect(image.locator(".model-current")).to_have_text("Loaded")
+    assert rig.states() == {"Qwen-Image-2.1": "ready"}, rig.states()
     assert not errors, errors
     context.close()
 

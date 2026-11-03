@@ -230,6 +230,9 @@ export interface InstalledModel {
   state?: "idle" | "starting" | "ready" | "stopping"
   resident_bytes?: number
   expires_in?: number | null
+  /* Seconds it stays loaded once idle; null means it never unloads (a request or a preload said so). */
+  keep_alive?: number | null
+  inflight?: number
   last_error?: string
 }
 
@@ -259,6 +262,17 @@ export async function switchModel(baseUrl: string, apiKey: string, key: string, 
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { id: string; name: string }
   return { id: body.id, name: body.name }
+}
+
+/* Asks a `coli router` to unload a model. One that is answering a request is not cut off: the router says
+   "unloading when idle" (202) and it goes when the request has finished. */
+export async function unloadModel(baseUrl: string, apiKey: string, key: string, signal?: AbortSignal): Promise<{ status: string; id: string }> {
+  const response = await fetch(endpoint(baseUrl, "models/unload"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ key }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { status: string; id: string }
+  return { status: body.status, id: body.id }
 }
 
 function pause(ms: number, signal?: AbortSignal) {
