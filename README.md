@@ -596,6 +596,7 @@ template, so the commands are the same for every model:
 ./coli chat  --model /nvme/qwen36          # chat in the terminal
 ./coli web   --model /nvme/qwen36          # API + dashboard, opens a browser
 ./coli serve --model /nvme/qwen36          # API + dashboard, no browser
+./coli router                              # every installed model on one port, loaded when asked for (docs/router.md)
 ./coli plan  --model /nvme/qwen36          # where the model will live: VRAM, RAM, disk
 ./coli doctor --model /nvme/qwen36         # read-only check: is everything ready?
 ./coli tune  --model /nvme/qwen36          # measure and save this machine's fastest safe settings

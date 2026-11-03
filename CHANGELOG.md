@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Several models behind one port: `coli router`
+
+`coli router` serves every installed model from one address. It reads the `model` of each request and sends it to
+that model's own `coli serve` (a worker on a loopback port), starting the worker the first time the model is asked
+for and stopping it after it has been idle (`--keep-alive`, default 10 minutes). Before a load it compares the
+model's size with the free memory and stops the least recently used idle model until it fits; a model that is
+answering is never stopped. Only one model computes at a time (they share the CPU, so two renders at once are each
+several times slower); `--parallel-models` turns that off. The API key is checked once, at the door. The design
+follows Ollama's scheduler. [docs/router.md](docs/router.md)
+
+- The dashboard's model switcher understands it: models show as loaded or not, with a Load button, their memory
+  use and when they unload, and nothing restarts. `POST /v1/models/switch` loads a model and answers when it is
+  ready; `GET /v1/models` lists every model, with what each announced last time it ran; `GET /health` adds a
+  `router` block.
+- `c/tests/test_router.py` (49 tests, real worker processes), `c/tests/test_router_serve.py` (real gateways
+  with the stub engines), `web/tests/router_ui.py`, and `c/tools/mutate_router.py` (33 mutants, all caught).
+
 ### Fixed
 
 - The gateway (`coli serve`, `coli web`) now saves every finished picture to `~/colibri-images` (`COLI_IMAGE_DIR`) before it

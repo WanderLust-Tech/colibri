@@ -3669,6 +3669,22 @@ def cmd_stop(a):
     except OSError: pass
     print(f"  {C.grn}✓ stopped{C.r} — RAM released")
 
+def cmd_router(a):
+    """Several models behind one port (router.py): each in its own `coli serve`, started when asked for."""
+    import router
+    try:
+        keep_alive=router.parse_duration(a.keep_alive)
+    except ValueError as error:
+        sys.exit(f"{C.yel}--keep-alive:{C.r} {error}")
+    if a.max_loaded<0: sys.exit(f"{C.yel}--max-loaded cannot be negative{C.r}")
+    if a.models_root:
+        os.environ["COLI_MODELS_ROOT"]=os.pathsep.join(
+            [os.path.abspath(os.path.expanduser(r)) for r in a.models_root]+[os.environ.get("COLI_MODELS_ROOT","")])
+    router.serve(host=a.host,port=a.port,api_key=a.api_key,roots=[] if a.models else None,models=a.models or (),
+                 keep_alive=keep_alive,max_loaded=a.max_loaded,max_queue=a.max_queue,queue_timeout=a.queue_timeout,
+                 parallel_models=a.parallel_models,cors_origins=a.cors_origin,allowed_hosts=a.allowed_host,
+                 worker_args=["--kv-slots",str(a.kv_slots)]+list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots)
+
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""
     need_model(a.model)
@@ -4066,6 +4082,33 @@ def main():
     ps.add_argument("--allowed-host",action="append",
         default=[h.strip() for h in os.environ.get("COLI_ALLOWED_HOSTS","").split(",") if h.strip()],
         help="additional Host header accepted by the DNS-rebinding guard; repeat as needed")
+    pr=sub.add_parser("router",help="serve every installed model behind one port: a model loads when it is asked "
+                      "for and unloads when idle, and only one model computes at a time")
+    pr.add_argument("--host",default="127.0.0.1"); pr.add_argument("--port",type=int,default=8000)
+    pr.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pr.add_argument("--cors-origin",action="append",default=None,
+                    help="allowed browser origin, repeatable; plain values replace the default list, +ORIGIN adds to it")
+    pr.add_argument("--allowed-host",action="append",
+        default=[h.strip() for h in os.environ.get("COLI_ALLOWED_HOSTS","").split(",") if h.strip()],
+        help="additional Host header accepted by the DNS-rebinding guard; repeat as needed")
+    pr.add_argument("--model",action="append",dest="models",default=None,metavar="DIR",
+                    help="offer only this model directory (repeatable); default: every model in the models folders")
+    pr.add_argument("--models-root",action="append",default=None,metavar="DIR",
+                    help="a folder whose sub-folders are models, besides the setup's and ~/colibri-models (repeatable)")
+    pr.add_argument("--keep-alive",default=os.environ.get("COLI_KEEP_ALIVE","10m"),metavar="TIME",
+                    help="how long a model stays loaded after its last request: 30s, 10m (default), 2h, 0 (unload at "
+                         "once) or -1 (never)")
+    pr.add_argument("--max-loaded",type=int,default=int(os.environ.get("COLI_MAX_LOADED_MODELS","3")),metavar="N",
+                    help="most models loaded at once (default 3, 0 for no limit); a model that does not fit in the "
+                         "free memory stops idle ones whatever this says")
+    pr.add_argument("--parallel-models",action="store_true",
+                    help="let two models compute at the same time (they share the CPU, so each is slower)")
+    pr.add_argument("--preload",action="append",default=[],metavar="MODEL",help="load this model at start (repeatable)")
+    pr.add_argument("--max-queue",type=int,default=int(os.environ.get("COLI_MAX_QUEUE","8")))
+    pr.add_argument("--queue-timeout",type=float,default=float(os.environ.get("COLI_QUEUE_TIMEOUT","300")))
+    pr.add_argument("--kv-slots",type=int,default=int(os.environ.get("COLI_KV_SLOTS","1")))
+    pr.add_argument("--worker-arg",action="append",default=[],metavar="ARG",
+                    help="an extra argument for every `coli serve` the router starts (repeatable)")
     pcluster=sub.add_parser("cluster", help="run the local-cluster control plane or an expert worker")
     cluster_sub=pcluster.add_subparsers(dest="cluster_cmd")
     pcoord=cluster_sub.add_parser("coordinator", help="serve worker registration and discovery")
@@ -4165,7 +4208,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,
