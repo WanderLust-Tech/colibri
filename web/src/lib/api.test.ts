@@ -426,7 +426,19 @@ describe("model switching", () => {
 
   it("treats a server that does not say it can switch as unable to", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ data: [] })))
-    await expect(listInstalledModels("http://localhost:8000/v1", "")).resolves.toEqual({ switch: false, reason: null, models: [] })
+    await expect(listInstalledModels("http://localhost:8000/v1", "")).resolves.toEqual({ switch: false, reason: null, router: false, models: [] })
+  })
+
+  it("knows a router, and keeps what it says of each model's state", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({
+      switch: true, reason: null, router: true,
+      data: [{ key: "a1", id: "qwen-image-2.1-colibri", current: true, state: "ready", resident_bytes: 14e9, expires_in: 540 },
+             { key: "b2", id: "ace-step-1.5-colibri", current: false, state: "idle", last_error: "out of memory" }],
+    })))
+    const result = await listInstalledModels("http://localhost:8000/v1", "")
+    expect(result.router).toBe(true)
+    expect(result.models[0]).toMatchObject({ state: "ready", resident_bytes: 14e9, expires_in: 540 })
+    expect(result.models[1].last_error).toBe("out of memory")
   })
 
   it("asks for a switch by key and never sends a path", async () => {

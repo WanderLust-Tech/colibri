@@ -225,24 +225,33 @@ export interface InstalledModel {
   current: boolean
   switchable: boolean
   reason: string | null
+  /* Only from `coli router`: where the model is in its life (idle, starting, ready, stopping), what it holds
+     in memory, how long until it is unloaded for being idle, and why its last load failed. */
+  state?: "idle" | "starting" | "ready" | "stopping"
+  resident_bytes?: number
+  expires_in?: number | null
+  last_error?: string
 }
 
 export interface InstalledModels {
   /* False when this server cannot restart itself (not started by the coli launcher). */
   switch: boolean
   reason: string | null
+  /* A `coli router`: models load when asked for and unload when idle, so nothing restarts. */
+  router: boolean
   models: InstalledModel[]
 }
 
 export async function listInstalledModels(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<InstalledModels> {
   const response = await fetch(endpoint(baseUrl, "models/installed"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { switch?: boolean; reason?: string | null; data?: InstalledModel[] }
-  return { switch: body.switch === true, reason: body.reason ?? null, models: body.data ?? [] }
+  const body = (await response.json()) as { switch?: boolean; reason?: string | null; router?: boolean; data?: InstalledModel[] }
+  return { switch: body.switch === true, reason: body.reason ?? null, router: body.router === true, models: body.data ?? [] }
 }
 
 /* Asks the server to restart on another installed model. It answers 202 and goes
-   down: follow it with waitForModel. */
+   down: follow it with waitForModel. A `coli router` instead loads the model and
+   answers 200 when it is ready (or says why it could not start). */
 export async function switchModel(baseUrl: string, apiKey: string, key: string, signal?: AbortSignal): Promise<{ id: string; name: string }> {
   const response = await fetch(endpoint(baseUrl, "models/switch"), {
     method: "POST", headers: headers(apiKey), body: JSON.stringify({ key }), signal,
