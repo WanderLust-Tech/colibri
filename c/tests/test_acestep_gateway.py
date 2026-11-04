@@ -7,7 +7,9 @@ actually made and the WAV framing.
 """
 import base64
 import http.client
+import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -293,6 +295,93 @@ class CancelAndQueueTest(unittest.TestCase):
             self.assertTrue(set(results) <= {200, 503}, results)
         finally:
             gw.close()
+
+
+class SavedSongsTest(unittest.TestCase):
+    """A finished song is on disk before it is sent, as a finished picture is: a browser that stops reading, or is closed,
+    cannot lose a song that took minutes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = GatewayHarness()
+        cls.out = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.server.save_songs_to = None
+        cls.gw.close()
+        cls.out.cleanup()
+
+    def setUp(self):
+        for name in os.listdir(self.out.name):
+            os.remove(os.path.join(self.out.name, name))
+        self.gw.server.save_songs_to = self.out.name
+
+    def saved(self):
+        return sorted(os.listdir(self.out.name))
+
+    def test_a_server_nobody_told_where_keeps_its_hands_off_the_disk(self):
+        self.assertIsNone(APIServer(("127.0.0.1", 0), None, MODEL_ID, KEY).save_songs_to)
+        self.gw.server.save_songs_to = None
+        status, _h, raw = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7)
+        self.assertEqual(status, 200, raw[:200])
+        self.assertEqual(self.saved(), [])
+
+    def test_the_response_and_the_file_are_the_same_song(self):
+        status, _h, raw = self.gw.music(prompt="Calm piano, soft strings!", duration=1, steps=1, seed=7)
+        self.assertEqual(status, 200, raw[:200])
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        names = self.saved()
+        self.assertEqual(len(names), 1, names)
+        self.assertRegex(names[0], r"^\d{8}-\d{6}-calm-piano-soft-strings-s7\.wav$")     # the name `coli music` gives
+        self.assertEqual(Path(self.out.name, names[0]).read_bytes(), sent)
+
+    def test_a_song_sent_as_a_wav_file_is_saved_too(self):
+        status, _h, sent = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7, response_format="wav")
+        self.assertEqual(status, 200)
+        names = self.saved()
+        self.assertEqual(len(names), 1, names)
+        self.assertEqual(Path(self.out.name, names[0]).read_bytes(), sent)
+
+    def test_a_streamed_song_is_saved_too_and_before_the_event_that_carries_it(self):
+        status, _h, events = self.gw.stream(prompt="a lullaby", duration=1, steps=1, seed=3)
+        self.assertEqual(status, 200)
+        completed = [data for name, data in events if name == "music_generation.completed"]
+        self.assertEqual(len(completed), 1, events)
+        names = self.saved()
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(names[0].endswith("-a-lullaby-s3.wav"), names)
+        self.assertEqual(Path(self.out.name, names[0]).read_bytes(), base64.b64decode(completed[0]["data"][0]["b64_json"]))
+
+    def test_two_songs_of_one_caption_and_seed_never_overwrite(self):
+        for _ in range(2):
+            status, _h, raw = self.gw.music(prompt="a lullaby", duration=1, steps=1, seed=3)
+            self.assertEqual(status, 200, raw[:200])
+        self.assertEqual(len(self.saved()), 2, self.saved())
+
+    def test_a_failed_save_is_logged_and_the_song_is_still_sent(self):
+        blocker = os.path.join(self.out.name, "not-a-directory")
+        Path(blocker).write_bytes(b"x")
+        self.gw.server.save_songs_to = os.path.join(blocker, "inside")            # cannot be made: its parent is a file
+        log = io.StringIO()
+        real = sys.stderr
+        sys.stderr = log
+        try:
+            status, _h, raw = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7)
+        finally:
+            sys.stderr = real
+        self.assertEqual(status, 200, raw[:200])
+        self.assertEqual(wav_of(json.loads(raw)["data"][0]["b64_json"])[1], RATE)
+        self.assertIn("could not save the song", log.getvalue())
+
+
+class SaveSwitchTest(unittest.TestCase):
+    def test_on_unless_told_otherwise(self):
+        self.assertTrue(music_engine.save_enabled({}))
+        for value in ("0", "false", "No", " OFF "):
+            with self.subTest(value=value):
+                self.assertFalse(music_engine.save_enabled({"COLI_MUSIC_SAVE": value}))
+        self.assertTrue(music_engine.save_enabled({"COLI_MUSIC_SAVE": "1"}))
 
 
 if __name__ == "__main__":

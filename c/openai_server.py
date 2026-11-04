@@ -6194,12 +6194,13 @@ class APIServer(ThreadingHTTPServer):
 
     def __init__(self, address, engine, model_id, api_key=None, max_tokens=1024,
                  cors_origins=DEFAULT_CORS_ORIGINS, max_queue=8, queue_timeout=300,
-                 kv_slots=1, allowed_hosts=(), save_images_to=None):
+                 kv_slots=1, allowed_hosts=(), save_images_to=None, save_songs_to=None):
         super().__init__(address, APIHandler)
         self.engine = engine
         # A directory to write every finished picture to before it is sent (None: do not). The launcher
         # sets it (coli serve, coli web); a server built by a test or an embedder keeps its hands off the disk.
         self.save_images_to = save_images_to
+        self.save_songs_to = save_songs_to      # the same for finished songs (WAV files)
         self.model_id = model_id
         self.api_key = api_key
         self.max_tokens = max_tokens
@@ -7703,13 +7704,30 @@ class APIHandler(BaseHTTPRequestHandler):
             except music_engine.MusicEngineError as error:
                 raise APIError(500, f"The music engine failed: {error}", None, "engine_error",
                                "server_error") from None
+            wav = self._finish_song(result, request, request_id)
             if request["response_format"] == "wav":
-                wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
                 queue_headers.update({"x-colibri-seed": str(result.get("seed")),
                                       "x-colibri-duration": str(result.get("duration"))})
                 self.send_bytes(200, wav, "audio/wav", request_id, queue_headers)
                 return
-            self.send_json(200, self._music_payload(result, created), request_id, queue_headers)
+            self.send_json(200, self._music_payload(result, created, wav), request_id, queue_headers)
+
+    def _finish_song(self, result, request, request_id):
+        """The finished song as WAV bytes, written to disk first when the server was told where to.
+
+        A song takes minutes, and everything after the engine's last step (the encode, the socket, the
+        browser) can still lose it, as it could a picture. So it is saved before it is sent, under the name
+        `coli music` gives it (<date>-<time>-<caption>-s<seed>.wav, never overwriting). A failure to save is
+        logged and does not fail the request: the song is still sent."""
+        wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+        directory = getattr(self.server, "save_songs_to", None)
+        if directory:
+            try:
+                path = music_engine.save_wav(wav, request["caption"], result["seed"], directory)
+                sys.stderr.write(f"[music] saved {path}\n")
+            except OSError as error:
+                sys.stderr.write(f"[music] {request_id}: could not save the song to {directory}: {error}\n")
+        return wav
 
     @staticmethod
     def _music_run(engine, request, **hooks):
@@ -7728,9 +7746,10 @@ class APIHandler(BaseHTTPRequestHandler):
         return result
 
     @staticmethod
-    def _music_payload(result, created):
+    def _music_payload(result, created, wav=None):
         import base64
-        wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+        if wav is None:
+            wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
                 "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds")
         return {"created": created,
@@ -7812,7 +7831,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                       "type": "server_error", "param": None, "code": "engine_error"}})
             write(b"data: [DONE]\n\n")
             return
-        event("music_generation.completed", self._music_payload(result, created))
+        event("music_generation.completed",
+              self._music_payload(result, created, self._finish_song(result, request, request_id)))
         write(b"data: [DONE]\n\n")
 
     def send_bytes(self, status, data, content_type, request_id=None, headers=None):
@@ -8719,6 +8739,8 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
     server.switch = switch
     if image_engine.save_enabled():
         server.save_images_to = image_engine.image_dir()      # a finished picture is kept (COLI_IMAGE_DIR, COLI_IMAGE_SAVE=0 to stop)
+    if music_engine.save_enabled():
+        server.save_songs_to = music_engine.music_dir()       # and a finished song (COLI_MUSIC_DIR, COLI_MUSIC_SAVE=0 to stop)
     runtime = None
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:

@@ -363,6 +363,10 @@ coli doctor --model ~/models/ace-step-1.5
 coli serve --model ~/models/ace-step-1.5      # POST /v1/audio/music
 ```
 
+`coli serve` and `coli web` also write each finished song to that folder before they send it (`COLI_MUSIC_DIR` moves it;
+the server's log says `[music] saved <path>`), so a song cannot be lost to a browser tab that was put to sleep, or closed,
+while it was made. A failed save is logged and the song is still sent. `COLI_MUSIC_SAVE=0` turns this off.
+
 `coli run "prompt"` on a music model does the same as `coli music`; `coli chat` and `coli tune` refuse it with a
 pointer (there is no conversation and no decode loop to tune); `--ctx` does not apply. `coli music` prints the song's
 path as its last line of stdout, so a script can read it; progress goes to the terminal's line (stderr when piped).

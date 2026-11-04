@@ -827,6 +827,14 @@ def music_dir(env=None):
     return os.path.expanduser(configured) if configured else os.path.join(os.path.expanduser("~"), "colibri-music")
 
 
+def save_enabled(env=None):
+    """Does the gateway keep a copy of every finished song? Yes, unless COLI_MUSIC_SAVE says no
+    (0, false, no or off): a song can take many minutes, and a browser tab that stops reading, or is
+    closed, must not be able to lose it."""
+    env = os.environ if env is None else env
+    return env.get("COLI_MUSIC_SAVE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _slug_of(prompt, limit=48):
     words = re.sub(r"[^a-z0-9]+", "-", (prompt or "").lower()).strip("-")
     return words[:limit].rstrip("-") or "music"

@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The gateway (`coli serve`, `coli web`, and so the router) now saves every finished song to `~/colibri-music`
+  (`COLI_MUSIC_DIR`) before it sends it, as it already does for pictures and as `coli music` does. A song could finish
+  on the server while a sleeping browser tab never read it, and it then existed nowhere. `COLI_MUSIC_SAVE=0` turns it off.
+
 ### Several models behind one port: `coli router`
 
 `coli router` serves every installed model from one address. It reads the `model` of each request and sends it to
