@@ -1340,6 +1340,16 @@ class RouterHandler(BaseHTTPRequestHandler):
 
 
 # ----------------------------------------------------------------------------- entry point
+def worker_kv_slots(entry, wanted):
+    """The KV slots to start a model's worker with: what was asked for, but no more than its family supports (a
+    picture or music model has one), and at least one."""
+    try:
+        from family_registry import family_by_id
+        return max(1, min(wanted, family_by_id(entry["family"]).limits.max_kv_slots))
+    except Exception:
+        return 1
+
+
 def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), keep_alive=DEFAULT_KEEP_ALIVE,
           max_loaded=DEFAULT_MAX_LOADED, max_queue=8, queue_timeout=300.0, parallel_models=False,
           cors_origins=None, allowed_hosts=(), worker_args=(), preload=(), engine_ready=None, kv_slots=1):
@@ -1357,13 +1367,13 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
         print("WARNING: --allowed-host '*' accepts ANY Host header (DNS-rebinding guard disabled)", file=sys.stderr)
     catalog = Catalog(roots=roots, models=models,
                       engine_ready=engine_ready or (lambda family: openai_server.default_engine(family).exists()),
-                      worker_kv_slots=kv_slots)
+                      worker_kv_slots=1)          # every family can run one slot; kv_slots is clamped per model below
     extra = list(worker_args)
 
     def command(entry, free):
         launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coli")
         return [sys.executable, launcher, "serve", "--model", entry["path"], "--host", "127.0.0.1",
-                "--port", str(free)] + extra
+                "--port", str(free), "--kv-slots", str(worker_kv_slots(entry, kv_slots))] + extra
 
     pool = Pool(catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                 state=State(default_state_path()), queue_timeout=queue_timeout,

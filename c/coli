@@ -3781,7 +3781,7 @@ def _run_router(a,router,keep_alive):
     router.serve(host=a.host,port=a.port,api_key=a.api_key,roots=[] if a.models else None,models=a.models or (),
                  keep_alive=keep_alive,max_loaded=a.max_loaded,max_queue=a.max_queue,queue_timeout=a.queue_timeout,
                  parallel_models=a.parallel_models,cors_origins=a.cors_origin,allowed_hosts=a.allowed_host,
-                 worker_args=["--kv-slots",str(a.kv_slots)]+list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots)
+                 worker_args=list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots)   # the router gives each worker as many slots as its family allows
 
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""

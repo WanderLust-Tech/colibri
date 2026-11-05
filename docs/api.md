@@ -606,8 +606,21 @@ key (`OPENAI_API_KEY` / `OPENAI_BASE_URL` for env-based tools).
 ## Isolated KV contexts
 
 `coli serve --kv-slots N` allocates up to 16 independent sequence contexts.
-Requests select one with the optional integer `cache_slot` field; ordinary
-OpenAI clients omit it and keep the original slot 0 behavior.
+Requests select one with the optional integer `cache_slot` field. A chat request that
+leaves it out is placed by the server: a turn goes to the slot that already holds its
+earlier turns (its messages begin with that slot's last request, as every turn of a chat
+and every step of an agent loop does), and anything else is a new conversation that takes
+an idle slot that was never used, else the one used longest ago. So a title or summary
+request, or a second window, does not throw away the cache of the conversation you are
+working in, and with a long prompt that is minutes saved. The engine reuses a cached prefix
+only when the new prompt starts with everything it already read, which is why only a true
+continuation is sent back. `GET /health` lists, per slot, how many messages it holds and how
+long ago it was used. With one slot there is nothing to choose.
+
+Each slot is a full-size context: a Qwen3-Coder-30B slot at a 32768-token window can grow
+to about 6 GB (only the part in use is resident, about 0.2 MB a token), so keep it to the few
+conversations you really run at once. Slots are used one at a time per request; several
+requests in flight interleave their decoding, the models still share the CPU.
 
 ```json
 {

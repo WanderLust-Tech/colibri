@@ -23,7 +23,7 @@ from openai_server import (APIError, engine_exit_status, APIHandler, APIServer, 
                            LOGPROBS_TOP_K_CAP, logprobs_options,
                            READY, Engine, InklingStreamSplit, StopFilter, ThinkingStreamSplit,
                            _engine_error, _image_bytes_from_url, cap_for_arch,
-                           conversation_cache_slot, model_arch,
+                           conversation_cache_slot, SlotLedger, model_arch,
                            generation_options, parse_tool_calls, parse_dsv4_tool_calls,
                            parse_arch_tool_calls, parse_k3_tool_calls, parse_qwen38_tool_calls,
                            parse_qwen_tool_calls,
@@ -4938,6 +4938,164 @@ class ConversationCacheSlotTest(unittest.TestCase):
     def test_deterministic(self):
         conv = self._conv("same question", "same answer", "again")
         self.assertEqual(conversation_cache_slot(conv, 8), conversation_cache_slot(conv, 8))
+
+
+class SlotLedgerTest(unittest.TestCase):
+    """Which slot a turn goes to: the one that holds its earlier turns, else the idlest."""
+
+    SYSTEM = "you are a coding assistant with a very long system prompt"
+
+    def setUp(self):
+        self.now = 0.0
+        self.ledger = SlotLedger(3, clock=lambda: self.now)
+
+    def conv(self, *turns, system=None):
+        messages = [{"role": "system", "content": system or self.SYSTEM}]
+        for i, text in enumerate(turns):
+            messages.append({"role": "user" if i % 2 == 0 else "assistant", "content": text})
+        return messages
+
+    def pick(self, messages, idle=None):
+        self.now += 1.0
+        return self.ledger.choose(messages, idle)
+
+    def test_one_slot_has_nothing_to_choose(self):
+        self.assertEqual(SlotLedger(1).choose(self.conv("hi")), 0)
+
+    def test_empty_or_bad_input_is_zero(self):
+        self.assertEqual(self.ledger.choose(None), 0)
+        self.assertEqual(self.ledger.choose([]), 0)
+
+    def test_every_turn_of_a_conversation_goes_to_its_slot(self):
+        first = self.pick(self.conv("1+1="))
+        self.assertEqual(self.pick(self.conv("1+1=", "2", "and 2+2?")), first)
+        self.assertEqual(self.pick(self.conv("1+1=", "2", "and 2+2?", "4", "thanks")), first)
+
+    def test_an_exact_retry_goes_back_to_the_same_slot(self):
+        first = self.pick(self.conv("question"))
+        self.assertEqual(self.pick(self.conv("question")), first)
+
+    def test_three_new_conversations_take_three_different_slots(self):
+        slots = {self.pick(self.conv(f"task {i}")) for i in range(3)}
+        self.assertEqual(slots, {0, 1, 2})
+
+    def test_conversations_that_share_a_system_prompt_are_still_different_conversations(self):
+        a = self.pick(self.conv("write a parser"))
+        b = self.pick(self.conv("write a lexer"))
+        self.assertNotEqual(a, b)
+
+    def test_a_side_request_does_not_take_the_working_conversations_slot(self):
+        ledger = SlotLedger(2, clock=lambda: self.now)
+        self.now = 1.0
+        main = ledger.choose(self.conv("refactor this module"))
+        for turn in range(3):
+            self.now += 1.0
+            side = ledger.choose(self.conv(f"write a title for this chat {turn}", system="you write titles"))
+            self.assertNotEqual(side, main, "a title request landed on the conversation being worked on")
+            self.now += 1.0
+            self.assertEqual(ledger.choose(self.conv("refactor this module", "done", "now the tests")), main)
+
+    def test_a_new_conversation_takes_the_slot_used_longest_ago(self):
+        a = self.pick(self.conv("a"))
+        b = self.pick(self.conv("b"))
+        c = self.pick(self.conv("c"))
+        self.assertEqual(self.pick(self.conv("a", "x", "again")), a)          # a is warm again
+        self.assertEqual(self.pick(self.conv("d")), b)                         # b is the oldest now
+        self.assertEqual(self.pick(self.conv("e")), c)
+
+    def test_a_busy_slot_is_avoided_by_a_new_conversation(self):
+        ledger = SlotLedger(2, clock=lambda: self.now)
+        self.now = 1.0
+        a = ledger.choose(self.conv("a"))                                      # the older of the two
+        self.now = 2.0
+        b = ledger.choose(self.conv("b"))
+        self.now = 3.0
+        self.assertEqual(ledger.choose(self.conv("c"), idle={b}), b)           # a is busy: do not queue behind it
+        self.assertEqual(a, 0)
+
+    def test_with_every_slot_busy_the_oldest_is_chosen(self):
+        a = self.pick(self.conv("a"))
+        self.pick(self.conv("b"))
+        self.pick(self.conv("c"))
+        self.assertEqual(self.pick(self.conv("d"), idle=set()), a)
+
+    def test_a_turn_goes_to_its_slot_even_when_that_slot_is_busy(self):
+        a = self.pick(self.conv("a"))
+        self.assertEqual(self.pick(self.conv("a", "x", "more"), idle=set()), a)        # it waits: nowhere else has the work
+
+    def test_an_earlier_point_of_a_conversation_is_not_a_continuation(self):
+        a = self.pick(self.conv("a", "x", "more"))
+        self.assertNotEqual(self.pick(self.conv("a")), a)                      # a regenerated first turn
+
+    def test_the_longest_matching_slot_wins(self):
+        long = self.pick(self.conv("a", "x", "more"))
+        short = self.pick(self.conv("a"))                                      # the first turn asked again: not a continuation
+        self.assertNotEqual(short, long)
+        # both slots now begin the same way; the one that holds more of it is the one with the work
+        self.assertEqual(self.pick(self.conv("a", "x", "more", "y", "even more")), long)
+
+    def test_the_ledger_describes_each_slot(self):
+        self.pick(self.conv("a", "x", "more"))
+        self.now += 5
+        rows = self.ledger.snapshot()
+        self.assertEqual([row["slot"] for row in rows], [0, 1, 2])
+        self.assertEqual((rows[0]["messages"], rows[0]["idle_seconds"]), (4, 5.0))
+        self.assertEqual((rows[1]["messages"], rows[1]["idle_seconds"]), (0, None))
+
+
+class SlotRoutingHTTPTest(unittest.TestCase):
+    """What the engine is actually told, over HTTP, with several slots."""
+
+    def setUp(self):
+        self.engine = FakeEngine()
+        self.base = _spawn_test_server(self, self.engine, kv_slots=3)
+
+    def slot_of(self, *turns, system="you are a coding assistant", path="/v1/chat/completions", **body):
+        messages = [{"role": "system", "content": system}]
+        for i, text in enumerate(turns):
+            messages.append({"role": "user" if i % 2 == 0 else "assistant", "content": text})
+        request = {"model": "test-model", "messages": messages, "max_tokens": 4}
+        if path == "/v1/messages":
+            request = {"model": "test-model", "max_tokens": 4, "system": system, "messages": messages[1:]}
+        request.update(body)
+        before = len(self.engine.calls)
+        with _post_json(self.base, path, request) as response:
+            response.read()
+        self.assertEqual(len(self.engine.calls), before + 1)
+        return self.engine.calls[-1][4]
+
+    def test_two_conversations_keep_their_own_slots_while_taking_turns(self):
+        a1 = self.slot_of("fix the bug")
+        b1 = self.slot_of("explain the build")
+        self.assertNotEqual(a1, b1)
+        self.assertEqual(self.slot_of("fix the bug", "ok", "and the test?"), a1)
+        self.assertEqual(self.slot_of("explain the build", "ok", "and the cache?"), b1)
+        self.assertEqual(self.slot_of("fix the bug", "ok", "and the test?", "ok", "ship it"), a1)
+
+    def test_a_side_request_goes_elsewhere(self):
+        main = self.slot_of("refactor the parser")
+        side = self.slot_of("title this chat", system="you write titles")
+        self.assertNotEqual(side, main)
+        self.assertEqual(self.slot_of("refactor the parser", "done", "next the lexer"), main)
+
+    def test_a_slot_named_by_the_client_is_used_as_named(self):
+        self.slot_of("one")
+        self.assertEqual(self.slot_of("two", cache_slot=2), 2)
+
+    def test_the_anthropic_endpoint_uses_the_same_ledger(self):
+        a = self.slot_of("fix the bug", path="/v1/messages")
+        b = self.slot_of("explain the build", path="/v1/messages")
+        self.assertNotEqual(a, b)
+        self.assertEqual(self.slot_of("fix the bug", "ok", "more", path="/v1/messages"), a)
+
+    def test_health_says_what_each_slot_holds(self):
+        self.slot_of("fix the bug")
+        request = Request(self.base + "/health", headers={"Authorization": "Bearer secret"})
+        with urlopen(request, timeout=5) as response:
+            health = json.load(response)
+        self.assertEqual(health["kv_slots"], 3)
+        self.assertEqual([row["messages"] for row in health["slots"]].count(0), 2)
+        self.assertEqual(sum(row["messages"] for row in health["slots"]), 2)       # a system message and a user message
 
 
 class ConnectionLimitTest(unittest.TestCase):

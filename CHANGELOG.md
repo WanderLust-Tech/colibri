@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Several conversations keep their cache: smarter KV slot choice
+
+With `--kv-slots N` above 1, a chat request is now sent to the slot that already holds its earlier turns, and a new
+conversation to an idle slot that was never used, else the one used longest ago. Before, the slot came from a hash of the
+conversation's opening, which ignored whether other slots were idle: unrelated conversations could share a slot, and a side
+request (a title, a summary) could land on the slot of the conversation being worked on and throw its cache away, which on
+a CPU means re-reading a long prompt for minutes. A `cache_slot` named by the client is still used as named, and System One keeps
+its own state-based rule. `GET /health` shows what each slot holds. `coli router --kv-slots N` now gives each worker as many
+slots as its family allows (picture and music models keep one) instead of the same number for every model, which made them
+unavailable. [docs/api.md](docs/api.md#isolated-kv-contexts)
+
 ### Fixed
 
 - The gateway (`coli serve`, `coli web`, and so the router) now saves every finished song to `~/colibri-music`

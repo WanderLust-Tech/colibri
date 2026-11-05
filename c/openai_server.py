@@ -272,6 +272,11 @@ class GenerationScheduler:
             candidates.discard(earlier_slot)
         return min(candidates, default=None)
 
+    def idle_slots(self):
+        """The slots with no request running."""
+        with self.condition:
+            return set(self.free_slots)
+
     def snapshot(self):
         with self.condition:
             return {"active": self.active, "queued": len(self.queue),
@@ -3899,6 +3904,67 @@ def parse_stop_sequences(body):
     return tuple(sequences)
 
 
+class SlotLedger:
+    """Which conversation each KV slot holds, so a turn goes where its earlier turns are.
+
+    conversation_cache_slot hashes a conversation's opening to a slot. That is stable, but it cannot see which
+    slots are idle: two unrelated conversations collide on one slot a fraction of the time even when the others
+    are empty, and an unrelated request (a title, a summary, a second window) that hashes onto a busy
+    conversation's slot throws its cache away. A long prompt costs minutes to read on a CPU, so that matters.
+
+    The ledger remembers, per slot, the messages of the last request it served. A request whose messages BEGIN
+    with a slot's (every turn of a chat, each step of an agent loop, an exact retry) goes to that slot: the engine
+    reuses a prefix only when the new prompt starts with what it already read, so that is the one slot where
+    the work is not repeated. Anything else is a new conversation: it takes an idle slot that was never used, else
+    the one used longest ago, so a conversation that is being worked on keeps its slot until every other slot has
+    been tried. Choosing also claims the slot, so two requests arriving together do not pick the same one.
+
+    With one slot there is nothing to choose."""
+
+    def __init__(self, slots, clock=time.monotonic):
+        self.slots = slots
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.held = [None] * slots              # per slot: the digests of the messages of its last request
+        self.used = [None] * slots              # per slot: when it was last chosen
+
+    @staticmethod
+    def digests(messages):
+        out = []
+        for message in messages:
+            try:
+                key = json.dumps(message, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                key = repr(message)
+            out.append(hashlib.sha1(key.encode("utf-8", "replace")).digest()[:8])
+        return tuple(out)
+
+    def choose(self, messages, idle=None):
+        """The slot for a request with these messages. `idle` is the set of slots with no request running
+        (None: do not know)."""
+        if self.slots <= 1 or not isinstance(messages, list) or not messages:
+            return 0
+        digests = self.digests(messages)
+        with self.lock:
+            best, longest = None, 0
+            for slot, held in enumerate(self.held):
+                if held and len(held) <= len(digests) and digests[:len(held)] == held and len(held) > longest:
+                    best, longest = slot, len(held)
+            if best is None:
+                free = [slot for slot in range(self.slots) if idle is None or slot in idle]
+                best = min(free or range(self.slots),
+                           key=lambda slot: (self.used[slot] is not None, self.used[slot] or 0.0, slot))
+            self.held[best] = digests
+            self.used[best] = self.clock()
+            return best
+
+    def snapshot(self):
+        with self.lock:
+            return [{"slot": slot, "messages": len(held or ()), "idle_seconds":
+                     None if self.used[slot] is None else round(self.clock() - self.used[slot], 1)}
+                    for slot, held in enumerate(self.held)]
+
+
 def conversation_cache_slot(messages, kv_slots):
     """Stable KV slot for a conversation so its turns reuse the same cached prefix.
 
@@ -6206,6 +6272,7 @@ class APIServer(ThreadingHTTPServer):
         self.max_tokens = max_tokens
         self.scheduler = GenerationScheduler(max_queue, queue_timeout, kv_slots)
         self.kv_slots = kv_slots
+        self.slot_ledger = SlotLedger(kv_slots)
         self.cors_origins = tuple(cors_origins)
         # Extra Host header values trusted past the DNS-rebinding guard, for a
         # reverse proxy / MagicDNS in front of the loopback bind (#597). Explicit
@@ -6874,6 +6941,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     payload["arch"] = ARCH            # which family answers: coli chat reads it
                     payload["scheduler"] = self.server.scheduler.snapshot()
                     payload["kv_slots"] = self.server.kv_slots
+                    if self.server.kv_slots > 1:
+                        payload["slots"] = self.server.slot_ledger.snapshot()       # what each slot last served, and how long ago
                     payload["input_modalities"] = self.server.input_modalities()
                     payload["continue_assistant"] = os.environ.get("COLI_CONTINUE_ASSISTANT", "1") != "0" and ARCH in CONTINUATION_FAMILIES
                     tiers = getattr(self.server.engine, "tiers", None) if self.server.engine else None
@@ -7912,11 +7981,12 @@ class APIHandler(BaseHTTPRequestHandler):
                            "cache_slot")
         if cache_slot is None and self.server.kv_slots > 1:
             # #634: pin each conversation to a stable KV slot so multi-turn reuses its
-            # cached prefix instead of re-prefilling. Only when the request carries a
+            # cached prefix instead of re-prefilling (the SlotLedger: a turn goes to the slot that holds its
+            # earlier turns, a new conversation to the idlest slot). Only when the request carries a
             # conversation; raw /v1/completions keeps the scheduler's free-slot pick.
             conversation = body.get("messages")
             if isinstance(conversation, list) and conversation:
-                cache_slot = conversation_cache_slot(conversation, self.server.kv_slots)
+                cache_slot = self.server.slot_ledger.choose(conversation, self.server.scheduler.idle_slots())
         stream = body.get("stream", False)
         if not isinstance(stream, bool):
             raise APIError(400, "`stream` must be a boolean.", "stream")
@@ -8447,11 +8517,12 @@ class APIHandler(BaseHTTPRequestHandler):
                            "cache_slot")
         if cache_slot is None and self.server.kv_slots > 1:
             # #634: pin each conversation to a stable KV slot so multi-turn reuses its
-            # cached prefix instead of re-prefilling. Only when the request carries a
+            # cached prefix instead of re-prefilling (the SlotLedger: a turn goes to the slot that holds its
+            # earlier turns, a new conversation to the idlest slot). Only when the request carries a
             # conversation; raw /v1/completions keeps the scheduler's free-slot pick.
             conversation = body.get("messages")
             if isinstance(conversation, list) and conversation:
-                cache_slot = conversation_cache_slot(conversation, self.server.kv_slots)
+                cache_slot = self.server.slot_ledger.choose(conversation, self.server.scheduler.idle_slots())
         stream = body.get("stream", False)
         if not isinstance(stream, bool):
             raise APIError(400, "`stream` must be a boolean.", "stream")

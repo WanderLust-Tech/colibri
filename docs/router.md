@@ -58,7 +58,8 @@ has runners.
 | `--parallel-models` | off | Let two models compute at the same time |
 | `--preload MODEL` | | Load this model at start (repeat for several) |
 | `--max-queue`, `--queue-timeout` | `8`, `300` | Requests waiting for another model's turn |
-| `--kv-slots N`, `--worker-arg ARG` | `1` | Passed to every `coli serve` the router starts |
+| `--kv-slots N` | `1` (`COLI_KV_SLOTS`) | KV slots for each chat model, so several conversations keep their cache (see [api.md](api.md#isolated-kv-contexts)). A model gets no more than its family allows: picture and music models always have one |
+| `--worker-arg ARG` | | An extra argument for every `coli serve` the router starts (repeatable) |
 
 What the router learns is kept in `router.json` in the setup folder (`%LOCALAPPDATA%\colibri` on
 Windows): how much memory each model really took the last time it was loaded.

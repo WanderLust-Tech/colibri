@@ -795,5 +795,30 @@ class SwitchTest(unittest.TestCase):
         self.assertFalse(body["router"]["parallel_models"])
 
 
+class WorkerKvSlotsTest(unittest.TestCase):
+    """The router's --kv-slots is what a chat model gets, never more than its family allows: a picture or a music
+    model has one slot, and was refused (or marked unavailable) when every worker was told the same number."""
+
+    def slots(self, family, wanted):
+        return router.worker_kv_slots({"family": family}, wanted)
+
+    def test_a_chat_model_gets_what_was_asked(self):
+        self.assertEqual(self.slots("qwen36", 3), 3)
+
+    def test_a_chat_model_is_held_to_its_family_limit(self):
+        from family_registry import family_by_id
+        limit = family_by_id("qwen36").limits.max_kv_slots
+        self.assertEqual(self.slots("qwen36", limit + 5), limit)
+
+    def test_picture_and_music_models_keep_one_slot(self):
+        self.assertEqual(self.slots("qwen_image", 3), 1)
+        self.assertEqual(self.slots("ace_step", 3), 1)
+
+    def test_an_unknown_family_or_a_nonsense_count_gives_one(self):
+        self.assertEqual(self.slots("no-such-family", 3), 1)
+        self.assertEqual(router.worker_kv_slots({}, 3), 1)
+        self.assertEqual(self.slots("qwen36", 0), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
