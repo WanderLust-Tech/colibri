@@ -40,7 +40,6 @@ know stops the conversion rather than being dropped silently.
 """
 import argparse
 import json
-import mmap
 import os
 import re
 import shutil
@@ -66,20 +65,20 @@ DTYPE_NAMES = {"F32": np.float32, "F16": np.float16, "BF16": None, "I8": np.int8
 # ---------------------------------------------------------------------------- reading
 
 class SafeFile:
-    """One .safetensors file, memory mapped. Tensors are read lazily as float32."""
+    """One .safetensors file. Tensors are read with plain sequential reads, never through a memory map:
+    a checkpoint is often on a spinning disk (or a USB one), where the page faults of a mapped file arrive in
+    random order and run at a few MB/s, and one read of a whole tensor runs at the disk's speed."""
 
     def __init__(self, path):
         self.path = path
-        self.fh = open(path, "rb")
-        self.map = mmap.mmap(self.fh.fileno(), 0, access=mmap.ACCESS_READ)
-        n = struct.unpack("<Q", self.map[:8])[0]
-        header = json.loads(self.map[8:8 + n])
+        self.fh = open(path, "rb", buffering=0)
+        n = struct.unpack("<Q", self.fh.read(8))[0]
+        header = json.loads(self.fh.read(n))
         header.pop("__metadata__", None)
         self.base = 8 + n
         self.tensors = header
 
     def close(self):
-        self.map.close()
         self.fh.close()
 
     def shape(self, name):
@@ -88,40 +87,49 @@ class SafeFile:
     def dtype(self, name):
         return self.tensors[name]["dtype"]
 
+    def _read(self, offset, nbytes):
+        buf = np.empty(nbytes, dtype=np.uint8)
+        view = memoryview(buf)
+        self.fh.seek(offset)
+        got = 0
+        while got < nbytes:
+            n = self.fh.readinto(view[got:got + (64 << 20)])
+            if not n:
+                raise SystemExit(f"{self.path}: ended {nbytes - got} bytes early")
+            got += n
+        return buf
+
     def raw(self, name):
-        t = self.tensors[name]
-        lo, hi = t["data_offsets"]
-        return self.map[self.base + lo:self.base + hi]
+        lo, hi = self.tensors[name]["data_offsets"]
+        return self._read(self.base + lo, hi - lo)
+
+    @staticmethod
+    def _decode(buf, kind, shape):
+        if kind == "BF16":
+            u = buf.view(np.uint16).astype(np.uint32) << 16
+            return u.view(np.float32).reshape(shape)
+        if kind == "F16":
+            return buf.view(np.float16).astype(np.float32).reshape(shape)
+        if kind == "F32":
+            return buf.view(np.float32).reshape(shape).copy()
+        raise SystemExit(f"unsupported checkpoint dtype {kind}")
 
     def array(self, name):
-        """The whole tensor as float32 (a copy)."""
+        """The whole tensor as float32."""
+        t = self.tensors[name]
+        return self._decode(self.raw(name), t["dtype"], t["shape"])
+
+    def stack(self, name):
+        """A stacked tensor ([E, ...]) read once, whole, and handed out one slab at a time as float32."""
         t = self.tensors[name]
         buf = self.raw(name)
-        kind = t["dtype"]
-        if kind == "BF16":
-            u = np.frombuffer(buf, dtype=np.uint16).astype(np.uint32) << 16
-            return u.view(np.float32).reshape(t["shape"])
-        if kind == "F16":
-            return np.frombuffer(buf, dtype=np.float16).astype(np.float32).reshape(t["shape"])
-        if kind == "F32":
-            return np.frombuffer(buf, dtype=np.float32).reshape(t["shape"]).copy()
-        raise SystemExit(f"{name}: unsupported checkpoint dtype {kind}")
-
-    def slab(self, name, index):
-        """Row `index` of the leading axis, as float32 (the experts are stacked [E, ...])."""
-        t = self.tensors[name]
         shape = t["shape"]
-        per = int(np.prod(shape[1:]))
-        kind = t["dtype"]
-        esz = {"BF16": 2, "F16": 2, "F32": 4}[kind]
-        lo = self.base + t["data_offsets"][0] + index * per * esz
-        buf = self.map[lo:lo + per * esz]
-        if kind == "BF16":
-            u = np.frombuffer(buf, dtype=np.uint16).astype(np.uint32) << 16
-            return u.view(np.float32).reshape(shape[1:])
-        if kind == "F16":
-            return np.frombuffer(buf, dtype=np.float16).astype(np.float32).reshape(shape[1:])
-        return np.frombuffer(buf, dtype=np.float32).reshape(shape[1:]).copy()
+        esz = {"BF16": 2, "F16": 2, "F32": 4}[t["dtype"]]
+        per = int(np.prod(shape[1:])) * esz
+
+        def slab(index):
+            return self._decode(buf[index * per:(index + 1) * per], t["dtype"], shape[1:])
+        return slab
 
 
 class Checkpoint:
@@ -384,9 +392,10 @@ def convert(src, out, log=print):
 
         def make(g=gate_up, d=down, fg=fg, fd=fd, layer=layer):
             out_blob = np.empty((experts, blob_bytes(hidden, inter)), dtype=np.uint8)
+            gate_up_slab, down_slab = fg.stack(g), fd.stack(d)           # each read once, front to back
             for e in range(experts):
-                gu = fg.slab(g, e)
-                out_blob[e] = expert_blob(gu[:inter], gu[inter:], fd.slab(d, e))
+                gu = gate_up_slab(e)
+                out_blob[e] = expert_blob(gu[:inter], gu[inter:], down_slab(e))
             log(f"  layer {layer + 1}/{layers} experts quantized ({time.time() - t0:.0f}s)")
             return out_blob
 

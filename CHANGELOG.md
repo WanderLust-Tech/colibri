@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Gemma 4 (26B-A4B), text only
+
+`c/gemma4.c` runs google/gemma-4-26B-A4B-it, Google's mixture of experts (25.2B parameters, 3.8B used per token): a new
+engine, a converter (`c/tools/convert_gemma4.py`, numpy only), its own tokenizer header (`c/gemma4_tok.h`: SentencePiece-style
+BPE with byte fallback), and in the gateway the model's chat template (byte for byte against the release's), tool calls in
+Gemma's own syntax and its thought channel as `reasoning_content`. Its sliding-window layers keep a ring of keys and values
+and only five layers keep every position, so a conversation costs 41 KB a token (a fifth of Qwen3-Coder's), and a
+conversation sent again keeps what it shares with the last turn even though the template drops the empty thought channel
+from the history. Checked against transformers on a tiny random model to 1.5e-5, with 26 of 27 mutations caught (the
+twenty-seventh is equivalent). Pictures, audio and the dense Gemma 4 sizes are not supported. [docs/gemma4.md](docs/gemma4.md)
+
 ### Several conversations keep their cache: smarter KV slot choice
 
 With `--kv-slots N` above 1, a chat request is now sent to the slot that already holds its earlier turns, and a new

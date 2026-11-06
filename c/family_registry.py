@@ -1054,8 +1054,9 @@ def _gemma4_geometry(config, context, _model_dir):
     pass holds besides.
 
     Only the full-attention layers keep every position (two KV heads of 512 on the 26B-A4B); each sliding
-    layer keeps a ring of its window plus one prompt chunk (gemma4.c: CHUNK) however long the context, so a
-    long window costs a fifth of what a model with a KV head per layer does. Keys and values are float32."""
+    layer keeps a ring of its window, one prompt chunk (gemma4.c: CHUNK) and the slack that lets a conversation
+    be rewound (G4_SLACK, 2048) however long the context, so a long window costs a fifth of what a model with a
+    KV head per layer does. Keys and values are float32."""
     layers = _required_int(config, "num_hidden_layers", "gemma4")
     kinds = config.get("layer_types")
     if not isinstance(kinds, list) or len(kinds) != layers:
@@ -1068,9 +1069,9 @@ def _gemma4_geometry(config, context, _model_dir):
     nkv_g = _optional_int(config, "num_global_key_value_heads", nkv_s, 1)
     full = sum(1 for kind in kinds if kind == "full_attention")
     sliding = layers - full
-    chunk = 256
+    chunk, slack = 256, 2048
     state = (full * context * nkv_g * hd_g * 2 * 4
-             + sliding * min(context, window + chunk) * nkv_s * hd_s * 2 * 4)
+             + sliding * min(context, window + chunk + slack) * nkv_s * hd_s * 2 * 4)
     hidden = _required_int(config, "hidden_size", "gemma4")
     wide = max(heads * max(hd_s, hd_g), _required_int(config, "intermediate_size", "gemma4"), hidden)
     workspace = chunk * wide * 4 * 6 + 64 * 1024 * 1024        # a chunk's activations, and the scratch of the expert kernel
