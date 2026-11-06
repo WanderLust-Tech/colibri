@@ -34,6 +34,22 @@ TINY = os.environ.get("GEMMA4_TINY", os.path.join(C_DIR, "gemma4_tiny"))
 REF = os.path.join(TINY, "ref.json")
 
 
+def ensure_container():
+    """The weights are not committed (no repo weights are): rebuild them from the fixed recipe, numpy only."""
+    import glob
+    if glob.glob(os.path.join(TINY, "model-*.safetensors")) or not os.path.isfile(REF):
+        return True
+    try:
+        import make_gemma4_tiny
+        make_gemma4_tiny.build_container(TINY)
+        return True
+    except ImportError:
+        return False
+
+
+HAVE_FIXTURE = bool(EXE) and os.path.isfile(REF) and ensure_container()
+
+
 def offline(ids, greedy=0, extra=None):
     """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids."""
     env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
@@ -46,7 +62,7 @@ def offline(ids, greedy=0, extra=None):
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
-@unittest.skipUnless(EXE and os.path.isfile(REF), "needs the built gemma4 and c/gemma4_tiny")
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class LogitsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -237,7 +253,7 @@ class Engine:
                 pass
 
 
-@unittest.skipUnless(EXE and os.path.isfile(REF), "needs the built gemma4 and c/gemma4_tiny")
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class ServeTest(unittest.TestCase):
     TURN = "<|turn>user\nthe quick brown fox<turn|>\n<|turn>model\n"
 

@@ -189,6 +189,8 @@ typedef struct {
     int trace;
 } Model;
 
+static int g_slots_hint = 1;                           /* KV_SLOTS, for sizing the expert cache */
+
 static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory (%zu bytes)", n); return p; }
 
 static void load_f32(Model *m, const char *name, float **out, int64_t want) {
@@ -256,6 +258,23 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
                   + 4 * ((size_t)2 * c->moe_inter * (H / 64) + (size_t)H * (c->moe_inter / 64));
     st_tensor *b = st_find(&m->S, m->L[0].blob_name);
     if (!b || b->numel != (int64_t)E * (int64_t)m->blob_bytes) die("expert blobs have the wrong size: the container does not match its config");
+    if (cap <= 0) {                                          /* nobody chose: what the machine can hold */
+        double total = 0, avail = 0; compat_meminfo_gb(&total, &avail);
+        if (avail <= 0) avail = total > 0 ? total * 0.5 : 8.0;
+        double ring_gb = 0, tok_gb = 0;                      /* KV of one conversation: the rings, and a 8192-token reply's full layers */
+        for (int l = 0; l < c->n_layers; l++) {
+            double per_pos = 2.0 * m->L[l].nkv * m->L[l].hd * 4 / 1e9;
+            if (m->L[l].full) tok_gb += per_pos * (max_t < 8192 ? max_t : 8192); else ring_gb += per_pos * (c->window + CHUNK);
+        }
+        double kv_gb = g_slots_hint * (ring_gb + tok_gb);
+        double budget = avail * 0.75 - rss_gb() - kv_gb;
+        double per_cap = (double)c->n_layers * (double)m->blob_bytes / 1e9;
+        cap = budget > 0 ? (int)(budget / per_cap) : 0;
+        if (cap < 8) cap = 8;
+        fprintf(stderr, "[gemma4] %.1f GB free: %d of %d experts cached per layer (%.1f GB; KV for %d conversation%s %.1f GB)%s\n",
+                avail, cap > E ? E : cap, E, (cap > E ? E : cap) * per_cap, g_slots_hint, g_slots_hint == 1 ? "" : "s", kv_gb,
+                cap < 32 ? " -- little memory: reading experts from disk will be slow; --cap or --ctx overrides" : "");
+    }
     if (cap < c->topk) cap = c->topk;
     if (cap > E) cap = E;
     m->cap = cap;
@@ -903,7 +922,7 @@ int main(int argc, char **argv) {
     coli_omp_tune_threads("gemma4");
     const char *snap = getenv("SNAP");
     if (!snap) { coli_print_launcher_help("Gemma 4", "SNAP=<model directory> SERVE=1 ./gemma4 <experts cached per layer>"); return 1; }
-    int cap = argc > 1 ? atoi(argv[1]) : (getenv("G4_CAP") ? atoi(getenv("G4_CAP")) : 16);
+    int cap = argc > 1 ? atoi(argv[1]) : (getenv("G4_CAP") ? atoi(getenv("G4_CAP")) : 0);   /* 0: size it from free memory */
     int test = getenv("G4_TEST") && getenv("G4_TEST")[0] == '1';
     int n_slots = 1;
     if (getenv("KV_SLOTS") && *getenv("KV_SLOTS")) {
@@ -911,6 +930,7 @@ int main(int argc, char **argv) {
         if (*end || v < 1 || v > MAX_SLOTS) { fprintf(stderr, "KV_SLOTS must be between 1 and %d\n", MAX_SLOTS); return 2; }
         n_slots = (int)v;
     }
+    g_slots_hint = n_slots;
     int ctx = getenv("CTX") ? atoi(getenv("CTX")) : 8192;
     if (ctx < 1 || ctx > 262144) { fprintf(stderr, "CTX must be 1..262144 (got %d)\n", ctx); return 2; }
     if (getenv("SEED")) g_rng ^= (uint64_t)atoll(getenv("SEED")) * 0xD1B54A32D192ED03ULL; else g_rng ^= (uint64_t)time(NULL) * 0xD1B54A32D192ED03ULL;
