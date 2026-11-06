@@ -889,7 +889,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
                 if (cmd.kind == COLI_SERVE_COMMAND_SUBMIT) coli_serve_write_error(stdout, cmd.id, "bad submit header");
                 coli_serve_command_dispose(&cmd);
             } else if (res == COLI_SERVE_READ_OK) {
-                if (cmd.kind == COLI_SERVE_COMMAND_CANCEL) {
+                if (cmd.kind == COLI_SERVE_COMMAND_CANCEL || cmd.kind == COLI_SERVE_COMMAND_STOP) {   /* both end the request with its DONE */
                     for (int i = 0; i < n_slots; i++) if (rq[i].active && !strcmp(rq[i].id, cmd.id)) rq[i].cancel = 1;
                 } else if (cmd.kind == COLI_SERVE_COMMAND_SUBMIT) {
                     if (cmd.slot < 0 || cmd.slot >= n_slots) coli_serve_write_error(stdout, cmd.id, "invalid cache slot");
@@ -904,7 +904,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
                             coli_serve_write_accept(stdout, r->id, r->np);
                         free(payload);
                     }
-                } else if (cmd.kind != COLI_SERVE_COMMAND_STOP) {
+                } else {
                     coli_serve_write_error(stdout, cmd.id, "NOT_SUPPORTED");
                 }
                 coli_serve_command_dispose(&cmd);

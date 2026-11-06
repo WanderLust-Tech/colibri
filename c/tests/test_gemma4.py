@@ -220,8 +220,8 @@ class Engine:
         self.proc.stdin.flush()
         return rid
 
-    def cancel(self, rid):
-        self.proc.stdin.write(f"CANCEL {rid}\n".encode())
+    def cancel(self, rid, verb="CANCEL"):
+        self.proc.stdin.write(f"{verb} {rid}\n".encode())
         self.proc.stdin.flush()
 
     def collect(self, rid, timeout=60):
@@ -412,6 +412,19 @@ class ServeTest(unittest.TestCase):
         out = e.collect(rid)
         self.assertLess(int(out["done"][2]), 400)
         self.assertEqual(out["done"][7], "0")              # not "stopped by the length limit"
+        self.assertEqual(e.ask("hello there", max_tokens=2)["done"][2], "2")
+
+    def test_stop_ends_a_request_early_the_same_way(self):
+        """The gateway sends STOP when a client's stop sequence has matched: the engine must not run on to max_tokens."""
+        e = self.engine()
+        rid = e.submit("the quick brown fox", max_tokens=400)
+        kind = None
+        while kind != "DATA":
+            kind, args, _ = e.get()
+        e.cancel(rid, verb="STOP")
+        out = e.collect(rid)
+        self.assertLess(int(out["done"][2]), 400)
+        self.assertEqual(out["done"][7], "0")
         self.assertEqual(e.ask("hello there", max_tokens=2)["done"][2], "2")
 
     def test_a_prompt_that_does_not_fit_is_refused_with_the_frame_the_gateway_reads(self):
