@@ -54,6 +54,12 @@ MUTANTS = [
     ("expert input not pre-normalised", "rms_w(m->e_in + (size_t)s * H, xres + (size_t)s * H, y->pre_ff_ln2, H, c->eps);",
      "memcpy(m->e_in + (size_t)s * H, xres + (size_t)s * H, (size_t)H * 4);"),
     ("expert cache serves the wrong expert", "int sl = lc->slot_of[want[i]];", "int sl = lc->slot_of[(want[i] + 1) % c->n_experts];"),
+    # the serve loop's reuse of a rewound conversation (ServeTest)
+    ("reuse ignores what the ring still holds", "if (p->len > m->ring && p->len - c > m->ring - m->c.window + 1) return 0;", "", "ServeTest"),
+    ("reuse allows one position too many", "p->len - c > m->ring - m->c.window + 1) return 0;", "p->len - c > m->ring - m->c.window + 2) return 0;", "ServeTest"),
+    ("reuse allows one position too few", "p->len - c > m->ring - m->c.window + 1) return 0;", "p->len - c > m->ring - m->c.window) return 0;", "ServeTest"),
+    ("reuse forgets to cut the record", "    p->len = c;\n    return c;", "    return c;", "ServeTest"),
+    ("reuse feeds nothing when the prompt repeats", "if (c > np - 1) c = np - 1;", "if (c > np) c = np;", "ServeTest"),
 ]
 
 
@@ -62,7 +68,8 @@ def main():
         original = handle.read()
     survived = []
     with tempfile.TemporaryDirectory() as tmp:
-        for name, old, new in MUTANTS:
+        for name, old, new, *which in MUTANTS:
+            which = which[0] if which else "LogitsTest"
             if original.count(old) != 1:
                 print(f"?? {name}: the pattern matches {original.count(old)} times, fix the mutant")
                 survived.append(name)
@@ -76,7 +83,7 @@ def main():
                 print(f"?? {name}: does not build\n{build.stderr[-400:]}")
                 survived.append(name)
                 continue
-            run = subprocess.run([sys.executable, os.path.join(C_DIR, "tests", "test_gemma4.py"), "LogitsTest"],
+            run = subprocess.run([sys.executable, os.path.join(C_DIR, "tests", "test_gemma4.py"), which],
                                  env=dict(os.environ, GEMMA4_EXE=exe, PYTHONUTF8="1"), capture_output=True, text=True)
             killed = run.returncode != 0
             print(("killed   " if killed else ("equivalent " if name in EQUIVALENT else "SURVIVED ")) + name)

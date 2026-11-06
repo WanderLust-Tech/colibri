@@ -180,7 +180,8 @@ typedef struct {
     int cap; size_t blob_bytes;
     LCache *cache; uint64_t clock; uint32_t group; uint64_t hits, miss; double disk_s;
     uint8_t *ehit;                                    /* [layers*experts] routed this request */
-    int max_t, ring, chunk;                           /* chunk: rows per forward_chunk (<= CHUNK); ring: window + chunk */
+    int max_t, ring, chunk, slack;                    /* chunk: rows per forward_chunk (<= CHUNK); slack: positions the sliding
+                                                       * layers keep beyond window + chunk, so a conversation can be rewound; ring: all three */
     /* working memory for one chunk */
     float *x, *h, *qb, *kb, *vb, *ao, *g1, *u1, *m1, *m2, *e_in, *e_out, *rl, *kv_tmp;
     int *ridx; float *rval; const XfExpert **eptr; XfExpert *xe; void *scratch; size_t scratch_bytes;
@@ -297,7 +298,9 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
     m->max_t = max_t;
     m->chunk = getenv("G4_CHUNK") ? atoi(getenv("G4_CHUNK")) : CHUNK;
     if (m->chunk < 1 || m->chunk > CHUNK) m->chunk = CHUNK;
-    m->ring = c->window + m->chunk;
+    m->slack = getenv("G4_SLACK") ? atoi(getenv("G4_SLACK")) : 2048;
+    if (m->slack < 0) m->slack = 0;
+    m->ring = c->window + m->chunk + m->slack;
     int nh = c->n_heads, hdm = c->hd_g > c->hd_s ? c->hd_g : c->hd_s;
     int kvm = c->nkv_s * c->hd_s > c->nkv_g * c->hd_g ? c->nkv_s * c->hd_s : c->nkv_g * c->hd_g;
     int Fd = c->dense_inter;
@@ -822,6 +825,25 @@ static void req_finish(Model *m, Req *r) {
 
 static int kv_prefix_off(void) { const char *e = getenv("COLI_KV_PREFIX"); return e && *e == '0'; }
 
+/* How much of what a slot holds this prompt may keep. Colibri's other engines keep a cache only when the new prompt
+ * begins with everything fed. That would waste Gemma 4: its template drops the empty thought channel (and a past
+ * turn's reasoning) from the history, so a resent conversation differs from what was fed just after "<|turn>model",
+ * and the whole conversation would be read again every turn. Here the common prefix is kept, and the positions
+ * after it forgotten, as long as the sliding layers still hold the window before it: their ring keeps the last
+ * `ring` positions, so the prefix may end at most ring - window + 1 before the end of what was fed. The full layers
+ * keep every position, so they never limit it. At least one token is always left to feed. */
+static int reuse_len(Model *m, Seq *q, const int *ids, int np) {
+    kv_prefix *p = &q->kvp;
+    if (!p->fed || p->tainted || p->len <= 0) return 0;
+    int c = 0, top = p->len < np ? p->len : np;
+    while (c < top && p->fed[c] == ids[c]) c++;
+    if (c > np - 1) c = np - 1;
+    if (c <= 0) return 0;
+    if (p->len > m->ring && p->len - c > m->ring - m->c.window + 1) return 0;      /* the window before c is gone */
+    p->len = c;
+    return c;
+}
+
 /* Begin a request: tokenize, budget, find what the slot already holds. 0 when it ended here. */
 static int req_start(Model *m, G4Tok *T, Req *r, Seq *q, const char *payload, int plen, int ctx_cap) {
     int cap = plen + 16;
@@ -834,7 +856,7 @@ static int req_start(Model *m, G4Tok *T, Req *r, Seq *q, const char *payload, in
         coli_serve_write_error(stdout, r->id, msg); free(r->ids); r->ids = NULL; return 0;
     }
     if (budget < r->max_tok) r->max_tok = budget;
-    int reuse = kv_prefix_off() ? 0 : kv_prefix_reuse(&q->kvp, r->ids, r->np);
+    int reuse = kv_prefix_off() ? 0 : reuse_len(m, q, r->ids, r->np);
     if (!reuse) kv_prefix_clear(&q->kvp);
     if (getenv("COLI_PREFIX_LOG"))
         fprintf(stderr, reuse ? "[PREFIX] reusing %d of %d prompt tokens\n" : "[PREFIX] no reuse of %d held, prompt %d\n", reuse ? reuse : q->kvp.len, r->np);

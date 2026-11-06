@@ -53,7 +53,7 @@ HAVE_FIXTURE = bool(EXE) and os.path.isfile(REF) and ensure_container()
 def offline(ids, greedy=0, extra=None):
     """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids."""
     env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
-               OMP_NUM_THREADS="2")
+               OMP_NUM_THREADS="2", G4_SLACK="0")          # no slack: the ring is window + chunk, so it wraps
     env.update(extra or {})
     cap = env.pop("CAP", "128")
     done = subprocess.run([EXE, cap], env=env, capture_output=True, text=True, timeout=120)
@@ -306,6 +306,64 @@ class ServeTest(unittest.TestCase):
         self.assertFalse(any("reusing" in line for line in without.log))
         self.assertEqual(a["data"], b["data"])
         self.assertEqual(a["data"], with_reuse.ask(second, max_tokens=6)["data"])
+
+    def reuse_lines(self, engine):
+        return [line for line in engine.log if line.startswith("[PREFIX]")]
+
+    def test_a_rewound_conversation_keeps_what_it_shares_with_the_last(self):
+        """The template drops the empty thought channel from past turns, so a resent conversation differs from
+        what was fed right after "<|turn>model": the shared prefix is kept, the rest read again."""
+        shared_text = "<|turn>user\nthe quick brown fox<turn|>\n<|turn>model\n"
+        first = shared_text + "<|channel>thought\n<channel|>"
+        second = (shared_text + "hello there<turn|>\n<|turn>user\nmore<turn|>\n<|turn>model\n"
+                  "<|channel>thought\n<channel|>")
+        with_reuse = self.engine()
+        with_reuse.ask(first, max_tokens=6)
+        a = with_reuse.ask(second, max_tokens=6)
+        line = self.reuse_lines(with_reuse)[-1]
+        shared = self.engine().ask(shared_text, max_tokens=1)["accept"]
+        self.assertIn(f"reusing {shared} of", line)        # exactly the shared tokens, not the whole first prompt
+        without = self.engine(extra={"COLI_KV_PREFIX": "0"})
+        without.ask(first, max_tokens=6)
+        self.assertEqual(a["data"], without.ask(second, max_tokens=6)["data"])
+
+    def test_a_conversation_rewound_past_the_rings_slack_is_read_again(self):
+        """Window 6, chunk 4, no slack: the ring holds 10 positions, so a prefix may end at most 5 before the end
+        of what was fed."""
+        small = {"G4_SLACK": "0", "G4_CHUNK": "4"}
+        long_a = "a " * 40
+        # "a " * 40 is 41 tokens; two generated tokens leave 42 fed. A prompt sharing the first k tokens rewinds 42 - k:
+        # 5 is the most the ring allows.
+        for text, kept in (("a " * 37 + "s s s", True), ("a " * 36 + "s s s", False), ("a " * 10 + "s " * 30, False)):
+            e = self.engine(extra=small)
+            e.ask(long_a, max_tokens=2)
+            got = e.ask(text, max_tokens=5)
+            line = self.reuse_lines(e)[-1]
+            self.assertEqual("reusing" in line, kept, line)
+            plain = self.engine(extra=dict(small, COLI_KV_PREFIX="0"))
+            plain.ask(long_a, max_tokens=2)
+            self.assertEqual(got["data"], plain.ask(text, max_tokens=5)["data"], text)
+
+    def test_what_was_forgotten_by_a_rewind_is_not_matched_later(self):
+        """A is rewound to B (shorter), then C is B followed by exactly the tokens A had after B's end. If the engine
+        still believed it held A's tail, it would keep keys and values computed under A's middle for C."""
+        t = "<turn|>"
+        a = "<|turn>user\nthe quick" + t + " a" * 8 + t + " the fox"
+        b = "<|turn>user\nthe quick" + t + " a" * 3 + t
+        c = b + " a" * 5 + t + " the fox"
+        e = self.engine()
+        e.ask(a, max_tokens=1)
+        in_b = e.ask(b, max_tokens=1)["accept"]
+        got = e.ask(c, max_tokens=8)
+        self.assertIn(f"reusing {in_b} of", self.reuse_lines(e)[-1])     # B, not A's longer prefix
+        self.assertEqual(got["data"], self.engine().ask(c, max_tokens=8)["data"])
+
+    def test_the_same_prompt_again_feeds_only_its_last_token(self):
+        e = self.engine()
+        e.ask(self.TURN, max_tokens=6)
+        again = e.ask(self.TURN, max_tokens=6)
+        self.assertIn("reusing", self.reuse_lines(e)[-1])
+        self.assertEqual(again["data"], self.engine().ask(self.TURN, max_tokens=6)["data"])
 
     def test_two_conversations_keep_their_own_cache_and_may_overlap(self):
         e = self.engine(slots=2)
