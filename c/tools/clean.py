@@ -41,6 +41,7 @@ FILES = [
     "deepseek_v4", "deepseek_v4.exe", "deepseek_v4.cflags", "deepseek_v4.cudaflags",
     "deepseek_v41", "deepseek_v41.exe",
     "mimo", "mimo.exe",
+    "gemma4", "gemma4.exe",
     "qwenimage", "qwenimage.exe",
     "acestep", "acestep.exe",
     "laya", "laya.exe",

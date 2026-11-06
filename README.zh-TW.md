@@ -18,10 +18,10 @@
 因此 colibri 把這一部分留在 RAM 中，其餘的部分，也就是專家，則在模型需要時才從硬碟讀取。
 純 C 實作，每個模型家族一個檔案，不需要 GPU。
 
-目前有十三個引擎可以執行。其中十個用於語言模型：**GLM-5.2/5.3**、
+目前有十四個引擎可以執行。其中十一個用於語言模型：**GLM-5.2/5.3**、
 **GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、
 **DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、
-**Qwen3.6**（同一引擎也執行 Qwen3-Coder 與稠密的 Qwen3.8-27B）以及
+**Qwen3.6**（同一引擎也執行 Qwen3-Coder 與稠密的 Qwen3.8-27B）、**Gemma-4**（26B-A4B 混合專家模型）以及
 **OLMoE**。一個用來生成圖片：**Qwen-Image-2.1**。兩個用來回答決策問題：
 **Laya** 與 **GLiNER2.5-Decide**；第三個決策模型 **Clef** 則執行在
 Qwen3.6 引擎上。[我的機器適合哪一個](#which-model-for-my-machine)

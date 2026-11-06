@@ -19,11 +19,11 @@ parameters uses only a small part of itself for each token, so colibri keeps
 that part in RAM and reads the rest, the experts, from the disk when the model
 asks for them. Pure C, one file per model family, no GPU required.
 
-Fourteen engines run today. Ten are for language models: **GLM-5.2/5.3**,
+Fifteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
-**Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B) and
-**OLMoE**. One draws pictures: **Qwen-Image-2.1**. One makes music: **ACE-Step 1.5**. Two answer decisions:
+**Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B),
+**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. One draws pictures: **Qwen-Image-2.1**. One makes music: **ACE-Step 1.5**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 

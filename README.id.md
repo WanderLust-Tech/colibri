@@ -20,11 +20,11 @@ sehingga colibri menyimpan bagian itu di RAM dan membaca sisanya, yaitu para
 pakar, dari disk ketika model membutuhkannya. C murni, satu file per keluarga
 model, tanpa memerlukan GPU.
 
-Saat ini ada tiga belas engine yang dapat dijalankan. Sepuluh di antaranya untuk
+Saat ini ada empat belas engine yang dapat dijalankan. Sebelas di antaranya untuk
 model bahasa: **GLM-5.2/5.3**, **GLM-5.3-Flash**, **Inkling**, **Kimi K3**,
 **DeepSeek V4 Flash**, **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (dan Pro),
 **Qwen3.8-Flash-Next**, **Qwen3.6** (yang juga menjalankan Qwen3-Coder dan model
-dense Qwen3.8-27B), serta **OLMoE**. Satu menghasilkan gambar:
+dense Qwen3.8-27B), **Gemma-4** (26B-A4B, campuran pakar), serta **OLMoE**. Satu menghasilkan gambar:
 **Qwen-Image-2.1**. Dua digunakan untuk menjawab pertanyaan pengambilan keputusan:
 **Laya** dan **GLiNER2.5-Decide**, dengan model keputusan ketiga, **Clef**, pada
 engine Qwen3.6. [Mana yang cocok untuk mesin saya](#which-model-for-my-machine)

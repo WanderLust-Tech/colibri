@@ -95,7 +95,7 @@ jobs:
       - name: Build engines
         run: |
           cd c
-          for t in colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage acestep laya gliner_decide; do
+          for t in colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo gemma4 qwenimage acestep laya gliner_decide; do
             extra=""
             case " ${{ matrix.metal }} " in *" $t "*) extra="METAL=1" ;; esac
             make $t ${{ matrix.make_args }} $extra
@@ -164,6 +164,7 @@ jobs:
           cp c/acestep${{ matrix.ext }} dist/acestep${{ matrix.ext }}
           cp c/deepseek_v41${{ matrix.ext }} dist/deepseek_v41${{ matrix.ext }}
           cp c/mimo${{ matrix.ext }} dist/mimo${{ matrix.ext }}
+          cp c/gemma4${{ matrix.ext }} dist/gemma4${{ matrix.ext }}
           cp c/laya${{ matrix.ext }} dist/laya${{ matrix.ext }}
           cp c/gliner_decide${{ matrix.ext }} dist/gliner_decide${{ matrix.ext }}
           # deepseek_v4 -- underscore, not the hyphen of the make target: engine_for()
@@ -347,7 +348,7 @@ jobs:
           for f in ../c/shaders/*.spv; do
             test -f "shaders/$(basename "$f")" || { echo "FAIL: shaders/$(basename "$f") missing from archive"; exit 1; }
           done
-          ENGINES="colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage acestep laya gliner_decide"
+          ENGINES="colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo gemma4 qwenimage acestep laya gliner_decide"
           if [ "${{ matrix.v4 }}" = "1" ]; then ENGINES="$ENGINES deepseek_v4"; fi
           COLI_ENGINES="$ENGINES" python3 - <<'PYCHK'
           import os, sys

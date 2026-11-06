@@ -1049,6 +1049,50 @@ def _inkling_expert_inventory(name, size, config, _dtype=None):
     return tuple((layer, expert, per_expert) for expert in range(experts))
 
 
+def _gemma4_geometry(config, context, _model_dir):
+    """Gemma 4 (the mixture-of-experts one): the keys and values of a conversation, and what the forward
+    pass holds besides.
+
+    Only the full-attention layers keep every position (two KV heads of 512 on the 26B-A4B); each sliding
+    layer keeps a ring of its window plus one prompt chunk (gemma4.c: CHUNK) however long the context, so a
+    long window costs a fifth of what a model with a KV head per layer does. Keys and values are float32."""
+    layers = _required_int(config, "num_hidden_layers", "gemma4")
+    kinds = config.get("layer_types")
+    if not isinstance(kinds, list) or len(kinds) != layers:
+        raise ValueError("gemma4: layer_types must list every layer")
+    window = _required_int(config, "sliding_window", "gemma4")
+    heads = _required_int(config, "num_attention_heads", "gemma4")
+    hd_s = _required_int(config, "head_dim", "gemma4")
+    nkv_s = _required_int(config, "num_key_value_heads", "gemma4")
+    hd_g = _optional_int(config, "global_head_dim", hd_s, 1)
+    nkv_g = _optional_int(config, "num_global_key_value_heads", nkv_s, 1)
+    full = sum(1 for kind in kinds if kind == "full_attention")
+    sliding = layers - full
+    chunk = 256
+    state = (full * context * nkv_g * hd_g * 2 * 4
+             + sliding * min(context, window + chunk) * nkv_s * hd_s * 2 * 4)
+    hidden = _required_int(config, "hidden_size", "gemma4")
+    wide = max(heads * max(hd_s, hd_g), _required_int(config, "intermediate_size", "gemma4"), hidden)
+    workspace = chunk * wide * 4 * 6 + 64 * 1024 * 1024        # a chunk's activations, and the scratch of the expert kernel
+    return PlannerGeometry(state, 0, workspace, _required_int(config, "num_experts", "gemma4"))
+
+
+_GEMMA4_EXPERTS = re.compile(r"^model\.language_model\.layers\.(\d+)\.experts\.blob$")
+
+
+def _gemma4_expert_inventory(name, size, config, _dtype=None):
+    """The container keeps each layer's experts as one tensor of equal records (tools/convert_gemma4.py);
+    the planner prices them one by one."""
+    match = _GEMMA4_EXPERTS.fullmatch(name)
+    if match is None:
+        return ()
+    experts = _required_int(config, "num_experts", "gemma4")
+    if size % experts:
+        raise ValueError(f"gemma4: expert tensor {name!r} is not divisible by {experts} experts")
+    layer = int(match.group(1))
+    return tuple((layer, expert, size // experts) for expert in range(experts))
+
+
 def _qwen38_expert_inventory(name, size, config, dtype=None):
     """Index per-expert FP8 and fused BF16 expert tensor layouts.
 
@@ -1539,6 +1583,41 @@ FAMILIES = (
         # trunk goes first, as int8 residents (docs/qwen38.md, "GPU").
         supports_accelerator=True,
         trunk_inventory=_qwen38_trunk_inventory,
+    ),
+    FamilyDescriptor(
+        id="gemma4",
+        # Gemma 4's mixture of experts (google/gemma-4-26B-A4B-it): 128 experts, 8 a token, text only.
+        # The checkpoint says gemma4 with a text_config; a text-only export says gemma4_text.
+        model_types=("gemma4", "gemma4_text"),
+        display_name="Gemma-4-26B-A4B",
+        display_scale="26B",
+        engine_artifact="gemma4",
+        engine_aliases=(),
+        engine_group="gemma4",
+        internal_arch="gemma4",
+        build_target="gemma4",
+        process_names=("gemma4",),
+        default_model_id="gemma-4-26b-a4b-colibri",
+        cli_adapter="gemma4",
+        gateway_adapter="gemma4",
+        planner_id="gemma4_moe",
+        planner_geometry=_gemma4_geometry,
+        planner_unsupported_reason="",
+        expert_inventory=_gemma4_expert_inventory,
+        # coli convert routes to convert_gemma4.py: it takes --src or --repo and --out only.
+        converter="convert_gemma4.py",
+        converter_accepts=(),
+        config_section="text_config",
+        # implicit_cap 0: the engine sizes its expert cache from free memory when nobody chose a number
+        # (gemma4.c), the way olmoe does. Eight slots a layer would stream every expert off the disk.
+        limits=FamilyLimits(8192, 262144, 1024, 8192, 16, 0, "CTX"),
+        capabilities=FamilyCapabilities(True, False, False, True),
+        has_gateway_adapter=True,
+        # coli run stays unwired: its one-shot path would need this family's template, and chat, serve and
+        # web all reach it through the gateway.
+        has_cli_adapter=False,
+        supports_accelerator=False,
+        tune_prompt_template="<bos><|turn>user\n{prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
     ),
     FamilyDescriptor(
         id="deepseek_v4",

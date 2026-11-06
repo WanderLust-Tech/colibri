@@ -15,7 +15,7 @@
 
 **小さなエンジン、巨大なモデル。** colibri は、とても大きなオープンモデルを、あなたがすでに持っているマシンで動かします。数千億パラメータの Mixture-of-Experts モデルは、1 トークンごとに自分自身のごく一部しか使いません。そこで colibri はその部分を RAM に置き、残りの部分、つまりエキスパートは、モデルが必要としたときにディスクから読み込みます。純粋な C で書かれ、モデルファミリーごとにファイルは 1 つ、GPU は不要です。
 
-現在動作するエンジンは 13 個です。そのうち 10 個は言語モデル用です：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（と Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（Qwen3-Coder と密モデルの Qwen3.8-27B も動かします）、そして **OLMoE**。1 個は画像を描きます：**Qwen-Image-2.1**。2 個は判定に答えます：**Laya** と **GLiNER2.5-Decide** で、さらに 3 つ目の判定モデル **Clef** が Qwen3.6 エンジンで動きます。[自分のマシンに合うのはどれか](#which-model-for-my-machine)
+現在動作するエンジンは 14 個です。そのうち 11 個は言語モデル用です：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（と Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（Qwen3-Coder と密モデルの Qwen3.8-27B も動かします）、**Gemma-4**（26B-A4B のエキスパート混合モデル）、そして **OLMoE**。1 個は画像を描きます：**Qwen-Image-2.1**。2 個は判定に答えます：**Laya** と **GLiNER2.5-Decide** で、さらに 3 つ目の判定モデル **Clef** が Qwen3.6 エンジンで動きます。[自分のマシンに合うのはどれか](#which-model-for-my-machine)
 
 ```
 $ ./coli chat

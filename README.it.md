@@ -20,11 +20,11 @@ tiene quella parte in RAM e legge il resto, gli expert, dal disco quando il
 modello li chiede. C puro, un file per famiglia di modelli, nessuna GPU
 necessaria.
 
-Oggi girano tredici motori. Dieci sono per modelli linguistici: **GLM-5.2/5.3**,
+Oggi girano quattordici motori. Undici sono per modelli linguistici: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (e Pro), **Qwen3.8-Flash-Next**,
-**Qwen3.6** (che esegue anche Qwen3-Coder e il denso Qwen3.8-27B) e
-**OLMoE**. Uno disegna immagini: **Qwen-Image-2.1**. Due prendono decisioni:
+**Qwen3.6** (che esegue anche Qwen3-Coder e il denso Qwen3.8-27B),
+**Gemma-4** (il 26B-A4B a miscela di esperti) e **OLMoE**. Uno disegna immagini: **Qwen-Image-2.1**. Due prendono decisioni:
 **Laya** e **GLiNER2.5-Decide**, con un terzo modello di decisione, **Clef**, sul
 motore Qwen3.6. [Quale scegliere per la mia macchina](#which-model-for-my-machine)
 

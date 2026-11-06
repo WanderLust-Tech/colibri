@@ -25,6 +25,7 @@ import v4_dsml                      # vendored DeepSeek V4 DSML reference primit
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
+import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
 from family_registry import default_model_id as registry_default_model_id
@@ -1058,6 +1059,8 @@ def _parse_arch_tool_calls(reply, tools, tool_reply, track_spans):
         return parse_k3_tool_calls(reply, tools) + (None, None)  # pre-#1147 engines
     if chat_flavor() in ("qwen36", "qwen38", "qwen3_coder"):
         return parse_qwen_tool_calls(reply, tools) + (None, None)
+    if ARCH == "gemma4":
+        return gemma4_chat.parse_tool_calls(reply, tools) + (None, None)
     if ARCH == "mimo":
         return _parse_mimo_tool_calls(reply, tools, track_spans)
     return _parse_tool_calls(reply, tools, track_spans)
@@ -1073,6 +1076,8 @@ def _tool_stream_markers():
         return (v41_dsml.TOOL_CALLS_PREFIX, v41_dsml.TOOL_CALL_PREFIX)
     if ARCH == "kimi":
         return (K3_TOOLS_OPEN,)
+    if ARCH == "gemma4":
+        return (gemma4_chat.CALL_OPEN,)
     return (BOX_START,)
 
 
@@ -1718,6 +1723,23 @@ def render_chat_v4(messages, enable_thinking=False, reasoning_effort=None, tools
     if add_generation_prompt:
         parts.extend((assistant, "<think>" if enable_thinking else "</think>"))
     return "".join(parts)
+
+
+def render_chat_gemma4(messages, enable_thinking=False, reasoning_effort=None, tools=None,
+                       tool_choice=None, add_generation_prompt=True, preserve_thinking=False):
+    """Gemma 4's chat template, byte for byte (gemma4_chat.render; tests/test_gemma4_chat_template.py
+    renders the release's own template with jinja2 and compares). Tool declarations ride the system turn
+    in Gemma's own syntax, calls and results are <|tool_call> and <|tool_response> blocks, and with thinking
+    off the cue carries an empty thought channel so the model answers at once.
+
+    Pictures, audio and video are refused: this engine reads text."""
+    if tool_choice == "none":
+        tools = None
+    try:
+        return gemma4_chat.render(messages, tools, bool(enable_thinking), add_generation_prompt,
+                                  bool(preserve_thinking))
+    except gemma4_chat.ChatError as error:
+        raise APIError(400, str(error), error.param, error.code) from error
 
 
 def render_chat_olmoe(messages, enable_thinking=False, reasoning_effort=None, tools=None,
@@ -3483,6 +3505,9 @@ def render_chat_for_arch(messages, enable_thinking=False, reasoning_effort=None,
     if ARCH == "glm53":
         return render_chat_glm53(messages, enable_thinking, reasoning_effort, tools,
                                  tool_choice, add_generation_prompt)
+    if ARCH == "gemma4":
+        return render_chat_gemma4(messages, enable_thinking, reasoning_effort, tools,
+                                  tool_choice, add_generation_prompt, preserve_thinking)
     if chat_flavor() == "qwen38":
         return render_chat_qwen38(messages, enable_thinking, reasoning_effort, tools,
                                   tool_choice, add_generation_prompt)
@@ -5293,12 +5318,13 @@ class _Pending:
     keeps holding it until the engine says the turn is over. Dropping the entry instead
     would free the admission while the engine is still generating, and the next request
     would submit into a pipe nobody is reading."""
-    __slots__ = ("events", "logprob_channel", "failed")
+    __slots__ = ("events", "logprob_channel", "failed", "dialect")
 
     def __init__(self, logprob_channel=False):
         self.events = queue.Queue()
         self.logprob_channel = logprob_channel
         self.failed = None
+        self.dialect = None            # Gemma 4: the stream's translation of its thinking channel
 
 
 class Engine:
@@ -5551,6 +5577,13 @@ class Engine:
                         except APIError as error:
                             self._record_fault(entry, error)
                             continue
+                    if record is None and self.family.id == "gemma4":
+                        # Its thinking channel in the words the reasoning splitter already knows.
+                        if entry.dialect is None:
+                            entry.dialect = gemma4_chat.StreamDialect()
+                        data = entry.dialect.feed(data)
+                        if not data:
+                            continue
                     entry.events.put(("data", data if record is None else (data, record)))
                 elif kind == "TOOL" and len(fields) == 3:
                     # Opaque, request-scoped structured output. K3 emits an
@@ -5654,6 +5687,10 @@ class Engine:
                     with self.pending_lock:
                         entry = self.pending.pop(request_id, None)
                     if entry is not None:
+                        if entry.dialect is not None:
+                            tail = entry.dialect.flush()     # a reply that ended inside the channel's opening
+                            if tail:
+                                entry.events.put(("data", tail))
                         # The turn is over, so a fault recorded mid-turn is delivered now
                         # rather than when it was found, which would have freed the
                         # admission while the engine was still generating.

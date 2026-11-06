@@ -15,7 +15,7 @@
 
 **小巧引擎，庞大模型。** colibri 在你现有的机器上运行超大规模的开放模型。一个拥有数千亿参数的专家混合（mixture-of-experts，MoE）模型，每个 token 只会用到自身的一小部分，因此 colibri 把这一部分放在内存中，其余部分，也就是各个专家，则在模型需要时从磁盘读取。纯 C 实现，每个模型家族一个文件，不需要 GPU。
 
-目前有十三个引擎可以运行。其中十个用于语言模型：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（它也能运行 Qwen3-Coder 和稠密的 Qwen3.8-27B）以及 **OLMoE**。一个用于生成图片：**Qwen-Image-2.1**。两个用于回答决策问题：**Laya** 和 **GLiNER2.5-Decide**，第三个决策模型 **Clef** 运行在 Qwen3.6 引擎上。[我的机器适合哪一个](#which-model-for-my-machine)
+目前有十四个引擎可以运行。其中十一个用于语言模型：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（它也能运行 Qwen3-Coder 和稠密的 Qwen3.8-27B）、**Gemma-4**（26B-A4B 混合专家模型）以及 **OLMoE**。一个用于生成图片：**Qwen-Image-2.1**。两个用于回答决策问题：**Laya** 和 **GLiNER2.5-Decide**，第三个决策模型 **Clef** 运行在 Qwen3.6 引擎上。[我的机器适合哪一个](#which-model-for-my-machine)
 
 ```
 $ ./coli chat

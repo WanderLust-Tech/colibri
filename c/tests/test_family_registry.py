@@ -1051,6 +1051,8 @@ class FamilyRegistryTest(unittest.TestCase):
             "deepseek_v41": "hello {world}",
             # MiMo-V2.6: render_chat_mimo's cue with thinking on (its template's default)
             "mimo": "<|im_start|>user\nhello {world}<|im_end|><|im_start|>assistant\n<think>",
+            # Gemma 4: render_chat_gemma4's cue with thinking off (an empty thought channel)
+            "gemma4": "<bos><|turn>user\nhello {world}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             # An image model has no chat template and nothing to tune; the
             # template is the identity and `coli tune` refuses the modality.
             "qwen_image": "hello {world}",

@@ -48,7 +48,10 @@ import struct
 import sys
 import time
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    sys.exit("convert_gemma4.py needs numpy: pip install numpy (and huggingface_hub for --repo)")
 
 META_FORMAT = "colibri-gemma4-v1"
 BLOCK = 64                    # int4 group size: fixed by c/expert_ffn.h
@@ -416,7 +419,8 @@ def main():
     where = ap.add_mutually_exclusive_group(required=True)
     where.add_argument("--src", help="a local checkpoint directory (config.json + safetensors)")
     where.add_argument("--repo", help="a Hugging Face repo to download first, e.g. google/gemma-4-26B-A4B-it")
-    ap.add_argument("--out", required=True, help="the container directory to write")
+    ap.add_argument("--out", "--outdir", dest="out", required=True,
+                    help="the container directory to write (coli convert passes it as --outdir)")
     ap.add_argument("--keep-source", action="store_true", help="with --repo: keep the downloaded checkpoint")
     args = ap.parse_args()
     src = args.src
