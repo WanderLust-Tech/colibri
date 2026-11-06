@@ -20,7 +20,7 @@ line by line, and the tests below hold it to that.
 
 ## Quickstart
 
-Convert the checkpoint (a 52 GB download of bf16 weights, 14 GB afterwards; both must fit on the disk
+Convert the checkpoint (a 52 GB download of bf16 weights, 15 GB afterwards; both must fit on the disk
 while it runs). The converter needs only numpy, and `huggingface_hub` for `--repo`:
 
 ```sh
@@ -46,7 +46,8 @@ Dense matrices (attention, the dense MLP, the embedding table that is also the o
 per-row int8, 2.6 GB and always resident. Each layer's 128 experts are one tensor of equal
 records in the planar int4 group-of-64 layout `c/expert_ffn.h` reads (the kernel Qwen3.6 and OLMoE
 use; it learned GELU for this): 3.35 MB an expert, 12.9 GB for all 3840. Norms, the router and the
-scalars stay in float32.
+scalars stay in float32. Keep the container on a fast disk: on a hard disk the experts that are not
+cached wait for it.
 
 ## Memory
 
@@ -105,7 +106,14 @@ read again.
 - **Tokenizer.** `c/gemma4_tok.h` (SentencePiece-style BPE with byte fallback, which `tok.h` cannot do)
   gives the ids of the `tokenizers` library on 323 inputs, including emoji, runs of spaces and
   newlines, bytes with no vocabulary entry and the special tokens, and 18288 tokens of source code.
-- **The real checkpoint.** @@REAL@@
+- **The real checkpoint**, converted (15.3 GB from 52 GB, 20 minutes, mostly the reading of a USB disk) and run on
+  an i9-14900KF with 8 of its threads, every expert of every layer cached (about 15 GB): a one-sentence answer
+  correct and stopped by the model's own end of turn; a paragraph at **14.2 tokens a second** over 300 tokens;
+  a 3509-token prompt read in 90.6 s (**39 tokens a second**, cold experts included) and the same prompt again in
+  0.1 s; a code word placed at the start of a 3449-token prompt, beyond the 1024-token window, recalled exactly
+  (which only the five full-attention layers can do); a tool call written in the model's syntax and parsed into
+  `tool_calls`; thinking on, the reasoning in its channel and the answer after it; a second turn that kept the
+  22 tokens it shared with the first and read the other 29. Greedy decoding, so the answers repeat.
 
 ```sh
 python3 c/tools/make_gemma4_tiny.py --reference   # recompute the reference (torch + transformers)
