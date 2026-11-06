@@ -1,0 +1,11 @@
+{
+ "format": "colibri-gemma4-v1",
+ "dense_bits": 8,
+ "expert_bits": 4,
+ "expert_group": 64,
+ "expert_blob_bytes": 6912,
+ "layers": 6,
+ "experts": 8,
+ "skipped_tensors": 0,
+ "skipped_note": "vision tower and projector: this engine is text-only"
+}

@@ -706,11 +706,28 @@ static int run_test(Model *m) {
     printf("],\"last\":[");
     for (int i = 0; i < V; i++) printf(i ? ",%.9g" : "%.9g", last[i]);
     printf("],\"greedy\":[");
+    int *gids = xmalloc(((size_t)greedy + 1) * sizeof(int));
     for (int g = 0; g < greedy; g++) {
-        int t = argmax_v(last, V); printf(g ? ",%d" : "%d", t);
+        int t = argmax_v(last, V); gids[g] = t; printf(g ? ",%d" : "%d", t);
         free(last); last = forward(m, &q, &t, 1, n + g, NULL);
     }
-    printf("]}\n");
+    printf("]");
+    /* what those tokens spell, as hex bytes: what a served reply's DATA frames carry */
+    static G4Tok T;
+    char tp[2048]; snprintf(tp, sizeof tp, "%s/tokenizer.json", getenv("SNAP"));
+    FILE *probe = fopen(tp, "rb");
+    if (probe) {
+        fclose(probe);
+        if (g4_tok_load(&T, tp)) {
+            printf(",\"greedy_hex\":\"");
+            for (int g = 0; g < greedy; g++) {
+                char piece[512]; int k = g4_tok_piece(&T, gids[g], piece, sizeof piece);
+                for (int i = 0; i < k; i++) printf("%02x", (unsigned char)piece[i]);
+            }
+            printf("\"");
+        }
+    }
+    printf("}\n");
     return 0;
 }
 

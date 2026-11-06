@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import convert_gemma4 as cv  # noqa: E402
 
 TINY = dict(
-    vocab_size=512, hidden_size=128, intermediate_size=128, moe_intermediate_size=64,
+    vocab_size=512, hidden_size=64, intermediate_size=64, moe_intermediate_size=64,
     num_hidden_layers=6, num_attention_heads=4, num_key_value_heads=2, head_dim=32,
     global_head_dim=64, num_global_key_value_heads=1, num_experts=8, top_k_experts=3,
     sliding_window=6, max_position_embeddings=512, rms_norm_eps=1e-6,
@@ -50,6 +50,40 @@ TINY = dict(
     },
     bos_token_id=2, eos_token_id=1, pad_token_id=0,
 )
+
+
+SPECIAL = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3, "<|tool>": 46, "<tool|>": 47, "<|tool_call>": 48,
+           "<tool_call|>": 49, "<|tool_response>": 50, "<tool_response|>": 51, '<|"|>': 52, "<|think|>": 98,
+           "<|channel>": 100, "<channel|>": 101, "<|turn>": 105, "<turn|>": 106}
+
+
+def tiny_tokenizer(path):
+    """A 512-entry tokenizer with Gemma's shape: the mark for spaces, byte fallback at the real
+    ids (238 + byte), the chat control tokens at their real ids, a few merges."""
+    from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, decoders
+    vocab = dict(SPECIAL)
+    for b in range(256):
+        vocab["<0x%02X>" % b] = 238 + b
+    free = iter(i for i in range(512) if i not in set(vocab.values()))
+    mark = "▁"                                   # the mark Gemma writes for a space
+    chars = [mark, "\n"] + [chr(c) for c in range(33, 127) if chr(c) not in "<"]
+    for ch in chars:
+        vocab[ch] = next(free)
+    merges = []
+    for pair in [(mark, "t"), ("h", "e"), (mark + "t", "he"), ("i", "n"), ("e", "r"), (mark, "a"), (mark, "s"),
+                 ("o", "n"), (mark + "a", "n"), ("t", "h"), ("e", "n"), (mark, "w"), ("a", "t"), (mark, "o"),
+                 (mark, "i"), ("o", "u"), ("r", "e"), (mark + "i", "s"), ("\n", "\n")]:
+        merged = pair[0] + pair[1]
+        if pair[0] in vocab and pair[1] in vocab and merged not in vocab:
+            vocab[merged] = next(free)
+            merges.append(pair)
+    tk = Tokenizer(models.BPE(vocab=vocab, merges=merges, unk_token="<unk>", fuse_unk=True, byte_fallback=True))
+    tk.normalizer = normalizers.Replace(" ", mark)
+    tk.pre_tokenizer = pre_tokenizers.Split(" ", "merged_with_previous")
+    tk.decoder = decoders.Sequence([decoders.Replace(mark, " "), decoders.ByteFallback(), decoders.Fuse()])
+    tk.add_special_tokens(list(SPECIAL))
+    tk.save(path)
+    return tk
 
 
 def randomize(model, rng):
@@ -140,6 +174,10 @@ def main():
     with open(os.path.join(hf_dir, "config.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(config_json, handle, indent=1)
     save_safetensors(os.path.join(hf_dir, "model.safetensors"), ckpt)
+    tk = tiny_tokenizer(os.path.join(hf_dir, "tokenizer.json"))
+    with open(os.path.join(hf_dir, "generation_config.json"), "w", encoding="utf-8", newline="\n") as handle:
+        json.dump({"bos_token_id": 2, "eos_token_id": [1, 106, 50], "pad_token_id": 0, "temperature": 1.0,
+                   "top_k": 64, "top_p": 0.95}, handle)
     cv.convert(hf_dir, container, log=lambda *_: None)
 
     # The reference model gets the snapped weights.
@@ -154,7 +192,9 @@ def main():
         [2] + [int(x) for x in rng.integers(5, 500, 4)],
         [2] + [int(x) for x in rng.integers(5, 500, 40)],
     ]
-    out = {"config": TINY, "cases": []}
+    texts = ["hello there", "the quick brown fox", "  two  spaces\n\nand lines", "café 日本 \U0001f600",
+             "<|turn>user\nhi<turn|>\n<|turn>model\n", "a<|channel>b<channel|>c"]
+    out = {"config": TINY, "cases": [], "encodings": [{"text": t, "ids": tk.encode(t, add_special_tokens=False).ids} for t in texts]}
     with torch.no_grad():
         for ids in prompts:
             x = torch.tensor([ids])

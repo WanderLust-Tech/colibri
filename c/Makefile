@@ -1341,6 +1341,15 @@ endif
 acestep$(EXE): acestep.c acestep_vae.h acestep_vae_enc.h acestep_dit.h acestep_tok.h acestep_text.h acestep_audio.h third_party/minimp3.h acestep_gen.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
 	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
 
+# Gemma 4 mixture of experts (gemma-4-26B-A4B-it), text only (docs/gemma4.md): the chat engine, with the
+# routed experts streamed through expert_ffn.h and its own tokenizer header (gemma4_tok.h).
+ifneq ($(EXE),)
+.PHONY: gemma4
+gemma4: gemma4$(EXE)
+endif
+gemma4$(EXE): gemma4.c gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h .build-config
+	$(CC) $(CFLAGS) gemma4.c -o gemma4$(EXE) $(LDFLAGS)
+
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision
 # head, served on POST /v1/systemone through the DECIDE command (docs/laya.md).
 # One file; qi_gemm.h is its matrix kernel, decide_serve.h its serve loop.
