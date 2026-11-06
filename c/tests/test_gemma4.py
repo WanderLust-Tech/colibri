@@ -98,6 +98,14 @@ class LogitsTest(unittest.TestCase):
         self.assertGreater(len(set(case["all_top"])), 10)
 
 
+try:
+    import numpy  # noqa: F401
+    HAVE_NUMPY = True
+except ImportError:
+    HAVE_NUMPY = False
+
+
+@unittest.skipUnless(HAVE_NUMPY, "needs numpy")
 class ContainerTest(unittest.TestCase):
     def test_int8_rows_round_trip(self):
         import numpy as np
