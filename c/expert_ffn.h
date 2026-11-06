@@ -292,9 +292,18 @@ static inline void xf_gate_up_rows(float *g, float *u, const XfExpert *e, const 
         else      { g[r] = xf_dot_f32(wg, sg, a->x, H);                 u[r] = xf_dot_f32(wu, su, a->x, H); }
     }
 }
-/* silu(g)*u over [0,F): the hidden row, in the engines' historical form */
+/* silu(g)*u over [0,F): the hidden row, in the engines' historical form.
+ * An engine that gates with GELU (Gemma 4: gelu_pytorch_tanh) defines XF_ACT_GELU_TANH before
+ * including this header; nothing changes for one that does not. */
 static inline void xf_swiglu(float *h, const float *g, const float *u, int F) {
+#ifdef XF_ACT_GELU_TANH
+    for (int i = 0; i < F; i++) {
+        float gv = g[i];
+        h[i] = (0.5f * gv * (1.f + tanhf(0.7978845608028654f * (gv + 0.044715f * gv * gv * gv)))) * u[i];
+    }
+#else
     for (int i = 0; i < F; i++) { float gv = g[i]; h[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+#endif
 }
 /* down rows [r0,r1) of one expert for one hidden row */
 static inline void xf_down_rows(float *y, const XfExpert *e, const XfAct *h, int F, int r0, int r1, int mode) {
