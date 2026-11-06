@@ -66,3 +66,4 @@ tests/xdna_fail_fixtures/
 tests/xdna_physical_probe
 gemma4_tiny/gemma4_meta.json
 gemma4_tiny/model.safetensors.index.json
+gemma4_tiny/.coli_*
