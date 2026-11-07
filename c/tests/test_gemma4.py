@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 C_DIR = os.path.join(HERE, "..")
@@ -304,6 +305,16 @@ class ContainerTest(unittest.TestCase):
         p2, s2 = cv.quantize_int4_planar(back)
         self.assertTrue((p == p2).all())
         self.assertTrue(np.allclose(s, s2, rtol=1e-6))
+
+    def test_a_repo_that_is_a_directory_is_read_in_place(self):
+        """coli convert always passes --repo: a directory on disk is the source itself, never downloaded, never removed."""
+        import tempfile
+        import convert_gemma4 as cv
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, {"huggingface_hub": None}):
+            self.assertEqual(cv.resolve_source(None, d, os.path.join(d, "out")), (d, None))
+            self.assertEqual(cv.resolve_source(d, None, "out"), (d, None))
+            with self.assertRaises(SystemExit):        # a name that is not a directory needs huggingface_hub
+                cv.resolve_source(None, "google/gemma-4-26B-A4B-it", os.path.join(d, "out"))
 
     def test_an_unknown_tensor_stops_the_conversion(self):
         import convert_gemma4 as cv

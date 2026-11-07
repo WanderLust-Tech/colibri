@@ -105,6 +105,14 @@ class ConvertRoutingTest(unittest.TestCase):
         self.assertTrue(calls, "no converter was launched at all")
         self.assertEqual(self.script_of(calls[0]), "convert_glm53.py")
 
+    def test_a_gemma4_checkpoint_reaches_its_converter_with_no_precision_flags(self):
+        calls = self.run_convert("gemma4")
+        self.assertEqual(len(calls), 1, "convert_gemma4.py has no MTP pass")
+        self.assertEqual(self.script_of(calls[0]), "convert_gemma4.py")
+        for flag in ("--ebits", "--io-bits", "--xbits", "--group-size", "--mtp"):
+            self.assertNotIn(flag, calls[0])
+        self.assertIn("--outdir", calls[0])
+
     def test_olmoe_checkpoint_reaches_convert_olmoe_merged(self):
         """OLMoE\'s converter is convert_olmoe_merged.py (not GLM-5.2\'s
         convert_fp8_to_int4.py).  The converter takes no precision flags;

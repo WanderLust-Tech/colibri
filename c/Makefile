@@ -1341,7 +1341,7 @@ endif
 acestep$(EXE): acestep.c acestep_vae.h acestep_vae_enc.h acestep_dit.h acestep_tok.h acestep_text.h acestep_audio.h third_party/minimp3.h acestep_gen.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
 	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
 
-# Gemma 4 mixture of experts (gemma-4-26B-A4B-it), text only (docs/gemma4.md): the chat engine, with the
+# Gemma 4 mixture of experts (gemma-4-26B-A4B-it) and the dense 31B, E4B and E2B, with pictures and audio (docs/gemma4.md): the chat engine, with the
 # routed experts streamed through expert_ffn.h and its own tokenizer header (gemma4_tok.h).
 ifneq ($(EXE),)
 .PHONY: gemma4

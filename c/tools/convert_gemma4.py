@@ -619,6 +619,25 @@ def convert(src, out, log=print, with_vision=True, with_audio=True):
     return meta
 
 
+def resolve_source(src, repo, out):
+    """The checkpoint directory to read, and the directory this call downloaded (to remove afterwards), or None.
+
+    `coli convert` always passes --repo, so a --repo that names a directory on disk is read in place:
+    nothing is downloaded and nothing is ever removed."""
+    if repo and os.path.isdir(os.path.expanduser(repo)):
+        return os.path.expanduser(repo), None
+    if not repo:
+        return src, None
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        raise SystemExit("--repo needs huggingface_hub (pip install huggingface_hub)")
+    downloaded = out.rstrip("/\\") + ".source"
+    print(f"downloading {repo} to {downloaded} (about 52 GB)")
+    return snapshot_download(repo, local_dir=downloaded,
+                             allow_patterns=["*.json", "*.safetensors", "*.jinja"]), downloaded
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     where = ap.add_mutually_exclusive_group(required=True)
@@ -634,17 +653,7 @@ def main():
     ap.add_argument("--add-vision", action="store_true",
                     help="add the vision tower to an existing container (--out) that was converted without it")
     args = ap.parse_args()
-    src = args.src
-    downloaded = None
-    if args.repo:
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError:
-            raise SystemExit("--repo needs huggingface_hub (pip install huggingface_hub)")
-        downloaded = args.out.rstrip("/\\") + ".source"
-        print(f"downloading {args.repo} to {downloaded} (about 52 GB)")
-        src = snapshot_download(args.repo, local_dir=downloaded,
-                                allow_patterns=["*.json", "*.safetensors", "*.jinja"])
+    src, downloaded = resolve_source(args.src, args.repo, args.out)
     if args.add_vision:
         add_vision(src, args.out)
     elif args.add_audio:

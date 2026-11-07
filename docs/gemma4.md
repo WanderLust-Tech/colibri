@@ -38,7 +38,12 @@ python3 c/tools/convert_gemma4.py --repo google/gemma-4-26B-A4B-it --out ~/Model
 python3 c/tools/convert_gemma4.py --repo google/gemma-4-E2B-it --out ~/Models/gemma4-e2b
 # or, from a checkpoint already on disk:
 python3 c/tools/convert_gemma4.py --src /path/to/gemma-4-26B-A4B-it --out ~/Models/gemma4-26b-a4b
+# the same through the CLI (--repo takes a Hugging Face repo or a directory; a directory is read in place and kept):
+coli convert --repo google/gemma-4-26B-A4B-it --model ~/Models/gemma4-26b-a4b
 ```
+
+`coli setup` does not list Gemma: its catalogue holds only downloads that run as they are (a ready container on
+Hugging Face, or an official checkpoint the engine reads directly), and Gemma needs this conversion first.
 
 The towers come with it (`--no-vision` and `--no-audio` leave them out). A container made before the towers were carried
 gets them in a minute without converting the rest: `--add-vision`, `--add-audio`.
