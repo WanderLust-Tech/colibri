@@ -114,20 +114,206 @@ class GatewayTest(unittest.TestCase):
         self.assertIn('<|tool_call>call:get_weather{city:<|"|>Rome<|"|>,days:3}<tool_call|>', prompt)
         self.assertTrue(prompt.endswith('<|tool_response>response:get_weather{value:<|"|>24 C<|"|>}<tool_response|>'))
 
-    def test_a_picture_is_a_clear_400(self):
+    def test_audio_is_a_clear_400(self):
         base = self.server(["x"])
         status, error = _error_body(self, lambda: self.chat(base, messages=[{"role": "user", "content": [
-            {"type": "text", "text": "what is this"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]))
+            {"type": "text", "text": "what is this"}, {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}]}]))
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "unsupported_content_type")
+        self.assertIn("audio", error["message"])
         self.assertEqual(self.engine.calls, [])
 
     def test_the_model_is_listed_under_its_family_name(self):
         self.assertEqual(openai_server.family_by_id("gemma4").default_model_id, "gemma-4-26b-a4b-colibri")
 
 
+try:
+    import numpy  # noqa: F401
+    from PIL import Image
+    HAVE_PIL = True
+except ImportError:                                   # pragma: no cover
+    HAVE_PIL = False
+
+
+def data_uri(width, height, colour=(200, 30, 30), kind="PNG"):
+    import base64
+    import io
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), colour).save(buffer, kind)
+    return f"data:image/{kind.lower()};base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+class PictureEngine(ScriptedEngine):
+    """An engine that says it loaded a vision tower, and keeps the pictures it is handed."""
+    model_dir = None
+
+    def __init__(self, *args, vision=True, tokens="280", **kw):
+        super().__init__(*args, **kw)
+        self.vision = vision
+        self.caps = {"vision": "1" if vision else "0", "img_tokens": tokens}
+        self.images = []
+
+    def generate(self, *args, image=None, **kw):
+        self.images.append(image)
+        return super().generate(*args, image=image, **kw)
+
+
+@unittest.skipUnless(HAVE_PIL, "needs Pillow and numpy")
+class PictureTest(unittest.TestCase):
+    """Pictures in a request: run through the image processor, placeholders in the prompt, IMAGE frames to the engine."""
+
+    def setUp(self):
+        patcher = patch("openai_server.ARCH", "gemma4")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def server(self, **kw):
+        self.engine = PictureEngine(chunks=["It is red."], supports_logprobs_echo=False, supports_tok_ids=False, **kw)
+        return _spawn_test_server(self, self.engine)
+
+    def chat(self, base, content, **body):
+        body.setdefault("model", "test-model")
+        body.setdefault("messages", [{"role": "user", "content": content}])
+        with _post_chat(base, body) as response:
+            return json.load(response)
+
+    def test_a_picture_is_sized_by_the_processors_rule_and_becomes_its_placeholders(self):
+        base = self.server()
+        reply = self.chat(base, [{"type": "text", "text": "What colour?"},
+                                 {"type": "image_url", "image_url": {"url": data_uri(96, 48)}}])
+        self.assertEqual(reply["choices"][0]["message"]["content"], "It is red.")
+        # 96 x 48 pixels, scaled to fill at most 2520 patches of 16 pixels in multiples of 48: 1104 x 528
+        grid_h, grid_w = 528 // 16, 1104 // 16
+        tokens = (grid_h // 3) * (grid_w // 3)
+        self.assertEqual(tokens, 253)
+        prompt = self.engine.calls[0][0]
+        self.assertIn("<|turn>user\nWhat colour?<|image>" + "<|image|>" * tokens + "<image|><turn|>", prompt)
+        (patches, gh, gw), = [self.engine.images[0]]
+        self.assertEqual((gh, gw), (grid_h, grid_w))
+        self.assertEqual(len(patches.tobytes()), gh * gw * 16 * 16 * 3)
+        self.assertTrue((patches.reshape(-1, 3) == (200, 30, 30)).all())      # a flat colour stays flat through the resize
+
+    def test_two_pictures_go_in_order(self):
+        base = self.server()
+        self.chat(base, [{"type": "image_url", "image_url": {"url": data_uri(48, 48, (255, 0, 0))}},
+                         {"type": "text", "text": "and"},
+                         {"type": "image_url", "image_url": {"url": data_uri(96, 48, (0, 0, 255))}}])
+        first, second = self.engine.images[0]
+        self.assertEqual(len(self.engine.images[0]), 2)
+        self.assertTrue((first[0].reshape(-1, 3) == (255, 0, 0)).all())
+        self.assertTrue((second[0].reshape(-1, 3) == (0, 0, 255)).all())
+        prompt = self.engine.calls[0][0]
+        self.assertEqual(prompt.count("<|image>"), 2)
+        self.assertEqual(prompt.count("<image|>"), 2)
+        runs = [len(run) // len("<|image|>") for run in prompt.replace("<|image>", " ").replace("<image|>", " ").split(" ") if run.startswith("<|image|>")]
+        self.assertEqual(runs, [(first[1] // 3) * (first[2] // 3), (second[1] // 3) * (second[2] // 3)])
+
+    def test_the_engines_limit_chooses_the_budget(self):
+        base = self.server(tokens="70")
+        self.chat(base, [{"type": "image_url", "image_url": {"url": data_uri(400, 300)}}])
+        patches, gh, gw = self.engine.images[0]
+        self.assertLessEqual((gh // 3) * (gw // 3), 70)
+        self.assertGreater((gh // 3) * (gw // 3), 40)
+
+    def test_an_engine_without_the_tower_says_so(self):
+        base = self.server(vision=False)
+        status, error = _error_body(self, lambda: self.chat(base, [{"type": "image_url", "image_url": {"url": data_uri(48, 48)}}]))
+        self.assertEqual(status, 400)
+        self.assertIn("no vision tower", error["message"])
+        self.assertIn("--add-vision", error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_something_that_is_not_a_picture_is_a_400(self):
+        base = self.server()
+        status, error = _error_body(self, lambda: self.chat(base, [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]))
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "invalid_image")
+        self.assertEqual(self.engine.calls, [])
+
+    def test_a_sliver_is_one_column_wide_as_the_processor_makes_it(self):
+        """A 2 x 2000 strip: the processor gives its width one 48-pixel column and its height all it can have."""
+        base = self.server()
+        self.chat(base, [{"type": "image_url", "image_url": {"url": data_uri(2, 2000)}}])
+        patches, gh, gw = self.engine.images[0]
+        self.assertEqual((gh, gw), (840, 3))
+        self.assertEqual((gh // 3) * (gw // 3), 280)
+
+    def test_pictures_that_the_template_would_place_in_another_order_are_refused(self):
+        """The template writes a tool result's pictures at the assistant turn that called the tool, before that
+        turn's own content: the engine takes pictures in the order the gateway sends them."""
+        base = self.server()
+        picture = {"type": "image_url", "image_url": {"url": data_uri(48, 48)}}
+        status, error = _error_body(self, lambda: self.chat(base, None, messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [{"type": "text", "text": "here"}, picture],
+             "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "ok"}, picture]}]))
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "unsupported_content_order")
+
+    def test_a_tool_result_picture_is_placed_after_its_response(self):
+        base = self.server()
+        self.chat(base, None, messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": [
+                {"type": "text", "text": "ok"}, {"type": "image_url", "image_url": {"url": data_uri(48, 48)}}]}])
+        prompt = self.engine.calls[0][0]
+        self.assertIn("<tool_response|><|image>", prompt)
+        self.assertEqual(len(self.engine.images[0:1]), 1)
+
+    def test_the_model_card_lists_image_input_when_the_tower_is_loaded(self):
+        from urllib.request import Request, urlopen
+        for vision, want in ((True, True), (False, False)):
+            base = self.server(vision=vision)
+            with urlopen(Request(base + "/v1/models", headers={"Authorization": "Bearer secret"}), timeout=5) as response:
+                card = json.load(response)["data"][0]
+            self.assertEqual("image" in card["input_modalities"], want, card)
+
+    def test_the_anthropic_endpoint_takes_a_picture_too(self):
+        import base64
+        import io
+        base = self.server()
+        buffer = io.BytesIO()
+        Image.new("RGB", (48, 48), (1, 2, 3)).save(buffer, "PNG")
+        body = {"model": "test-model", "max_tokens": 8, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what"}, {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": base64.b64encode(buffer.getvalue()).decode()}}]}]}
+        with _post_json(base, "/v1/messages", body) as response:
+            reply = json.load(response)
+        self.assertEqual(reply["content"][0]["text"], "It is red.")
+        self.assertIn("<|image>", self.engine.calls[0][0])
+        patches, gh, gw = self.engine.images[0]
+        self.assertEqual(len(patches.tobytes()), gh * gw * 16 * 16 * 3)
+        self.assertTrue((patches.reshape(-1, 3) == (1, 2, 3)).all())
+
+
 class DispatcherTest(unittest.TestCase):
     """The real Engine class on canned frames: the exact SUBMIT, and the channel's translation."""
+
+    def test_several_pictures_are_sent_one_frame_each_before_the_submit(self):
+        first, second = b"\x01" * 12, b"\x02" * 24
+
+        def respond(process, frame):
+            if frame.startswith(b"SUBMIT"):
+                process.stdout.feed(b"ACCEPT 1 5\nDATA 1 2\nok\n" b"DONE 1 STAT 1 1.0 50.0 1.25 5 0\n")
+
+        process = FakeProcess(respond)
+        with patch("openai_server.ARCH", "gemma4"), patch("openai_server.subprocess.Popen", return_value=process):
+            engine = Engine("gemma4", "model")
+            engine.generate("<bos>x", 4, 0.0, 1.0, lambda text: None, image=[(first, 2, 3), (second, 4, 3)])
+        engine.close()
+        self.assertEqual(process.writes[0], b"IMAGE 1 12 2 3\n" + first + b"\n")
+        self.assertEqual(process.writes[1], b"IMAGE 1 24 4 3\n" + second + b"\n")
+        self.assertTrue(process.writes[2].startswith(b"SUBMIT 1 "))
+
+    def test_the_engines_refusal_of_a_picture_is_a_400(self):
+        error = openai_server._engine_error(["BAD_IMAGE", "bytes=3", "expected=12"], "ERROR 1 BAD_IMAGE bytes=3 expected=12")
+        self.assertEqual(error.status, 400)
+        self.assertEqual(error.code, "invalid_image")
+        self.assertIn("bytes=3", error.message)
 
     def test_request_and_response_transcript_is_byte_exact(self):
         prompt = gemma4_chat.render([{"role": "user", "content": "hi"}], enable_thinking=True)

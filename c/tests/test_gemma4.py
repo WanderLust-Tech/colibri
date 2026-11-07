@@ -50,13 +50,25 @@ def ensure_container():
 HAVE_FIXTURE = bool(EXE) and os.path.isfile(REF) and ensure_container()
 
 
-def offline(ids, greedy=0, extra=None):
-    """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids."""
+def offline(ids, greedy=0, extra=None, images=None):
+    """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids. images: (patch bytes,
+    grid height, grid width) for each run of picture placeholders in the prompt."""
+    import tempfile
     env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
-               OMP_NUM_THREADS="2", G4_SLACK="0")          # no slack: the ring is window + chunk, so it wraps
+               OMP_NUM_THREADS="2", G4_SLACK="0",          # no slack: the ring is window + chunk, so it wraps
+               G4_IMG_TOKENS="1")                          # ... and no room kept for pictures, unless a test says so
     env.update(extra or {})
     cap = env.pop("CAP", "128")
-    done = subprocess.run([EXE, cap], env=env, capture_output=True, text=True, timeout=120)
+    with tempfile.TemporaryDirectory() as tmp:
+        specs = []
+        for i, (patches, gh, gw) in enumerate(images or ()):
+            path = os.path.join(tmp, f"picture{i}.bin")
+            with open(path, "wb") as handle:
+                handle.write(patches)
+            specs.append(f"{path}|{gh}|{gw}")
+        if specs:
+            env["G4_IMAGES"] = ";".join(specs)
+        done = subprocess.run([EXE, cap], env=env, capture_output=True, text=True, timeout=120)
     if done.returncode:
         raise AssertionError(done.stdout[-400:] + done.stderr[-1500:])
     return json.loads(done.stdout.strip().splitlines()[-1])
@@ -96,6 +108,116 @@ class LogitsTest(unittest.TestCase):
         spread = max(case["last_logits"]) - min(case["last_logits"])
         self.assertGreater(spread, 2.0)
         self.assertGreater(len(set(case["all_top"])), 10)
+
+
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
+class BatchTest(unittest.TestCase):
+    """A decode step of several conversations in one pass over the weights (the serve loop's way of decoding): each
+    conversation must get, bit for bit, the logits it gets stepping alone. Not a tolerance: a reply must not depend
+    on who else is asking."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(REF, encoding="utf-8") as handle:
+            cls.ref = json.load(handle)
+        a, b, c = (case["ids"] for case in cls.ref["cases"])
+        cls.prompts = [a, b, c, c[:17], a[:9] + [123, 45], b + [7], c[:30]]       # 23, 4, 41, 17, 11, 5, 30 tokens
+
+    def batch(self, count, threads="2", **extra):
+        prompts = self.prompts[:count]
+        env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, prompts[0])),
+                   G4_IDS2=";".join(",".join(map(str, p)) for p in prompts[1:]), G4_GREEDY="8",
+                   OMP_NUM_THREADS=threads, G4_SLACK="0", G4_IMG_TOKENS="1")
+        env.update(extra)
+        cap = env.pop("CAP", "128")
+        done = subprocess.run([EXE, cap], env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout[-300:] + done.stderr[-1000:])
+        return json.loads(done.stdout.strip().splitlines()[-1])["batch"]
+
+    def check(self, count, **extra):
+        out = self.batch(count, **extra)
+        self.assertEqual(out["conversations"], count)
+        self.assertEqual(out["max_diff"], 0.0, f"a batch of {count} changed a logit by {out['max_diff']} ({extra})")
+        self.assertEqual(out["identical"], 1)
+
+    def test_two_conversations(self):
+        self.check(2)
+
+    def test_seven_conversations_of_different_lengths(self):
+        self.check(7)          # more than the four rows the prefill kernel takes at once: the single-row kernel for each
+
+    def test_with_one_thread_and_many(self):
+        self.check(5, threads="1")
+        self.check(5, threads="8")
+
+    def test_with_an_expert_cache_smaller_than_the_experts_the_batch_wants(self):
+        self.check(5, CAP="3")
+        self.check(7, CAP="5")
+
+
+def picture(ref, index):
+    """(patch bytes, grid height, grid width) of picture `index` of the reference."""
+    p = ref["vision"]["images"][index]
+    return bytes.fromhex(p["hex"]), p["gh"], p["gw"]
+
+
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
+class VisionTest(unittest.TestCase):
+    """The vision tower and the pictures inside a prompt, against transformers' Gemma4ForConditionalGeneration: the
+    soft tokens the tower makes, and the logits of whole prompts with one or two pictures in them. The reference pads
+    the pictures to the longest and masks the padding; the engine pads nothing. The sliding layers (window 6) let a
+    picture's rows see each other, and the 12-token picture is longer than the window."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(REF, encoding="utf-8") as handle:
+            cls.ref = json.load(handle)
+        cls.cases = cls.ref["vision"]["cases"]
+
+    def check(self, features=True, **extra):
+        extra = dict({"G4_IMG_TOKENS": "12"}, **extra)
+        for case in self.cases:
+            out = offline(case["ids"], len(case["greedy"]), extra, [picture(self.ref, i) for i in case["images"]])
+            if features:
+                worst = max(abs(a - b) for fa, fb in zip(out["features"], case["features"]) for a, b in zip(fa, fb))
+                self.assertLess(worst, 1e-3, f"soft tokens differ by {worst}")
+            worst = max(abs(a - b) for a, b in zip(out["last"], case["last_logits"]))
+            self.assertLess(worst, 2e-3, f"last-row logits differ by {worst} ({case['spans']}, {extra})")
+            rows = max(abs(a - b) for ra, rb in zip(out["rows"], case["logit_sample"]) for a, b in zip(ra, rb))
+            self.assertLess(rows, 2e-3, f"row logits differ by {rows} ({extra})")
+            self.assertEqual(out["top"], case["all_top"], extra)
+            self.assertEqual(out["greedy"], case["greedy"], extra)
+
+    def test_whole_prompt_at_once(self):
+        self.check()
+
+    def test_chunks_never_split_a_picture(self):
+        self.check(features=False, G4_CHUNK="5")        # a picture of 6 or 12 rows does not fit: it goes alone, whole
+
+    def test_a_row_at_a_time_takes_each_picture_whole(self):
+        self.check(features=False, G4_CHUNK="1")
+
+    def test_with_a_ring_that_wraps_and_a_small_expert_cache(self):
+        self.check(features=False, G4_CHUNK="3", CAP="3")
+
+    def test_the_picture_changes_the_answer(self):
+        """Not trivial: the same ids with the picture's colours inverted give different logits."""
+        case = self.cases[0]
+        patches, gh, gw = picture(self.ref, 0)
+        extra = {"G4_IMG_TOKENS": "12"}
+        a = offline(case["ids"], 0, extra, [(patches, gh, gw)])
+        b = offline(case["ids"], 0, extra, [(bytes(255 - v for v in patches), gh, gw)])
+        self.assertGreater(max(abs(x - y) for x, y in zip(a["last"], b["last"])), 0.05)
+        self.assertGreater(max(abs(v) for v in case["features"][0]), 0.5)
+
+    def test_a_prompt_with_pictures_needs_them(self):
+        case = self.cases[0]
+        with self.assertRaises(AssertionError) as caught:
+            offline(case["ids"], 0, {"G4_IMG_TOKENS": "12"}, None)
+        self.assertIn("G4_IMAGES", str(caught.exception))
+        with self.assertRaises(AssertionError) as caught:
+            offline(case["ids"], 0, {"G4_IMG_TOKENS": "12", "G4_VISION": "0"}, [picture(self.ref, 0)])
+        self.assertIn("no vision tower", str(caught.exception))
 
 
 try:
@@ -150,8 +272,84 @@ class ContainerTest(unittest.TestCase):
         import convert_gemma4 as cv
         self.assertEqual(cv.classify("model.language_model.layers.3.self_attn.q_proj.weight"), "matrix")
         self.assertEqual(cv.classify("model.language_model.layers.3.experts.gate_up_proj"), "expert")
-        self.assertEqual(cv.classify("model.vision_tower.encoder.layers.0.input_layernorm.weight"), "skip")
+        self.assertEqual(cv.classify("model.vision_tower.encoder.layers.0.input_layernorm.weight"), "vexact")
+        self.assertEqual(cv.classify("model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight"), "vmatrix")
+        self.assertEqual(cv.classify("model.vision_tower.patch_embedder.position_embedding_table"), "vexact")
+        self.assertEqual(cv.classify("model.embed_vision.embedding_projection.weight"), "vmatrix")
+        self.assertEqual(cv.classify("model.audio_tower.layers.0.self_attn.q_proj.weight"), "skip")
+        self.assertIsNone(cv.classify("model.vision_tower.encoder.layers.0.mystery.weight"))
         self.assertIsNone(cv.classify("model.language_model.layers.3.self_attn.mystery.weight"))
+
+    def source(self, directory):
+        """A float checkpoint of the tiny model, text and vision, in `directory`."""
+        import shutil
+        import make_gemma4_tiny as tiny
+        state = tiny.random_weights()
+        state.update(tiny.random_vision_weights())
+        for name in ("config.json", "generation_config.json", "tokenizer.json"):
+            shutil.copyfile(os.path.join(TINY, name), os.path.join(directory, name))
+        tiny.save_f32_safetensors(os.path.join(directory, "model.safetensors"), state)
+        return state
+
+    def names(self, directory):
+        with open(os.path.join(directory, "model.safetensors.index.json"), encoding="utf-8") as handle:
+            return json.load(handle)["weight_map"]
+
+    def test_the_vision_tower_is_carried_as_int8_rows_and_exact_vectors(self):
+        import tempfile
+        import numpy as np
+        import convert_gemma4 as cv
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            state = self.source(src)
+            meta = cv.convert(src, out, log=lambda *_: None)
+            self.assertEqual(meta["vision"]["hidden"], 32)
+            self.assertEqual(meta["vision"]["layers"], 2)
+            self.assertEqual(meta["skipped_tensors"], 0)
+            names = self.names(out)
+            ck = cv.Checkpoint(out)
+            try:
+                for name in ("model.vision_tower.encoder.layers.1.mlp.down_proj.linear.weight",
+                             "model.vision_tower.patch_embedder.input_proj.weight",
+                             "model.embed_vision.embedding_projection.weight"):
+                    self.assertIn(name + ".scale", names)
+                    q, s = cv.quantize_int8_rows(state[name])
+                    self.assertTrue((np.frombuffer(ck.file_of(name).raw(name), dtype=np.int8).reshape(q.shape) == q).all(), name)
+                for name in ("model.vision_tower.std_bias", "model.vision_tower.patch_embedder.position_embedding_table",
+                             "model.vision_tower.encoder.layers.0.self_attn.q_norm.weight"):
+                    self.assertNotIn(name + ".scale", names)
+                    self.assertTrue((ck.array(name) == state[name]).all(), name)
+            finally:
+                ck.close()
+
+    def test_no_vision_leaves_the_tower_out_and_add_vision_makes_the_same_container(self):
+        import tempfile
+        import numpy as np
+        import convert_gemma4 as cv
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as full, tempfile.TemporaryDirectory() as late:
+            self.source(src)
+            cv.convert(src, full, log=lambda *_: None)
+            meta = cv.convert(src, late, log=lambda *_: None, with_vision=False)
+            tower = [n for n in self.names(full) if n.startswith(("model.vision_tower.", "model.embed_vision."))]
+            self.assertTrue(tower)
+            self.assertFalse([n for n in self.names(late) if n in tower])
+            self.assertNotIn("vision", meta)
+            import make_gemma4_tiny as tiny
+            self.assertEqual(meta["skipped_tensors"], len(tiny.vision_shapes()))      # left out, and counted
+            cv.add_vision(src, late, log=lambda *_: None)
+            self.assertEqual(sorted(self.names(late)), sorted(self.names(full)))
+            def vision_meta(directory):
+                with open(os.path.join(directory, "gemma4_meta.json"), encoding="utf-8") as handle:
+                    return json.load(handle)["vision"]
+            self.assertEqual(vision_meta(late), vision_meta(full))
+            a, b = cv.Checkpoint(full), cv.Checkpoint(late)
+            try:
+                for name in tower:
+                    self.assertTrue((np.asarray(a.file_of(name).raw(name)) == np.asarray(b.file_of(name).raw(name))).all(), name)
+            finally:
+                a.close()
+                b.close()
+            with self.assertRaises(SystemExit):                      # a second time: it is there already
+                cv.add_vision(src, late, log=lambda *_: None)
 
 
 class Engine:
@@ -159,7 +357,7 @@ class Engine:
 
     def __init__(self, slots=1, extra=None, cap="128", ctx="4096"):
         env = dict(os.environ, SNAP=TINY, SERVE="1", SERVE_BATCH="1", KV_SLOTS=str(slots), CTX=ctx,
-                   OMP_NUM_THREADS="2", COLI_PREFIX_LOG="1")
+                   OMP_NUM_THREADS="2", COLI_PREFIX_LOG="1", G4_IMG_TOKENS="1")   # 1: the ring is sized for text, as the tests count it
         env.update(extra or {})
         self.proc = subprocess.Popen([EXE, cap], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, bufsize=0)
@@ -212,11 +410,15 @@ class Engine:
     def get(self, timeout=60):
         return self.frames.get(timeout=timeout)
 
-    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None):
+    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None, images=None):
+        """images: (patch bytes, grid height, grid width) for each picture, sent as IMAGE frames just before the SUBMIT."""
         rid = rid or str(self.next_id)
         self.next_id += 1
         payload = text.encode("utf-8")
-        self.proc.stdin.write(f"SUBMIT {rid} {slot} {len(payload)} {max_tokens} {temperature} {top_p}\n".encode() + payload + b"\n")
+        frames = b""
+        for patches, gh, gw in images or ():
+            frames += f"IMAGE {rid} {len(patches)} {gh} {gw}\n".encode() + patches + b"\n"
+        self.proc.stdin.write(frames + f"SUBMIT {rid} {slot} {len(payload)} {max_tokens} {temperature} {top_p}\n".encode() + payload + b"\n")
         self.proc.stdin.flush()
         return rid
 
@@ -280,7 +482,9 @@ class ServeTest(unittest.TestCase):
         e = self.engine()
         kinds = [line[0] for line in e.startup]
         self.assertEqual(kinds[0], "READY")
-        self.assertIn(("CAPS", ["vision=0"]), [(k, a) for k, a, _ in e.startup])
+        self.assertIn(("CAPS", ["vision=1", "img_tokens=1"]), [(k, a) for k, a, _ in e.startup])
+        text_only = self.engine(extra={"G4_VISION": "0"})
+        self.assertIn(("CAPS", ["vision=0", "img_tokens=0"]), [(k, a) for k, a, _ in text_only.startup])
         for kind in ("STAT", "HWINFO", "TIERS", "EMAP"):
             self.assertIn(kind, kinds)
 
@@ -388,6 +592,61 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(seen[r1], alone["the quick brown fox"])
         self.assertEqual(seen[r2], alone["hello there"])
 
+    def drain(self, engine, rids):
+        """The DATA of each request until every one has its DONE."""
+        seen, done = {r: b"" for r in rids}, {}
+        while len(done) < len(rids):
+            kind, args, body = engine.get()
+            if kind == "DATA" and args[0] in seen:
+                seen[args[0]] += body
+            elif kind in ("DONE", "ERROR") and args and args[0] in seen:
+                done[args[0]] = (kind, args)
+        return seen, done
+
+    def test_conversations_decoding_together_say_what_each_says_alone(self):
+        texts = ["the quick brown fox", "hello there", "  two  spaces\n\nand lines", "café 日本 \U0001f600"]
+        lengths = [3, 9, 6, 12]                                            # they finish on different steps
+        alone = [self.engine().ask(t, max_tokens=n)["data"] for t, n in zip(texts, lengths)]
+        e = self.engine(slots=4)
+        rids = [e.submit(t, slot=i, max_tokens=n) for i, (t, n) in enumerate(zip(texts, lengths))]
+        seen, done = self.drain(e, rids)
+        for rid, want in zip(rids, alone):
+            self.assertEqual(done[rid][0], "DONE")
+            self.assertEqual(seen[rid], want)
+
+    def test_one_conversation_leaving_a_batch_does_not_disturb_the_others(self):
+        texts = ["the quick brown fox", "hello there", "  two  spaces\n\nand lines"]
+        alone = [self.engine().ask(t, max_tokens=8)["data"] for t in texts]
+        e = self.engine(slots=3)
+        rids = [e.submit(t, slot=i, max_tokens=8 if i != 1 else 300) for i, t in enumerate(texts)]
+        seen = {r: b"" for r in rids}
+        stopped, done = False, {}
+        while len(done) < 3:
+            kind, args, body = e.get()
+            if kind == "DATA" and args[0] in seen:
+                seen[args[0]] += body
+                if args[0] == rids[1] and not stopped:
+                    e.cancel(rids[1])                                      # the long one is cancelled in the middle
+                    stopped = True
+            elif kind == "DONE" and args[0] in seen:
+                done[args[0]] = args
+        self.assertEqual(seen[rids[0]], alone[0])
+        self.assertEqual(seen[rids[2]], alone[2])
+        self.assertLess(int(done[rids[1]][2]), 300)
+        self.assertEqual(e.ask("hello there", slot=1, max_tokens=2)["done"][2], "2")
+
+    def test_a_conversation_reading_its_prompt_and_others_decoding_take_turns(self):
+        """A long prompt is read a chunk at a time between the decode steps of the others, and nobody's reply changes."""
+        long_text = "a " * 200
+        want_long = self.engine().ask(long_text, max_tokens=4)["data"]
+        want_short = self.engine().ask("hello there", max_tokens=20)["data"]
+        e = self.engine(slots=2, extra={"G4_CHUNK": "16"})
+        r1 = e.submit("hello there", slot=0, max_tokens=20)
+        r2 = e.submit(long_text, slot=1, max_tokens=4)
+        seen, done = self.drain(e, [r1, r2])
+        self.assertEqual(seen[r1], want_short)
+        self.assertEqual(seen[r2], want_long)
+
     def test_a_busy_slot_and_a_bad_slot_are_refused_by_id(self):
         e = self.engine(slots=2)
         first = e.submit("the quick brown fox", slot=0, max_tokens=40)
@@ -445,6 +704,132 @@ class ServeTest(unittest.TestCase):
         e.ask("hello there", max_tokens=1)
         e.proc.stdin.close()
         self.assertEqual(e.proc.wait(timeout=30), 0)
+
+
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
+class ServeVisionTest(unittest.TestCase):
+    """Pictures over the serve protocol: IMAGE frames before the SUBMIT, soft tokens computed when the prompt reaches
+    them, a cache that remembers which picture it was built on."""
+    VISION = {"G4_IMG_TOKENS": "12"}
+
+    @classmethod
+    def setUpClass(cls):
+        with open(REF, encoding="utf-8") as handle:
+            cls.ref = json.load(handle)
+        cls.ids = {e["text"]: e["ids"] for e in cls.ref["encodings"]}
+
+    def engine(self, **kw):
+        kw["extra"] = dict(self.VISION, **kw.get("extra", {}))
+        e = Engine(**kw)
+        self.addCleanup(e.close)
+        return e
+
+    def prompt(self, *pictures, before="hello there", after="the quick brown fox"):
+        """Text and the ids it makes: `before`, each picture (as the gateway expands it: begin, soft tokens, end),
+        `after`."""
+        text, ids = before, list(self.ids[before]) if before else []
+        for index in pictures:
+            tokens = (self.ref["vision"]["images"][index]["gh"] // 3) * (self.ref["vision"]["images"][index]["gw"] // 3)
+            text += "<|image>" + "<|image|>" * tokens + "<image|>"
+            ids += [501] + [500] * tokens + [502]
+        text += after
+        ids += self.ids[after]
+        return text, ids
+
+    def pictures(self, *indexes):
+        return [picture(self.ref, i) for i in indexes]
+
+    def pictures_made(self, e):
+        return sum("picture:" in line for line in e.log)
+
+    def test_the_reply_is_the_offline_greedy_continuation(self):
+        text, ids = self.prompt(0)
+        want = offline(ids, 6, self.VISION, self.pictures(0))
+        e = self.engine()
+        out = e.ask(text, max_tokens=6, images=self.pictures(0))
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["accept"], len(ids))
+        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]))
+
+    def test_two_pictures_and_small_chunks(self):
+        text, ids = self.prompt(2, 1)
+        want = offline(ids, 5, self.VISION, self.pictures(2, 1))
+        e = self.engine(extra={"G4_CHUNK": "4"})        # the 12-token picture is three chunks wide, and goes whole
+        out = e.ask(text, max_tokens=5, images=self.pictures(2, 1))
+        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]))
+        self.assertEqual(self.pictures_made(e), 2)
+
+    def test_a_turn_that_extends_a_picture_conversation_reads_the_picture_once(self):
+        first, _ = self.prompt(0)
+        second = first + "<turn|>\n<|turn>user\nhello there"
+        e = self.engine()
+        e.ask(first, max_tokens=2, images=self.pictures(0))
+        got = e.ask(second, max_tokens=5, images=self.pictures(0))
+        self.assertIn("reusing", [l for l in e.log if l.startswith("[PREFIX]")][-1])
+        self.assertEqual(self.pictures_made(e), 1)       # the second turn's picture rows were in the cache
+        plain = self.engine(extra={"COLI_KV_PREFIX": "0"})
+        plain.ask(first, max_tokens=2, images=self.pictures(0))
+        self.assertEqual(got["data"], plain.ask(second, max_tokens=5, images=self.pictures(0))["data"])
+
+    def test_another_picture_is_not_served_from_the_cache_of_this_one(self):
+        """The same ids, a different picture: the placeholders match and the pixels do not."""
+        text, ids = self.prompt(0)
+        patches, gh, gw = self.pictures(0)[0]
+        other = bytes(255 - v for v in patches)
+        e = self.engine()
+        first = e.ask(text, max_tokens=4, images=[(patches, gh, gw)])
+        second = e.ask(text, max_tokens=4, images=[(other, gh, gw)])
+        line = [l for l in e.log if l.startswith("[PREFIX]")][-1]
+        before = len(self.ids["hello there"]) + 1                    # the text and the begin-of-image token
+        self.assertIn(f"reusing {before} of", line)                  # up to the picture, not into it
+        self.assertEqual(self.pictures_made(e), 2)
+        fresh = self.engine().ask(text, max_tokens=4, images=[(other, gh, gw)])
+        self.assertEqual(second["data"], fresh["data"])
+        self.assertNotEqual(first["data"], second["data"])
+        again = e.ask(text, max_tokens=4, images=[(patches, gh, gw)])      # and back: the first picture's rows are gone
+        self.assertEqual(again["data"], first["data"])
+
+    def test_the_picture_count_must_match_the_placeholders(self):
+        text, _ = self.prompt(0)
+        e = self.engine()
+        out = e.ask(text, max_tokens=2)                                    # placeholders, no picture
+        self.assertTrue((out["error"] or "").startswith("BAD_IMAGE"), out)
+        out = e.ask("hello there", max_tokens=2, images=self.pictures(0))  # a picture, no placeholders
+        self.assertTrue((out["error"] or "").startswith("BAD_IMAGE"), out)
+        out = e.ask(self.prompt(1)[0], max_tokens=2, images=self.pictures(0))      # the wrong size
+        self.assertIn("soft tokens", out["error"] or "")
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")       # and the engine goes on
+
+    def test_a_malformed_picture_is_refused_by_id_and_its_submit_is_silent(self):
+        text, _ = self.prompt(0)
+        patches, gh, gw = self.pictures(0)[0]
+        e = self.engine()
+        for bad in ((patches[:-3], gh, gw), (patches, gh + 1, gw), (patches, gh, gw + 3)):
+            out = e.ask(text, max_tokens=2, images=[bad])
+            self.assertTrue((out["error"] or "").startswith("BAD_IMAGE"), out)
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+    def test_a_picture_beyond_what_the_engine_takes_is_refused(self):
+        text, _ = self.prompt(2)
+        e = self.engine(extra={"G4_IMG_TOKENS": "6"})                       # the 12-token picture does not fit
+        out = e.ask(text, max_tokens=2, images=self.pictures(2))
+        self.assertIn("G4_IMG_TOKENS", out["error"] or "")
+
+    def test_an_engine_without_the_tower_refuses_pictures(self):
+        text, _ = self.prompt(0)
+        e = self.engine(extra={"G4_VISION": "0"})
+        out = e.ask(text, max_tokens=2, images=self.pictures(0))
+        self.assertIn("no vision tower", out["error"] or "")
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+    def test_cancel_during_a_picture_prompt(self):
+        text, _ = self.prompt(2, 0)
+        e = self.engine()
+        rid = e.submit(text, max_tokens=300, images=self.pictures(2, 0))
+        e.cancel(rid)
+        out = e.collect(rid)
+        self.assertIsNotNone(out["done"])
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
 
 
 if __name__ == "__main__":

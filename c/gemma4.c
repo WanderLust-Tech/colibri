@@ -51,6 +51,7 @@
 #include "kv_prefix.h"
 #include "serve_codec.h"
 #include "serve_budget.h"
+#include "kv_image_key.h"
 #define XF_ACT_GELU_TANH 1
 #include "expert_ffn.h"
 #include "gemma4_tok.h"
@@ -88,6 +89,8 @@ typedef struct {
     float eps, softcap, theta_s, theta_g, prf;
     uint8_t is_full[128];
     int stop[16], n_stop;
+    int image_token;                    /* the placeholder id of one soft token (-1: the config names none) */
+    struct { int present, hidden, layers, heads, hd, inter, patch, pool, npos, standardize; float eps, theta; } vc;
 } Cfg;
 
 static double jnum(jval *o, const char *key, double dflt) {
@@ -135,6 +138,27 @@ static void load_cfg(Cfg *c, const char *snap) {
     if (c->hidden % 64 || c->moe_inter % 64) die("hidden %d and moe_intermediate_size %d must be multiples of 64", c->hidden, c->moe_inter);
     if (c->hd_s % 2 || c->hd_g % 2) die("head sizes must be even");
     if (jnum(t, "num_kv_shared_layers", 0) || jnum(t, "hidden_size_per_layer_input", 0)) die("kv sharing and per-layer embeddings are not supported");
+    c->image_token = (int)jnum(root, "image_token_id", -1);
+    jval *vcfg = json_get(root, "vision_config");
+    if (vcfg && vcfg->t == J_OBJ) {
+        c->vc.present = 1;
+        c->vc.hidden = (int)jnum(vcfg, "hidden_size", 0); c->vc.layers = (int)jnum(vcfg, "num_hidden_layers", 0);
+        c->vc.heads = (int)jnum(vcfg, "num_attention_heads", 0); c->vc.inter = (int)jnum(vcfg, "intermediate_size", 0);
+        c->vc.hd = (int)jnum(vcfg, "head_dim", c->vc.heads ? c->vc.hidden / c->vc.heads : 0);
+        c->vc.patch = (int)jnum(vcfg, "patch_size", 16); c->vc.pool = (int)jnum(vcfg, "pooling_kernel_size", 3);
+        c->vc.npos = (int)jnum(vcfg, "position_embedding_size", 10240);
+        c->vc.eps = (float)jnum(vcfg, "rms_norm_eps", 1e-6);
+        jval *vr = json_get(vcfg, "rope_parameters");
+        c->vc.theta = (float)jnum(vr, "rope_theta", 100.0);
+        jval *sd = json_get(vcfg, "standardize");
+        c->vc.standardize = sd && sd->t == J_BOOL ? sd->boolean : 0;
+        if (c->vc.hidden < 1 || c->vc.layers < 1 || c->vc.heads < 1 || c->vc.hd < 4 || c->vc.hd % 4 || c->vc.inter < 1 ||
+            c->vc.patch < 1 || c->vc.pool < 1 || c->vc.npos < 1)
+            die("config: implausible vision_config");
+        if (jnum(vcfg, "num_key_value_heads", c->vc.heads) != c->vc.heads) die("a vision tower with grouped keys and values is not supported");
+        jval *cl = json_get(vcfg, "use_clipped_linears");
+        if (cl && cl->t == J_BOOL && cl->boolean) die("clipped vision linears are not supported");
+    }
     /* stop ids: generation_config.json lists them (eos, end of turn, start of a tool response) */
     snprintf(path, sizeof path, "%s/generation_config.json", snap);
     jval *eos = NULL; char *garena = NULL; jval *groot = NULL;
@@ -173,14 +197,39 @@ typedef struct { ESlot *s; int n; int *slot_of; } LCache;
 typedef struct { float **K, **V; kv_prefix kvp; } Seq;       /* one conversation's keys and values */
 
 typedef struct {
+    float *in_ln, *post_attn_ln, *pre_ff_ln, *post_ff_ln, *q_norm, *k_norm;
+    QMat q, k, v, o, gate, up, down;
+} VLayer;
+
+typedef struct {                                      /* the vision tower and the projector into the text model's space */
+    int loaded;
+    QMat input_proj, proj;
+    float *pos;                                       /* [2][npos][hidden]: column table, then row table */
+    float *std_bias, *std_scale;
+    float *inv;                                       /* rope frequencies, hd/4 */
+    VLayer *L;
+} Vision;
+
+/* One picture inside a prompt: its soft tokens occupy positions [start, start + ntok), which a prompt's rows
+ * read from `feat` instead of the embedding table, and which the sliding layers attend to in both directions. */
+typedef struct {
+    int start, ntok, gh, gw;
+    unsigned char *pix;                               /* gh*gw patches of patch*patch*3 bytes, as the gateway sent them */
+    float *feat;                                      /* ntok x hidden, computed when the prompt reaches the picture */
+    uint64_t key;                                     /* identifies the picture: a cache is reused only for the same one */
+} ImgSpan;
+
+typedef struct {
     Cfg c; shards S;
+    Vision vis; int rows, img_tokens;                 /* rows: the most one forward_chunk takes (a prompt chunk, or a whole picture);
+                                                       * img_tokens: the soft tokens of the biggest picture accepted (0: no vision) */
     QMat embed; float *final_norm;
     Layer *L;
     float *inv_s, *inv_g;                             /* rope frequencies: sliding, full */
     int cap; size_t blob_bytes;
     LCache *cache; uint64_t clock; uint32_t group; uint64_t hits, miss; double disk_s;
     uint8_t *ehit;                                    /* [layers*experts] routed this request */
-    int max_t, ring, chunk, slack;                    /* chunk: rows per forward_chunk (<= CHUNK); slack: positions the sliding
+    int max_t, ring, chunk, slack;                    /* chunk: rows of prompt per step (<= CHUNK); slack: positions the sliding
                                                        * layers keep beyond window + chunk, so a conversation can be rewound; ring: all three */
     /* working memory for one chunk */
     float *x, *h, *qb, *kb, *vb, *ao, *g1, *u1, *m1, *m2, *e_in, *e_out, *rl, *kv_tmp;
@@ -212,6 +261,43 @@ static void load_q(Model *m, const char *name, QMat *w, int O, int I) {
     w->q = xmalloc((size_t)O * I);
     st_read_raw(&m->S, name, w->q, 0);
     load_f32(m, sname, &w->s, O);
+}
+
+/* The vision tower, when the config describes one and the container carries it. */
+static void load_vision(Model *m) {
+    Cfg *c = &m->c; Vision *v = &m->vis;
+    if (getenv("G4_VISION") && getenv("G4_VISION")[0] == '0') return;      /* text only, as asked: the tower is not read */
+    if (!c->vc.present || !st_find(&m->S, "model.vision_tower.patch_embedder.input_proj.weight")) return;
+    int D = c->vc.hidden, F = c->vc.inter, nh = c->vc.heads, hd = c->vc.hd;
+    char nm[256];
+    load_q(m, "model.vision_tower.patch_embedder.input_proj.weight", &v->input_proj, D, c->vc.patch * c->vc.patch * 3);
+    load_f32(m, "model.vision_tower.patch_embedder.position_embedding_table", &v->pos, (int64_t)2 * c->vc.npos * D);
+    if (c->vc.standardize) { load_f32(m, "model.vision_tower.std_bias", &v->std_bias, D); load_f32(m, "model.vision_tower.std_scale", &v->std_scale, D); }
+    load_q(m, "model.embed_vision.embedding_projection.weight", &v->proj, c->hidden, D);
+    v->L = calloc((size_t)c->vc.layers, sizeof(VLayer));
+    for (int l = 0; l < c->vc.layers; l++) {
+        VLayer *y = &v->L[l];
+#define VNAME(tail) (snprintf(nm, sizeof nm, "model.vision_tower.encoder.layers.%d.%s", l, tail), nm)
+        load_f32(m, VNAME("input_layernorm.weight"), &y->in_ln, D);
+        load_f32(m, VNAME("post_attention_layernorm.weight"), &y->post_attn_ln, D);
+        load_f32(m, VNAME("pre_feedforward_layernorm.weight"), &y->pre_ff_ln, D);
+        load_f32(m, VNAME("post_feedforward_layernorm.weight"), &y->post_ff_ln, D);
+        load_f32(m, VNAME("self_attn.q_norm.weight"), &y->q_norm, hd);
+        load_f32(m, VNAME("self_attn.k_norm.weight"), &y->k_norm, hd);
+        load_q(m, VNAME("self_attn.q_proj.linear.weight"), &y->q, nh * hd, D);
+        load_q(m, VNAME("self_attn.k_proj.linear.weight"), &y->k, nh * hd, D);
+        load_q(m, VNAME("self_attn.v_proj.linear.weight"), &y->v, nh * hd, D);
+        load_q(m, VNAME("self_attn.o_proj.linear.weight"), &y->o, D, nh * hd);
+        load_q(m, VNAME("mlp.gate_proj.linear.weight"), &y->gate, F, D);
+        load_q(m, VNAME("mlp.up_proj.linear.weight"), &y->up, F, D);
+        load_q(m, VNAME("mlp.down_proj.linear.weight"), &y->down, D, F);
+#undef VNAME
+    }
+    /* axial rope: the first half of a head turns with the patch's column, the second with its row; each half
+     * rotates its own two halves by the same hd/4 angles */
+    v->inv = xmalloc((size_t)(hd / 4) * sizeof(float));
+    for (int j = 0; j < hd / 4; j++) v->inv[j] = 1.f / powf(c->vc.theta, (float)(2 * j) / (float)(hd / 2));
+    v->loaded = 1;
 }
 
 static void model_init(Model *m, const char *snap, int cap, int max_t) {
@@ -254,6 +340,15 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
         snprintf(y->blob_buf, sizeof y->blob_buf, "%slayers.%d.experts.blob", P, l);
         y->blob_name = y->blob_buf;
 #undef NAME
+    }
+    load_vision(m);
+    m->rows = CHUNK;                                         /* a picture's soft tokens go through one forward_chunk together */
+    if (m->vis.loaded) {
+        int img = getenv("G4_IMG_TOKENS") ? atoi(getenv("G4_IMG_TOKENS")) : 280;
+        if (img < 1) img = 1;
+        if (img > 4096) img = 4096;
+        m->img_tokens = img;
+        if (img > m->rows) m->rows = img;
     }
     m->blob_bytes = (size_t)2 * c->moe_inter * (H / 2) + (size_t)H * (c->moe_inter / 2)
                   + 4 * ((size_t)2 * c->moe_inter * (H / 64) + (size_t)H * (c->moe_inter / 64));
@@ -300,28 +395,31 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
     if (m->chunk < 1 || m->chunk > CHUNK) m->chunk = CHUNK;
     m->slack = getenv("G4_SLACK") ? atoi(getenv("G4_SLACK")) : 2048;
     if (m->slack < 0) m->slack = 0;
-    m->ring = c->window + m->chunk + m->slack;
+    /* a sliding row reads the window behind it; the rows of one forward_chunk are all written before any is read, so the
+     * ring holds the window and the largest chunk (a prompt chunk, or a whole picture) */
+    m->ring = c->window + (m->img_tokens > m->chunk ? m->img_tokens : m->chunk) + m->slack;
     int nh = c->n_heads, hdm = c->hd_g > c->hd_s ? c->hd_g : c->hd_s;
     int kvm = c->nkv_s * c->hd_s > c->nkv_g * c->hd_g ? c->nkv_s * c->hd_s : c->nkv_g * c->hd_g;
-    int Fd = c->dense_inter;
-    m->x = xmalloc((size_t)CHUNK * H * 4); m->h = xmalloc((size_t)CHUNK * H * 4);
-    m->qb = xmalloc((size_t)CHUNK * nh * hdm * 4); m->ao = xmalloc((size_t)CHUNK * nh * hdm * 4);
-    m->kb = xmalloc((size_t)CHUNK * kvm * 4); m->vb = xmalloc((size_t)CHUNK * kvm * 4);
-    m->g1 = xmalloc((size_t)CHUNK * Fd * 4); m->u1 = xmalloc((size_t)CHUNK * Fd * 4);
-    m->m1 = xmalloc((size_t)CHUNK * H * 4); m->m2 = xmalloc((size_t)CHUNK * H * 4);
-    m->e_in = xmalloc((size_t)CHUNK * H * 4); m->e_out = xmalloc((size_t)CHUNK * H * 4);
-    m->rl = xmalloc((size_t)CHUNK * E * 4);
-    m->ridx = xmalloc((size_t)CHUNK * c->topk * sizeof(int)); m->rval = xmalloc((size_t)CHUNK * c->topk * 4);
-    m->eptr = xmalloc((size_t)CHUNK * c->topk * sizeof(void *));
+    int Fd = c->dense_inter, R = m->rows;
+    m->x = xmalloc((size_t)R * H * 4); m->h = xmalloc((size_t)R * H * 4);
+    m->qb = xmalloc((size_t)R * nh * hdm * 4); m->ao = xmalloc((size_t)R * nh * hdm * 4);
+    m->kb = xmalloc((size_t)R * kvm * 4); m->vb = xmalloc((size_t)R * kvm * 4);
+    m->g1 = xmalloc((size_t)R * Fd * 4); m->u1 = xmalloc((size_t)R * Fd * 4);
+    m->m1 = xmalloc((size_t)R * H * 4); m->m2 = xmalloc((size_t)R * H * 4);
+    m->e_in = xmalloc((size_t)R * H * 4); m->e_out = xmalloc((size_t)R * H * 4);
+    m->rl = xmalloc((size_t)R * E * 4);
+    m->ridx = xmalloc((size_t)R * c->topk * sizeof(int)); m->rval = xmalloc((size_t)R * c->topk * 4);
+    m->eptr = xmalloc((size_t)R * c->topk * sizeof(void *));
     m->xe = xmalloc((size_t)E * sizeof(XfExpert));
-    m->scratch_bytes = xf_moe_scratch_bytes(CHUNK, c->topk, H, c->moe_inter);
+    m->scratch_bytes = xf_moe_scratch_bytes(R, c->topk, H, c->moe_inter);
     m->scratch = xmalloc(m->scratch_bytes);
     int T = 1;
 #ifdef _OPENMP
     T = omp_get_max_threads();
 #endif
     m->scores = xmalloc((size_t)T * sizeof(float *));
-    for (int i = 0; i < T; i++) m->scores[i] = xmalloc(((size_t)max_t + 16) * 4);
+    /* a sliding row reads the window behind it and, inside a picture, the rest of the picture ahead of it */
+    for (int i = 0; i < T; i++) m->scores[i] = xmalloc(((size_t)max_t + c->window + R + 16) * 4);
     m->trace = getenv("G4_TRACE") != NULL;
 }
 
@@ -347,6 +445,10 @@ static inline float dot_f32(const float *a, const float *b, int n) {
     for (; i + 16 <= n; i += 16) {
         a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), a0);
         a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8), a1);
+    }
+    if (i + 8 <= n) {                                   /* a head of 72 (the vision tower's) is 4 x 16 + 8 */
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), a0);
+        i += 8;
     }
     a0 = _mm256_add_ps(a0, a1);
     float t[8]; _mm256_storeu_ps(t, a0);
@@ -386,14 +488,25 @@ static inline void dot_q8(const int8_t *w, const float *x, int I, int rows, floa
 }
 
 /* y[S][O] = x[S][I] . W^T, W per-row int8 */
+static int g_rows1 = 0;       /* a decode step: every row goes through the single-row kernel, so a row gets the same bits
+                               * whether it is alone or one of several conversations' tokens (the 4-row kernel adds in another order) */
+
 static void mm(float *y, const float *x, int S, const QMat *W) {
     int O = W->O, I = W->I;
+    /* The rows go through in blocks of 32: a block of activations (32 x I floats) stays in the cache while every
+     * weight row is read against it, instead of the whole of x being streamed again for each of the O weight rows.
+     * That is what lets a picture's 2400 rows (or a chunk's 256) run near the arithmetic's speed. Each dot product
+     * is the same sum in the same order, so the results do not change. */
+    for (int s0 = 0; s0 < S; s0 += 32) {
+        int sn = S - s0 < 32 ? S - s0 : 32;
 #pragma omp parallel for schedule(static)
-    for (int o = 0; o < O; o++) {
-        const int8_t *w = W->q + (size_t)o * I; float sc = W->s[o], r[4];
-        int s = 0;
-        for (; s + 4 <= S; s += 4) { dot_q8(w, x + (size_t)s * I, I, 4, r); for (int k = 0; k < 4; k++) y[(size_t)(s + k) * O + o] = r[k] * sc; }
-        for (; s < S; s++) { dot_q8(w, x + (size_t)s * I, I, 1, r); y[(size_t)s * O + o] = r[0] * sc; }
+        for (int o = 0; o < O; o++) {
+            const int8_t *w = W->q + (size_t)o * I; float sc = W->s[o], r[4];
+            int s = s0, end = s0 + sn;
+            if (!g_rows1)
+                for (; s + 4 <= end; s += 4) { dot_q8(w, x + (size_t)s * I, I, 4, r); for (int k = 0; k < 4; k++) y[(size_t)(s + k) * O + o] = r[k] * sc; }
+            for (; s < end; s++) { dot_q8(w, x + (size_t)s * I, I, 1, r); y[(size_t)s * O + o] = r[0] * sc; }
+        }
     }
 }
 
@@ -506,15 +619,162 @@ static void moe_routed(Model *m, int l, const float *xres, int S) {
     free(seen);
     ESlot **slots = xmalloc((size_t)m->cap * sizeof(ESlot *));
     int *pos_of = xmalloc((size_t)E * sizeof(int));
+    /* A cache smaller than the experts the rows want means several groups. Added group by group, a row's experts
+     * would be summed in the order the groups come, which depends on what else is in the batch; so then each
+     * expert's output is kept and every row is summed in its own rank order at the end, whatever the grouping. */
+    float *ctb = nu > m->cap ? xmalloc((size_t)S * K * H * sizeof(float)) : NULL;
     for (int g0 = 0; g0 < nu; g0 += m->cap) {
         int n = nu - g0 < m->cap ? nu - g0 : m->cap;
         experts_ready(m, l, uniq + g0, n, slots);
         for (int e = 0; e < E; e++) pos_of[e] = -1;
         for (int i = 0; i < n; i++) { m->xe[i] = expert_view(m, slots[i]->buf); pos_of[uniq[g0 + i]] = i; }
         for (int i = 0; i < S * K; i++) m->eptr[i] = pos_of[idx[i]] >= 0 ? &m->xe[pos_of[idx[i]]] : NULL;
-        xf_moe_add(m->e_out, m->e_in, S, K, H, F, idx, val, m->eptr, 0, m->scratch);
+        if (ctb) xf_moe_compute(ctb, m->e_in, S, K, H, F, idx, m->eptr, 0, m->scratch);
+        else xf_moe_add(m->e_out, m->e_in, S, K, H, F, idx, val, m->eptr, 0, m->scratch);
+    }
+    if (ctb) {
+        for (int s = 0; s < S; s++) {
+            float *os = m->e_out + (size_t)s * H;
+            for (int k = 0; k < K; k++) {
+                int i = s * K + k; float w = val[i]; const float *cc = ctb + (size_t)i * H;
+                for (int d = 0; d < H; d++) os[d] += w * cc[d];
+            }
+        }
+        free(ctb);
     }
     free(uniq); free(slots); free(pos_of);
+}
+
+/* ------------------------------------------------------------------------------ vision */
+
+/* Turn the first half of a head by the patch's column angles and the second half by its row angles; each half
+ * is rotated as two halves (rotate_half) by the same hd/4 angles. cx/sx, cy/sy: [hd/4] for this patch. */
+static void rope_axial(float *x, int hd, const float *cx, const float *sx, const float *cy, const float *sy) {
+    int h4 = hd / 4;
+    for (int i = 0; i < h4; i++) {
+        float a = x[i], b = x[i + h4];
+        x[i] = a * cx[i] - b * sx[i]; x[i + h4] = b * cx[i] + a * sx[i];
+        float e = x[2 * h4 + i], f = x[3 * h4 + i];
+        x[2 * h4 + i] = e * cy[i] - f * sy[i]; x[3 * h4 + i] = f * cy[i] + e * sy[i];
+    }
+}
+
+/* The soft tokens of one picture: (gh/pool) * (gw/pool) rows of the text model's hidden size, malloc'd.
+ * pix holds gh*gw patches of patch*patch*3 bytes (row, column, channel), row-major over the grid, the bytes the
+ * image processor makes before it divides by 255. transformers' Gemma4VisionModel and Gemma4MultimodalEmbedder
+ * are the specification; there is no padding here, so none of the padding's handling is. */
+static float *vision_encode(Model *m, const unsigned char *pix, int gh, int gw) {
+    Cfg *c = &m->c; Vision *v = &m->vis;
+    int D = c->vc.hidden, F = c->vc.inter, nh = c->vc.heads, hd = c->vc.hd, k = c->vc.pool, H = c->hidden;
+    int P = gh * gw, pd = c->vc.patch * c->vc.patch * 3, h4 = hd / 4;
+    float eps = c->vc.eps;
+    double t0 = now_s();
+    size_t PD = (size_t)P * D, PQ = (size_t)P * nh * hd;
+    float *x = xmalloc(PD * 4), *h = xmalloc(PD * 4), *t = xmalloc(PD * 4);
+    float *q = xmalloc(PQ * 4), *kk = xmalloc(PQ * 4), *vv = xmalloc(PQ * 4), *ao = xmalloc(PQ * 4);
+    float *g = xmalloc((size_t)P * F * 4), *u = xmalloc((size_t)P * F * 4);
+    {
+        float *in = xmalloc((size_t)P * pd * 4);
+        const float rescale = (float)(1.0 / 255.0);
+        for (size_t i = 0; i < (size_t)P * pd; i++) in[i] = 2.f * ((float)pix[i] * rescale - 0.5f);
+        mm(x, in, P, &v->input_proj);
+        free(in);
+    }
+    float *cx = xmalloc((size_t)P * h4 * 4), *sx = xmalloc((size_t)P * h4 * 4), *cy = xmalloc((size_t)P * h4 * 4), *sy = xmalloc((size_t)P * h4 * 4);
+    for (int p = 0; p < P; p++) {
+        int col = p % gw, row = p / gw;
+        const float *a = v->pos + (size_t)col * D, *b = v->pos + ((size_t)c->vc.npos + row) * D;
+        for (int i = 0; i < D; i++) x[(size_t)p * D + i] += a[i] + b[i];
+        for (int j = 0; j < h4; j++) {
+            float ax = (float)col * v->inv[j], ay = (float)row * v->inv[j];
+            cx[(size_t)p * h4 + j] = cosf(ax); sx[(size_t)p * h4 + j] = sinf(ax);
+            cy[(size_t)p * h4 + j] = cosf(ay); sy[(size_t)p * h4 + j] = sinf(ay);
+        }
+    }
+    int T = 1;
+#ifdef _OPENMP
+    T = omp_get_max_threads();
+#endif
+    float *scb = xmalloc((size_t)T * P * 4);
+    double t_attn = 0, t_mm = 0, t1;
+    for (int l = 0; l < c->vc.layers; l++) {
+        VLayer *y = &v->L[l];
+        t1 = now_s();
+        for (int p = 0; p < P; p++) rms_w(h + (size_t)p * D, x + (size_t)p * D, y->in_ln, D, eps);
+        mm(q, h, P, &y->q); mm(kk, h, P, &y->k); mm(vv, h, P, &y->v);
+        t_mm += now_s() - t1;
+        for (int p = 0; p < P; p++) for (int hh = 0; hh < nh; hh++) {
+            size_t o = ((size_t)p * nh + hh) * hd;
+            rms_w(q + o, q + o, y->q_norm, hd, eps);
+            rope_axial(q + o, hd, cx + (size_t)p * h4, sx + (size_t)p * h4, cy + (size_t)p * h4, sy + (size_t)p * h4);
+            rms_w(kk + o, kk + o, y->k_norm, hd, eps);
+            rope_axial(kk + o, hd, cx + (size_t)p * h4, sx + (size_t)p * h4, cy + (size_t)p * h4, sy + (size_t)p * h4);
+            rms_nw(vv + o, vv + o, hd, eps);
+        }
+        /* every patch sees every patch; the scores are not scaled */
+        t1 = now_s();
+#pragma omp parallel for schedule(dynamic, 4)
+        for (int it = 0; it < P * nh; it++) {
+            int p = it / nh, hh = it % nh, tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            float *sc = scb + (size_t)tid * P;
+            const float *qh = q + ((size_t)p * nh + hh) * hd;
+            float mx = -INFINITY;
+            for (int j = 0; j < P; j++) { float s = dot_f32(qh, kk + ((size_t)j * nh + hh) * hd, hd); sc[j] = s; if (s > mx) mx = s; }
+            float sum = 0.f;
+            for (int j = 0; j < P; j++) { sc[j] = expf(sc[j] - mx); sum += sc[j]; }
+            float inv = 1.f / sum;
+            float *out = ao + ((size_t)p * nh + hh) * hd;
+            for (int d = 0; d < hd; d++) out[d] = 0.f;
+            for (int j = 0; j < P; j++) {
+                const float *vj = vv + ((size_t)j * nh + hh) * hd; float w = sc[j] * inv;
+                for (int d = 0; d < hd; d++) out[d] += w * vj[d];
+            }
+        }
+        t_attn += now_s() - t1;
+        t1 = now_s();
+        mm(t, ao, P, &y->o);
+        for (int p = 0; p < P; p++) {
+            rms_w(t + (size_t)p * D, t + (size_t)p * D, y->post_attn_ln, D, eps);
+            for (int i = 0; i < D; i++) x[(size_t)p * D + i] += t[(size_t)p * D + i];
+        }
+        for (int p = 0; p < P; p++) rms_w(h + (size_t)p * D, x + (size_t)p * D, y->pre_ff_ln, D, eps);
+        mm(g, h, P, &y->gate); mm(u, h, P, &y->up);
+        for (size_t i = 0; i < (size_t)P * F; i++) g[i] = gelu_tanh(g[i]) * u[i];
+        mm(t, g, P, &y->down);
+        for (int p = 0; p < P; p++) {
+            rms_w(t + (size_t)p * D, t + (size_t)p * D, y->post_ff_ln, D, eps);
+            for (int i = 0; i < D; i++) x[(size_t)p * D + i] += t[(size_t)p * D + i];
+        }
+        t_mm += now_s() - t1;
+    }
+    /* pool k x k patches into one soft token, scale, standardise, then the projector (a weightless RMS norm and a matrix) */
+    int tw = gw / k, ntok = (gh / k) * tw;
+    float *pooled = calloc((size_t)ntok * D, sizeof(float));
+    if (!pooled) die("out of memory (%zu bytes)", (size_t)ntok * D * sizeof(float));
+    float inv_kk = 1.f / (float)(k * k), root = sqrtf((float)D);
+    for (int p = 0; p < P; p++) {
+        int tok = (p / gw / k) * tw + (p % gw) / k;
+        for (int i = 0; i < D; i++) pooled[(size_t)tok * D + i] += x[(size_t)p * D + i] * inv_kk;
+    }
+    for (int tk = 0; tk < ntok; tk++) {
+        float *r = pooled + (size_t)tk * D;
+        for (int i = 0; i < D; i++) {
+            r[i] *= root;
+            if (c->vc.standardize) r[i] = (r[i] - v->std_bias[i]) * v->std_scale[i];
+        }
+        rms_nw(r, r, D, eps);
+    }
+    float *feat = xmalloc((size_t)ntok * H * 4);
+    mm(feat, pooled, ntok, &v->proj);
+    free(pooled); free(x); free(h); free(t); free(q); free(kk); free(vv); free(ao); free(g); free(u);
+    free(cx); free(sx); free(cy); free(sy); free(scb);
+    if (getenv("COLI_PREFIX_LOG") || m->trace)
+        fprintf(stderr, "[gemma4] picture: %d patches -> %d soft tokens in %.2fs (attention %.2fs, matrices %.2fs)\n",
+                P, ntok, now_s() - t0, t_attn, t_mm);
+    return feat;
 }
 
 /* ------------------------------------------------------------------------------ the forward pass */
@@ -525,13 +785,48 @@ static void trace(Model *m, const char *what, int l, const float *x, int n) {
     fprintf(stderr, "[G4] %-10s L%-2d sum % .6f abs % .6f  %.5f %.5f %.5f\n", what, l, s, a, x[0], x[1], x[2]);
 }
 
-/* S rows of one conversation at positions pos0..pos0+S-1, S <= CHUNK. Leaves the residual stream in m->x. */
-static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0) {
+static const ImgSpan *span_at(const ImgSpan *sp, int nsp, int p) {
+    for (int i = 0; i < nsp; i++) if (p >= sp[i].start && p < sp[i].start + sp[i].ntok) return &sp[i];
+    return NULL;
+}
+
+/* How many of the `left` rows from position pos go through forward_chunk together: up to a chunk, but never part
+ * of a picture. The sliding layers let a picture's rows see each other, so all of its keys must be there when
+ * its first row is read: a chunk that would end inside a picture stops before it, and one that starts at a
+ * picture takes the whole of it (more rows than a chunk, up to the picture's size). */
+static int next_rows(const Model *m, const ImgSpan *sp, int nsp, int pos, int left) {
+    int n = left < m->chunk ? left : m->chunk;
+    for (int i = 0; i < nsp; i++) {
+        int a = sp[i].start, b = a + sp[i].ntok;
+        if (pos >= a && pos < b) return b - pos < left ? b - pos : left;
+        if (a > pos && a < pos + n && b > pos + n) n = a - pos;
+    }
+    return n;
+}
+
+/* S rows at positions pos0..pos0+S-1 of one conversation q, S <= m->rows, or, with qs and ps given, S rows that
+ * are each their own conversation's next token (qs[s] at position ps[s]: a decode step of several conversations,
+ * q, pos0 and the pictures then unused). Leaves the residual stream in m->x.
+ * sp: the pictures of the prompt; their rows are the tower's soft tokens, not embeddings, and a picture lies
+ * wholly inside one chunk. */
+static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, const ImgSpan *sp, int nsp,
+                          Seq *const *qs, const int *ps) {
     Cfg *c = &m->c;
     int H = c->hidden, nh = c->n_heads;
     double t0;
     float emb_scale = sqrtf((float)H);
+    int *reach = xmalloc((size_t)S * sizeof(int));              /* the last position a sliding row reads: itself, or the end of its picture */
     for (int s = 0; s < S; s++) {                              /* embedding */
+        int p = ps ? ps[s] : pos0 + s;
+        const ImgSpan *g = nsp ? span_at(sp, nsp, p) : NULL;
+        reach[s] = p;
+        if (g) {
+            if (!g->feat) die("internal: a picture's rows reached the model without its soft tokens");
+            reach[s] = g->start + g->ntok - 1;
+            if (ps || reach[s] >= pos0 + S) die("internal: a chunk ends inside a picture (%d rows from %d)", S, pos0);
+            memcpy(m->x + (size_t)s * H, g->feat + (size_t)(p - g->start) * H, (size_t)H * sizeof(float));
+            continue;
+        }
         int id = ids[s]; if (id < 0 || id >= c->vocab) id = 0;
         const int8_t *w = m->embed.q + (size_t)id * H; float sc = m->embed.s[id] * emb_scale;
         for (int i = 0; i < H; i++) m->x[(size_t)s * H + i] = (float)w[i] * sc;
@@ -542,7 +837,7 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0) {
     float *cs_s = xmalloc((size_t)S * hs2 * 4), *sn_s = xmalloc((size_t)S * hs2 * 4);
     float *cs_g = xmalloc((size_t)S * hg2 * 4), *sn_g = xmalloc((size_t)S * hg2 * 4);
     for (int s = 0; s < S; s++) {
-        float p = (float)(pos0 + s);
+        float p = (float)(ps ? ps[s] : pos0 + s);
         for (int i = 0; i < hs2; i++) { float a = p * m->inv_s[i]; cs_s[(size_t)s * hs2 + i] = cosf(a); sn_s[(size_t)s * hs2 + i] = sinf(a); }
         for (int i = 0; i < hg2; i++) { float a = p * m->inv_g[i]; cs_g[(size_t)s * hg2 + i] = cosf(a); sn_g[(size_t)s * hg2 + i] = sinf(a); }
     }
@@ -571,36 +866,39 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0) {
                 rms_nw(vh, vh, hd, c->eps);
             }
             /* store this row's keys and values */
-            int p = pos0 + s;
+            int p = ps ? ps[s] : pos0 + s;
+            Seq *cq = qs ? qs[s] : q;
             size_t slot = y->full ? (size_t)p : (size_t)(p % m->ring);
-            memcpy(q->K[l] + slot * nkv * hd, m->kb + (size_t)s * nkv * hd, (size_t)nkv * hd * sizeof(float));
-            memcpy(q->V[l] + slot * nkv * hd, m->vb + (size_t)s * nkv * hd, (size_t)nkv * hd * sizeof(float));
+            memcpy(cq->K[l] + slot * nkv * hd, m->kb + (size_t)s * nkv * hd, (size_t)nkv * hd * sizeof(float));
+            memcpy(cq->V[l] + slot * nkv * hd, m->vb + (size_t)s * nkv * hd, (size_t)nkv * hd * sizeof(float));
         }
         /* scores, softmax, weighted values; the model does not scale scores */
 #pragma omp parallel for schedule(dynamic, 4)
         for (int it = 0; it < S * nh; it++) {
-            int s = it / nh, h = it % nh, p = pos0 + s, kvh = h / grp;
+            int s = it / nh, h = it % nh, p = ps ? ps[s] : pos0 + s, kvh = h / grp;
+            const Seq *cq = qs ? qs[s] : q;
             int tid = 0;
 #ifdef _OPENMP
             tid = omp_get_thread_num();
 #endif
             float *sc = m->scores[tid];
             int lo = y->full ? 0 : (p - c->window + 1 > 0 ? p - c->window + 1 : 0);
+            int hi = y->full ? p : reach[s];                    /* full layers are causal; sliding ones read the whole picture a row is in */
             const float *qh = m->qb + ((size_t)s * nh + h) * hd;
             float mx = -INFINITY;
-            for (int j = lo; j <= p; j++) {
+            for (int j = lo; j <= hi; j++) {
                 size_t slot = y->full ? (size_t)j : (size_t)(j % m->ring);
-                float v = dot_f32(qh, q->K[l] + (slot * nkv + kvh) * hd, hd);
+                float v = dot_f32(qh, cq->K[l] + (slot * nkv + kvh) * hd, hd);
                 sc[j - lo] = v; if (v > mx) mx = v;
             }
             float sum = 0.f;
-            for (int j = lo; j <= p; j++) { sc[j - lo] = expf(sc[j - lo] - mx); sum += sc[j - lo]; }
+            for (int j = lo; j <= hi; j++) { sc[j - lo] = expf(sc[j - lo] - mx); sum += sc[j - lo]; }
             float inv = 1.f / sum;
             float *out = m->ao + ((size_t)s * nh + h) * hd;
             for (int d = 0; d < hd; d++) out[d] = 0.f;
-            for (int j = lo; j <= p; j++) {
+            for (int j = lo; j <= hi; j++) {
                 size_t slot = y->full ? (size_t)j : (size_t)(j % m->ring);
-                const float *vv = q->V[l] + (slot * nkv + kvh) * hd; float w = sc[j - lo] * inv;
+                const float *vv = cq->V[l] + (slot * nkv + kvh) * hd; float w = sc[j - lo] * inv;
                 for (int d = 0; d < hd; d++) out[d] += w * vv[d];
             }
         }
@@ -632,7 +930,7 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0) {
         m->t_moe += now_s() - t0;
         trace(m, "layer", l, m->x + (size_t)(S - 1) * H, H);
     }
-    free(cs_s); free(sn_s); free(cs_g); free(sn_g);
+    free(cs_s); free(sn_s); free(cs_g); free(sn_g); free(reach);
 }
 
 /* logits of one residual row: final norm, tied head, soft cap. out has c->vocab floats. */
@@ -652,20 +950,78 @@ static void head_row(Model *m, const float *xrow, float *out) {
     m->t_head += now_s() - t0;
 }
 
+/* Logits of S residual rows at once (rows of xr), one pass over the tied head: out[s] gets V floats. Each row's
+ * logits are what head_row gives it alone, bit for bit (the single-row kernel for every row). */
+static void head_rows(Model *m, const float *xr, int S, float **out) {
+    Cfg *c = &m->c; int H = c->hidden, V = c->vocab;
+    double t0 = now_s();
+    float *hn = xmalloc((size_t)S * H * 4);
+    for (int s = 0; s < S; s++) rms_w(hn + (size_t)s * H, xr + (size_t)s * H, m->final_norm, H, c->eps);
+#pragma omp parallel for schedule(static)
+    for (int v = 0; v < V; v++) {
+        const int8_t *w = m->embed.q + (size_t)v * H; float sc = m->embed.s[v];
+        for (int s = 0; s < S; s++) {
+            float r[4]; dot_q8(w, hn + (size_t)s * H, H, 1, r);
+            float l = r[0] * sc;
+            out[s][v] = c->softcap > 0 ? c->softcap * tanhf(l / c->softcap) : l;
+        }
+    }
+    free(hn);
+    m->t_head += now_s() - t0;
+}
+
+/* One decode step of several conversations: row s is token ids[s] at position ps[s] of conversation qs[s]. The
+ * projections, the experts and the head run once over the S rows (the weights are read once, not S times); the
+ * attention reads and writes each row's own conversation. out[s] gets that conversation's logits (V floats,
+ * malloc'd), the same bits it would get stepping alone. */
+static void forward_rows(Model *m, Seq *const *qs, const int *ids, const int *ps, int S, float **out) {
+    int V = m->c.vocab;
+    g_rows1 = 1;
+    forward_chunk(m, NULL, ids, S, 0, NULL, 0, qs, ps);
+    for (int s = 0; s < S; s++) { kv_prefix_record(&qs[s]->kvp, ids + s, ps[s], 1); out[s] = xmalloc((size_t)V * 4); }
+    head_rows(m, m->x, S, out);
+    g_rows1 = 0;
+    m->forwards += S;
+}
+
 /* Run `n` tokens of a conversation starting at position pos0 (chunked). Returns the logits after the
- * last token (V floats, malloc'd); with all != NULL, every row's logits too (all: n*V floats). */
-static float *forward(Model *m, Seq *q, const int *ids, int n, int pos0, float *all) {
+ * last token (V floats, malloc'd); with all != NULL, every row's logits too (all: n*V floats).
+ * keys: what the cache records for each row (NULL: the ids), which is how a picture's rows are told from another's. */
+static float *forward(Model *m, Seq *q, const int *ids, int n, int pos0, float *all,
+                      const int *keys, const ImgSpan *sp, int nsp) {
     Cfg *c = &m->c; int V = c->vocab;
     float *last = xmalloc((size_t)V * 4);
-    for (int s0 = 0; s0 < n; s0 += m->chunk) {
-        int S = n - s0 < m->chunk ? n - s0 : m->chunk;
-        forward_chunk(m, q, ids + s0, S, pos0 + s0);
-        kv_prefix_record(&q->kvp, ids + s0, pos0 + s0, S);
+    for (int s0 = 0; s0 < n;) {
+        int S = next_rows(m, sp, nsp, pos0 + s0, n - s0);
+        forward_chunk(m, q, ids + s0, S, pos0 + s0, sp, nsp, NULL, NULL);
+        kv_prefix_record(&q->kvp, keys ? keys + s0 : ids + s0, pos0 + s0, S);
         if (all) for (int s = 0; s < S; s++) head_row(m, m->x + (size_t)s * c->hidden, all + (size_t)(s0 + s) * V);
-        if (s0 + m->chunk >= n) head_row(m, m->x + (size_t)(S - 1) * c->hidden, last);
+        if (s0 + S >= n) head_row(m, m->x + (size_t)(S - 1) * c->hidden, last);
         m->forwards += S;
+        s0 += S;
     }
     return last;
+}
+
+/* The cache's key for row `t` of a picture: negative, so it can never equal a token id, and different for each
+ * row and each picture. */
+static int image_row_key(uint64_t picture, int t) {
+    uint64_t h = (picture ^ ((uint64_t)(t + 1) * 0x9E3779B97F4A7C15ULL)) * 0xD1B54A32D192ED03ULL;
+    return -1 - (int)((h >> 33) & 0x3fffffff);
+}
+
+/* Find the pictures a prompt's placeholders make: runs of the image token. Fills sp[i].start and .ntok, returns
+ * how many (at most cap). */
+static int find_pictures(const Cfg *c, const int *ids, int n, ImgSpan *sp, int cap) {
+    int k = 0;
+    if (c->image_token < 0) return 0;
+    for (int i = 0; i < n;) {
+        if (ids[i] != c->image_token) { i++; continue; }
+        int j = i; while (j < n && ids[j] == c->image_token) j++;
+        if (k < cap) { sp[k].start = i; sp[k].ntok = j - i; }
+        k++; i = j;
+    }
+    return k;
 }
 
 /* ------------------------------------------------------------------------------ sampling */
@@ -711,7 +1067,58 @@ static int is_stop(const Cfg *c, int t) { for (int i = 0; i < c->n_stop; i++) if
 
 /* ------------------------------------------------------------------------------ test mode */
 
+static int parse_ids(const char *e, int *ids) {
+    int n = 0;
+    for (const char *p = e; *p;) { char *end; long v = strtol(p, &end, 10); if (end == p) break; ids[n++] = (int)v; p = *end == ',' ? end + 1 : end; }
+    return n;
+}
+
+/* G4_TEST with G4_IDS and G4_IDS2: two conversations step G4_GREEDY times, each alone and then together in one batched
+ * pass, and every logit of every step is compared bit for bit: a conversation must get from a batch exactly what it
+ * gets alone (the serve loop's promise, and why a reply does not depend on who else is asking). The steps are fed
+ * the tokens of the solo run, so the inputs are the same even if the bits were not. */
+static int run_batch_test(Model *m) {
+    int V = m->c.vocab, steps = getenv("G4_GREEDY") ? atoi(getenv("G4_GREEDY")) : 8;
+    /* G4_IDS is the first conversation; G4_IDS2 holds the others, separated by ';' (at most MAX_SLOTS - 1) */
+    const char *src[MAX_SLOTS]; int N = 0;
+    src[N++] = getenv("G4_IDS");
+    char *rest = strdup(getenv("G4_IDS2"));
+    for (char *tokp = strtok(rest, ";"); tokp && N < MAX_SLOTS; tokp = strtok(NULL, ";")) src[N++] = tokp;
+    int *ids[MAX_SLOTS], n[MAX_SLOTS];
+    for (int a = 0; a < N; a++) { ids[a] = xmalloc(strlen(src[a]) * sizeof(int) + 16); n[a] = parse_ids(src[a], ids[a]); }
+    float *alone[MAX_SLOTS]; int *tok[MAX_SLOTS];
+    for (int a = 0; a < N; a++) {
+        Seq q; seq_init(m, &q);
+        alone[a] = xmalloc((size_t)steps * V * 4); tok[a] = xmalloc((size_t)steps * sizeof(int));
+        float *last = forward(m, &q, ids[a], n[a], 0, NULL, NULL, NULL, 0);
+        for (int st = 0; st < steps; st++) {
+            tok[a][st] = argmax_v(last, V);
+            free(last); last = forward(m, &q, &tok[a][st], 1, n[a] + st, NULL, NULL, NULL, 0);
+            memcpy(alone[a] + (size_t)st * V, last, (size_t)V * 4);
+        }
+        free(last);
+    }
+    Seq qs[MAX_SLOTS]; Seq *qp[MAX_SLOTS];
+    for (int a = 0; a < N; a++) { qp[a] = &qs[a]; seq_init(m, &qs[a]); free(forward(m, &qs[a], ids[a], n[a], 0, NULL, NULL, NULL, 0)); }
+    int identical = 1; double worst = 0;
+    for (int st = 0; st < steps; st++) {
+        int bt[MAX_SLOTS], bp[MAX_SLOTS];
+        for (int a = 0; a < N; a++) { bt[a] = tok[a][st]; bp[a] = n[a] + st; }
+        float *out[MAX_SLOTS];
+        forward_rows(m, qp, bt, bp, N, out);
+        for (int a = 0; a < N; a++) {
+            const float *want = alone[a] + (size_t)st * V;
+            if (memcmp(out[a], want, (size_t)V * 4)) identical = 0;
+            for (int i = 0; i < V; i++) { double d = fabs((double)out[a][i] - (double)want[i]); if (d > worst) worst = d; }
+            free(out[a]);
+        }
+    }
+    printf("{\"batch\":{\"conversations\":%d,\"steps\":%d,\"identical\":%d,\"max_diff\":%.9g}}\n", N, steps, identical, worst);
+    return 0;
+}
+
 static int run_test(Model *m) {
+    if (getenv("G4_IDS2")) return run_batch_test(m);
     const char *e = getenv("G4_IDS");
     if (!e) die("G4_TEST needs G4_IDS=1,2,3");
     int *ids = xmalloc(strlen(e) * sizeof(int) + 16), n = 0;
@@ -719,8 +1126,35 @@ static int run_test(Model *m) {
     int greedy = getenv("G4_GREEDY") ? atoi(getenv("G4_GREEDY")) : 0;
     int V = m->c.vocab;
     Seq q; seq_init(m, &q);
+    /* pictures: G4_IMAGES=file|gh|gw;file|gh|gw, one per run of image placeholders, each file the raw patch bytes */
+    ImgSpan sp[16]; memset(sp, 0, sizeof sp);
+    int nsp = find_pictures(&m->c, ids, n, sp, 16);
+    int *keys = NULL;
+    if (nsp > 16) die("G4_TEST: more than 16 pictures");
+    if (nsp) {
+        if (!m->vis.loaded) die("G4_TEST: the prompt has pictures and the container has no vision tower");
+        const char *ie = getenv("G4_IMAGES");
+        if (!ie) die("G4_TEST: the prompt has %d picture(s): G4_IMAGES=file|gh|gw;...", nsp);
+        keys = xmalloc((size_t)n * sizeof(int)); memcpy(keys, ids, (size_t)n * sizeof(int));
+        for (int i = 0; i < nsp; i++) {
+            char path[1024]; int gh, gw; int used = 0;
+            if (sscanf(ie, "%1023[^|]|%d|%d%n", path, &gh, &gw, &used) != 3) die("G4_IMAGES: bad entry near '%s'", ie);
+            ie += used; if (*ie == ';') ie++;
+            int k = m->c.vc.pool;
+            if (gh % k || gw % k || (gh / k) * (gw / k) != sp[i].ntok) die("G4_IMAGES: %dx%d patches give %d soft tokens, the prompt has %d", gh, gw, (gh / k) * (gw / k), sp[i].ntok);
+            size_t bytes = (size_t)gh * gw * m->c.vc.patch * m->c.vc.patch * 3;
+            sp[i].pix = xmalloc(bytes);
+            FILE *f = fopen(path, "rb");
+            if (!f || fread(sp[i].pix, 1, bytes, f) != bytes) die("G4_IMAGES: cannot read %zu bytes from %s", bytes, path);
+            fclose(f);
+            sp[i].gh = gh; sp[i].gw = gw;
+            sp[i].key = kv_image_hash(sp[i].pix, bytes, gh, gw);
+            sp[i].feat = vision_encode(m, sp[i].pix, gh, gw);
+            for (int t = 0; t < sp[i].ntok; t++) keys[sp[i].start + t] = image_row_key(sp[i].key, t);
+        }
+    }
     float *all = xmalloc((size_t)n * V * 4);
-    float *last = forward(m, &q, ids, n, 0, all);
+    float *last = forward(m, &q, ids, n, 0, all, keys, sp, nsp);
     printf("{\"top\":[");
     for (int s = 0; s < n; s++) printf(s ? ",%d" : "%d", argmax_v(all + (size_t)s * V, V));
     printf("],\"rows\":[");
@@ -731,9 +1165,18 @@ static int run_test(Model *m) {
     int *gids = xmalloc(((size_t)greedy + 1) * sizeof(int));
     for (int g = 0; g < greedy; g++) {
         int t = argmax_v(last, V); gids[g] = t; printf(g ? ",%d" : "%d", t);
-        free(last); last = forward(m, &q, &t, 1, n + g, NULL);
+        free(last); last = forward(m, &q, &t, 1, n + g, NULL, NULL, NULL, 0);
     }
     printf("]");
+    if (nsp) {                                                 /* the soft tokens the tower made, for the tower's own test */
+        printf(",\"features\":[");
+        for (int i = 0; i < nsp; i++) {
+            printf(i ? ",[" : "[");
+            for (size_t j = 0; j < (size_t)sp[i].ntok * m->c.hidden; j++) printf(j ? ",%.9g" : "%.9g", sp[i].feat[j]);
+            printf("]");
+        }
+        printf("]");
+    }
     /* what those tokens spell, as hex bytes: what a served reply's DATA frames carry */
     static G4Tok T;
     char tp[2048]; snprintf(tp, sizeof tp, "%s/tokenizer.json", getenv("SNAP"));
@@ -765,7 +1208,15 @@ typedef struct {
     double t0; uint64_t h0, m0;
     double attn0, moe0, head0, disk0; long long fwd0;
     int reuse;
+    int *keys;                          /* what the cache records per prompt row: the ids, a picture's rows keyed by the picture */
+    ImgSpan *sp; int nsp;               /* the prompt's pictures */
 } Req;
+
+#define MAX_PICS 8
+/* Pictures that arrived (IMAGE frames) for the SUBMIT that follows; the gateway writes them together. */
+static struct { unsigned char *pix; int gh, gw; } g_pend[MAX_PICS];
+static int g_npend, g_pend_bad;
+static void pending_clear(void) { for (int i = 0; i < g_npend; i++) free(g_pend[i].pix); g_npend = 0; }
 
 static const ColiServeWireProfile g4_wire = {
     .max_header_bytes = 511, .max_payload_bytes = 1u << 25, .max_tokens = 1 << 20,
@@ -821,6 +1272,9 @@ static void req_finish(Model *m, Req *r) {
     fflush(stdout);
     serve_hits(m);
     free(r->ids); free(r->lo); r->ids = NULL; r->lo = NULL; r->active = 0;
+    free(r->keys); r->keys = NULL;
+    for (int i = 0; i < r->nsp; i++) { free(r->sp[i].pix); free(r->sp[i].feat); }
+    free(r->sp); r->sp = NULL; r->nsp = 0;
 }
 
 static int kv_prefix_off(void) { const char *e = getenv("COLI_KV_PREFIX"); return e && *e == '0'; }
@@ -832,12 +1286,14 @@ static int kv_prefix_off(void) { const char *e = getenv("COLI_KV_PREFIX"); retur
  * after it forgotten, as long as the sliding layers still hold the window before it: their ring keeps the last
  * `ring` positions, so the prefix may end at most ring - window + 1 before the end of what was fed. The full layers
  * keep every position, so they never limit it. At least one token is always left to feed. */
-static int reuse_len(Model *m, Seq *q, const int *ids, int np) {
+static int reuse_len(Model *m, Seq *q, const int *keys, int np, const ImgSpan *sp, int nsp) {
     kv_prefix *p = &q->kvp;
     if (!p->fed || p->tainted || p->len <= 0) return 0;
     int c = 0, top = p->len < np ? p->len : np;
-    while (c < top && p->fed[c] == ids[c]) c++;
+    while (c < top && p->fed[c] == keys[c]) c++;
     if (c > np - 1) c = np - 1;
+    for (int i = 0; i < nsp; i++)                       /* a picture is kept whole or not at all: its rows were made together */
+        if (c > sp[i].start && c < sp[i].start + sp[i].ntok) c = sp[i].start;
     if (c <= 0) return 0;
     if (p->len > m->ring && p->len - c > m->ring - m->c.window + 1) return 0;      /* the window before c is gone */
     p->len = c;
@@ -849,14 +1305,43 @@ static int req_start(Model *m, G4Tok *T, Req *r, Seq *q, const char *payload, in
     int cap = plen + 16;
     r->ids = xmalloc((size_t)cap * sizeof(int));
     r->np = g4_tok_encode(T, payload, plen, r->ids, cap);
-    if (r->np <= 0) { coli_serve_write_error(stdout, r->id, "empty prompt"); free(r->ids); r->ids = NULL; return 0; }
+    if (r->np <= 0) { coli_serve_write_error(stdout, r->id, "empty prompt"); free(r->ids); r->ids = NULL; pending_clear(); return 0; }
     int budget = coli_serve_budget(r->np, r->max_tok, ctx_cap, 0);
     if (budget < 0) {
         char msg[160]; snprintf(msg, sizeof msg, "CONTEXT_EXCEEDED prompt_tokens=%d requested=%d capacity=%d", r->np, r->max_tok, ctx_cap);
-        coli_serve_write_error(stdout, r->id, msg); free(r->ids); r->ids = NULL; return 0;
+        coli_serve_write_error(stdout, r->id, msg); free(r->ids); r->ids = NULL; pending_clear(); return 0;
     }
     if (budget < r->max_tok) r->max_tok = budget;
-    int reuse = kv_prefix_off() ? 0 : reuse_len(m, q, r->ids, r->np);
+    /* pictures: one run of image placeholders for each picture that arrived, as many soft tokens as it makes */
+    r->keys = xmalloc((size_t)r->np * sizeof(int)); memcpy(r->keys, r->ids, (size_t)r->np * sizeof(int));
+    r->sp = NULL; r->nsp = 0;
+    if (m->vis.loaded) {
+        ImgSpan found[MAX_PICS + 1]; memset(found, 0, sizeof found);
+        int nf = find_pictures(&m->c, r->ids, r->np, found, MAX_PICS + 1), k = m->c.vc.pool;
+        char msg[200]; msg[0] = 0;
+        if (nf != g_npend) snprintf(msg, sizeof msg, "BAD_IMAGE the prompt has %d image placeholder run%s and %d picture%s arrived", nf, nf == 1 ? "" : "s", g_npend, g_npend == 1 ? "" : "s");
+        for (int i = 0; !msg[0] && i < nf; i++) {
+            int want = (g_pend[i].gh / k) * (g_pend[i].gw / k);
+            if (found[i].ntok != want) snprintf(msg, sizeof msg, "BAD_IMAGE picture %d has %d soft tokens and the prompt %d placeholders", i + 1, want, found[i].ntok);
+        }
+        if (msg[0]) {
+            coli_serve_write_error(stdout, r->id, msg);
+            free(r->ids); r->ids = NULL; free(r->keys); r->keys = NULL; pending_clear(); return 0;
+        }
+        if (nf) {
+            r->sp = calloc((size_t)nf, sizeof(ImgSpan));
+            for (int i = 0; i < nf; i++) {
+                ImgSpan *g = &r->sp[i];
+                g->start = found[i].start; g->ntok = found[i].ntok; g->gh = g_pend[i].gh; g->gw = g_pend[i].gw;
+                g->pix = g_pend[i].pix; g_pend[i].pix = NULL;
+                g->key = kv_image_hash(g->pix, (size_t)g->gh * g->gw * m->c.vc.patch * m->c.vc.patch * 3, g->gh, g->gw);
+                for (int t = 0; t < g->ntok; t++) r->keys[g->start + t] = image_row_key(g->key, t);
+            }
+            r->nsp = nf;
+        }
+        g_npend = 0;
+    }
+    int reuse = kv_prefix_off() ? 0 : reuse_len(m, q, r->keys, r->np, r->sp, r->nsp);
     if (!reuse) kv_prefix_clear(&q->kvp);
     if (getenv("COLI_PREFIX_LOG"))
         fprintf(stderr, reuse ? "[PREFIX] reusing %d of %d prompt tokens\n" : "[PREFIX] no reuse of %d held, prompt %d\n", reuse ? reuse : q->kvp.len, r->np);
@@ -873,7 +1358,8 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
     Req *rq = calloc((size_t)n_slots, sizeof(Req));
     for (int i = 0; i < n_slots; i++) seq_init(m, &seq[i]);
     coli_serve_stdio_init();
-    coli_serve_write_ready_caps(stdout, rss_gb(), "vision=0");
+    {   char caps[64]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d", m->vis.loaded, m->img_tokens);
+        coli_serve_write_ready_caps(stdout, rss_gb(), caps); }
     serve_hwinfo(); serve_tiers_emap(m);
     fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);
     int input_eof = 0, rr = 0;
@@ -891,9 +1377,31 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
             } else if (res == COLI_SERVE_READ_OK) {
                 if (cmd.kind == COLI_SERVE_COMMAND_CANCEL || cmd.kind == COLI_SERVE_COMMAND_STOP) {   /* both end the request with its DONE */
                     for (int i = 0; i < n_slots; i++) if (rq[i].active && !strcmp(rq[i].id, cmd.id)) rq[i].cancel = 1;
+                } else if (cmd.kind == COLI_SERVE_COMMAND_IMAGE) {
+                    /* IMAGE <id> <bytes> <gh> <gw>: the patch grid of one picture, for the SUBMIT that follows. Its payload
+                     * is already read; a refusal here makes the SUBMIT after it a no-op (the gateway has the ERROR). */
+                    Cfg *cc = &m->c; int k = cc->vc.pool;
+                    size_t want = (size_t)cmd.grid_h * cmd.grid_w * cc->vc.patch * cc->vc.patch * 3;
+                    const char *why = NULL; char msg[160];
+                    if (!m->vis.loaded) why = "this engine has no vision tower; images are not supported";
+                    else if (g_npend >= MAX_PICS) { snprintf(msg, sizeof msg, "BAD_IMAGE at most %d pictures in a request", MAX_PICS); why = msg; }
+                    else if (cmd.grid_h % k || cmd.grid_w % k || cmd.grid_h > cc->vc.npos || cmd.grid_w > cc->vc.npos) {
+                        snprintf(msg, sizeof msg, "BAD_IMAGE the patch grid %dx%d is not a multiple of %d or exceeds %d", cmd.grid_h, cmd.grid_w, k, cc->vc.npos); why = msg; }
+                    else if ((size_t)cmd.payload_bytes != want) {
+                        snprintf(msg, sizeof msg, "BAD_IMAGE bytes=%llu expected=%zu", (unsigned long long)cmd.payload_bytes, want); why = msg; }
+                    else if ((cmd.grid_h / k) * (cmd.grid_w / k) > m->img_tokens) {
+                        snprintf(msg, sizeof msg, "BAD_IMAGE the picture makes %d soft tokens and this engine takes %d (G4_IMG_TOKENS)", (cmd.grid_h / k) * (cmd.grid_w / k), m->img_tokens); why = msg; }
+                    if (why) { coli_serve_write_error(stdout, cmd.id, why); g_pend_bad = 1; }
+                    else {
+                        g_pend[g_npend].pix = (unsigned char *)coli_serve_command_take_payload(&cmd);
+                        g_pend[g_npend].gh = cmd.grid_h; g_pend[g_npend].gw = cmd.grid_w; g_npend++;
+                    }
+                } else if (cmd.kind == COLI_SERVE_COMMAND_SUBMIT && g_pend_bad) {
+                    g_pend_bad = 0; pending_clear();                 /* its picture was refused and answered: nothing more to say */
+                    free(coli_serve_command_take_payload(&cmd));
                 } else if (cmd.kind == COLI_SERVE_COMMAND_SUBMIT) {
-                    if (cmd.slot < 0 || cmd.slot >= n_slots) coli_serve_write_error(stdout, cmd.id, "invalid cache slot");
-                    else if (rq[cmd.slot].active) coli_serve_write_error(stdout, cmd.id, "SLOT_BUSY");
+                    if (cmd.slot < 0 || cmd.slot >= n_slots) { coli_serve_write_error(stdout, cmd.id, "invalid cache slot"); pending_clear(); }
+                    else if (rq[cmd.slot].active) { coli_serve_write_error(stdout, cmd.id, "SLOT_BUSY"); pending_clear(); }
                     else {
                         Req *r = &rq[cmd.slot];
                         memset(r, 0, sizeof *r);
@@ -919,21 +1427,39 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
         Req *r = &rq[i]; Seq *q = &seq[i];
         if (r->cancel) { r->limited = 0; req_finish(m, r); serve_tiers_emap(m); continue; }
         if (r->phase == 0) {
-            int n = r->np - r->done_np; if (n > m->chunk) n = m->chunk;
-            float *lo = forward(m, q, r->ids + r->done_np, n, r->done_np, NULL);
+            int n = next_rows(m, r->sp, r->nsp, r->done_np, r->np - r->done_np);
+            ImgSpan *pic = NULL;                               /* a picture in the rows about to run, not yet seen by the tower: that is this turn's work */
+            for (int k = 0; k < r->nsp; k++)
+                if (!r->sp[k].feat && r->sp[k].start < r->done_np + n && r->sp[k].start + r->sp[k].ntok > r->done_np) { pic = &r->sp[k]; break; }
+            if (pic) { pic->feat = vision_encode(m, pic->pix, pic->gh, pic->gw); continue; }
+            float *lo = forward(m, q, r->ids + r->done_np, n, r->done_np, NULL, r->keys + r->done_np, r->sp, r->nsp);
             r->done_np += n;
             if (r->done_np >= r->np) { r->lo = lo; r->phase = 1; } else free(lo);
             continue;
         }
-        /* decode: pick the next token from the logits, send it, then feed it */
-        int t = pick_token(r->lo, V, r->temp, r->top_p, (int)top_k_env);
-        if (is_stop(c, t)) { r->limited = 0; req_finish(m, r); serve_tiers_emap(m); continue; }
-        char piece[512]; int nb = g4_tok_piece(T, t, piece, sizeof piece);
-        coli_serve_write_data(stdout, r->id, piece, (size_t)nb);
-        r->gen++;
-        if (r->gen >= r->max_tok || r->np + r->gen >= ctx_cap) { req_finish(m, r); serve_tiers_emap(m); continue; }
-        free(r->lo);
-        r->lo = forward(m, q, &t, 1, r->np + r->gen - 1, NULL);
+        /* decode: every conversation that is decoding takes its step together. Each picks its next token from its
+         * logits and sends it; the ones that go on are fed in one pass, so the weights are read once for all of them
+         * (what makes two conversations at once cost far less than twice one). A conversation gets the bits it would
+         * alone. */
+        int bi[MAX_SLOTS], bt[MAX_SLOTS], bp[MAX_SLOTS], nb = 0; Seq *bq[MAX_SLOTS];
+        for (int j = 0; j < n_slots; j++) {
+            Req *w = &rq[j];
+            if (!w->active || w->phase != 1) continue;
+            if (w->cancel) { w->limited = 0; req_finish(m, w); serve_tiers_emap(m); continue; }
+            int t = pick_token(w->lo, V, w->temp, w->top_p, (int)top_k_env);
+            if (is_stop(c, t)) { w->limited = 0; req_finish(m, w); serve_tiers_emap(m); continue; }
+            char piece[512]; int np_ = g4_tok_piece(T, t, piece, sizeof piece);
+            coli_serve_write_data(stdout, w->id, piece, (size_t)np_);
+            w->gen++;
+            if (w->gen >= w->max_tok || w->np + w->gen >= ctx_cap) { req_finish(m, w); serve_tiers_emap(m); continue; }
+            free(w->lo); w->lo = NULL;
+            bi[nb] = j; bt[nb] = t; bp[nb] = w->np + w->gen - 1; bq[nb] = &seq[j]; nb++;
+        }
+        if (nb) {
+            float *outs[MAX_SLOTS];
+            forward_rows(m, bq, bt, bp, nb, outs);
+            for (int b = 0; b < nb; b++) rq[bi[b]].lo = outs[b];
+        }
     }
     free(seq); free(rq);
 }

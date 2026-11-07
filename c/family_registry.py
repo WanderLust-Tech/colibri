@@ -1069,7 +1069,7 @@ def _gemma4_geometry(config, context, _model_dir):
     nkv_g = _optional_int(config, "num_global_key_value_heads", nkv_s, 1)
     full = sum(1 for kind in kinds if kind == "full_attention")
     sliding = layers - full
-    chunk, slack = 256, 2048
+    chunk, slack = 280, 2048            # 280: the rows of one forward pass (gemma4.c: a prompt chunk of 256, or a picture of 280 soft tokens)
     state = (full * context * nkv_g * hd_g * 2 * 4
              + sliding * min(context, window + chunk + slack) * nkv_s * hd_s * 2 * 4)
     hidden = _required_int(config, "hidden_size", "gemma4")
@@ -1587,7 +1587,7 @@ FAMILIES = (
     ),
     FamilyDescriptor(
         id="gemma4",
-        # Gemma 4's mixture of experts (google/gemma-4-26B-A4B-it): 128 experts, 8 a token, text only.
+        # Gemma 4's mixture of experts (google/gemma-4-26B-A4B-it): 128 experts, 8 a token, text and pictures in.
         # The checkpoint says gemma4 with a text_config; a text-only export says gemma4_text.
         model_types=("gemma4", "gemma4_text"),
         display_name="Gemma-4-26B-A4B",
@@ -1612,7 +1612,7 @@ FAMILIES = (
         # implicit_cap 0: the engine sizes its expert cache from free memory when nobody chose a number
         # (gemma4.c), the way olmoe does. Eight slots a layer would stream every expert off the disk.
         limits=FamilyLimits(8192, 262144, 1024, 8192, 16, 0, "CTX"),
-        capabilities=FamilyCapabilities(True, False, False, True),
+        capabilities=FamilyCapabilities(True, False, False, True, image=True),
         has_gateway_adapter=True,
         # coli run stays unwired: its one-shot path would need this family's template, and chat, serve and
         # web all reach it through the gateway.

@@ -31,12 +31,16 @@ Tensors, with the checkpoint's own names (prefix P = model.language_model.):
       (row, block); element = (nibble - 8) * scale. Values are confined to -7..7, so a
       quantize / dequantize / quantize round trip is exact.
 
-The vision tower (model.vision_tower.*, model.embed_vision.*) is skipped on purpose and
-counted in the report: this engine is text-only. A tensor name this script does not
-know stops the conversion rather than being dropped silently.
+The vision tower and its projector (model.vision_tower.*, model.embed_vision.*) are carried when the
+checkpoint has them (--no-vision leaves them out): the matrices as per-row int8 with the same names,
+the norms, the position table and the standardisation vectors as F32. Audio towers (the small dense
+sizes have one; the 26B-A4B does not) are skipped and counted in the report. A tensor name this
+script does not know stops the conversion rather than being dropped silently.
 
     python c/tools/convert_gemma4.py --src /path/to/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b
     python c/tools/convert_gemma4.py --repo google/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b
+    # a container converted before the vision tower was carried: add just the tower (a minute)
+    python c/tools/convert_gemma4.py --src /path/to/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b --add-vision
 """
 import argparse
 import json
@@ -234,12 +238,38 @@ EXACT_TAILS = {
     "router.proj.weight", "router.scale", "router.per_expert_scale",
 }
 EXPERT_TAILS = {"experts.gate_up_proj", "experts.down_proj"}
-SKIPPED_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.audio_tower.", "model.embed_audio.")
+SKIPPED_PREFIXES = ("model.audio_tower.", "model.embed_audio.")
+VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.")
+VISION_LAYER = re.compile(r"^model\.vision_tower\.encoder\.layers\.(\d+)\.(.+)$")
+VISION_MATRIX_TAILS = {
+    "self_attn.q_proj.linear.weight", "self_attn.k_proj.linear.weight", "self_attn.v_proj.linear.weight",
+    "self_attn.o_proj.linear.weight", "mlp.gate_proj.linear.weight", "mlp.up_proj.linear.weight",
+    "mlp.down_proj.linear.weight",
+}
+VISION_EXACT_TAILS = {
+    "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight",
+    "post_feedforward_layernorm.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight",
+}
+VISION_MATRICES = {"model.vision_tower.patch_embedder.input_proj.weight",
+                   "model.embed_vision.embedding_projection.weight"}
+VISION_EXACT = {"model.vision_tower.patch_embedder.position_embedding_table",
+                "model.vision_tower.std_bias", "model.vision_tower.std_scale"}
 
 
 def classify(name):
     if name.startswith(SKIPPED_PREFIXES):
         return "skip"
+    if name.startswith(VISION_PREFIXES):
+        if name in VISION_MATRICES:
+            return "vmatrix"
+        if name in VISION_EXACT:
+            return "vexact"
+        m = VISION_LAYER.match(name)
+        if m and m.group(2) in VISION_MATRIX_TAILS:
+            return "vmatrix"
+        if m and m.group(2) in VISION_EXACT_TAILS:
+            return "vexact"
+        return None
     if name == LANG + "embed_tokens.weight":
         return "embed"
     if name == LANG + "norm.weight":
@@ -265,8 +295,9 @@ class ShardWriter:
     follows from its shape, so each record carries a producer that makes the bytes when
     its turn comes. Nothing is held beyond the tensor being written."""
 
-    def __init__(self, out_dir):
+    def __init__(self, out_dir, prefix="model"):
         self.out = out_dir
+        self.prefix = prefix
         self.pending = []          # (name, dtype, shape, nbytes, producer)
         self.bytes = 0
         self.shards = []           # (filename, [names])
@@ -284,7 +315,7 @@ class ShardWriter:
         if not self.pending:
             return
         number = len(self.shards) + 1
-        filename = f"model-{number:05d}.safetensors.part"
+        filename = f"{self.prefix}-{number:05d}.safetensors.part"
         header, offset = {}, 0
         for name, dtype, shape, nbytes, _ in self.pending:
             header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + nbytes]}
@@ -308,7 +339,7 @@ class ShardWriter:
         total = len(self.shards)
         weight_map, size = {}, 0
         for i, (partial, names) in enumerate(self.shards, 1):
-            final = f"model-{i:05d}-of-{total:05d}.safetensors"
+            final = f"{self.prefix}-{i:05d}-of-{total:05d}.safetensors"
             os.replace(os.path.join(self.out, partial), os.path.join(self.out, final))
             for n in names:
                 weight_map[n] = final
@@ -317,6 +348,19 @@ class ShardWriter:
             json.dump({"metadata": {"total_size": size}, "weight_map": weight_map}, handle, indent=1)
         return size
 
+    def finish_into(self, index):
+        """Finish, merging this writer's shards into an existing index (a dict, as the index file holds it)."""
+        self.flush()
+        total = len(self.shards)
+        for i, (partial, names) in enumerate(self.shards, 1):
+            final = f"{self.prefix}-{i:05d}-of-{total:05d}.safetensors"
+            os.replace(os.path.join(self.out, partial), os.path.join(self.out, final))
+            for n in names:
+                index["weight_map"][n] = final
+            index["metadata"]["total_size"] += os.path.getsize(os.path.join(self.out, final))
+        with open(os.path.join(self.out, "model.safetensors.index.json"), "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(index, handle, indent=1)
+
 
 # ----------------------------------------------------------------------- the converter
 
@@ -324,7 +368,89 @@ def text_config(config):
     return config.get("text_config", config)
 
 
-def convert(src, out, log=print):
+def vision_summary(config):
+    """The tower's shape, for gemma4_meta.json (the gateway reads it), or None."""
+    vc = config.get("vision_config")
+    if not isinstance(vc, dict):
+        return None
+    rope = vc.get("rope_parameters") or {}
+    return {"hidden": vc["hidden_size"], "layers": vc["num_hidden_layers"], "heads": vc["num_attention_heads"],
+            "head_dim": vc.get("head_dim") or vc["hidden_size"] // vc["num_attention_heads"],
+            "intermediate": vc["intermediate_size"], "patch": vc["patch_size"],
+            "pool": vc["pooling_kernel_size"], "positions": vc["position_embedding_size"],
+            "eps": vc.get("rms_norm_eps", 1e-6), "rope_theta": rope.get("rope_theta", 100.0),
+            "standardize": bool(vc.get("standardize", True)),
+            "max_soft_tokens": config.get("vision_soft_tokens_per_image", 280)}
+
+
+def add_tensor_producers(w, ck, names_wanted):
+    """Queue the I8 (+ .scale) / F32 tensors of `names_wanted` (name -> kind) on writer w."""
+    for name in sorted(names_wanted):
+        shape = ck.file_of(name).shape(name)
+        if names_wanted[name] == "vmatrix":
+            if len(shape) != 2:
+                raise SystemExit(f"{name}: expected a matrix, got shape {shape}")
+            cache = {}
+
+            def both(n=name, cache=cache):
+                if "q" not in cache:
+                    cache["q"], cache["s"] = quantize_int8_rows(ck.array(n))
+                return cache
+
+            w.add(name, "I8", shape, lambda b=both: b()["q"])
+            w.add(name + ".scale", "F32", (shape[0],), lambda b=both: b()["s"])
+        else:
+            w.add(name, "F32", shape, lambda n=name: ck.array(n))
+
+
+def add_vision(src, out, log=print):
+    """Add the vision tower to a container that was converted without it: one more shard, the index
+    and the meta file updated. The text weights are not touched."""
+    with open(os.path.join(src, "config.json"), encoding="utf-8") as handle:
+        config = json.load(handle)
+    summary = vision_summary(config)
+    if summary is None:
+        raise SystemExit(f"{src}: config.json has no vision_config")
+    meta_path = os.path.join(out, "gemma4_meta.json")
+    index_path = os.path.join(out, "model.safetensors.index.json")
+    if not (os.path.exists(meta_path) and os.path.exists(index_path)):
+        raise SystemExit(f"{out}: not a Gemma 4 container (gemma4_meta.json or the index is missing)")
+    with open(index_path, encoding="utf-8") as handle:
+        index = json.load(handle)
+    if any(n.startswith("model.vision_tower.") for n in index["weight_map"]):
+        raise SystemExit(f"{out}: already has the vision tower")
+    ck = Checkpoint(src)
+    wanted, unknown = {}, []
+    for n in ck.names():
+        if n.startswith(VISION_PREFIXES):
+            k = classify(n)
+            if k is None:
+                unknown.append(n)
+            else:
+                wanted[n] = k
+    if unknown:
+        raise SystemExit("vision tensors this converter does not know:\n  " + "\n  ".join(unknown[:20]))
+    if not wanted:
+        raise SystemExit(f"{src}: no vision tensors in the checkpoint")
+    t0 = time.time()
+    w = ShardWriter(out, prefix="vision")
+    add_tensor_producers(w, ck, wanted)
+    w.finish_into(index)
+    ck.close()
+    for f in COPY_FILES:                    # the config now carries vision_config, the processor config the image sizes
+        if f in ("config.json", "processor_config.json") and os.path.exists(os.path.join(src, f)):
+            shutil.copyfile(os.path.join(src, f), os.path.join(out, f))
+    with open(meta_path, encoding="utf-8") as handle:
+        meta = json.load(handle)
+    meta["vision"] = summary
+    meta.pop("skipped_note", None)
+    with open(meta_path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(meta, handle, indent=1)
+    log(f"added {len(wanted)} vision tensors in {time.time() - t0:.0f}s")
+    return meta
+
+
+def convert(src, out, log=print, with_vision=True):
     with open(os.path.join(src, "config.json"), encoding="utf-8") as handle:
         config = json.load(handle)
     tc = text_config(config)
@@ -342,12 +468,15 @@ def convert(src, out, log=print):
     ck = Checkpoint(src)
     names = ck.names()
     kinds, unknown, skipped = {}, [], 0
+    vision_names = {}
     for n in names:
         k = classify(n)
         if k is None:
             unknown.append(n)
-        elif k == "skip":
+        elif k == "skip" or (k in ("vmatrix", "vexact") and not with_vision):
             skipped += 1
+        elif k in ("vmatrix", "vexact"):
+            vision_names[n] = k
         else:
             kinds[n] = k
     if unknown:
@@ -404,6 +533,7 @@ def convert(src, out, log=print):
         if k == "matrix" and not n.startswith(LANG + "layers."):
             raise SystemExit(f"unexpected matrix outside the layers: {n}")
 
+    add_tensor_producers(w, ck, vision_names)
     size = w.finish()
     ck.close()
     for f in COPY_FILES:
@@ -415,11 +545,14 @@ def convert(src, out, log=print):
         "expert_blob_bytes": blob_bytes(hidden, inter),
         "layers": layers, "experts": experts,
         "skipped_tensors": skipped,
-        "skipped_note": "vision tower and projector: this engine is text-only",
     }
+    if vision_names:
+        meta["vision"] = vision_summary(config)
+    elif skipped:
+        meta["skipped_note"] = "vision tower and projector left out (--no-vision, or the checkpoint has none)"
     with open(os.path.join(out, "gemma4_meta.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(meta, handle, indent=1)
-    log(f"wrote {size / 1e9:.2f} GB in {time.time() - t0:.0f}s; skipped {skipped} vision tensors")
+    log(f"wrote {size / 1e9:.2f} GB in {time.time() - t0:.0f}s; {len(vision_names)} vision tensors carried, {skipped} skipped")
     return meta
 
 
@@ -431,6 +564,9 @@ def main():
     ap.add_argument("--out", "--outdir", dest="out", required=True,
                     help="the container directory to write (coli convert passes it as --outdir)")
     ap.add_argument("--keep-source", action="store_true", help="with --repo: keep the downloaded checkpoint")
+    ap.add_argument("--no-vision", action="store_true", help="leave the vision tower out of the container")
+    ap.add_argument("--add-vision", action="store_true",
+                    help="add the vision tower to an existing container (--out) that was converted without it")
     args = ap.parse_args()
     src = args.src
     downloaded = None
@@ -443,7 +579,10 @@ def main():
         print(f"downloading {args.repo} to {downloaded} (about 52 GB)")
         src = snapshot_download(args.repo, local_dir=downloaded,
                                 allow_patterns=["*.json", "*.safetensors", "*.jinja"])
-    convert(src, args.out)
+    if args.add_vision:
+        add_vision(src, args.out)
+    else:
+        convert(src, args.out, with_vision=not args.no_vision)
     if downloaded and not args.keep_source:
         shutil.rmtree(downloaded, ignore_errors=True)
         print(f"removed {downloaded}")

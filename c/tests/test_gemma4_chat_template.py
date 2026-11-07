@@ -68,6 +68,19 @@ CASES = {
     "history": {"messages": [{"role": "user", "content": "1+1?"}, {"role": "assistant", "content": "2"},
                              {"role": "user", "content": "and 2+2?"}]},
     "user parts": {"messages": [{"role": "user", "content": [{"type": "text", "text": " a "}, {"type": "text", "text": " b "}]}]},
+    "a picture in a user turn": {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": " what is this? "}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "text", "text": " and this "}, {"type": "image", "image": "x"}]}]},
+    "two pictures and a system turn": {"messages": [
+        {"role": "system", "content": "Describe pictures."},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u1"}}, {"type": "image_url", "image_url": {"url": "u2"}}]},
+        {"role": "assistant", "content": "Two pictures."}, {"role": "user", "content": "more"}]},
+    "pictures in a tool result": {"tools": [SEARCH], "messages": [
+        {"role": "user", "content": "find it"},
+        {"role": "assistant", "content": "", "tool_calls": [call("search", {"query": "cats"}, "c1")]},
+        {"role": "tool", "tool_call_id": "c1", "content": [
+            {"type": "text", "text": "two hits"}, {"type": "image_url", "image_url": {"url": "u1"}},
+            {"type": "image_url", "image_url": {"url": "u2"}}]}]},
     "an old turn's reasoning is dropped": {"messages": [
         {"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1", "reasoning_content": "old thoughts"},
         {"role": "user", "content": "q2"}]},
@@ -181,12 +194,38 @@ class TemplateTest(unittest.TestCase):
         self.assertEqual(g.render(messages), want)
         self.assertIn("<|channel>thought\nr\n<channel|>", want)
 
-    def test_a_picture_is_refused_not_dropped(self):
-        for part in ({"type": "image_url", "image_url": {"url": "data:..."}}, {"type": "input_audio", "input_audio": {}}):
+    def test_audio_and_video_are_refused_not_dropped(self):
+        for part in ({"type": "input_audio", "input_audio": {}}, {"type": "audio"}, {"type": "video"}):
             with self.assertRaises(g.ChatError) as caught:
                 g.render([{"role": "user", "content": [{"type": "text", "text": "what is this"}, part]}])
             self.assertEqual(caught.exception.code, "unsupported_content_type")
             self.assertEqual(caught.exception.param, "messages.0.content.1")
+            self.assertIn("audio", str(caught.exception))
+
+    def test_a_picture_becomes_what_the_processor_makes_of_the_templates_marker(self):
+        """The template writes <|image|>; the processor turns each into begin, one placeholder per soft token, end."""
+        part = {"type": "image_url", "_soft_tokens": 3, "_image_index": 0}
+        bare = g.render([{"role": "user", "content": [{"type": "text", "text": "what?"}, {"type": "image_url"}]}])
+        self.assertIn("<|turn>user\nwhat?<|image|><turn|>", bare)
+        order = []
+        got = g.render([{"role": "user", "content": [{"type": "text", "text": "what?"}, part]}], image_order=order)
+        self.assertEqual(got, bare.replace("<|image|>", "<|image><|image|><|image|><|image|><image|>"))
+        self.assertEqual(order, [0])
+        # a tool result's pictures follow the response block, as the template writes them
+        messages = [{"role": "user", "content": "find"},
+                    {"role": "assistant", "content": "", "tool_calls": [call("search", {"query": "x"}, "c1")]},
+                    {"role": "tool", "tool_call_id": "c1", "content": [
+                        {"type": "text", "text": "hit"}, {"type": "image_url", "_soft_tokens": 1, "_image_index": 0},
+                        {"type": "image_url", "_soft_tokens": 2, "_image_index": 1}]}]
+        order = []
+        got = g.render(messages, [SEARCH], image_order=order)
+        self.assertIn("<tool_response|><|image><|image|><image|><|image><|image|><|image|><image|>", got)
+        self.assertEqual(order, [0, 1])
+
+    def test_a_count_that_is_not_a_positive_integer_is_a_bare_marker(self):
+        for count in (0, -1, True, "3", None, 2.5):
+            part = {"type": "image_url", "_soft_tokens": count}
+            self.assertEqual(g.image_marker(part), "<|image|>", count)
 
     def test_bad_input_is_refused_by_name(self):
         for bad, param in (([], "messages"), (None, "messages"), ("hi", "messages"),

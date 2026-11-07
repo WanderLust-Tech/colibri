@@ -146,6 +146,33 @@
       "rstrip": false,
       "normalized": false,
       "special": true
+    },
+    {
+      "id": 500,
+      "content": "<|image|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 501,
+      "content": "<|image>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 502,
+      "content": "<image|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
     }
   ],
   "normalizer": {
@@ -577,7 +604,10 @@
       "<0xFC>": 490,
       "<0xFD>": 491,
       "<0xFE>": 492,
-      "<0xFF>": 493
+      "<0xFF>": 493,
+      "<|image|>": 500,
+      "<|image>": 501,
+      "<image|>": 502
     },
     "merges": [
       [

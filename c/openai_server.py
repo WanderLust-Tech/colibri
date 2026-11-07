@@ -169,6 +169,10 @@ def _engine_error(fields, message):
                         f"messages resulted in at least {used} tokens. Please shorten the "
                         f"conversation, or restart the server with a larger CTX.",
                         "messages", "context_length_exceeded")
+    if fields and fields[0] == "BAD_IMAGE":
+        # gemma4.c refusing a picture (its size, its bytes, or placeholders that do not match the pictures sent):
+        # the request's mistake, with the engine's account of it.
+        return APIError(400, "The engine refused the picture: " + " ".join(fields[1:]) + ".", "messages", "invalid_image")
     return RuntimeError(message)
 
 
@@ -1732,14 +1736,25 @@ def render_chat_gemma4(messages, enable_thinking=False, reasoning_effort=None, t
     in Gemma's own syntax, calls and results are <|tool_call> and <|tool_response> blocks, and with thinking
     off the cue carries an empty thought channel so the model answers at once.
 
-    Pictures, audio and video are refused: this engine reads text."""
+    Pictures arrive already run through the image processor (expand_gemma4_images: each picture part carries its
+    soft-token count) and become the begin-of-image token, one placeholder per soft token and the end-of-image
+    token, where the template puts <|image|>. Audio and video are refused (the checkpoint has no audio tower)."""
     if tool_choice == "none":
         tools = None
+    order = []
     try:
-        return gemma4_chat.render(messages, tools, bool(enable_thinking), add_generation_prompt,
-                                  bool(preserve_thinking))
+        prompt = gemma4_chat.render(messages, tools, bool(enable_thinking), add_generation_prompt,
+                                    bool(preserve_thinking), image_order=order)
     except gemma4_chat.ChatError as error:
         raise APIError(400, str(error), error.param, error.code) from error
+    # The engine takes the pictures as IMAGE frames in the order the gateway sends them (the order of the
+    # conversation) and matches them to the placeholder runs in the prompt in order. The template writes a
+    # tool message's pictures at the assistant turn that called the tool, so the two orders can differ.
+    if order != sorted(order) or any(index is None for index in order):
+        raise APIError(400, "pictures in a tool result must come after the pictures of the assistant message that "
+                            "called the tool: this engine takes them in the order the prompt shows them.",
+                       "messages", "unsupported_content_order")
+    return prompt
 
 
 def render_chat_olmoe(messages, enable_thinking=False, reasoning_effort=None, tools=None,
@@ -2882,6 +2897,71 @@ def expand_qwen38_images(messages, model_dir, max_tokens=None):
                 raise APIError(400, f"unsupported content part {kind!r}.", "messages")
         rewritten.append({**message, "content": "".join(pieces)})
     return rewritten, images
+
+
+def gemma4_vision_meta(model_dir):
+    """The Gemma 4 vision tower's shape (patch size, pooling) from the container, or None. gemma4_meta.json carries it
+    when the converter did; config.json's vision_config is the fallback for a container made before."""
+    if not model_dir:
+        return None
+    try:
+        meta = json.loads((Path(model_dir) / "gemma4_meta.json").read_text(encoding="utf-8"))
+        if isinstance(meta, dict) and isinstance(meta.get("vision"), dict):
+            return meta["vision"]
+    except (OSError, ValueError):
+        pass
+    try:
+        config = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+        vision = config.get("vision_config")
+        if isinstance(vision, dict):
+            return {"patch": vision.get("patch_size", 16), "pool": vision.get("pooling_kernel_size", 3)}
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def expand_gemma4_images(messages, model_dir, token_limit=None):
+    """Run every picture of a conversation through Gemma 4's image processor.
+
+    Returns (messages, pictures): the messages with each picture part replaced by one that carries what the renderer
+    needs (`_soft_tokens`, the number of placeholders the picture makes, and `_image_index`) and not the pixels, and
+    the list of (patches, grid_h, grid_w), in the order of the conversation, which the engine takes as IMAGE frames.
+    token_limit is what the engine accepts per picture (its `img_tokens`)."""
+    meta = gemma4_vision_meta(model_dir) or {}
+    patch, pool = int(meta.get("patch", 16)), int(meta.get("pool", 3))
+    pictures, rewritten = [], []
+    for index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            rewritten.append(message)
+            continue
+        parts = []
+        for part in content:
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind in ("image_url", "input_image"):
+                data = _image_bytes_from_url(_image_part_url(part, kind))
+                patches, grid_h, grid_w = _preprocess_gemma4_image(data, token_limit, patch, pool)
+                parts.append({"type": "image_url", "_soft_tokens": (grid_h // pool) * (grid_w // pool),
+                              "_image_index": len(pictures)})
+                pictures.append((patches, grid_h, grid_w))
+            else:
+                parts.append(part)
+        rewritten.append({**message, "content": parts})
+    return rewritten, pictures
+
+
+def _preprocess_gemma4_image(data, token_limit, patch, pool):
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+        import gemma4_image
+        budget = gemma4_image.soft_token_budget(token_limit if token_limit else 280)
+        return gemma4_image.preprocess(data, budget, patch, pool)
+    except ImportError as problem:
+        raise APIError(400, f"image support needs Pillow and numpy ({problem}).", "messages")
+    except ValueError as problem:
+        raise APIError(400, str(problem), "messages", "invalid_image")
 
 
 def qwen36_has_vision(model_dir):
@@ -5911,8 +5991,10 @@ class Engine:
                 # partire dentro lo stesso lock, o un'altra richiesta potrebbe
                 # infilarsi in mezzo e prendersi l'immagine di questa.
                 try:
-                    if image is not None:
-                        patches, grid_h, grid_w = image
+                    # One picture is a (patches, grid_h, grid_w) tuple; an engine that takes several (gemma4)
+                    # is handed a list of them, sent in order, one IMAGE frame each.
+                    for picture in ([] if image is None else [image] if isinstance(image, tuple) else image):
+                        patches, grid_h, grid_w = picture
                         blob = patches.tobytes() if hasattr(patches, "tobytes") else patches
                         try:
                             _write_all(
@@ -8466,7 +8548,11 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, "this engine loaded no vision tower: the checkpoint declares "
                                 "one in its config but its weights are not in the container, "
                                 "so images cannot be served. Reconvert the checkpoint with its "
-                                "vision weights, or send text only.",
+                                "vision weights"
+                                + (" (python c/tools/convert_gemma4.py --src <checkpoint> --out <container> "
+                                   "--add-vision adds just the tower; or unset G4_VISION=0)"
+                                   if ARCH == "gemma4" else "")
+                                + ", or send text only.",
                            "messages", "unsupported_content_type")
         if ARCH == "glm53":
             messages, images = expand_glm53_images(messages, model_dir)
@@ -8487,6 +8573,17 @@ class APIHandler(BaseHTTPRequestHandler):
                                      else "Q36_MAX_IMAGE_TOKENS")
             messages, images = expand_qwen38_images(messages, model_dir,
                                                     int(ceiling) if ceiling else None)
+        elif ARCH == "gemma4":
+            # Any number of pictures (up to the engine's own limit), each sent as an IMAGE frame in order.
+            try:
+                limit = int(getattr(self.server.engine, "caps", {}).get("img_tokens") or 0) or None
+            except (TypeError, ValueError):
+                limit = None
+            ceiling = os.environ.get("G4_MAX_IMAGE_TOKENS")
+            if ceiling and limit:
+                limit = min(limit, int(ceiling))
+            messages, images = expand_gemma4_images(messages, model_dir, limit)
+            return messages, (images[0] if len(images) == 1 else images or None)
         else:
             return messages, None
         if len(images) > 1:

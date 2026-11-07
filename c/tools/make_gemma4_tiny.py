@@ -44,7 +44,7 @@ TINY = dict(
     global_head_dim=64, num_global_key_value_heads=1, num_experts=8, top_k_experts=3,
     sliding_window=6, max_position_embeddings=512, rms_norm_eps=1e-6,
     final_logit_softcapping=30.0, hidden_activation="gelu_pytorch_tanh",
-    attention_k_eq_v=True, enable_moe_block=True, hidden_size_per_layer_input=0,
+    attention_k_eq_v=True, enable_moe_block=True, hidden_size_per_layer_input=0, use_bidirectional_attention="vision",
     num_kv_shared_layers=0, tie_word_embeddings=True, attention_bias=False,
     layer_types=["sliding_attention", "sliding_attention", "full_attention",
                  "sliding_attention", "sliding_attention", "full_attention"],
@@ -55,9 +55,21 @@ TINY = dict(
     bos_token_id=2, eos_token_id=1, pad_token_id=0,
 )
 
+# A tiny vision tower: every part of the real one (patch embedding with two position tables, axial rope over
+# two halves of the head, per-head norms, sandwich norms, gelu MLP, 3 x 3 pooling, standardisation, the
+# projector) at a size a test can run in transformers.
+TINY_VISION = dict(
+    hidden_size=32, intermediate_size=48, num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+    head_dim=8, hidden_activation="gelu_pytorch_tanh", rms_norm_eps=1e-6, pooling_kernel_size=3, patch_size=4,
+    position_embedding_size=64, use_clipped_linears=False, standardize=True,
+    rope_parameters={"rope_theta": 100.0, "rope_type": "default"}, max_position_embeddings=1024,
+)
+IMAGE_IDS = dict(image_token_id=500, boi_token_id=501, eoi_token_id=502)
+
 SPECIAL = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3, "<|tool>": 46, "<tool|>": 47, "<|tool_call>": 48,
            "<tool_call|>": 49, "<|tool_response>": 50, "<tool_response|>": 51, '<|"|>': 52, "<|think|>": 98,
-           "<|channel>": 100, "<channel|>": 101, "<|turn>": 105, "<turn|>": 106}
+           "<|channel>": 100, "<channel|>": 101, "<|turn>": 105, "<turn|>": 106,
+           "<|image|>": 500, "<|image>": 501, "<image|>": 502}
 
 TEXTS = ["hello there", "the quick brown fox", "  two  spaces\n\nand lines", "café 日本 \U0001f600",
          "<|turn>user\nhi<turn|>\n<|turn>model\n", "a<|channel>b<channel|>c"]
@@ -120,8 +132,64 @@ def random_weights(cfg=TINY, seed=SEED):
     return state
 
 
+V = "model.vision_tower."
+
+
+def vision_shapes(vcfg=TINY_VISION, text_hidden=TINY["hidden_size"]):
+    """The vision tower's tensors, in the real checkpoint's naming."""
+    D, F, nh, hd = vcfg["hidden_size"], vcfg["intermediate_size"], vcfg["num_attention_heads"], vcfg["head_dim"]
+    nkv, patch = vcfg["num_key_value_heads"], vcfg["patch_size"]
+    out = {V + "patch_embedder.input_proj.weight": (D, 3 * patch * patch),
+           V + "patch_embedder.position_embedding_table": (2, vcfg["position_embedding_size"], D),
+           V + "std_bias": (D,), V + "std_scale": (D,),
+           "model.embed_vision.embedding_projection.weight": (text_hidden, D)}
+    for l in range(vcfg["num_hidden_layers"]):
+        p = f"{V}encoder.layers.{l}."
+        for n in ("input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm"):
+            out[p + n + ".weight"] = (D,)
+        out[p + "self_attn.q_proj.linear.weight"] = (nh * hd, D)
+        out[p + "self_attn.k_proj.linear.weight"] = (nkv * hd, D)
+        out[p + "self_attn.v_proj.linear.weight"] = (nkv * hd, D)
+        out[p + "self_attn.o_proj.linear.weight"] = (D, nh * hd)
+        out[p + "self_attn.q_norm.weight"] = (hd,)
+        out[p + "self_attn.k_norm.weight"] = (hd,)
+        out[p + "mlp.gate_proj.linear.weight"] = (F, D)
+        out[p + "mlp.up_proj.linear.weight"] = (F, D)
+        out[p + "mlp.down_proj.linear.weight"] = (D, F)
+    return out
+
+
+def random_vision_weights(seed=SEED + 100):
+    """Vision weights from their own generator, so adding them did not move a single text weight (and
+    ref.json, computed before they existed, is still the text model's reference)."""
+    rng = np.random.default_rng(seed)
+    state = {}
+    shapes_ = vision_shapes()
+    for name in sorted(shapes_):
+        shape = shapes_[name]
+        if name.endswith("std_scale"):
+            v = rng.uniform(0.5, 1.5, shape)
+        elif name.endswith("std_bias"):
+            v = rng.normal(0, 0.5, shape)
+        elif "norm" in name:
+            v = rng.uniform(0.6, 1.4, shape)
+        elif name.endswith("position_embedding_table"):
+            v = rng.normal(0, 0.5, shape)
+        elif name.endswith("input_proj.weight"):
+            v = rng.normal(0, 0.3, shape)
+        else:
+            v = rng.normal(0, 0.2, shape)
+        state[name] = v.astype(np.float32)
+    return state
+
+
 def snap(name, array):
     """What the container will hold for this tensor, dequantized."""
+    if name.startswith(("model.vision_tower.", "model.embed_vision.")):
+        if name.endswith(".linear.weight") or name.endswith("input_proj.weight") or name.endswith("embedding_projection.weight"):
+            q, s = cv.quantize_int8_rows(array)
+            return cv.dequantize_int8_rows(q, s)
+        return array
     if name.endswith("embed_tokens.weight") or name.rsplit(".", 2)[-2] in (
             "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"):
         q, s = cv.quantize_int8_rows(array)
@@ -182,8 +250,10 @@ def tiny_tokenizer(path):
 def config_json():
     text = {k: v for k, v in TINY.items()}
     text["model_type"] = "gemma4_text"
+    vision = dict(TINY_VISION, model_type="gemma4_vision")
     return {"architectures": ["Gemma4ForConditionalGeneration"], "model_type": "gemma4",
-            "tie_word_embeddings": True, "text_config": text}
+            "tie_word_embeddings": True, "text_config": text, "vision_config": vision,
+            "vision_soft_tokens_per_image": 12, **IMAGE_IDS}
 
 
 def write_committed_files(fixture=FIXTURE):
@@ -199,6 +269,7 @@ def build_container(fixture=FIXTURE):
     """The container, from the committed config and tokenizer. numpy only."""
     import tempfile
     state = random_weights()
+    state.update(random_vision_weights())
     with tempfile.TemporaryDirectory() as src:
         for name in ("config.json", "generation_config.json", "tokenizer.json"):
             shutil.copyfile(os.path.join(fixture, name), os.path.join(src, name))
@@ -243,8 +314,115 @@ def reference(fixture=FIXTURE):
                 "logit_sample": [[float(v) for v in row[:16]] for row in logits],
                 "greedy": seq[len(ids):],
             })
+    out["vision"] = vision_reference(tk)
     with open(os.path.join(fixture, "ref.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(out, handle)
+
+
+def image_patches(pixels, patch=TINY_VISION["patch_size"]):
+    """(H, W, 3) uint8 -> [(H/patch) * (W/patch), patch * patch * 3] in the order the real processor makes them:
+    row-major over the patch grid, each patch flattened as (row, column, channel)."""
+    h, w, _ = pixels.shape
+    gh, gw = h // patch, w // patch
+    return (pixels.reshape(gh, patch, gw, patch, 3).transpose(0, 2, 1, 3, 4).reshape(gh * gw, patch * patch * 3), gh, gw)
+
+
+# (height, width) in pixels of the images the vision cases use: 6 x 9 patches (6 soft tokens), 3 x 3 (1 token)
+# and 9 x 12 (12 tokens, longer than the sliding window of 6)
+VISION_IMAGES = [(24, 36), (12, 12), (36, 48)]
+VISION_PROMPTS = [
+    # (image indices, text ids around them): the ids list holds None where an image goes
+    ([0], [2, 11, 12, None, 13, 14, 15]),
+    ([0, 1], [2, 11, None, 12, 13, None, 14, 15, 16]),
+    ([2], [2] + [20 + i for i in range(9)] + [None] + [40 + i for i in range(5)]),
+    ([2, 0], [2, None, 30, 31, 32, None]),
+]
+
+
+def vision_cases():
+    """The images (random pixels) and the prompts that use them, as ids with the placeholders expanded."""
+    rng = np.random.default_rng(SEED + 2)
+    images = []
+    for h, w in VISION_IMAGES:
+        base = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+        images.append(base)
+    prompts = []
+    k = TINY_VISION["pooling_kernel_size"]
+    for which, layout in VISION_PROMPTS:
+        ids, spans, it = [], [], iter(which)
+        for item in layout:
+            if item is None:
+                img = images[next(it)]
+                tokens = (img.shape[0] // TINY_VISION["patch_size"] // k) * (img.shape[1] // TINY_VISION["patch_size"] // k)
+                ids.append(IMAGE_IDS["boi_token_id"])
+                spans.append((len(ids), tokens))
+                ids.extend([IMAGE_IDS["image_token_id"]] * tokens)
+                ids.append(IMAGE_IDS["eoi_token_id"])
+            else:
+                ids.append(item)
+        prompts.append({"ids": ids, "images": which, "spans": spans})
+    return images, prompts
+
+
+def vision_reference(tk):
+    """What transformers' Gemma4ForConditionalGeneration computes for prompts with pictures in them: the soft
+    tokens the tower produces, and the logits of the whole model, with the bidirectional attention inside an
+    image that the sliding layers apply. Images are padded to the longest, as the real processor does, so the
+    padding path is the oracle's and the engine (which pads nothing) must agree with it."""
+    import torch
+    from transformers import Gemma4Config, Gemma4ForConditionalGeneration, Gemma4TextConfig, Gemma4VisionConfig
+
+    torch.manual_seed(SEED)
+    cfg = Gemma4Config(text_config=Gemma4TextConfig(**TINY), vision_config=Gemma4VisionConfig(**TINY_VISION), **IMAGE_IDS)
+    model = Gemma4ForConditionalGeneration(cfg).to(torch.float32).eval()
+    state = {}
+    for name, a in random_weights().items():
+        state[name] = torch.from_numpy(snap(name, a))
+    for name, a in random_vision_weights().items():
+        state[name] = torch.from_numpy(snap(name, a))
+    missing = model.load_state_dict(state, strict=False)
+    assert not [k for k in missing.missing_keys if not k.startswith("lm_head")], missing.missing_keys
+    assert not missing.unexpected_keys, missing.unexpected_keys
+    model.tie_weights()
+    images, prompts = vision_cases()
+    patches = [image_patches(img) for img in images]
+    # hex: the patches as the engine takes them (the IMAGE frame's payload); pixels: the picture they came from
+    out = {"images": [{"gh": gh, "gw": gw, "hex": np.ascontiguousarray(p).tobytes().hex(),
+                       "height": img.shape[0], "width": img.shape[1], "pixels": img.reshape(-1).tobytes().hex()}
+                      for img, (p, gh, gw) in zip(images, patches)], "cases": []}
+    with torch.no_grad():
+        for case in prompts:
+            use = [patches[i] for i in case["images"]]
+            longest = max(p.shape[0] for p, _, _ in use)
+            pix = torch.zeros(len(use), longest, use[0][0].shape[1])
+            pos = torch.full((len(use), longest, 2), -1, dtype=torch.long)
+            for i, (p, gh, gw) in enumerate(use):
+                pix[i, :p.shape[0]] = torch.from_numpy(p.astype(np.float32) * (1 / 255))
+                ys, xs = np.divmod(np.arange(gh * gw), gw)
+                pos[i, :p.shape[0], 0] = torch.from_numpy(xs)
+                pos[i, :p.shape[0], 1] = torch.from_numpy(ys)
+            ids = case["ids"]
+            kinds = [1 if t == IMAGE_IDS["image_token_id"] else 0 for t in ids]
+
+            def run(seq):
+                tt = torch.tensor([kinds + [0] * (len(seq) - len(kinds))])
+                return model(input_ids=torch.tensor([seq]), pixel_values=pix, image_position_ids=pos,
+                             mm_token_type_ids=tt).logits[0].float()
+
+            features = model.get_image_features(pixel_values=pix, image_position_ids=pos).pooler_output
+            logits = run(ids)
+            seq = list(ids)
+            for _ in range(6):
+                seq.append(int(run(seq)[-1].argmax()))
+            out["cases"].append({
+                "ids": ids, "images": case["images"], "spans": case["spans"],
+                "features": [[float(v) for v in f.reshape(-1)] for f in features],
+                "last_logits": [float(v) for v in logits[-1]],
+                "all_top": [int(v) for v in logits.argmax(-1)],
+                "logit_sample": [[float(v) for v in row[:16]] for row in logits],
+                "greedy": seq[len(ids):],
+            })
+    return out
 
 
 def main():

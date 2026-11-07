@@ -213,9 +213,34 @@ def format_tool_response_block(tool_name, response):
 
 # ------------------------------------------------------------------------------ the prompt
 
+IMAGE_PARTS = ("image", "image_url", "input_image")      # what the gateway accepts as a picture (the template knows the first two)
+IMAGE_MARK = "<|image|>"
+IMAGE_BEGIN, IMAGE_END = "<|image>", "<image|>"
+NO_MEDIA = ("input_audio", "audio", "video")
+
+
+def image_marker(part, order=None):
+    """What a picture part becomes in the prompt. The template writes <|image|>, and the processor then turns
+    each into the begin-of-image token, one placeholder per soft token the picture makes, and the end-of-image
+    token. The gateway has run the picture through the processor and stored the soft-token count in the part
+    (`_soft_tokens`); without it the bare marker is what the template alone renders. `order`, a list, collects the
+    part's `_image_index` each time a marker is written, which tells the caller in what order the pictures came."""
+    if order is not None:
+        order.append(part.get("_image_index"))
+    n = part.get("_soft_tokens")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return IMAGE_BEGIN + IMAGE_MARK * n + IMAGE_END
+    return IMAGE_MARK
+
+
+def _refuse_media(part, where):
+    raise ChatError("This Gemma 4 engine reads text and pictures: audio and video are not supported "
+                    "(the 26B-A4B checkpoint has no audio tower).", where, "unsupported_content_type")
+
+
 def _text_of(content, where, trim_each=False, model=False):
-    """The text of a message's content: a string, or the text parts of a list (a picture is refused:
-    this engine reads text)."""
+    """The text of a message's content: a string, or the text parts of a list (pictures are the caller's
+    business, see _images_of)."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -225,18 +250,30 @@ def _text_of(content, where, trim_each=False, model=False):
         for index, part in enumerate(content):
             if isinstance(part, dict) and part.get("type") == "text":
                 out.append(_s(part.get("text", "")))
-            elif isinstance(part, dict) and part.get("type") in ("image", "image_url", "input_audio", "audio", "video"):
-                raise ChatError("This Gemma 4 engine reads text only: pictures, audio and video are not supported yet.",
-                                f"{where}.{index}", "unsupported_content_type")
+            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
+                continue
+            elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
+                _refuse_media(part, f"{where}.{index}")
             else:
-                raise ChatError("Message content parts must be text.", f"{where}.{index}", "unsupported_content_type")
+                raise ChatError("Message content parts must be text or pictures.", f"{where}.{index}", "unsupported_content_type")
         return "".join(out)
     raise ChatError("Message content must be a string or an array of parts.", where)
 
 
-def _captured(content, model, where):
+def _images_of(content, where, order=None):
+    """The markers of a tool response's pictures, in order: the template writes them after the response block."""
+    out = []
+    for index, part in enumerate(content if isinstance(content, list) else ()):
+        if isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
+            out.append(image_marker(part, order))
+        elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
+            _refuse_media(part, f"{where}.{index}")
+    return "".join(out)
+
+
+def _captured(content, model, where, order=None):
     """The template's captured_content: a string trimmed (an assistant's, with its thinking channels
-    removed first), a list of parts one by one."""
+    removed first), a list of parts one by one, a picture as its marker."""
     if isinstance(content, str):
         return strip_thinking(content) if model else content.strip()
     if isinstance(content, list):
@@ -245,11 +282,12 @@ def _captured(content, model, where):
             if isinstance(part, dict) and part.get("type") == "text":
                 text = _s(part.get("text", ""))
                 out.append(strip_thinking(text) if model else text.strip())
-            elif isinstance(part, dict) and part.get("type") in ("image", "image_url", "input_audio", "audio", "video"):
-                raise ChatError("This Gemma 4 engine reads text only: pictures, audio and video are not supported yet.",
-                                f"{where}.{index}", "unsupported_content_type")
+            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
+                out.append(image_marker(part, order))
+            elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
+                _refuse_media(part, f"{where}.{index}")
             else:
-                raise ChatError("Message content parts must be text.", f"{where}.{index}", "unsupported_content_type")
+                raise ChatError("Message content parts must be text or pictures.", f"{where}.{index}", "unsupported_content_type")
         return "".join(out)
     if content is None:
         return ""
@@ -271,8 +309,10 @@ def _arguments(call, where):
     return function["name"], args
 
 
-def render(messages, tools=None, enable_thinking=False, add_generation_prompt=True, preserve_thinking=False):
-    """The prompt for a conversation, as chat_template.jinja renders it."""
+def render(messages, tools=None, enable_thinking=False, add_generation_prompt=True, preserve_thinking=False,
+           image_order=None):
+    """The prompt for a conversation, as chat_template.jinja renders it. image_order: a list that receives the
+    `_image_index` of each picture part in the order its marker was written."""
     if not isinstance(messages, list) or not messages:
         raise ChatError("`messages` must be a non-empty array.", "messages")
     if tools is not None and not isinstance(tools, list):
@@ -354,11 +394,12 @@ def render(messages, tools=None, enable_thinking=False, add_generation_prompt=Tr
                     out.append(format_tool_response_block(name, body))
                 elif isinstance(body, list):
                     out.append(format_tool_response_block(name, _text_of(body, f"messages.{k}.content")))
+                    out.append(_images_of(body, f"messages.{k}.content", image_order))
                 else:
                     out.append(format_tool_response_block(name, body))
                 responded = True
                 prev_type = "tool_response"
-        captured = _captured(message.get("content"), role == "model", f"{where}.content")
+        captured = _captured(message.get("content"), role == "model", f"{where}.content", image_order)
         out.append(captured)
         has_content = len(captured.strip()) > 0
         next_role, found = None, False
