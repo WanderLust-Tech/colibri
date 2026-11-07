@@ -33,8 +33,8 @@ EQUIVALENT = {"top-k weights not renormalised",
               "a cancelled conversation goes on decoding"}
 
 MUTANTS = [
-    ("attention scaled by 1/4", "float v = dot_f32(qh, q->K[l] + (slot * nkv + kvh) * hd, hd);",
-     "float v = 0.25f * dot_f32(qh, q->K[l] + (slot * nkv + kvh) * hd, hd);"),
+    ("attention scaled by 1/4", "float v = dot_f32(qh, cq->K[ksrc] + (slot * nkv + kvh) * hd, hd);",
+     "float v = 0.25f * dot_f32(qh, cq->K[ksrc] + (slot * nkv + kvh) * hd, hd);"),
     ("window one too long", "int lo = y->full ? 0 : (p - c->window + 1 > 0 ? p - c->window + 1 : 0);",
      "int lo = y->full ? 0 : (p - c->window > 0 ? p - c->window : 0);"),
     ("window one too short", "int lo = y->full ? 0 : (p - c->window + 1 > 0 ? p - c->window + 1 : 0);",
@@ -103,9 +103,10 @@ MUTANTS = [
     ("the tower runs only for a picture that starts the chunk",
      "if (!r->sp[k].feat && r->sp[k].start < r->done_np + n && r->sp[k].start + r->sp[k].ntok > r->done_np) { pic = &r->sp[k]; break; }",
      "if (!r->sp[k].feat && r->sp[k].start == r->done_np) { pic = &r->sp[k]; break; }", "ServeVisionTest"),
-    ("placeholder runs not counted against pictures", "if (nf != g_npend) snprintf(msg", "if (0) snprintf(msg", "ServeVisionTest"),
-    ("picture size not checked against its placeholders", "if (found[i].ntok != want) snprintf(msg", "if (0) snprintf(msg", "ServeVisionTest"),
-    ("picture bytes not checked", "else if ((size_t)cmd.payload_bytes != want) {", "else if (0) {", "ServeVisionTest"),
+    ("placeholder runs not counted against pictures", "else if (want_n[0] != have[0]) snprintf(msg", "else if (0) snprintf(msg", "ServeVisionTest"),
+    ("picture size not checked against its placeholders", "if (found[i].ntok != want)", "if (0)", "ServeVisionTest"),
+    ("picture bytes not checked", "else if ((size_t)cmd.payload_bytes != want) {\n                        snprintf(msg, sizeof msg, \"BAD_IMAGE bytes",
+     "else if (0) {\n                        snprintf(msg, sizeof msg, \"BAD_IMAGE bytes", "ServeVisionTest"),
     # the other sizes: per-layer embeddings, layers that share keys and values, clipped vision linears
     ("per-layer embedding block skipped", "        if (c->ple_dim) {                                        /* the per-layer-embedding block",
      "        if (0) {                                        /* the per-layer-embedding block", "PleLogitsTest"),
