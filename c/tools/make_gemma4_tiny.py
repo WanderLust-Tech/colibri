@@ -66,6 +66,18 @@ TINY_VISION = dict(
     rope_parameters={"rope_theta": 100.0, "rope_type": "default"}, max_position_embeddings=1024,
 )
 IMAGE_IDS = dict(image_token_id=500, boi_token_id=501, eoi_token_id=502)
+AUDIO_IDS = dict(audio_token_id=503, boa_token_id=504, eoa_token_index=505)
+
+# A tiny audio tower, for the E2B-like variant: the conformer of the real one (two stride-2 convolutions with a layer norm and a
+# relu, macaron feed-forwards, chunked local attention with a relative-position bias and a softcap, a causal depthwise
+# convolution, clipped linears, an output projection with a bias) at a size a test can run in transformers. The attention context
+# is a chunk of 4 with a past of 4 and no future, as the real one is a chunk of 12 with a past of 12; the mel bins are as many as
+# the first convolution has channels, which the model's flattening implies.
+TINY_AUDIO = dict(hidden_size=32, num_hidden_layers=2, num_attention_heads=4, hidden_act="silu",
+                  subsampling_conv_channels=[16, 8], conv_kernel_size=3, residual_weight=0.5, attention_chunk_size=4,
+                  attention_context_left=5, attention_context_right=0, attention_logit_cap=50.0, use_clipped_linears=True,
+                  rms_norm_eps=1e-6, gradient_clipping=1e10, output_proj_dims=24)
+AUDIO_FRAMES = [19, 7, 45]          # mel frames of the clips the audio cases use: 5, 2 and 12 soft tokens
 
 # The other sizes of the family, as tiny as the first: the 31B (dense: the MLP alone, keys are values on the full layers) and the
 # E2B/E4B (per-layer embeddings, the last two layers reading the keys and values of earlier ones, a double-wide MLP there, and
@@ -78,13 +90,13 @@ TINY_VISION_CLIPPED = dict(TINY_VISION, use_clipped_linears=True, standardize=Fa
 VARIANTS = {
     "moe": {"dir": FIXTURE, "text": TINY, "vision": TINY_VISION, "seed": SEED},
     "dense": {"dir": FIXTURE + "_dense", "text": TINY_DENSE, "vision": TINY_VISION, "seed": 11},
-    "ple": {"dir": FIXTURE + "_ple", "text": TINY_PLE, "vision": TINY_VISION_CLIPPED, "seed": 13},
+    "ple": {"dir": FIXTURE + "_ple", "text": TINY_PLE, "vision": TINY_VISION_CLIPPED, "seed": 13, "audio": TINY_AUDIO},
 }
 
 SPECIAL = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3, "<|tool>": 46, "<tool|>": 47, "<|tool_call>": 48,
            "<tool_call|>": 49, "<|tool_response>": 50, "<tool_response|>": 51, '<|"|>': 52, "<|think|>": 98,
            "<|channel>": 100, "<channel|>": 101, "<|turn>": 105, "<turn|>": 106,
-           "<|image|>": 500, "<|image>": 501, "<image|>": 502}
+           "<|image|>": 500, "<|image>": 501, "<image|>": 502, "<|audio|>": 503, "<|audio>": 504, "<audio|>": 505}
 
 TEXTS = ["hello there", "the quick brown fox", "  two  spaces\n\nand lines", "café 日本 \U0001f600",
          "<|turn>user\nhi<turn|>\n<|turn>model\n", "a<|channel>b<channel|>c"]
@@ -232,8 +244,81 @@ def random_vision_weights(seed=SEED + 100, vcfg=TINY_VISION, text_hidden=TINY["h
     return state
 
 
+A = "model.audio_tower."
+
+
+def audio_shapes(acfg=TINY_AUDIO, text_hidden=TINY["hidden_size"]):
+    """The audio tower's tensors, in the real checkpoint's naming."""
+    D, C0, C1, K, heads = acfg["hidden_size"], *acfg["subsampling_conv_channels"], acfg["conv_kernel_size"], acfg["num_attention_heads"]
+    hd = D // heads
+    out = {A + "subsample_conv_projection.layer0.conv.weight": (C0, 1, 3, 3),
+           A + "subsample_conv_projection.layer0.norm.weight": (C0,),
+           A + "subsample_conv_projection.layer1.conv.weight": (C1, C0, 3, 3),
+           A + "subsample_conv_projection.layer1.norm.weight": (C1,),
+           A + "subsample_conv_projection.input_proj_linear.weight": (D, (C0 // 4) * C1),
+           A + "output_proj.weight": (acfg["output_proj_dims"], D), A + "output_proj.bias": (acfg["output_proj_dims"],),
+           "model.embed_audio.embedding_projection.weight": (text_hidden, acfg["output_proj_dims"])}
+    linears = []
+    for l in range(acfg["num_hidden_layers"]):
+        p = f"{A}layers.{l}."
+        for i in (1, 2):
+            out[p + f"feed_forward{i}.ffw_layer_1.linear.weight"] = (4 * D, D)
+            out[p + f"feed_forward{i}.ffw_layer_2.linear.weight"] = (D, 4 * D)
+            out[p + f"feed_forward{i}.pre_layer_norm.weight"] = (D,)
+            out[p + f"feed_forward{i}.post_layer_norm.weight"] = (D,)
+            linears += [p + f"feed_forward{i}.ffw_layer_1", p + f"feed_forward{i}.ffw_layer_2"]
+        for n in ("norm_pre_attn", "norm_post_attn", "norm_out"):
+            out[p + n + ".weight"] = (D,)
+        for n in ("q_proj", "k_proj", "v_proj", "post"):
+            out[p + f"self_attn.{n}.linear.weight"] = (D, D)
+            linears.append(p + f"self_attn.{n}")
+        out[p + "self_attn.relative_k_proj.weight"] = (D, D)
+        out[p + "self_attn.per_dim_scale"] = (hd,)
+        out[p + "lconv1d.linear_start.linear.weight"] = (2 * D, D)
+        out[p + "lconv1d.linear_end.linear.weight"] = (D, D)
+        out[p + "lconv1d.depthwise_conv1d.weight"] = (D, 1, K)
+        out[p + "lconv1d.pre_layer_norm.weight"] = (D,)
+        out[p + "lconv1d.conv_norm.weight"] = (D,)
+        linears += [p + "lconv1d.linear_start", p + "lconv1d.linear_end"]
+    if acfg["use_clipped_linears"]:
+        for module in linears:
+            for limit in ("input_min", "input_max", "output_min", "output_max"):
+                out[module + "." + limit] = ()
+    return out
+
+
+def random_audio_weights(seed, acfg=TINY_AUDIO, text_hidden=TINY["hidden_size"]):
+    rng = np.random.default_rng(seed)
+    state = {}
+    shapes_ = audio_shapes(acfg, text_hidden)
+    for name in sorted(shapes_):
+        shape = shapes_[name]
+        if name.endswith(("input_min", "output_min")):
+            v = -rng.uniform(1.5, 3.0)
+        elif name.endswith(("input_max", "output_max")):
+            v = rng.uniform(1.5, 3.0)
+        elif "norm" in name:
+            v = rng.uniform(0.6, 1.4, shape)
+        elif name.endswith("per_dim_scale"):
+            v = rng.normal(0, 0.6, shape)
+        elif name.endswith("output_proj.bias"):
+            v = rng.normal(0, 0.3, shape)
+        elif name.endswith("conv.weight") or name.endswith("depthwise_conv1d.weight"):
+            v = rng.normal(0, 0.35, shape)
+        else:
+            v = rng.normal(0, 0.18, shape)
+        state[name] = np.asarray(v, dtype=np.float32)
+    return state
+
+
 def snap(name, array):
     """What the container will hold for this tensor, dequantized."""
+    if name.startswith(("model.audio_tower.", "model.embed_audio.")):
+        if name.endswith((".linear.weight", "relative_k_proj.weight", "input_proj_linear.weight", "output_proj.weight",
+                          "embedding_projection.weight")):
+            q, s = cv.quantize_int8_rows(array)
+            return cv.dequantize_int8_rows(q, s)
+        return array
     if name.startswith(("model.vision_tower.", "model.embed_vision.")):
         if name.endswith(".linear.weight") or name.endswith("input_proj.weight") or name.endswith("embedding_projection.weight"):
             q, s = cv.quantize_int8_rows(array)
@@ -300,9 +385,13 @@ def config_json(variant="moe"):
     text = {k: v for k, v in VARIANTS[variant]["text"].items()}
     text["model_type"] = "gemma4_text"
     vision = dict(VARIANTS[variant]["vision"], model_type="gemma4_vision")
-    return {"architectures": ["Gemma4ForConditionalGeneration"], "model_type": "gemma4",
-            "tie_word_embeddings": True, "text_config": text, "vision_config": vision,
-            "vision_soft_tokens_per_image": 12, **IMAGE_IDS}
+    config = {"architectures": ["Gemma4ForConditionalGeneration"], "model_type": "gemma4",
+              "tie_word_embeddings": True, "text_config": text, "vision_config": vision,
+              "vision_soft_tokens_per_image": 12, **IMAGE_IDS}
+    if VARIANTS[variant].get("audio"):
+        config["audio_config"] = dict(VARIANTS[variant]["audio"], model_type="gemma4_audio")
+        config.update(AUDIO_IDS, eoa_token_id=AUDIO_IDS["eoa_token_index"])
+    return config
 
 
 def write_committed_files(fixture=FIXTURE, variant="moe"):
@@ -320,9 +409,13 @@ def build_container(fixture=FIXTURE, variant="moe"):
     var = VARIANTS[variant]
     state = random_weights(var["text"], var["seed"])
     state.update(random_vision_weights(var["seed"] + 100, var["vision"], var["text"]["hidden_size"]))
+    if var.get("audio"):
+        state.update(random_audio_weights(var["seed"] + 200, var["audio"], var["text"]["hidden_size"]))
     with tempfile.TemporaryDirectory() as src:
         for name in ("config.json", "generation_config.json", "tokenizer.json"):
             have = os.path.join(fixture, name)
+            if name == "tokenizer.json":               # one tokenizer for every variant, the first fixture's (a copy left by an earlier build may be stale)
+                have = os.path.join(FIXTURE, name)
             shutil.copyfile(have if os.path.exists(have) else os.path.join(FIXTURE, name), os.path.join(src, name))
         save_f32_safetensors(os.path.join(src, "model.safetensors"), state)
         cv.convert(src, fixture, log=lambda *_: None)
@@ -368,6 +461,8 @@ def reference(fixture=FIXTURE, variant="moe"):
                 "greedy": seq[len(ids):],
             })
     out["vision"] = vision_reference(tk, variant)
+    if var.get("audio"):
+        out["audio"] = audio_reference(variant)
     with open(os.path.join(fixture, "ref.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(out, handle)
 
@@ -417,6 +512,109 @@ def vision_cases(variant="moe"):
     return images, prompts
 
 
+def _multimodal_model(variant):
+    """transformers' Gemma4ForConditionalGeneration with the variant's text, vision (and audio) config, loaded with the
+    variant's weights as the container holds them."""
+    import torch
+    from transformers import (Gemma4AudioConfig, Gemma4Config, Gemma4ForConditionalGeneration, Gemma4TextConfig,
+                              Gemma4VisionConfig)
+
+    var = VARIANTS[variant]
+    torch.manual_seed(var["seed"])
+    extra = {}
+    if var.get("audio"):
+        extra = dict(audio_config=Gemma4AudioConfig(**copy.deepcopy(var["audio"])), **AUDIO_IDS)
+    cfg = Gemma4Config(text_config=Gemma4TextConfig(**copy.deepcopy(var["text"])),
+                       vision_config=Gemma4VisionConfig(**copy.deepcopy(var["vision"])), **IMAGE_IDS, **extra)
+    model = Gemma4ForConditionalGeneration(cfg).to(torch.float32).eval()
+    weights = random_weights(var["text"], var["seed"])
+    weights.update(random_vision_weights(var["seed"] + 100, var["vision"], var["text"]["hidden_size"]))
+    if var.get("audio"):
+        weights.update(random_audio_weights(var["seed"] + 200, var["audio"], var["text"]["hidden_size"]))
+    state = {name: torch.from_numpy(snap(name, a)) for name, a in weights.items()}
+    missing = model.load_state_dict(state, strict=False)
+    assert not [k for k in missing.missing_keys if not k.startswith("lm_head")], missing.missing_keys
+    assert not missing.unexpected_keys, missing.unexpected_keys
+    model.tie_weights()
+    return model
+
+
+def audio_reference(variant):
+    """What transformers computes for prompts with clips of audio in them: the soft tokens the tower makes and the logits of
+    the whole model. Clips are padded to the longest with a mask, as the real processor does."""
+    import torch
+
+    var = VARIANTS[variant]
+    model = _multimodal_model(variant)
+    acfg = var["audio"]
+    bins = acfg["subsampling_conv_channels"][0]
+    rng = np.random.default_rng(var["seed"] + 3)
+    clips = [rng.normal(-2.0, 2.0, (frames, bins)).astype(np.float32) for frames in AUDIO_FRAMES]
+    out = {"clips": [{"frames": c.shape[0], "bins": bins, "hex": np.ascontiguousarray(c).tobytes().hex()} for c in clips], "cases": []}
+    images, _ = vision_cases(variant)
+    patches = [image_patches(img) for img in images]
+
+    def tokens(frames):
+        half = (frames - 1) // 2 + 1
+        return (half - 1) // 2 + 1
+
+    def audio_run(clip):
+        n = tokens(clips[clip].shape[0])
+        return [AUDIO_IDS["boa_token_id"]] + [AUDIO_IDS["audio_token_id"]] * n + [AUDIO_IDS["eoa_token_index"]]
+
+    def picture_run(index):
+        n = (images[index].shape[0] // TINY_VISION["patch_size"] // 3) * (images[index].shape[1] // TINY_VISION["patch_size"] // 3)
+        return [IMAGE_IDS["boi_token_id"]] + [IMAGE_IDS["image_token_id"]] * n + [IMAGE_IDS["eoi_token_id"]]
+
+    prompts = [
+        {"ids": [2, 11, 12] + audio_run(0) + [13, 14, 15], "clips": [0], "images": []},
+        {"ids": [2] + audio_run(1) + [30, 31] + audio_run(2) + [32], "clips": [1, 2], "images": []},
+        {"ids": [2, 40] + picture_run(1) + [41] + audio_run(0) + [42, 43], "clips": [0], "images": [1]},
+    ]
+    with torch.no_grad():
+        for case in prompts:
+            use = [clips[i] for i in case["clips"]]
+            longest = max(c.shape[0] for c in use)
+            feats = torch.zeros(len(use), longest, bins)
+            mask = torch.zeros(len(use), longest, dtype=torch.bool)
+            for i, c in enumerate(use):
+                feats[i, :c.shape[0]] = torch.from_numpy(c)
+                mask[i, :c.shape[0]] = True
+            kwargs = {"input_features": feats, "input_features_mask": mask}
+            kinds = [1 if t == IMAGE_IDS["image_token_id"] else 0 for t in case["ids"]]
+            if case["images"]:
+                use_p = [patches[i] for i in case["images"]]
+                pl = max(p.shape[0] for p, _, _ in use_p)
+                pix = torch.zeros(len(use_p), pl, use_p[0][0].shape[1])
+                pos = torch.full((len(use_p), pl, 2), -1, dtype=torch.long)
+                for i, (p, gh, gw) in enumerate(use_p):
+                    pix[i, :p.shape[0]] = torch.from_numpy(p.astype(np.float32) * (1 / 255))
+                    ys, xs = np.divmod(np.arange(gh * gw), gw)
+                    pos[i, :p.shape[0], 0] = torch.from_numpy(xs)
+                    pos[i, :p.shape[0], 1] = torch.from_numpy(ys)
+                kwargs.update(pixel_values=pix, image_position_ids=pos)
+
+            def run(seq):
+                tt = torch.tensor([kinds + [0] * (len(seq) - len(kinds))])
+                return model(input_ids=torch.tensor([seq]), mm_token_type_ids=tt, **kwargs).logits[0].float()
+
+            audio = model.model.get_audio_features(feats, mask)
+            soft = audio.pooler_output[audio.attention_mask]                       # every clip's valid soft tokens, in order
+            logits = run(case["ids"])
+            seq = list(case["ids"])
+            for _ in range(6):
+                seq.append(int(run(seq)[-1].argmax()))
+            out["cases"].append({
+                "ids": case["ids"], "clips": case["clips"], "images": case["images"],
+                "features": [float(v) for v in soft.reshape(-1)],
+                "last_logits": [float(v) for v in logits[-1]],
+                "all_top": [int(v) for v in logits.argmax(-1)],
+                "logit_sample": [[float(v) for v in row[:16]] for row in logits],
+                "greedy": seq[len(case["ids"]):],
+            })
+    return out
+
+
 def vision_reference(tk, variant="moe"):
     """What transformers' Gemma4ForConditionalGeneration computes for prompts with pictures in them: the soft
     tokens the tower produces, and the logits of the whole model, with the bidirectional attention inside an
@@ -426,19 +624,7 @@ def vision_reference(tk, variant="moe"):
     from transformers import Gemma4Config, Gemma4ForConditionalGeneration, Gemma4TextConfig, Gemma4VisionConfig
 
     var = VARIANTS[variant]
-    torch.manual_seed(var["seed"])
-    cfg = Gemma4Config(text_config=Gemma4TextConfig(**copy.deepcopy(var["text"])),
-                       vision_config=Gemma4VisionConfig(**copy.deepcopy(var["vision"])), **IMAGE_IDS)
-    model = Gemma4ForConditionalGeneration(cfg).to(torch.float32).eval()
-    state = {}
-    for name, a in random_weights(var["text"], var["seed"]).items():
-        state[name] = torch.from_numpy(snap(name, a))
-    for name, a in random_vision_weights(var["seed"] + 100, var["vision"], var["text"]["hidden_size"]).items():
-        state[name] = torch.from_numpy(snap(name, a))
-    missing = model.load_state_dict(state, strict=False)
-    assert not [k for k in missing.missing_keys if not k.startswith("lm_head")], missing.missing_keys
-    assert not missing.unexpected_keys, missing.unexpected_keys
-    model.tie_weights()
+    model = _multimodal_model(variant)
     images, prompts = vision_cases(variant)
     patches = [image_patches(img) for img in images]
     # hex: the patches as the engine takes them (the IMAGE frame's payload); pixels: the picture they came from

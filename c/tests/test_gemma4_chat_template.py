@@ -75,6 +75,15 @@ CASES = {
     "a picture in a user turn": {"messages": [{"role": "user", "content": [
         {"type": "text", "text": " what is this? "}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         {"type": "text", "text": " and this "}, {"type": "image", "image": "x"}]}]},
+    "audio in a user turn": {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": " transcribe "}, {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+        {"type": "text", "text": " and this "}, {"type": "audio", "audio": "x"}, {"type": "image_url", "image_url": {"url": "u"}}]}]},
+    "audio in a tool result": {"tools": [SEARCH], "messages": [
+        {"role": "user", "content": "find it"},
+        {"role": "assistant", "content": "", "tool_calls": [call("search", {"query": "cats"}, "c1")]},
+        {"role": "tool", "tool_call_id": "c1", "content": [
+            {"type": "text", "text": "a recording"}, {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+            {"type": "image_url", "image_url": {"url": "u1"}}]}]},
     "two pictures and a system turn": {"messages": [
         {"role": "system", "content": "Describe pictures."},
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u1"}}, {"type": "image_url", "image_url": {"url": "u2"}}]},
@@ -208,13 +217,30 @@ class TemplateTest(unittest.TestCase):
         self.assertEqual(g.render(messages), want)
         self.assertIn("<|channel>thought\nr\n<channel|>", want)
 
-    def test_audio_and_video_are_refused_not_dropped(self):
-        for part in ({"type": "input_audio", "input_audio": {}}, {"type": "audio"}, {"type": "video"}):
+    def test_video_is_refused_not_dropped(self):
+        for part in ({"type": "video"}, {"type": "video", "video": {"url": "u"}}):
             with self.assertRaises(g.ChatError) as caught:
                 g.render([{"role": "user", "content": [{"type": "text", "text": "what is this"}, part]}])
             self.assertEqual(caught.exception.code, "unsupported_content_type")
             self.assertEqual(caught.exception.param, "messages.0.content.1")
-            self.assertIn("audio", str(caught.exception))
+            self.assertIn("video", str(caught.exception))
+
+    def test_audio_becomes_what_the_processor_makes_of_the_templates_marker(self):
+        part = {"type": "input_audio", "_soft_tokens": 4, "_image_index": 0}
+        bare = g.render([{"role": "user", "content": [{"type": "text", "text": "what?"}, {"type": "input_audio"}]}])
+        self.assertIn("<|turn>user\nwhat?<|audio|><turn|>", bare)
+        order = []
+        got = g.render([{"role": "user", "content": [{"type": "text", "text": "what?"}, part]}], image_order=order)
+        self.assertEqual(got, bare.replace("<|audio|>", "<|audio>" + "<|audio|>" * 4 + "<audio|>"))
+        self.assertEqual(order, [0])
+        # pictures and clips in the order of the conversation share one index
+        mixed = [{"role": "user", "content": [
+            {"type": "image_url", "_soft_tokens": 2, "_image_index": 0}, {"type": "input_audio", "_soft_tokens": 3, "_image_index": 1},
+            {"type": "image_url", "_soft_tokens": 1, "_image_index": 2}]}]
+        order = []
+        got = g.render(mixed, image_order=order)
+        self.assertIn("<|image><|image|><|image|><image|><|audio><|audio|><|audio|><|audio|><audio|><|image><|image|><image|>", got)
+        self.assertEqual(order, [0, 1, 2])
 
     def test_a_picture_becomes_what_the_processor_makes_of_the_templates_marker(self):
         """The template writes <|image|>; the processor turns each into begin, one placeholder per soft token, end."""

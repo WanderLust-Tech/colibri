@@ -396,6 +396,7 @@ static int decide_serve(FILE *input, FILE *output, DecideFn decide, void *ctx,
         switch (command.kind) {
         case COLI_SERVE_COMMAND_SUBMIT:
         case COLI_SERVE_COMMAND_IMAGE:
+        case COLI_SERVE_COMMAND_AUDIO:
             /* Nothing to generate with: say so in the frame the gateway reads. */
             coli_serve_write_error(output, command.id, "NOT_SUPPORTED a decision engine does not generate text");
             break;

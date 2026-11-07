@@ -31,16 +31,17 @@ Tensors, with the checkpoint's own names (prefix P = model.language_model.):
       (row, block); element = (nibble - 8) * scale. Values are confined to -7..7, so a
       quantize / dequantize / quantize round trip is exact.
 
-The vision tower and its projector (model.vision_tower.*, model.embed_vision.*) are carried when the
-checkpoint has them (--no-vision leaves them out): the matrices as per-row int8 with the same names,
-the norms, the position table and the standardisation vectors as F32. Audio towers (the small dense
-sizes have one; the 26B-A4B does not) are skipped and counted in the report. A tensor name this
-script does not know stops the conversion rather than being dropped silently.
+The vision tower and its projector (model.vision_tower.*, model.embed_vision.*) and the audio tower
+(model.audio_tower.*, model.embed_audio.*: the E2B and E4B have one, the 26B-A4B and the 31B do not) are
+carried when the checkpoint has them (--no-vision and --no-audio leave them out): the matrices as
+per-row int8 with the same names, the norms, convolutions, position tables, clip limits and the like as
+F32. A tensor name this script does not know stops the conversion rather than being dropped silently.
 
     python c/tools/convert_gemma4.py --src /path/to/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b
     python c/tools/convert_gemma4.py --repo google/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b
     # a container converted before the vision tower was carried: add just the tower (a minute)
     python c/tools/convert_gemma4.py --src /path/to/gemma-4-26B-A4B-it --out ~/colibri-models/gemma4-26b-a4b --add-vision
+    python c/tools/convert_gemma4.py --src /path/to/gemma-4-E2B-it --out ~/colibri-models/gemma4-e2b --add-audio
 """
 import argparse
 import json
@@ -256,7 +257,24 @@ EXACT_TAILS = {
     "router.proj.weight", "router.scale", "router.per_expert_scale",
 }
 EXPERT_TAILS = {"experts.gate_up_proj", "experts.down_proj"}
-SKIPPED_PREFIXES = ("model.audio_tower.", "model.embed_audio.")
+AUDIO_PREFIXES = ("model.audio_tower.", "model.embed_audio.")
+# the audio tower's matrices (clipped linears, the relative-position projection, the subsampling and output projections and the
+# projector into the text model): per-row int8. Everything else of it (norms, the two convolutions, the depthwise kernels, the
+# per-dimension scales, the output bias, the clip limits) stays exact.
+AUDIO_MATRIX = re.compile(r"(\.linear\.weight|self_attn\.relative_k_proj\.weight|input_proj_linear\.weight|"
+                          r"^model\.audio_tower\.output_proj\.weight|^model\.embed_audio\.embedding_projection\.weight)$")
+_LIN = r"(?:linear\.weight|(?:input|output)_(?:min|max))"       # a clipped linear: its matrix, or one of its four limits
+AUDIO_KNOWN = re.compile(
+    r"^model\.audio_tower\.(?:"
+    r"subsample_conv_projection\.(?:layer[01]\.(?:conv|norm)\.weight|input_proj_linear\.weight)"
+    r"|output_proj\.(?:weight|bias)"
+    r"|layers\.\d+\.(?:"
+    r"feed_forward[12]\.(?:ffw_layer_[12]\." + _LIN + r"|pre_layer_norm\.weight|post_layer_norm\.weight)"
+    r"|norm_pre_attn\.weight|norm_post_attn\.weight|norm_out\.weight"
+    r"|self_attn\.(?:(?:q_proj|k_proj|v_proj|post)\." + _LIN + r"|relative_k_proj\.weight|per_dim_scale)"
+    r"|lconv1d\.(?:(?:linear_start|linear_end)\." + _LIN + r"|depthwise_conv1d\.weight|pre_layer_norm\.weight|conv_norm\.weight)"
+    r"))$|^model\.embed_audio\.embedding_projection\.weight$")
+SKIPPED_PREFIXES = ()
 VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.")
 VISION_LAYER = re.compile(r"^model\.vision_tower\.encoder\.layers\.(\d+)\.(.+)$")
 VISION_MATRIX_TAILS = {
@@ -276,8 +294,10 @@ VISION_CLIP = re.compile(r"\.(input|output)_(min|max)$")      # a clipped linear
 
 
 def classify(name):
-    if name.startswith(SKIPPED_PREFIXES):
-        return "skip"
+    if name.startswith(AUDIO_PREFIXES):
+        if not AUDIO_KNOWN.match(name):
+            return None
+        return "amatrix" if AUDIO_MATRIX.search(name) else "aexact"
     if name.startswith(VISION_PREFIXES):
         if name in VISION_MATRICES:
             return "vmatrix"
@@ -404,11 +424,22 @@ def vision_summary(config):
             "max_soft_tokens": config.get("vision_soft_tokens_per_image", 280)}
 
 
+def audio_summary(config):
+    """The audio tower's shape, for gemma4_meta.json, or None."""
+    ac = config.get("audio_config")
+    if not isinstance(ac, dict):
+        return None
+    return {"hidden": ac["hidden_size"], "layers": ac["num_hidden_layers"], "heads": ac["num_attention_heads"],
+            "chunk": ac.get("attention_chunk_size", 12), "left": ac.get("attention_context_left", 13),
+            "right": ac.get("attention_context_right", 0), "kernel": ac.get("conv_kernel_size", 5),
+            "channels": list(ac.get("subsampling_conv_channels", (128, 32))), "out_dims": ac.get("output_proj_dims", ac["hidden_size"])}
+
+
 def add_tensor_producers(w, ck, names_wanted):
     """Queue the I8 (+ .scale) / F32 tensors of `names_wanted` (name -> kind) on writer w."""
     for name in sorted(names_wanted):
         shape = ck.file_of(name).shape(name)
-        if names_wanted[name] == "vmatrix":
+        if names_wanted[name] in ("vmatrix", "amatrix"):
             if len(shape) != 2:
                 raise SystemExit(f"{name}: expected a matrix, got shape {shape}")
             cache = {}
@@ -424,54 +455,60 @@ def add_tensor_producers(w, ck, names_wanted):
             w.add(name, "F32", shape, lambda n=name: ck.array(n))
 
 
-def add_vision(src, out, log=print):
-    """Add the vision tower to a container that was converted without it: one more shard, the index
-    and the meta file updated. The text weights are not touched."""
+def add_tower(src, out, which, log=print):
+    """Add the vision or the audio tower ("vision" / "audio") to a container that was converted without it: one more
+    shard, the index and the meta file updated. The text weights are not touched."""
+    prefixes = VISION_PREFIXES if which == "vision" else AUDIO_PREFIXES
     with open(os.path.join(src, "config.json"), encoding="utf-8") as handle:
         config = json.load(handle)
-    summary = vision_summary(config)
+    summary = vision_summary(config) if which == "vision" else audio_summary(config)
     if summary is None:
-        raise SystemExit(f"{src}: config.json has no vision_config")
+        raise SystemExit(f"{src}: config.json has no {which}_config")
     meta_path = os.path.join(out, "gemma4_meta.json")
     index_path = os.path.join(out, "model.safetensors.index.json")
     if not (os.path.exists(meta_path) and os.path.exists(index_path)):
         raise SystemExit(f"{out}: not a Gemma 4 container (gemma4_meta.json or the index is missing)")
     with open(index_path, encoding="utf-8") as handle:
         index = json.load(handle)
-    if any(n.startswith("model.vision_tower.") for n in index["weight_map"]):
-        raise SystemExit(f"{out}: already has the vision tower")
+    if any(n.startswith(prefixes) for n in index["weight_map"]):
+        raise SystemExit(f"{out}: already has the {which} tower")
     ck = Checkpoint(src)
     wanted, unknown = {}, []
     for n in ck.names():
-        if n.startswith(VISION_PREFIXES):
+        if n.startswith(prefixes):
             k = classify(n)
             if k is None:
                 unknown.append(n)
             else:
                 wanted[n] = k
     if unknown:
-        raise SystemExit("vision tensors this converter does not know:\n  " + "\n  ".join(unknown[:20]))
+        raise SystemExit(f"{which} tensors this converter does not know:\n  " + "\n  ".join(unknown[:20]))
     if not wanted:
-        raise SystemExit(f"{src}: no vision tensors in the checkpoint")
+        raise SystemExit(f"{src}: no {which} tensors in the checkpoint")
     t0 = time.time()
-    w = ShardWriter(out, prefix="vision")
+    w = ShardWriter(out, prefix=which)
     add_tensor_producers(w, ck, wanted)
     w.finish_into(index)
     ck.close()
-    for f in COPY_FILES:                    # the config now carries vision_config, the processor config the image sizes
+    for f in COPY_FILES:                    # the config now carries the tower's section, the processor config its sizes
         if f in ("config.json", "processor_config.json") and os.path.exists(os.path.join(src, f)):
             shutil.copyfile(os.path.join(src, f), os.path.join(out, f))
     with open(meta_path, encoding="utf-8") as handle:
         meta = json.load(handle)
-    meta["vision"] = summary
+    meta[which] = summary
     meta.pop("skipped_note", None)
+    meta["skipped_tensors"] = max(0, meta.get("skipped_tensors", 0) - len(wanted))
     with open(meta_path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(meta, handle, indent=1)
-    log(f"added {len(wanted)} vision tensors in {time.time() - t0:.0f}s")
+    log(f"added {len(wanted)} {which} tensors in {time.time() - t0:.0f}s")
     return meta
 
 
-def convert(src, out, log=print, with_vision=True):
+def add_vision(src, out, log=print):
+    return add_tower(src, out, "vision", log)
+
+
+def convert(src, out, log=print, with_vision=True, with_audio=True):
     with open(os.path.join(src, "config.json"), encoding="utf-8") as handle:
         config = json.load(handle)
     tc = text_config(config)
@@ -489,10 +526,10 @@ def convert(src, out, log=print, with_vision=True):
         k = classify(n)
         if k is None:
             unknown.append(n)
-        elif k == "skip" or (k in ("vmatrix", "vexact") and not with_vision):
+        elif k == "skip" or (k in ("vmatrix", "vexact") and not with_vision) or (k in ("amatrix", "aexact") and not with_audio):
             skipped += 1
-        elif k in ("vmatrix", "vexact"):
-            vision_names[n] = k
+        elif k in ("vmatrix", "vexact", "amatrix", "aexact"):
+            vision_names[n] = k                                  # (the towers' tensors, vision and audio alike)
         else:
             kinds[n] = k
     if unknown:
@@ -570,9 +607,11 @@ def convert(src, out, log=print, with_vision=True):
         "layers": layers, "experts": experts, "moe": moe,
         "skipped_tensors": skipped,
     }
-    if vision_names:
+    if any(k in ("vmatrix", "vexact") for k in vision_names.values()):
         meta["vision"] = vision_summary(config)
-    elif skipped:
+    if any(k in ("amatrix", "aexact") for k in vision_names.values()):
+        meta["audio"] = audio_summary(config)
+    if not vision_names and skipped:
         meta["skipped_note"] = "vision tower and projector left out (--no-vision, or the checkpoint has none)"
     with open(os.path.join(out, "gemma4_meta.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(meta, handle, indent=1)
@@ -589,6 +628,9 @@ def main():
                     help="the container directory to write (coli convert passes it as --outdir)")
     ap.add_argument("--keep-source", action="store_true", help="with --repo: keep the downloaded checkpoint")
     ap.add_argument("--no-vision", action="store_true", help="leave the vision tower out of the container")
+    ap.add_argument("--no-audio", action="store_true", help="leave the audio tower (E2B, E4B) out of the container")
+    ap.add_argument("--add-audio", action="store_true",
+                    help="add the audio tower to an existing container (--out) that was converted without it")
     ap.add_argument("--add-vision", action="store_true",
                     help="add the vision tower to an existing container (--out) that was converted without it")
     args = ap.parse_args()
@@ -605,8 +647,10 @@ def main():
                                 allow_patterns=["*.json", "*.safetensors", "*.jinja"])
     if args.add_vision:
         add_vision(src, args.out)
+    elif args.add_audio:
+        add_tower(src, args.out, "audio")
     else:
-        convert(src, args.out, with_vision=not args.no_vision)
+        convert(src, args.out, with_vision=not args.no_vision, with_audio=not args.no_audio)
     if downloaded and not args.keep_source:
         shutil.rmtree(downloaded, ignore_errors=True)
         print(f"removed {downloaded}")

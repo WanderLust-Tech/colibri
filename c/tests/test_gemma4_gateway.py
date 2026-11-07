@@ -114,13 +114,13 @@ class GatewayTest(unittest.TestCase):
         self.assertIn('<|tool_call>call:get_weather{city:<|"|>Rome<|"|>,days:3}<tool_call|>', prompt)
         self.assertTrue(prompt.endswith('<|tool_response>response:get_weather{value:<|"|>24 C<|"|>}<tool_response|>'))
 
-    def test_audio_is_a_clear_400(self):
+    def test_video_is_a_clear_400(self):
         base = self.server(["x"])
         status, error = _error_body(self, lambda: self.chat(base, messages=[{"role": "user", "content": [
-            {"type": "text", "text": "what is this"}, {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}]}]))
+            {"type": "text", "text": "what is this"}, {"type": "video", "video": {"url": "u"}}]}]))
         self.assertEqual(status, 400)
         self.assertEqual(error["code"], "unsupported_content_type")
-        self.assertIn("audio", error["message"])
+        self.assertIn("video", error["message"])
         self.assertEqual(self.engine.calls, [])
 
     def test_the_model_is_listed_under_its_family_name(self):
@@ -147,10 +147,12 @@ class PictureEngine(ScriptedEngine):
     """An engine that says it loaded a vision tower, and keeps the pictures it is handed."""
     model_dir = None
 
-    def __init__(self, *args, vision=True, tokens="280", **kw):
+    def __init__(self, *args, vision=True, tokens="280", audio=False, audio_tokens="750", **kw):
         super().__init__(*args, **kw)
         self.vision = vision
-        self.caps = {"vision": "1" if vision else "0", "img_tokens": tokens}
+        self.audio = audio
+        self.caps = {"vision": "1" if vision else "0", "img_tokens": tokens,
+                     "audio": "1" if audio else "0", "audio_tokens": audio_tokens}
         self.images = []
 
     def generate(self, *args, image=None, **kw):
@@ -272,6 +274,82 @@ class PictureTest(unittest.TestCase):
                 card = json.load(response)["data"][0]
             self.assertEqual("image" in card["input_modalities"], want, card)
 
+    def audio_part(self, seconds=1.0, **kw):
+        import base64
+        import io
+        import wave
+        import numpy as np
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(kw.get("rate", 16000))
+            n = int(seconds * kw.get("rate", 16000))
+            w.writeframes((0.3 * np.sin(np.arange(n) * 0.2) * 32767).astype("<i2").tobytes())
+        return {"type": "input_audio", "input_audio": {"data": base64.b64encode(buffer.getvalue()).decode(), "format": kw.get("format", "wav")}}
+
+    def test_a_clip_is_run_through_the_front_end_and_becomes_its_placeholders(self):
+        base = self.server(audio=True)
+        reply = self.chat(base, [{"type": "text", "text": "Transcribe."}, self.audio_part(1.0)])
+        self.assertEqual(reply["choices"][0]["message"]["content"], "It is red.")
+        prompt = self.engine.calls[0][0]
+        self.assertIn("<|turn>user\nTranscribe.<|audio>" + "<|audio|>" * 25 + "<audio|><turn|>", prompt)    # 99 mel frames -> 25 soft tokens
+        mel, frames, bins, kind = self.engine.images[0]
+        self.assertEqual((frames, bins, kind), (99, 128, "audio"))
+        self.assertEqual(len(mel), 99 * 128 * 4)
+
+    def test_pictures_and_clips_go_in_the_order_they_come(self):
+        base = self.server(audio=True)
+        self.chat(base, [{"type": "image_url", "image_url": {"url": data_uri(48, 48)}}, self.audio_part(0.5),
+                         {"type": "text", "text": "both"}])
+        pictures = self.engine.images[0]
+        self.assertEqual(len(pictures), 2)
+        self.assertEqual(len(pictures[0]), 3)                         # (patches, gh, gw)
+        self.assertEqual(pictures[1][3], "audio")
+        prompt = self.engine.calls[0][0]
+        self.assertLess(prompt.index("<|image>"), prompt.index("<|audio>"))
+
+    def test_an_engine_without_the_tower_says_so_for_audio(self):
+        base = self.server(audio=False)
+        status, error = _error_body(self, lambda: self.chat(base, [self.audio_part(0.5)]))
+        self.assertEqual(status, 400)
+        self.assertIn("no audio tower", error["message"])
+        self.assertIn("--add-audio", error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_only_wav_is_read_and_a_bad_file_is_a_400(self):
+        base = self.server(audio=True)
+        for part, what in ((self.audio_part(0.5, format="mp3"), "WAV only"),
+                           ({"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}, "not a WAV"),
+                           ({"type": "input_audio", "input_audio": {"data": "!!!", "format": "wav"}}, "base64"),
+                           ({"type": "input_audio", "input_audio": "x"}, "must be an object")):
+            with self.subTest(what=what):
+                status, error = _error_body(self, lambda: self.chat(base, [part]))
+                self.assertEqual(status, 400)
+                self.assertEqual(error["code"], "invalid_audio")
+                self.assertIn(what, error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_the_engines_limit_cuts_a_long_clip(self):
+        base = self.server(audio=True, audio_tokens="50")
+        self.chat(base, [self.audio_part(5.0)])
+        self.assertLessEqual(self.engine.images[0][1], 50 * 4 + 3)
+        prompt = self.engine.calls[0][0]
+        self.assertLessEqual(prompt.count("<|audio|>"), 50)
+
+    def test_a_clip_at_another_rate_is_resampled(self):
+        base = self.server(audio=True)
+        self.chat(base, [self.audio_part(1.0, rate=44100)])
+        self.assertAlmostEqual(self.engine.images[0][1], 99, delta=2)
+
+    def test_the_model_card_lists_audio_when_the_tower_is_loaded(self):
+        from urllib.request import Request, urlopen
+        for audio, want in ((True, True), (False, False)):
+            base = self.server(audio=audio)
+            with urlopen(Request(base + "/v1/models", headers={"Authorization": "Bearer secret"}), timeout=5) as response:
+                card = json.load(response)["data"][0]
+            self.assertEqual("audio" in card["input_modalities"], want, card)
+
     def test_the_anthropic_endpoint_takes_a_picture_too(self):
         import base64
         import io
@@ -308,6 +386,27 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(process.writes[0], b"IMAGE 1 12 2 3\n" + first + b"\n")
         self.assertEqual(process.writes[1], b"IMAGE 1 24 4 3\n" + second + b"\n")
         self.assertTrue(process.writes[2].startswith(b"SUBMIT 1 "))
+
+    def test_a_clip_goes_as_an_audio_frame(self):
+        mel = b"\x01" * 40
+
+        def respond(process, frame):
+            if frame.startswith(b"SUBMIT"):
+                process.stdout.feed(b"ACCEPT 1 5\nDATA 1 2\nok\n" b"DONE 1 STAT 1 1.0 50.0 1.25 5 0\n")
+
+        process = FakeProcess(respond)
+        with patch("openai_server.ARCH", "gemma4"), patch("openai_server.subprocess.Popen", return_value=process):
+            engine = Engine("gemma4", "model")
+            engine.generate("<bos>x", 4, 0.0, 1.0, lambda text: None, image=[(b"\x02" * 12, 2, 3), (mel, 5, 2, "audio")])
+        engine.close()
+        self.assertEqual(process.writes[0], b"IMAGE 1 12 2 3\n" + b"\x02" * 12 + b"\n")
+        self.assertEqual(process.writes[1], b"AUDIO 1 40 5 2\n" + mel + b"\n")
+        self.assertTrue(process.writes[2].startswith(b"SUBMIT 1 "))
+
+    def test_the_engines_refusal_of_a_clip_is_a_400_too(self):
+        error = openai_server._engine_error(["BAD_AUDIO", "5", "mel", "bins"], "ERROR 1 BAD_AUDIO 5 mel bins")
+        self.assertEqual((error.status, error.code), (400, "invalid_audio"))
+        self.assertIn("5 mel bins", error.message)
 
     def test_the_engines_refusal_of_a_picture_is_a_400(self):
         error = openai_server._engine_error(["BAD_IMAGE", "bytes=3", "expected=12"], "ERROR 1 BAD_IMAGE bytes=3 expected=12")

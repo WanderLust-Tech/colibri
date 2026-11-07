@@ -75,9 +75,10 @@ def snap_is_moe():
         return bool(json.load(handle)["text_config"].get("enable_moe_block"))
 
 
-def offline(ids, greedy=0, extra=None, images=None):
+def offline(ids, greedy=0, extra=None, images=None, audios=None):
     """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids. images: (patch bytes,
-    grid height, grid width) for each run of picture placeholders in the prompt."""
+    grid height, grid width) for each run of picture placeholders in the prompt; audios: (float32 mel bytes, frames, bins)
+    for each run of audio placeholders."""
     import tempfile
     env = dict(os.environ, SNAP=snap_dir(), G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
                OMP_NUM_THREADS="2", G4_SLACK="0",          # no slack: the ring is window + chunk, so it wraps
@@ -93,6 +94,14 @@ def offline(ids, greedy=0, extra=None, images=None):
             specs.append(f"{path}|{gh}|{gw}")
         if specs:
             env["G4_IMAGES"] = ";".join(specs)
+        specs = []
+        for i, (mel, frames, bins) in enumerate(audios or ()):
+            path = os.path.join(tmp, f"clip{i}.bin")
+            with open(path, "wb") as handle:
+                handle.write(mel)
+            specs.append(f"{path}|{frames}|{bins}")
+        if specs:
+            env["G4_AUDIOS"] = ";".join(specs)
         done = subprocess.run([EXE, cap], env=env, capture_output=True, text=True, timeout=120)
     if done.returncode:
         raise AssertionError(done.stdout[-400:] + done.stderr[-1500:])
@@ -304,7 +313,13 @@ class ContainerTest(unittest.TestCase):
         self.assertEqual(cv.classify("model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight"), "vmatrix")
         self.assertEqual(cv.classify("model.vision_tower.patch_embedder.position_embedding_table"), "vexact")
         self.assertEqual(cv.classify("model.embed_vision.embedding_projection.weight"), "vmatrix")
-        self.assertEqual(cv.classify("model.audio_tower.layers.0.self_attn.q_proj.weight"), "skip")
+        self.assertEqual(cv.classify("model.audio_tower.layers.0.self_attn.q_proj.linear.weight"), "amatrix")
+        self.assertEqual(cv.classify("model.audio_tower.layers.3.feed_forward2.ffw_layer_1.input_min"), "aexact")
+        self.assertEqual(cv.classify("model.audio_tower.layers.0.lconv1d.depthwise_conv1d.weight"), "aexact")
+        self.assertEqual(cv.classify("model.audio_tower.output_proj.bias"), "aexact")
+        self.assertEqual(cv.classify("model.embed_audio.embedding_projection.weight"), "amatrix")
+        self.assertIsNone(cv.classify("model.audio_tower.layers.0.self_attn.q_proj.weight"))      # no such tensor: stop, do not guess
+        self.assertIsNone(cv.classify("model.audio_tower.layers.0.mystery.weight"))
         self.assertIsNone(cv.classify("model.vision_tower.encoder.layers.0.mystery.weight"))
         self.assertIsNone(cv.classify("model.language_model.layers.3.self_attn.mystery.weight"))
 
@@ -354,6 +369,46 @@ class ContainerTest(unittest.TestCase):
                     self.assertIn(lang + "layers.3.self_attn.k_proj.weight", names)
                     self.assertIn("model.vision_tower.encoder.layers.1.self_attn.v_proj.input_max", names)   # the clip limits
                     self.assertNotIn("model.vision_tower.std_bias", names)
+
+    def test_the_audio_tower_is_carried_and_can_be_added_later(self):
+        import shutil
+        import tempfile
+        import numpy as np
+        import convert_gemma4 as cv
+        import make_gemma4_tiny as tiny
+        var = tiny.VARIANTS["ple"]
+        state = tiny.random_weights(var["text"], var["seed"])
+        state.update(tiny.random_vision_weights(var["seed"] + 100, var["vision"], var["text"]["hidden_size"]))
+        state.update(tiny.random_audio_weights(var["seed"] + 200, var["audio"], var["text"]["hidden_size"]))
+        audio = [n for n in state if n.startswith(("model.audio_tower.", "model.embed_audio."))]
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as full, tempfile.TemporaryDirectory() as late:
+            tiny.write_committed_files(src, "ple")
+            shutil.copyfile(os.path.join(TINY, "tokenizer.json"), os.path.join(src, "tokenizer.json"))
+            tiny.save_f32_safetensors(os.path.join(src, "model.safetensors"), state)
+            meta = cv.convert(src, full, log=lambda *_: None)
+            self.assertEqual((meta["audio"]["hidden"], meta["audio"]["layers"], meta["audio"]["channels"]), (32, 2, [16, 8]))
+            names = self.names(full)
+            self.assertEqual(sum(n in names for n in audio), len(audio))
+            for n in audio:
+                self.assertEqual(n + ".scale" in names, cv.classify(n) == "amatrix", n)
+            self.assertIn("model.audio_tower.layers.1.lconv1d.linear_start.input_max", names)        # a clip limit, exact
+            self.assertNotIn("model.audio_tower.layers.1.lconv1d.depthwise_conv1d.weight.scale", names)
+            ck = cv.Checkpoint(full)
+            try:
+                name = "model.audio_tower.layers.0.self_attn.per_dim_scale"
+                self.assertTrue((ck.array(name) == state[name]).all())
+                name = "model.audio_tower.subsample_conv_projection.layer1.conv.weight"
+                self.assertEqual(ck.file_of(name).shape(name), (8, 16, 3, 3))
+                self.assertTrue((ck.array(name) == state[name]).all())
+            finally:
+                ck.close()
+            meta = cv.convert(src, late, log=lambda *_: None, with_audio=False)
+            self.assertNotIn("audio", meta)
+            self.assertFalse([n for n in self.names(late) if n in audio])
+            cv.add_tower(src, late, "audio", log=lambda *_: None)
+            self.assertEqual(sorted(self.names(late)), sorted(names))
+            with self.assertRaises(SystemExit):
+                cv.add_tower(src, late, "audio", log=lambda *_: None)
 
     def test_a_table_is_quantized_a_block_of_rows_at_a_time_with_the_same_result(self):
         import tempfile
@@ -489,14 +544,17 @@ class Engine:
     def get(self, timeout=60):
         return self.frames.get(timeout=timeout)
 
-    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None, images=None):
-        """images: (patch bytes, grid height, grid width) for each picture, sent as IMAGE frames just before the SUBMIT."""
+    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None, images=None, audios=None):
+        """images: (patch bytes, grid height, grid width) for each picture, sent as IMAGE frames just before the SUBMIT;
+        audios: (float32 mel bytes, frames, bins) for each clip, sent as AUDIO frames."""
         rid = rid or str(self.next_id)
         self.next_id += 1
         payload = text.encode("utf-8")
         frames = b""
         for patches, gh, gw in images or ():
             frames += f"IMAGE {rid} {len(patches)} {gh} {gw}\n".encode() + patches + b"\n"
+        for mel, count, bins in audios or ():
+            frames += f"AUDIO {rid} {len(mel)} {count} {bins}\n".encode() + mel + b"\n"
         self.proc.stdin.write(frames + f"SUBMIT {rid} {slot} {len(payload)} {max_tokens} {temperature} {top_p}\n".encode() + payload + b"\n")
         self.proc.stdin.flush()
         return rid
@@ -562,9 +620,11 @@ class ServeTest(unittest.TestCase):
         e = self.engine()
         kinds = [line[0] for line in e.startup]
         self.assertEqual(kinds[0], "READY")
-        self.assertIn(("CAPS", ["vision=1", "img_tokens=1"]), [(k, a) for k, a, _ in e.startup])
+        caps = dict(f.split("=") for k, a, _ in e.startup if k == "CAPS" for f in a)
+        self.assertEqual((caps["vision"], caps["img_tokens"]), ("1", "1"))
         text_only = self.engine(extra={"G4_VISION": "0"})
-        self.assertIn(("CAPS", ["vision=0", "img_tokens=0"]), [(k, a) for k, a, _ in text_only.startup])
+        caps = dict(f.split("=") for k, a, _ in text_only.startup if k == "CAPS" for f in a)
+        self.assertEqual((caps["vision"], caps["img_tokens"]), ("0", "0"))
         for kind in ("STAT", "HWINFO") + (("TIERS", "EMAP") if snap_is_moe() else ()):
             self.assertIn(kind, kinds)
 
@@ -917,6 +977,224 @@ class ServeVisionTest(unittest.TestCase):
         out = e.collect(rid)
         self.assertIsNotNone(out["done"])
         self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+
+def clip(ref, index):
+    """(float32 mel bytes, frames, bins) of clip `index` of the reference's audio cases."""
+    c = ref["audio"]["clips"][index]
+    return bytes.fromhex(c["hex"]), c["frames"], c["bins"]
+
+
+@unittest.skipUnless(HAVE_VARIANTS, "needs the dense and ple fixtures")
+class AudioTest(unittest.TestCase):
+    """The audio tower and clips inside a prompt, against transformers' Gemma4ForConditionalGeneration on the tiny E2B-like
+    fixture: the soft tokens the conformer makes, and the logits of whole prompts with clips (and, in one, a picture too).
+    The reference pads the clips to the longest and masks the padding; the engine pads nothing. The attention of the tower is
+    local (a row sees itself and three before it) and chunked, and the clips are long enough to cross several chunks."""
+    SNAP = VARIANT_DIRS["ple"]
+    EXTRA = {"G4_IMG_TOKENS": "12"}
+
+    @classmethod
+    def setUpClass(cls):
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
+        cls.cases = cls.ref["audio"]["cases"]
+
+    def run_case(self, case, **extra):
+        pictures = [picture(self.ref, i) for i in case["images"]]
+        return offline(case["ids"], len(case["greedy"]), dict(self.EXTRA, **extra), pictures, [clip(self.ref, i) for i in case["clips"]])
+
+    def check(self, features=True, **extra):
+        for case in self.cases:
+            out = self.run_case(case, **extra)
+            if features:
+                got = [v for f in out["features"] for v in f][-len(case["features"]):]        # the clips' tokens come after a picture's
+                worst = max(abs(a - b) for a, b in zip(got, case["features"]))
+                self.assertLess(worst, 1e-3, f"soft tokens differ by {worst}")
+            worst = max(abs(a - b) for a, b in zip(out["last"], case["last_logits"]))
+            self.assertLess(worst, 2e-3, f"last-row logits differ by {worst} ({case['clips']}, {extra})")
+            rows = max(abs(a - b) for ra, rb in zip(out["rows"], case["logit_sample"]) for a, b in zip(ra, rb))
+            self.assertLess(rows, 2e-3, f"row logits differ by {rows} ({extra})")
+            self.assertEqual(out["top"], case["all_top"], extra)
+            self.assertEqual(out["greedy"], case["greedy"], extra)
+
+    def test_whole_prompt_at_once(self):
+        self.check()
+
+    def test_a_clip_may_be_split_between_chunks(self):
+        self.check(features=False, G4_CHUNK="3")         # unlike a picture, a clip's rows are plain causal rows
+
+    def test_a_row_at_a_time(self):
+        self.check(features=False, G4_CHUNK="1")
+
+    def test_the_clip_changes_the_answer(self):
+        case = self.cases[0]
+        mel, frames, bins = clip(self.ref, 0)
+        import struct
+        values = struct.unpack(f"<{frames * bins}f", mel)
+        other = struct.pack(f"<{frames * bins}f", *(-v for v in values))
+        a = offline(case["ids"], 0, self.EXTRA, None, [(mel, frames, bins)])
+        b = offline(case["ids"], 0, self.EXTRA, None, [(other, frames, bins)])
+        self.assertGreater(max(abs(x - y) for x, y in zip(a["last"], b["last"])), 0.05)
+
+    def test_a_prompt_with_audio_needs_a_clip_and_a_tower(self):
+        case = self.cases[0]
+        with self.assertRaises(AssertionError) as caught:
+            offline(case["ids"], 0, self.EXTRA, None, None)
+        self.assertIn("G4_AUDIOS", str(caught.exception))
+        with self.assertRaises(AssertionError) as caught:
+            offline(case["ids"], 0, dict(self.EXTRA, G4_AUDIO="0"), None, [clip(self.ref, 0)])
+        self.assertIn("no audio tower", str(caught.exception))
+
+    def test_the_wrong_number_of_frames_for_the_placeholders_is_refused(self):
+        case = self.cases[0]
+        mel, frames, bins = clip(self.ref, 0)
+        with self.assertRaises(AssertionError) as caught:
+            offline(case["ids"], 0, self.EXTRA, None, [(mel[:bins * 4 * 4], frames - 14, bins)])
+        self.assertIn("soft tokens", str(caught.exception))
+
+
+@unittest.skipUnless(HAVE_VARIANTS, "needs the dense and ple fixtures")
+class ServeAudioTest(unittest.TestCase):
+    """Clips over the serve protocol: AUDIO frames before the SUBMIT, soft tokens computed when the prompt reaches them, a
+    cache that remembers which clip it was built on."""
+    SNAP = VARIANT_DIRS["ple"]
+    EXTRA = {"G4_IMG_TOKENS": "12"}
+
+    @classmethod
+    def setUpClass(cls):
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
+        cls.ids = {e["text"]: e["ids"] for e in cls.ref["encodings"]}
+
+    def engine(self, **kw):
+        set_snap(self.SNAP)
+        kw["extra"] = dict(self.EXTRA, **kw.get("extra", {}))
+        e = Engine(**kw)
+        self.addCleanup(e.close)
+        return e
+
+    def tokens(self, index):
+        frames = self.ref["audio"]["clips"][index]["frames"]
+        return ((frames - 1) // 2 + 1 - 1) // 2 + 1
+
+    def prompt(self, *clips, before="hello there", after="the quick brown fox"):
+        text, ids = before, list(self.ids[before])
+        for index in clips:
+            text += "<|audio>" + "<|audio|>" * self.tokens(index) + "<audio|>"
+            ids += [504] + [503] * self.tokens(index) + [505]
+        return text + after, ids + self.ids[after]
+
+    def clips(self, *indexes):
+        return [clip(self.ref, i) for i in indexes]
+
+    def pictures_made(self, e):
+        return sum("audio:" in line for line in e.log)
+
+    def test_the_handshake_says_the_engine_has_an_audio_tower(self):
+        e = self.engine()
+        caps = dict(f.split("=") for k, a, _ in e.startup if k == "CAPS" for f in a)
+        self.assertEqual((caps["audio"], caps["audio_tokens"]), ("1", "750"))
+        off = self.engine(extra={"G4_AUDIO": "0"})
+        caps = dict(f.split("=") for k, a, _ in off.startup if k == "CAPS" for f in a)
+        self.assertEqual((caps["audio"], caps["audio_tokens"]), ("0", "0"))
+
+    def test_the_reply_is_the_offline_greedy_continuation(self):
+        text, ids = self.prompt(0)
+        want = offline(ids, 6, self.EXTRA, None, self.clips(0))
+        stops = {1, 106, 50}
+        k = next((i for i, t in enumerate(want["greedy"]) if t in stops), 6)
+        if k < 6:
+            want = offline(ids, k, self.EXTRA, None, self.clips(0))
+        e = self.engine()
+        out = e.ask(text, max_tokens=6, audios=self.clips(0))
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["accept"], len(ids))
+        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]) if k else b"")
+
+    def test_two_clips_and_small_chunks(self):
+        text, ids = self.prompt(1, 2)
+        want = offline(ids, 4, self.EXTRA, None, self.clips(1, 2))
+        stops = {1, 106, 50}
+        k = next((i for i, t in enumerate(want["greedy"]) if t in stops), 4)
+        if k < 4:
+            want = offline(ids, k, self.EXTRA, None, self.clips(1, 2))
+        e = self.engine(extra={"G4_CHUNK": "3"})
+        out = e.ask(text, max_tokens=4, audios=self.clips(1, 2))
+        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]) if k else b"")
+        self.assertEqual(self.pictures_made(e), 2)
+
+    def test_a_turn_that_extends_a_clip_conversation_reads_the_clip_once(self):
+        first, _ = self.prompt(0)
+        second = first + "<turn|>\n<|turn>user\nhello there"
+        e = self.engine()
+        e.ask(first, max_tokens=2, audios=self.clips(0))
+        got = e.ask(second, max_tokens=5, audios=self.clips(0))
+        self.assertIn("reusing", [l for l in e.log if l.startswith("[PREFIX]")][-1])
+        self.assertEqual(self.pictures_made(e), 1)
+        plain = self.engine(extra={"COLI_KV_PREFIX": "0"})
+        plain.ask(first, max_tokens=2, audios=self.clips(0))
+        self.assertEqual(got["data"], plain.ask(second, max_tokens=5, audios=self.clips(0))["data"])
+
+    def test_another_clip_is_not_served_from_the_cache_of_this_one(self):
+        """The same ids, a different clip: the placeholders match and the sound does not."""
+        import struct
+        text, _ = self.prompt(0)
+        mel, frames, bins = clip(self.ref, 0)
+        other = struct.pack(f"<{frames * bins}f", *(-v for v in struct.unpack(f"<{frames * bins}f", mel)))
+        e = self.engine()
+        first = e.ask(text, max_tokens=4, audios=[(mel, frames, bins)])
+        second = e.ask(text, max_tokens=4, audios=[(other, frames, bins)])
+        line = [l for l in e.log if l.startswith("[PREFIX]")][-1]
+        self.assertIn(f"reusing {len(self.ids['hello there']) + 1} of", line)        # up to the clip, not into it
+        self.assertEqual(self.pictures_made(e), 2)
+        self.assertEqual(second["data"], self.engine().ask(text, max_tokens=4, audios=[(other, frames, bins)])["data"])
+        self.assertNotEqual(first["data"], second["data"])
+
+    def test_the_clip_count_must_match_the_placeholders(self):
+        text, _ = self.prompt(0)
+        e = self.engine()
+        out = e.ask(text, max_tokens=2)
+        self.assertTrue((out["error"] or "").startswith("BAD_AUDIO"), out)
+        out = e.ask("hello there", max_tokens=2, audios=self.clips(0))
+        self.assertTrue((out["error"] or "").startswith("BAD_AUDIO"), out)
+        out = e.ask(self.prompt(1)[0], max_tokens=2, audios=self.clips(0))              # the wrong length
+        self.assertIn("soft tokens", out["error"] or "")
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+    def test_a_malformed_clip_is_refused_by_id_and_its_submit_is_silent(self):
+        text, _ = self.prompt(0)
+        mel, frames, bins = clip(self.ref, 0)
+        e = self.engine()
+        for bad in ((mel[:-4], frames, bins), (mel, frames, bins + 1), (mel[:bins * 4 * 2], 2, bins)):
+            out = e.ask(text, max_tokens=2, audios=[bad])
+            self.assertTrue((out["error"] or "").startswith("BAD_AUDIO"), out)
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+    def test_a_clip_beyond_what_the_engine_takes_is_refused(self):
+        text, _ = self.prompt(2)
+        e = self.engine(extra={"G4_AUDIO_TOKENS": "5"})
+        out = e.ask(text, max_tokens=2, audios=self.clips(2))
+        self.assertIn("G4_AUDIO_TOKENS", out["error"] or "")
+
+    def test_an_engine_without_the_tower_refuses_audio(self):
+        text, _ = self.prompt(0)
+        e = self.engine(extra={"G4_AUDIO": "0"})
+        out = e.ask(text, max_tokens=2, audios=self.clips(0))
+        self.assertIn("no audio tower", out["error"] or "")
+        self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+    def test_a_clip_and_a_picture_in_one_prompt(self):
+        text = "the quick<|image><|image|><image|>hello there<|audio>" + "<|audio|>" * self.tokens(0) + "<audio|>the fox"
+        e = self.engine()
+        out = e.ask(text, max_tokens=3, images=[picture(self.ref, 1)], audios=self.clips(0))
+        self.assertIsNone(out["error"])
+        self.assertEqual(self.pictures_made(e), 1)                           # the clip's soft tokens were made...
+        self.assertEqual(sum("picture:" in line for line in e.log), 1)       # ...and the picture's
+        self.assertGreater(out["accept"], self.tokens(0) + 3)
+        again = e.ask(text, max_tokens=3, images=[picture(self.ref, 1)], audios=self.clips(0))
+        self.assertEqual(again["data"], out["data"])
+        self.assertEqual(self.pictures_made(e), 1)                           # a second ask reads neither again: both are cached
 
 
 def _make_variant_classes():

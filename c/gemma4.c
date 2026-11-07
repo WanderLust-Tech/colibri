@@ -93,6 +93,8 @@ typedef struct {
     int ple_dim, ple_vocab;             /* hidden_size_per_layer_input (0: none) and the vocabulary of that table */
     int kv_shared, double_wide, pad_token;   /* layers at the end that read an earlier layer's keys and values; their MLP is twice as wide (E2B) */
     int image_token;                    /* the placeholder id of one soft token (-1: the config names none) */
+    int audio_token;                    /* the same for one audio soft token */
+    struct { int present, hidden, layers, heads, hd, chunk, left, right, kconv, out_dims, ch0, ch1; float eps, cap, res_w, clip; } ac;
     struct { int present, hidden, layers, heads, hd, inter, patch, pool, npos, standardize; float eps, theta; } vc;
 } Cfg;
 
@@ -152,6 +154,30 @@ static void load_cfg(Cfg *c, const char *snap) {
     if (c->ple_dim < 0 || (c->ple_dim && c->ple_vocab < 1)) die("config: implausible per-layer embeddings");
     if (c->hd_s % 2 || c->hd_g % 2) die("head sizes must be even");
     c->image_token = (int)jnum(root, "image_token_id", -1);
+    c->audio_token = (int)jnum(root, "audio_token_id", -1);
+    jval *acfg = json_get(root, "audio_config");
+    if (acfg && acfg->t == J_OBJ) {
+        c->ac.present = 1;
+        c->ac.hidden = (int)jnum(acfg, "hidden_size", 0); c->ac.layers = (int)jnum(acfg, "num_hidden_layers", 0);
+        c->ac.heads = (int)jnum(acfg, "num_attention_heads", 0);
+        c->ac.hd = c->ac.heads ? c->ac.hidden / c->ac.heads : 0;
+        c->ac.chunk = (int)jnum(acfg, "attention_chunk_size", 12); c->ac.left = (int)jnum(acfg, "attention_context_left", 13);
+        c->ac.right = (int)jnum(acfg, "attention_context_right", 0); c->ac.kconv = (int)jnum(acfg, "conv_kernel_size", 5);
+        c->ac.out_dims = (int)jnum(acfg, "output_proj_dims", c->ac.hidden);
+        c->ac.eps = (float)jnum(acfg, "rms_norm_eps", 1e-6); c->ac.cap = (float)jnum(acfg, "attention_logit_cap", 50.0);
+        c->ac.res_w = (float)jnum(acfg, "residual_weight", 0.5); c->ac.clip = (float)jnum(acfg, "gradient_clipping", 1e10);
+        jval *ch = json_get(acfg, "subsampling_conv_channels");
+        c->ac.ch0 = ch && ch->t == J_ARR && ch->len == 2 ? (int)ch->kids[0]->num : 128;
+        c->ac.ch1 = ch && ch->t == J_ARR && ch->len == 2 ? (int)ch->kids[1]->num : 32;
+        jval *act = json_get(acfg, "hidden_act");
+        if (act && act->str && strcmp(act->str, "silu")) die("an audio tower with the activation '%s' is not supported (silu is)", act->str);
+        if (c->ac.hidden < 1 || c->ac.layers < 1 || c->ac.heads < 1 || c->ac.hidden % c->ac.heads || c->ac.kconv < 1 ||
+            c->ac.ch0 < 4 || c->ac.ch0 % 4 || c->ac.ch1 < 1 || c->ac.out_dims < 1 || c->ac.chunk < 1)
+            die("config: implausible audio_config");
+        /* the relative-position bias of the chunked attention is laid out for a past as long as a chunk and no future */
+        if (c->ac.left - 1 != c->ac.chunk || c->ac.right != 0)
+            die("an audio tower whose attention context is not (chunk %d, past %d, future 0) is not supported", c->ac.chunk, c->ac.left - 1);
+    }
     jval *vcfg = json_get(root, "vision_config");
     if (vcfg && vcfg->t == J_OBJ) {
         c->vc.present = 1;
@@ -224,17 +250,34 @@ typedef struct {                                      /* the vision tower and th
     VLayer *L;
 } Vision;
 
-/* One picture inside a prompt: its soft tokens occupy positions [start, start + ntok), which a prompt's rows
+typedef struct {                                      /* one conformer layer of the audio tower */
+    QMat ff_l1[2], ff_l2[2]; float *ff_pre[2], *ff_post[2];      /* the two feed-forwards, before and after the attention */
+    float *norm_pre_attn, *norm_post_attn, *norm_out;
+    QMat q, k, v, post, rel; float *per_dim;                     /* attention: rel is the relative-position projection (not clipped) */
+    QMat lc_start, lc_end; float *lc_pre, *lc_norm, *lc_dw;      /* the light convolution; lc_dw is the depthwise kernel [hidden][kconv] */
+    float *relk;                                                 /* rel applied to the positions 0..past: [past + 1][heads * hd] */
+} ALayer;
+
+typedef struct {                                      /* the audio tower and the projector into the text model's space */
+    int loaded;
+    float *conv0, *ln0, *conv1, *ln1;                 /* conv0 [ch0][9], conv1 [ch1][9][ch0] (taps, then input channels), and their layer norms */
+    QMat in_proj, out_proj, proj; float *out_bias;
+    ALayer *L;
+} Audio;
+
+/* One picture or one clip of audio inside a prompt: its soft tokens occupy positions [start, start + ntok), which a prompt's rows
  * read from `feat` instead of the embedding table, and which the sliding layers attend to in both directions. */
 typedef struct {
-    int start, ntok, gh, gw;
-    unsigned char *pix;                               /* gh*gw patches of patch*patch*3 bytes, as the gateway sent them */
+    int kind;                                         /* 0 a picture (its rows see each other on the sliding layers), 1 audio (plain causal rows) */
+    int start, ntok, gh, gw;                          /* a clip: gh frames of gw mel bins */
+    unsigned char *pix;                               /* gh*gw patches of patch*patch*3 bytes, as the gateway sent them; a clip's float32 mel frames */
     float *feat;                                      /* ntok x hidden, computed when the prompt reaches the picture */
     uint64_t key;                                     /* identifies the picture: a cache is reused only for the same one */
 } ImgSpan;
 
 typedef struct {
     Cfg c; shards S;
+    Audio aud; int aud_tokens;                        /* aud_tokens: the soft tokens of the longest clip accepted (0: no audio) */
     Vision vis; int rows, img_tokens;                 /* rows: the most one forward_chunk takes (a prompt chunk, or a whole picture);
                                                        * img_tokens: the soft tokens of the biggest picture accepted (0: no vision) */
     QMat embed; float *final_norm;
@@ -333,6 +376,56 @@ static void load_vision(Model *m) {
     v->loaded = 1;
 }
 
+/* The audio tower, when the config describes one and the container carries it. */
+static void load_audio(Model *m) {
+    Cfg *c = &m->c; Audio *a = &m->aud;
+    if (getenv("G4_AUDIO") && getenv("G4_AUDIO")[0] == '0') return;          /* no audio, as asked: the tower is not read */
+    if (!c->ac.present || !st_find(&m->S, "model.audio_tower.output_proj.weight")) return;
+    int D = c->ac.hidden, K = c->ac.kconv, C0 = c->ac.ch0, C1 = c->ac.ch1, hd = c->ac.hd;
+    char nm[300];
+    const char *T = "model.audio_tower.";
+    snprintf(nm, sizeof nm, "%ssubsample_conv_projection.layer0.conv.weight", T); load_f32(m, nm, &a->conv0, (int64_t)C0 * 9);
+    snprintf(nm, sizeof nm, "%ssubsample_conv_projection.layer0.norm.weight", T); load_f32(m, nm, &a->ln0, C0);
+    float *raw;
+    snprintf(nm, sizeof nm, "%ssubsample_conv_projection.layer1.conv.weight", T); load_f32(m, nm, &raw, (int64_t)C1 * C0 * 9);
+    a->conv1 = xmalloc((size_t)C1 * 9 * C0 * sizeof(float));                  /* [oc][ic][3][3] -> [oc][tap][ic]: the input channels contiguous */
+    for (int oc = 0; oc < C1; oc++) for (int ic = 0; ic < C0; ic++) for (int t = 0; t < 9; t++)
+        a->conv1[((size_t)oc * 9 + t) * C0 + ic] = raw[((size_t)oc * C0 + ic) * 9 + t];
+    free(raw);
+    snprintf(nm, sizeof nm, "%ssubsample_conv_projection.layer1.norm.weight", T); load_f32(m, nm, &a->ln1, C1);
+    snprintf(nm, sizeof nm, "%ssubsample_conv_projection.input_proj_linear.weight", T); load_q(m, nm, &a->in_proj, D, (C0 / 4) * C1);
+    a->L = calloc((size_t)c->ac.layers, sizeof(ALayer));
+    for (int l = 0; l < c->ac.layers; l++) {
+        ALayer *y = &a->L[l];
+#define ANAME(...) (snprintf(nm, sizeof nm, "%slayers.%d.", T, l), snprintf(nm + strlen(nm), sizeof nm - strlen(nm), __VA_ARGS__), nm)
+        for (int i = 0; i < 2; i++) {
+            load_q(m, ANAME("feed_forward%d.ffw_layer_1.linear.weight", i + 1), &y->ff_l1[i], 4 * D, D);
+            load_q(m, ANAME("feed_forward%d.ffw_layer_2.linear.weight", i + 1), &y->ff_l2[i], D, 4 * D);
+            load_f32(m, ANAME("feed_forward%d.pre_layer_norm.weight", i + 1), &y->ff_pre[i], D);
+            load_f32(m, ANAME("feed_forward%d.post_layer_norm.weight", i + 1), &y->ff_post[i], D);
+        }
+        load_f32(m, ANAME("norm_pre_attn.weight"), &y->norm_pre_attn, D);
+        load_f32(m, ANAME("norm_post_attn.weight"), &y->norm_post_attn, D);
+        load_f32(m, ANAME("norm_out.weight"), &y->norm_out, D);
+        load_q(m, ANAME("self_attn.q_proj.linear.weight"), &y->q, D, D);
+        load_q(m, ANAME("self_attn.k_proj.linear.weight"), &y->k, D, D);
+        load_q(m, ANAME("self_attn.v_proj.linear.weight"), &y->v, D, D);
+        load_q(m, ANAME("self_attn.post.linear.weight"), &y->post, D, D);
+        load_q(m, ANAME("self_attn.relative_k_proj.weight"), &y->rel, D, D);
+        load_f32(m, ANAME("self_attn.per_dim_scale"), &y->per_dim, hd);
+        load_q(m, ANAME("lconv1d.linear_start.linear.weight"), &y->lc_start, 2 * D, D);
+        load_q(m, ANAME("lconv1d.linear_end.linear.weight"), &y->lc_end, D, D);
+        load_f32(m, ANAME("lconv1d.depthwise_conv1d.weight"), &y->lc_dw, (int64_t)D * K);
+        load_f32(m, ANAME("lconv1d.pre_layer_norm.weight"), &y->lc_pre, D);
+        load_f32(m, ANAME("lconv1d.conv_norm.weight"), &y->lc_norm, D);
+#undef ANAME
+    }
+    snprintf(nm, sizeof nm, "%soutput_proj.weight", T); load_q(m, nm, &a->out_proj, c->ac.out_dims, D);
+    snprintf(nm, sizeof nm, "%soutput_proj.bias", T); load_f32(m, nm, &a->out_bias, c->ac.out_dims);
+    load_q(m, "model.embed_audio.embedding_projection.weight", &a->proj, c->hidden, c->ac.out_dims);
+    a->loaded = 1;
+}
+
 static void model_init(Model *m, const char *snap, int cap, int max_t) {
     memset(m, 0, sizeof *m);
     load_cfg(&m->c, snap);
@@ -400,6 +493,11 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
 #undef NAME
     }
     load_vision(m);
+    load_audio(m);
+    if (m->aud.loaded) {
+        int n = getenv("G4_AUDIO_TOKENS") ? atoi(getenv("G4_AUDIO_TOKENS")) : 750;     /* 750: 30 seconds, the model's own limit */
+        m->aud_tokens = n < 1 ? 1 : n > 4096 ? 4096 : n;
+    }
     m->rows = CHUNK;                                         /* a picture's soft tokens go through one forward_chunk together */
     if (m->vis.loaded) {
         int img = getenv("G4_IMG_TOKENS") ? atoi(getenv("G4_IMG_TOKENS")) : 280;
@@ -859,6 +957,192 @@ static float *vision_encode(Model *m, const unsigned char *pix, int gh, int gw) 
     return feat;
 }
 
+/* ------------------------------------------------------------------------------ audio */
+
+static void trace(Model *m, const char *what, int l, const float *x, int n);
+static inline float silu_f(float x) { return x / (1.f + expf(-x)); }
+
+static void clamp_rows(float *x, size_t n, float limit) {            /* the tower's gradient clipping: a no-op at the checkpoint's 1e10 */
+    if (limit >= 1e30f) return;
+    for (size_t i = 0; i < n; i++) x[i] = fminf(fmaxf(x[i], -limit), limit);
+}
+
+/* layer norm (mean removed, weight, no bias) over n channels, then relu */
+static void layernorm_relu(float *x, int n, const float *w, float eps) {
+    float mean = 0.f, var = 0.f;
+    for (int i = 0; i < n; i++) mean += x[i];
+    mean /= (float)n;
+    for (int i = 0; i < n; i++) { float d = x[i] - mean; var += d * d; }
+    float r = 1.f / sqrtf(var / (float)n + eps);
+    for (int i = 0; i < n; i++) { float v = (x[i] - mean) * r * w[i]; x[i] = v > 0.f ? v : 0.f; }
+}
+
+/* A feed-forward block of the conformer: clamp, norm, up, silu, down, clamp, norm, scaled, added to its input. */
+static void audio_ffn(Model *m, ALayer *y, int i, float *x, int T, float *tmp, float *big) {
+    Cfg *c = &m->c; int D = c->ac.hidden; float eps = c->ac.eps, lim = c->ac.clip;
+    memcpy(tmp, x, (size_t)T * D * sizeof(float));
+    clamp_rows(tmp, (size_t)T * D, lim);
+    for (int t = 0; t < T; t++) rms_w(tmp + (size_t)t * D, tmp + (size_t)t * D, y->ff_pre[i], D, eps);
+    vmm(big, tmp, T, &y->ff_l1[i]);
+    for (size_t j = 0; j < (size_t)T * 4 * D; j++) big[j] = silu_f(big[j]);
+    vmm(tmp, big, T, &y->ff_l2[i]);
+    clamp_rows(tmp, (size_t)T * D, lim);
+    for (int t = 0; t < T; t++) {
+        rms_w(tmp + (size_t)t * D, tmp + (size_t)t * D, y->ff_post[i], D, eps);
+        for (int d = 0; d < D; d++) x[(size_t)t * D + d] += tmp[(size_t)t * D + d] * c->ac.res_w;
+    }
+}
+
+/* The soft tokens of one clip of audio: mel holds M frames of ch0 log-mel bins (the model needs as many bins as its first
+ * convolution has channels: 128 in the E2B and E4B). Returns (ntok, hidden) floats, malloc'd, ntok = ceil(ceil(M/2)/2).
+ * transformers' Gemma4AudioModel and Gemma4MultimodalEmbedder are the specification; the clip is not padded here, which the
+ * model's masking makes equivalent (everything after the first two convolutions looks left only). */
+static float *audio_encode(Model *m, const float *mel, int M, int *ntok_out) {
+    Cfg *c = &m->c; Audio *a = &m->aud;
+    int D = c->ac.hidden, nh = c->ac.heads, hd = c->ac.hd, K = c->ac.kconv, C0 = c->ac.ch0, C1 = c->ac.ch1, bins = C0, H = c->hidden;
+    int past = c->ac.left - 1, P = past + 1; float eps = c->ac.eps, lim = c->ac.clip;
+    double t0 = now_s();
+    int T0 = (M - 1) / 2 + 1, F0 = (bins - 1) / 2 + 1, T1 = (T0 - 1) / 2 + 1, F1 = (F0 - 1) / 2 + 1;
+    float *o0 = xmalloc((size_t)T0 * F0 * C0 * sizeof(float));
+#pragma omp parallel for schedule(static)
+    for (int tf = 0; tf < T0 * F0; tf++) {                                  /* conv 3x3 stride 2 pad 1 over (time, mel), one channel in */
+        int t = tf / F0, f = tf % F0; float *out = o0 + (size_t)tf * C0;
+        for (int oc = 0; oc < C0; oc++) {
+            float acc = 0.f;
+            for (int kh = 0; kh < 3; kh++) {
+                int ti = 2 * t + kh - 1; if (ti < 0 || ti >= M) continue;
+                for (int kw = 0; kw < 3; kw++) {
+                    int fi = 2 * f + kw - 1; if (fi < 0 || fi >= bins) continue;
+                    acc += a->conv0[oc * 9 + kh * 3 + kw] * mel[(size_t)ti * bins + fi];
+                }
+            }
+            out[oc] = acc;
+        }
+        layernorm_relu(out, C0, a->ln0, eps);
+    }
+    float *o1 = xmalloc((size_t)T1 * F1 * C1 * sizeof(float));
+#pragma omp parallel for schedule(static)
+    for (int tf = 0; tf < T1 * F1; tf++) {
+        int t = tf / F1, f = tf % F1; float *out = o1 + (size_t)tf * C1;
+        for (int oc = 0; oc < C1; oc++) {
+            float acc = 0.f;
+            for (int kh = 0; kh < 3; kh++) {
+                int ti = 2 * t + kh - 1; if (ti < 0 || ti >= T0) continue;
+                for (int kw = 0; kw < 3; kw++) {
+                    int fi = 2 * f + kw - 1; if (fi < 0 || fi >= F0) continue;
+                    acc += dot_f32(a->conv1 + ((size_t)oc * 9 + kh * 3 + kw) * C0, o0 + ((size_t)ti * F0 + fi) * C0, C0);
+                }
+            }
+            out[oc] = acc;
+        }
+        layernorm_relu(out, C1, a->ln1, eps);
+    }
+    free(o0);
+    int T = T1;
+    float *x = xmalloc((size_t)T * D * 4), *tmp = xmalloc((size_t)T * D * 4), *big = xmalloc((size_t)T * 4 * D * 4);
+    float *q = xmalloc((size_t)T * D * 4), *k = xmalloc((size_t)T * D * 4), *v = xmalloc((size_t)T * D * 4), *ao = xmalloc((size_t)T * D * 4);
+    mm(x, o1, T, &a->in_proj);                                              /* [T][F1 * C1] -> [T][D] */
+    free(o1);
+    trace(m, "asub", -1, x, T * D);
+    /* the sinusoids of the relative positions past..0, as keys (once per layer) */
+    float *pe = xmalloc((size_t)P * D * 4);
+    {
+        int half = D / 2; float inc = logf(10000.f) / (float)(half - 1 > 1 ? half - 1 : 1);
+        for (int j = 0; j < P; j++) for (int i = 0; i < half; i++) {
+            float ang = (float)(past - j) * expf(-(float)i * inc);
+            pe[(size_t)j * D + i] = sinf(ang); pe[(size_t)j * D + half + i] = cosf(ang);
+        }
+    }
+    float qs = powf((float)hd, -0.5f) / logf(2.f), ks = logf(1.f + expf(1.f)) / logf(2.f);
+    int Tn = omp_get_max_threads();
+    float *scb = xmalloc((size_t)Tn * (past + 1) * 4);
+    for (int l = 0; l < c->ac.layers; l++) {
+        ALayer *y = &a->L[l];
+        if (!y->relk) { y->relk = xmalloc((size_t)P * D * 4); mm(y->relk, pe, P, &y->rel); }
+        audio_ffn(m, y, 0, x, T, tmp, big);
+        if (l == 0) trace(m, "a_ff1", l, x, T * D);
+        /* chunked local attention with a relative-position bias: a row sees the `past` rows before it and itself */
+        memcpy(tmp, x, (size_t)T * D * 4);
+        clamp_rows(tmp, (size_t)T * D, lim);
+        for (int t = 0; t < T; t++) rms_w(tmp + (size_t)t * D, tmp + (size_t)t * D, y->norm_pre_attn, D, eps);
+        vmm(q, tmp, T, &y->q); vmm(k, tmp, T, &y->k); vmm(v, tmp, T, &y->v);
+        for (int t = 0; t < T; t++) for (int h = 0; h < nh; h++) for (int d = 0; d < hd; d++) {
+            float pd = y->per_dim[d], sp = pd > 20.f ? pd : log1pf(expf(pd));          /* softplus */
+            q[(size_t)t * D + h * hd + d] = q[(size_t)t * D + h * hd + d] * qs * sp;
+            k[(size_t)t * D + h * hd + d] *= ks;
+        }
+#pragma omp parallel for schedule(dynamic, 8)
+        for (int it = 0; it < T * nh; it++) {
+            int t = it / nh, h = it % nh, tid = omp_get_thread_num();
+            float *sc = scb + (size_t)tid * (past + 1);
+            const float *qh = q + (size_t)t * D + h * hd;
+            int lo = t - past + 1 > 0 ? t - past + 1 : 0, n = t - lo + 1;     /* the reference's mask is dist < context_left - 1: `past` keys, itself included */
+            float mx = -INFINITY;
+            for (int s2 = lo; s2 <= t; s2++) {
+                float ac = dot_f32(qh, k + (size_t)s2 * D + h * hd, hd);
+                float bd = dot_f32(qh, y->relk + (size_t)(past - (t - s2)) * D + h * hd, hd);
+                float z = tanhf((ac + bd) / c->ac.cap) * c->ac.cap;
+                sc[s2 - lo] = z; if (z > mx) mx = z;
+            }
+            float sum = 0.f;
+            for (int j = 0; j < n; j++) { sc[j] = expf(sc[j] - mx); sum += sc[j]; }
+            float inv = 1.f / sum, *out = ao + (size_t)t * D + h * hd;
+            for (int d = 0; d < hd; d++) out[d] = 0.f;
+            for (int s2 = lo; s2 <= t; s2++) {
+                const float *vv = v + (size_t)s2 * D + h * hd; float w = sc[s2 - lo] * inv;
+                for (int d = 0; d < hd; d++) out[d] += w * vv[d];
+            }
+        }
+        vmm(tmp, ao, T, &y->post);
+        clamp_rows(tmp, (size_t)T * D, lim);
+        for (int t = 0; t < T; t++) {
+            rms_w(tmp + (size_t)t * D, tmp + (size_t)t * D, y->norm_post_attn, D, eps);
+            for (int d = 0; d < D; d++) x[(size_t)t * D + d] += tmp[(size_t)t * D + d];
+        }
+        if (l == 0) trace(m, "a_att", l, x, T * D);
+        /* the light convolution: norm, up to twice the width, gated, depthwise causal convolution, norm, silu, down */
+        memcpy(tmp, x, (size_t)T * D * 4);
+        for (int t = 0; t < T; t++) rms_w(tmp + (size_t)t * D, tmp + (size_t)t * D, y->lc_pre, D, eps);
+        vmm(big, tmp, T, &y->lc_start);
+        for (int t = 0; t < T; t++) for (int d = 0; d < D; d++) {
+            float av = big[(size_t)t * 2 * D + d], gv = big[(size_t)t * 2 * D + D + d];
+            tmp[(size_t)t * D + d] = av / (1.f + expf(-gv));                              /* glu */
+        }
+#pragma omp parallel for schedule(static)
+        for (int t = 0; t < T; t++) for (int d = 0; d < D; d++) {
+            float acc = 0.f;
+            for (int kk = 0; kk < K; kk++) { int ti = t - (K - 1) + kk; if (ti >= 0) acc += y->lc_dw[(size_t)d * K + kk] * tmp[(size_t)ti * D + d]; }
+            ao[(size_t)t * D + d] = acc;
+        }
+        clamp_rows(ao, (size_t)T * D, lim);
+        for (int t = 0; t < T; t++) {
+            rms_w(ao + (size_t)t * D, ao + (size_t)t * D, y->lc_norm, D, eps);
+            for (int d = 0; d < D; d++) ao[(size_t)t * D + d] = silu_f(ao[(size_t)t * D + d]);
+        }
+        vmm(tmp, ao, T, &y->lc_end);
+        for (size_t j = 0; j < (size_t)T * D; j++) x[j] += tmp[j];
+        if (l == 0) trace(m, "a_lc", l, x, T * D);
+        audio_ffn(m, y, 1, x, T, tmp, big);
+        clamp_rows(x, (size_t)T * D, lim);
+        for (int t = 0; t < T; t++) rms_w(x + (size_t)t * D, x + (size_t)t * D, y->norm_out, D, eps);
+        trace(m, "alayer", l, x, T * D);
+    }
+    int Od = c->ac.out_dims;
+    float *out = xmalloc((size_t)T * Od * 4);
+    mm(out, x, T, &a->out_proj);
+    for (int t = 0; t < T; t++) {
+        for (int d = 0; d < Od; d++) out[(size_t)t * Od + d] += a->out_bias[d];
+        rms_nw(out + (size_t)t * Od, out + (size_t)t * Od, Od, eps);                        /* the projector: a weightless norm, then a matrix */
+    }
+    float *feat = xmalloc((size_t)T * H * 4);
+    mm(feat, out, T, &a->proj);
+    free(out); free(x); free(tmp); free(big); free(q); free(k); free(v); free(ao); free(pe); free(scb);
+    if (getenv("COLI_PREFIX_LOG") || m->trace)
+        fprintf(stderr, "[gemma4] audio: %d mel frames -> %d soft tokens in %.2fs\n", M, T, now_s() - t0);
+    *ntok_out = T;
+    return feat;
+}
+
 /* ------------------------------------------------------------------------------ the forward pass */
 
 static void trace(Model *m, const char *what, int l, const float *x, int n) {
@@ -879,6 +1163,7 @@ static const ImgSpan *span_at(const ImgSpan *sp, int nsp, int p) {
 static int next_rows(const Model *m, const ImgSpan *sp, int nsp, int pos, int left) {
     int n = left < m->chunk ? left : m->chunk;
     for (int i = 0; i < nsp; i++) {
+        if (sp[i].kind) continue;                          /* a clip's rows are plain causal rows: a chunk may end anywhere in one */
         int a = sp[i].start, b = a + sp[i].ntok;
         if (pos >= a && pos < b) return b - pos < left ? b - pos : left;
         if (a > pos && a < pos + n && b > pos + n) n = a - pos;
@@ -904,8 +1189,10 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         reach[s] = p;
         if (g) {
             if (!g->feat) die("internal: a picture's rows reached the model without its soft tokens");
-            reach[s] = g->start + g->ntok - 1;
-            if (ps || reach[s] >= pos0 + S) die("internal: a chunk ends inside a picture (%d rows from %d)", S, pos0);
+            if (!g->kind) {
+                reach[s] = g->start + g->ntok - 1;
+                if (ps || reach[s] >= pos0 + S) die("internal: a chunk ends inside a picture (%d rows from %d)", S, pos0);
+            }
             memcpy(m->x + (size_t)s * H, g->feat + (size_t)(p - g->start) * H, (size_t)H * sizeof(float));
             continue;
         }
@@ -1136,18 +1423,30 @@ static int image_row_key(uint64_t picture, int t) {
     return -1 - (int)((h >> 33) & 0x3fffffff);
 }
 
-/* Find the pictures a prompt's placeholders make: runs of the image token. Fills sp[i].start and .ntok, returns
- * how many (at most cap). */
+/* Find the pictures and clips a prompt's placeholders make: runs of the image token and runs of the audio token. Fills
+ * sp[i].kind, .start and .ntok in the order they come, returns how many (at most cap are filled). */
 static int find_pictures(const Cfg *c, const int *ids, int n, ImgSpan *sp, int cap) {
     int k = 0;
-    if (c->image_token < 0) return 0;
     for (int i = 0; i < n;) {
-        if (ids[i] != c->image_token) { i++; continue; }
-        int j = i; while (j < n && ids[j] == c->image_token) j++;
-        if (k < cap) { sp[k].start = i; sp[k].ntok = j - i; }
+        int kind = c->image_token >= 0 && ids[i] == c->image_token ? 0 : c->audio_token >= 0 && ids[i] == c->audio_token ? 1 : -1;
+        if (kind < 0) { i++; continue; }
+        int j = i; while (j < n && ids[j] == ids[i]) j++;
+        if (k < cap) { sp[k].kind = kind; sp[k].start = i; sp[k].ntok = j - i; }
         k++; i = j;
     }
     return k;
+}
+
+/* soft tokens of a clip of M mel frames: two convolutions of stride 2 */
+static int audio_tokens_for(int frames) { int t = (frames - 1) / 2 + 1; return (t - 1) / 2 + 1; }
+
+/* The soft tokens of a picture or a clip, computed (the tower is the work of one turn of the serve loop). */
+static float *span_features(Model *m, const ImgSpan *g) {
+    if (g->kind == 0) return vision_encode(m, g->pix, g->gh, g->gw);
+    int n = 0;
+    float *f = audio_encode(m, (const float *)g->pix, g->gh, &n);
+    if (n != g->ntok) die("internal: a clip of %d frames made %d soft tokens, the prompt has %d", g->gh, n, g->ntok);
+    return f;
 }
 
 /* ------------------------------------------------------------------------------ sampling */
@@ -1252,30 +1551,39 @@ static int run_test(Model *m) {
     int greedy = getenv("G4_GREEDY") ? atoi(getenv("G4_GREEDY")) : 0;
     int V = m->c.vocab;
     Seq q; seq_init(m, &q);
-    /* pictures: G4_IMAGES=file|gh|gw;file|gh|gw, one per run of image placeholders, each file the raw patch bytes */
+    /* pictures and clips: G4_IMAGES=file|gh|gw;... (one per run of image placeholders, each file the raw patch bytes) and
+     * G4_AUDIOS=file|frames|bins;... (one per run of audio placeholders, each file float32 log-mel frames) */
     ImgSpan sp[16]; memset(sp, 0, sizeof sp);
     int nsp = find_pictures(&m->c, ids, n, sp, 16);
     int *keys = NULL;
-    if (nsp > 16) die("G4_TEST: more than 16 pictures");
+    if (nsp > 16) die("G4_TEST: more than 16 pictures and clips");
     if (nsp) {
-        if (!m->vis.loaded) die("G4_TEST: the prompt has pictures and the container has no vision tower");
-        const char *ie = getenv("G4_IMAGES");
-        if (!ie) die("G4_TEST: the prompt has %d picture(s): G4_IMAGES=file|gh|gw;...", nsp);
+        const char *cur[2] = { getenv("G4_IMAGES"), getenv("G4_AUDIOS") };
         keys = xmalloc((size_t)n * sizeof(int)); memcpy(keys, ids, (size_t)n * sizeof(int));
         for (int i = 0; i < nsp; i++) {
+            int kind = sp[i].kind;
+            if (kind == 0 && !m->vis.loaded) die("G4_TEST: the prompt has pictures and the container has no vision tower");
+            if (kind == 1 && !m->aud.loaded) die("G4_TEST: the prompt has audio and the container has no audio tower");
+            if (!cur[kind]) die("G4_TEST: the prompt has %s: %s=file|a|b;...", kind ? "audio" : "pictures", kind ? "G4_AUDIOS" : "G4_IMAGES");
             char path[1024]; int gh, gw; int used = 0;
-            if (sscanf(ie, "%1023[^|]|%d|%d%n", path, &gh, &gw, &used) != 3) die("G4_IMAGES: bad entry near '%s'", ie);
-            ie += used; if (*ie == ';') ie++;
-            int k = m->c.vc.pool;
-            if (gh % k || gw % k || (gh / k) * (gw / k) != sp[i].ntok) die("G4_IMAGES: %dx%d patches give %d soft tokens, the prompt has %d", gh, gw, (gh / k) * (gw / k), sp[i].ntok);
-            size_t bytes = (size_t)gh * gw * m->c.vc.patch * m->c.vc.patch * 3;
+            if (sscanf(cur[kind], "%1023[^|]|%d|%d%n", path, &gh, &gw, &used) != 3) die("G4_TEST: bad entry near '%s'", cur[kind]);
+            cur[kind] += used; if (*cur[kind] == ';') cur[kind]++;
+            size_t bytes;
+            if (kind == 0) {
+                int k = m->c.vc.pool;
+                if (gh % k || gw % k || (gh / k) * (gw / k) != sp[i].ntok) die("G4_IMAGES: %dx%d patches give %d soft tokens, the prompt has %d", gh, gw, (gh / k) * (gw / k), sp[i].ntok);
+                bytes = (size_t)gh * gw * m->c.vc.patch * m->c.vc.patch * 3;
+            } else {
+                if (gw != m->c.ac.ch0 || audio_tokens_for(gh) != sp[i].ntok) die("G4_AUDIOS: %d frames of %d bins give %d soft tokens, the prompt has %d", gh, gw, audio_tokens_for(gh), sp[i].ntok);
+                bytes = (size_t)gh * gw * sizeof(float);
+            }
             sp[i].pix = xmalloc(bytes);
             FILE *f = fopen(path, "rb");
-            if (!f || fread(sp[i].pix, 1, bytes, f) != bytes) die("G4_IMAGES: cannot read %zu bytes from %s", bytes, path);
+            if (!f || fread(sp[i].pix, 1, bytes, f) != bytes) die("G4_TEST: cannot read %zu bytes from %s", bytes, path);
             fclose(f);
             sp[i].gh = gh; sp[i].gw = gw;
-            sp[i].key = kv_image_hash(sp[i].pix, bytes, gh, gw);
-            sp[i].feat = vision_encode(m, sp[i].pix, gh, gw);
+            sp[i].key = kv_image_hash(sp[i].pix, bytes, gh, gw) ^ (kind ? 0x5A5A5A5A5A5A5A5AULL : 0);
+            sp[i].feat = span_features(m, &sp[i]);
             for (int t = 0; t < sp[i].ntok; t++) keys[sp[i].start + t] = image_row_key(sp[i].key, t);
         }
     }
@@ -1340,7 +1648,7 @@ typedef struct {
 
 #define MAX_PICS 8
 /* Pictures that arrived (IMAGE frames) for the SUBMIT that follows; the gateway writes them together. */
-static struct { unsigned char *pix; int gh, gw; } g_pend[MAX_PICS];
+static struct { int kind; unsigned char *pix; int gh, gw; } g_pend[2 * MAX_PICS];      /* kind 0 a picture, 1 a clip of audio */
 static int g_npend, g_pend_bad;
 static void pending_clear(void) { for (int i = 0; i < g_npend; i++) free(g_pend[i].pix); g_npend = 0; }
 
@@ -1440,17 +1748,24 @@ static int req_start(Model *m, G4Tok *T, Req *r, Seq *q, const char *payload, in
         coli_serve_write_error(stdout, r->id, msg); free(r->ids); r->ids = NULL; pending_clear(); return 0;
     }
     if (budget < r->max_tok) r->max_tok = budget;
-    /* pictures: one run of image placeholders for each picture that arrived, as many soft tokens as it makes */
+    /* pictures and clips: one run of placeholders for each that arrived, as many soft tokens as it makes */
     r->keys = xmalloc((size_t)r->np * sizeof(int)); memcpy(r->keys, r->ids, (size_t)r->np * sizeof(int));
     r->sp = NULL; r->nsp = 0;
-    if (m->vis.loaded) {
-        ImgSpan found[MAX_PICS + 1]; memset(found, 0, sizeof found);
-        int nf = find_pictures(&m->c, r->ids, r->np, found, MAX_PICS + 1), k = m->c.vc.pool;
+    if (m->vis.loaded || m->aud.loaded) {
+        ImgSpan found[2 * MAX_PICS + 1]; memset(found, 0, sizeof found);
+        int nf = find_pictures(&m->c, r->ids, r->np, found, 2 * MAX_PICS + 1), k = m->c.vc.pool;
+        int queue[2][2 * MAX_PICS], have[2] = { 0, 0 }, want_n[2] = { 0, 0 }, used[2] = { 0, 0 };
+        for (int i = 0; i < g_npend; i++) queue[g_pend[i].kind][have[g_pend[i].kind]++] = i;
+        for (int i = 0; i < nf && i < 2 * MAX_PICS + 1; i++) want_n[found[i].kind]++;
         char msg[200]; msg[0] = 0;
-        if (nf != g_npend) snprintf(msg, sizeof msg, "BAD_IMAGE the prompt has %d image placeholder run%s and %d picture%s arrived", nf, nf == 1 ? "" : "s", g_npend, g_npend == 1 ? "" : "s");
+        if (nf > 2 * MAX_PICS) snprintf(msg, sizeof msg, "BAD_IMAGE the prompt has more than %d pictures and clips", 2 * MAX_PICS);
+        else if (want_n[0] != have[0]) snprintf(msg, sizeof msg, "BAD_IMAGE the prompt has %d image placeholder run%s and %d picture%s arrived", want_n[0], want_n[0] == 1 ? "" : "s", have[0], have[0] == 1 ? "" : "s");
+        else if (want_n[1] != have[1]) snprintf(msg, sizeof msg, "BAD_AUDIO the prompt has %d audio placeholder run%s and %d clip%s arrived", want_n[1], want_n[1] == 1 ? "" : "s", have[1], have[1] == 1 ? "" : "s");
         for (int i = 0; !msg[0] && i < nf; i++) {
-            int want = (g_pend[i].gh / k) * (g_pend[i].gw / k);
-            if (found[i].ntok != want) snprintf(msg, sizeof msg, "BAD_IMAGE picture %d has %d soft tokens and the prompt %d placeholders", i + 1, want, found[i].ntok);
+            int kind = found[i].kind, idx = queue[kind][used[kind]++];
+            int want = kind ? audio_tokens_for(g_pend[idx].gh) : (g_pend[idx].gh / k) * (g_pend[idx].gw / k);
+            if (found[i].ntok != want)
+                snprintf(msg, sizeof msg, kind ? "BAD_AUDIO clip %d has %d soft tokens and the prompt %d placeholders" : "BAD_IMAGE picture %d has %d soft tokens and the prompt %d placeholders", used[kind], want, found[i].ntok);
         }
         if (msg[0]) {
             coli_serve_write_error(stdout, r->id, msg);
@@ -1458,11 +1773,14 @@ static int req_start(Model *m, G4Tok *T, Req *r, Seq *q, const char *payload, in
         }
         if (nf) {
             r->sp = calloc((size_t)nf, sizeof(ImgSpan));
+            used[0] = used[1] = 0;
             for (int i = 0; i < nf; i++) {
                 ImgSpan *g = &r->sp[i];
-                g->start = found[i].start; g->ntok = found[i].ntok; g->gh = g_pend[i].gh; g->gw = g_pend[i].gw;
-                g->pix = g_pend[i].pix; g_pend[i].pix = NULL;
-                g->key = kv_image_hash(g->pix, (size_t)g->gh * g->gw * m->c.vc.patch * m->c.vc.patch * 3, g->gh, g->gw);
+                int kind = found[i].kind, idx = queue[kind][used[kind]++];
+                g->kind = kind; g->start = found[i].start; g->ntok = found[i].ntok; g->gh = g_pend[idx].gh; g->gw = g_pend[idx].gw;
+                g->pix = g_pend[idx].pix; g_pend[idx].pix = NULL;
+                size_t bytes = kind ? (size_t)g->gh * g->gw * sizeof(float) : (size_t)g->gh * g->gw * m->c.vc.patch * m->c.vc.patch * 3;
+                g->key = kv_image_hash(g->pix, bytes, g->gh, g->gw) ^ (kind ? 0x5A5A5A5A5A5A5A5AULL : 0);
                 for (int t = 0; t < g->ntok; t++) r->keys[g->start + t] = image_row_key(g->key, t);
             }
             r->nsp = nf;
@@ -1486,7 +1804,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
     Req *rq = calloc((size_t)n_slots, sizeof(Req));
     for (int i = 0; i < n_slots; i++) seq_init(m, &seq[i]);
     coli_serve_stdio_init();
-    {   char caps[64]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d", m->vis.loaded, m->img_tokens);
+    {   char caps[96]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d audio=%d audio_tokens=%d", m->vis.loaded, m->img_tokens, m->aud.loaded, m->aud_tokens);
         coli_serve_write_ready_caps(stdout, rss_gb(), caps); }
     serve_hwinfo(); serve_tiers_emap(m);
     if (c->moe) fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);
@@ -1513,7 +1831,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
                     size_t want = (size_t)cmd.grid_h * cmd.grid_w * cc->vc.patch * cc->vc.patch * 3;
                     const char *why = NULL; char msg[160];
                     if (!m->vis.loaded) why = "this engine has no vision tower; images are not supported";
-                    else if (g_npend >= MAX_PICS) { snprintf(msg, sizeof msg, "BAD_IMAGE at most %d pictures in a request", MAX_PICS); why = msg; }
+                    else if (g_npend >= 2 * MAX_PICS) { snprintf(msg, sizeof msg, "BAD_IMAGE at most %d pictures and clips in a request", 2 * MAX_PICS); why = msg; }
                     else if (cmd.grid_h % k || cmd.grid_w % k || cmd.grid_h > cc->vc.npos || cmd.grid_w > cc->vc.npos) {
                         snprintf(msg, sizeof msg, "BAD_IMAGE the patch grid %dx%d is not a multiple of %d or exceeds %d", cmd.grid_h, cmd.grid_w, k, cc->vc.npos); why = msg; }
                     else if ((size_t)cmd.payload_bytes != want) {
@@ -1522,7 +1840,23 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
                         snprintf(msg, sizeof msg, "BAD_IMAGE the picture makes %d soft tokens and this engine takes %d (G4_IMG_TOKENS)", (cmd.grid_h / k) * (cmd.grid_w / k), m->img_tokens); why = msg; }
                     if (why) { coli_serve_write_error(stdout, cmd.id, why); g_pend_bad = 1; }
                     else {
-                        g_pend[g_npend].pix = (unsigned char *)coli_serve_command_take_payload(&cmd);
+                        g_pend[g_npend].kind = 0; g_pend[g_npend].pix = (unsigned char *)coli_serve_command_take_payload(&cmd);
+                        g_pend[g_npend].gh = cmd.grid_h; g_pend[g_npend].gw = cmd.grid_w; g_npend++;
+                    }
+                } else if (cmd.kind == COLI_SERVE_COMMAND_AUDIO) {
+                    /* AUDIO <id> <bytes> <frames> <bins>: the log-mel frames of one clip, float32, for the SUBMIT that follows */
+                    Cfg *cc = &m->c;
+                    size_t want = (size_t)cmd.grid_h * cmd.grid_w * sizeof(float);
+                    const char *why = NULL; char msg[160];
+                    if (!m->aud.loaded) why = "this engine has no audio tower; audio is not supported";
+                    else if (g_npend >= 2 * MAX_PICS) { snprintf(msg, sizeof msg, "BAD_AUDIO at most %d pictures and clips in a request", 2 * MAX_PICS); why = msg; }
+                    else if (cmd.grid_w != cc->ac.ch0) { snprintf(msg, sizeof msg, "BAD_AUDIO %d mel bins and this model reads %d", cmd.grid_w, cc->ac.ch0); why = msg; }
+                    else if ((size_t)cmd.payload_bytes != want) { snprintf(msg, sizeof msg, "BAD_AUDIO bytes=%llu expected=%zu", (unsigned long long)cmd.payload_bytes, want); why = msg; }
+                    else if (audio_tokens_for(cmd.grid_h) > m->aud_tokens) {
+                        snprintf(msg, sizeof msg, "BAD_AUDIO the clip makes %d soft tokens and this engine takes %d (G4_AUDIO_TOKENS)", audio_tokens_for(cmd.grid_h), m->aud_tokens); why = msg; }
+                    if (why) { coli_serve_write_error(stdout, cmd.id, why); g_pend_bad = 1; }
+                    else {
+                        g_pend[g_npend].kind = 1; g_pend[g_npend].pix = (unsigned char *)coli_serve_command_take_payload(&cmd);
                         g_pend[g_npend].gh = cmd.grid_h; g_pend[g_npend].gw = cmd.grid_w; g_npend++;
                     }
                 } else if (cmd.kind == COLI_SERVE_COMMAND_SUBMIT && g_pend_bad) {
@@ -1560,7 +1894,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
             ImgSpan *pic = NULL;                               /* a picture in the rows about to run, not yet seen by the tower: that is this turn's work */
             for (int k = 0; k < r->nsp; k++)
                 if (!r->sp[k].feat && r->sp[k].start < r->done_np + n && r->sp[k].start + r->sp[k].ntok > r->done_np) { pic = &r->sp[k]; break; }
-            if (pic) { pic->feat = vision_encode(m, pic->pix, pic->gh, pic->gw); continue; }
+            if (pic) { pic->feat = span_features(m, pic); continue; }
             float *lo = forward(m, q, r->ids + r->done_np, n, r->done_np, NULL, r->keys + r->done_np, r->sp, r->nsp);
             r->done_np += n;
             if (r->done_np >= r->np) { r->lo = lo; r->phase = 1; } else free(lo);

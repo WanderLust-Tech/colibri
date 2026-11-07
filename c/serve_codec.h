@@ -34,6 +34,10 @@ typedef enum {
      * receives it: the gateway sends it only after the engine announced decide=1 in
      * its CAPS line. */
     COLI_SERVE_COMMAND_DECIDE,
+    /* AUDIO <id> <bytes> <frames> <bins>\n<payload>\n: the log-mel frames of one clip (float32, frames x bins), announced
+     * just before the SUBMIT it belongs to, like IMAGE and parsed the same way (grid_h = frames, grid_w = bins). Only an
+     * engine that announced audio=1 in its CAPS line is ever sent one; any other answers it as an unknown command. */
+    COLI_SERVE_COMMAND_AUDIO,
 } ColiServeCommandKind;
 
 typedef enum {
@@ -160,6 +164,8 @@ static inline void coli_serve_classify_line(
         command->kind = COLI_SERVE_COMMAND_IMAGE;
     else if (name_size == 6 && !memcmp(name, "DECIDE", 6))
         command->kind = COLI_SERVE_COMMAND_DECIDE;
+    else if (name_size == 5 && !memcmp(name, "AUDIO", 5))
+        command->kind = COLI_SERVE_COMMAND_AUDIO;
     else
         return;
     while (*cursor == ' ' || *cursor == '\t') cursor++;
@@ -228,6 +234,7 @@ static inline ColiServeReadResult coli_serve_read_command_alloc(
     else if (!strcmp(fields[0], "CANCEL")) command->kind = COLI_SERVE_COMMAND_CANCEL;
     else if (!strcmp(fields[0], "IMAGE")) command->kind = COLI_SERVE_COMMAND_IMAGE;
     else if (!strcmp(fields[0], "DECIDE")) command->kind = COLI_SERVE_COMMAND_DECIDE;
+    else if (!strcmp(fields[0], "AUDIO")) command->kind = COLI_SERVE_COMMAND_AUDIO;
     else {
         free(line);
         return COLI_SERVE_READ_IGNORED;
@@ -243,8 +250,8 @@ static inline ColiServeReadResult coli_serve_read_command_alloc(
         free(line);
         return COLI_SERVE_READ_OK;
     }
-    if (command->kind == COLI_SERVE_COMMAND_IMAGE) {
-        /* IMAGE <id> <bytes> <grid_h> <grid_w>\n<payload>\n
+    if (command->kind == COLI_SERVE_COMMAND_IMAGE || command->kind == COLI_SERVE_COMMAND_AUDIO) {
+        /* IMAGE <id> <bytes> <grid_h> <grid_w>\n<payload>\n  (AUDIO <id> <bytes> <frames> <bins> alike)
          *
          * Il payload va consumato SEMPRE, anche quando il motore non sa cosa
          * farsene: lasciarlo nello stream sposterebbe il frame successivo di

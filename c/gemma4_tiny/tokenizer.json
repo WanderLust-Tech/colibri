@@ -173,6 +173,33 @@
       "rstrip": false,
       "normalized": false,
       "special": true
+    },
+    {
+      "id": 503,
+      "content": "<|audio|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 504,
+      "content": "<|audio>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 505,
+      "content": "<audio|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
     }
   ],
   "normalizer": {
@@ -607,7 +634,10 @@
       "<0xFF>": 493,
       "<|image|>": 500,
       "<|image>": 501,
-      "<image|>": 502
+      "<image|>": 502,
+      "<|audio|>": 503,
+      "<|audio>": 504,
+      "<audio|>": 505
     },
     "merges": [
       [

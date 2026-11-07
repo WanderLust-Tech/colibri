@@ -216,7 +216,10 @@ def format_tool_response_block(tool_name, response):
 IMAGE_PARTS = ("image", "image_url", "input_image")      # what the gateway accepts as a picture (the template knows the first two)
 IMAGE_MARK = "<|image|>"
 IMAGE_BEGIN, IMAGE_END = "<|image>", "<image|>"
-NO_MEDIA = ("input_audio", "audio", "video")
+AUDIO_PARTS = ("input_audio", "audio")                  # OpenAI's input_audio, and the template's own name for it
+AUDIO_MARK = "<|audio|>"
+AUDIO_BEGIN, AUDIO_END = "<|audio>", "<audio|>"
+NO_MEDIA = ("video",)
 
 
 def image_marker(part, order=None):
@@ -233,9 +236,19 @@ def image_marker(part, order=None):
     return IMAGE_MARK
 
 
+def audio_marker(part, order=None):
+    """What an audio part becomes: the template writes <|audio|>, the processor expands it to the begin-of-audio token, one
+    placeholder per soft token the clip makes (`_soft_tokens`, stored by the gateway) and the end-of-audio token."""
+    if order is not None:
+        order.append(part.get("_image_index"))
+    n = part.get("_soft_tokens")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return AUDIO_BEGIN + AUDIO_MARK * n + AUDIO_END
+    return AUDIO_MARK
+
+
 def _refuse_media(part, where):
-    raise ChatError("This Gemma 4 engine reads text and pictures: audio and video are not supported "
-                    "(the 26B-A4B checkpoint has no audio tower).", where, "unsupported_content_type")
+    raise ChatError("This Gemma 4 engine reads text, pictures and audio: video is not supported.", where, "unsupported_content_type")
 
 
 def _text_of(content, where, trim_each=False, model=False):
@@ -250,22 +263,24 @@ def _text_of(content, where, trim_each=False, model=False):
         for index, part in enumerate(content):
             if isinstance(part, dict) and part.get("type") == "text":
                 out.append(_s(part.get("text", "")))
-            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
+            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS + AUDIO_PARTS:
                 continue
             elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
                 _refuse_media(part, f"{where}.{index}")
             else:
-                raise ChatError("Message content parts must be text or pictures.", f"{where}.{index}", "unsupported_content_type")
+                raise ChatError("Message content parts must be text, pictures or audio.", f"{where}.{index}", "unsupported_content_type")
         return "".join(out)
     raise ChatError("Message content must be a string or an array of parts.", where)
 
 
 def _images_of(content, where, order=None):
-    """The markers of a tool response's pictures, in order: the template writes them after the response block."""
+    """The markers of a tool response's pictures and clips, in order: the template writes them after the response block."""
     out = []
     for index, part in enumerate(content if isinstance(content, list) else ()):
         if isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
             out.append(image_marker(part, order))
+        elif isinstance(part, dict) and part.get("type") in AUDIO_PARTS:
+            out.append(audio_marker(part, order))
         elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
             _refuse_media(part, f"{where}.{index}")
     return "".join(out)
@@ -284,10 +299,12 @@ def _captured(content, model, where, order=None):
                 out.append(strip_thinking(text) if model else text.strip())
             elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
                 out.append(image_marker(part, order))
+            elif isinstance(part, dict) and part.get("type") in AUDIO_PARTS:
+                out.append(audio_marker(part, order))
             elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
                 _refuse_media(part, f"{where}.{index}")
             else:
-                raise ChatError("Message content parts must be text or pictures.", f"{where}.{index}", "unsupported_content_type")
+                raise ChatError("Message content parts must be text, pictures or audio.", f"{where}.{index}", "unsupported_content_type")
         return "".join(out)
     if content is None:
         return ""

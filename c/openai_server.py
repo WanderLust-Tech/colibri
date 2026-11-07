@@ -169,10 +169,12 @@ def _engine_error(fields, message):
                         f"messages resulted in at least {used} tokens. Please shorten the "
                         f"conversation, or restart the server with a larger CTX.",
                         "messages", "context_length_exceeded")
-    if fields and fields[0] == "BAD_IMAGE":
-        # gemma4.c refusing a picture (its size, its bytes, or placeholders that do not match the pictures sent):
+    if fields and fields[0] in ("BAD_IMAGE", "BAD_AUDIO"):
+        # gemma4.c refusing a picture or a clip (its size, its bytes, or placeholders that do not match what was sent):
         # the request's mistake, with the engine's account of it.
-        return APIError(400, "The engine refused the picture: " + " ".join(fields[1:]) + ".", "messages", "invalid_image")
+        what = "picture" if fields[0] == "BAD_IMAGE" else "clip"
+        return APIError(400, f"The engine refused the {what}: " + " ".join(fields[1:]) + ".", "messages",
+                        "invalid_image" if what == "picture" else "invalid_audio")
     return RuntimeError(message)
 
 
@@ -2929,13 +2931,49 @@ def gemma4_vision_meta(model_dir):
     return None
 
 
-def expand_gemma4_images(messages, model_dir, token_limit=None):
+def has_audio_parts(messages):
+    """Whether any message carries a clip of audio (an OpenAI input_audio part)."""
+    for message in messages if isinstance(messages, list) else ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "input_audio" for part in content):
+            return True
+    return False
+
+
+def _gemma4_audio_part(part, token_limit):
+    """The mel frames (float32 bytes, frames, bins) and soft tokens of an OpenAI input_audio part: base64 WAV data."""
+    import base64
+    audio = part.get("input_audio")
+    if not isinstance(audio, dict) or not isinstance(audio.get("data"), str) or not audio["data"]:
+        raise APIError(400, "`input_audio` must be an object with base64 `data` and a `format`.", "messages", "invalid_audio")
+    fmt = str(audio.get("format") or "wav").lower()
+    if fmt not in ("wav", "wave"):
+        raise APIError(400, f"audio is read as WAV only (got {fmt!r}).", "messages", "invalid_audio")
+    try:
+        raw = base64.b64decode(audio["data"], validate=True)
+    except Exception:
+        raise APIError(400, "input_audio.data is not valid base64.", "messages", "invalid_audio")
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+        import gemma4_audio
+        mel, tokens = gemma4_audio.preprocess(raw, token_limit or 750)
+    except ImportError as problem:
+        raise APIError(400, f"audio support needs numpy ({problem}).", "messages")
+    except ValueError as problem:
+        raise APIError(400, str(problem), "messages", "invalid_audio")
+    return (mel.tobytes(), mel.shape[0], mel.shape[1], "audio"), tokens
+
+
+def expand_gemma4_images(messages, model_dir, token_limit=None, audio_limit=None):
     """Run every picture of a conversation through Gemma 4's image processor.
 
     Returns (messages, pictures): the messages with each picture part replaced by one that carries what the renderer
     needs (`_soft_tokens`, the number of placeholders the picture makes, and `_image_index`) and not the pixels, and
-    the list of (patches, grid_h, grid_w), in the order of the conversation, which the engine takes as IMAGE frames.
-    token_limit is what the engine accepts per picture (its `img_tokens`)."""
+    the list of (patches, grid_h, grid_w), in the order of the conversation, which the engine takes as IMAGE frames. Clips of
+    audio (input_audio parts) are in the list too, as (mel frames, frames, bins, "audio"), sent as AUDIO frames.
+    token_limit is what the engine accepts per picture (its `img_tokens`), audio_limit per clip (`audio_tokens`)."""
     meta = gemma4_vision_meta(model_dir) or {}
     patch, pool = int(meta.get("patch", 16)), int(meta.get("pool", 3))
     pictures, rewritten = [], []
@@ -2953,6 +2991,10 @@ def expand_gemma4_images(messages, model_dir, token_limit=None):
                 parts.append({"type": "image_url", "_soft_tokens": (grid_h // pool) * (grid_w // pool),
                               "_image_index": len(pictures)})
                 pictures.append((patches, grid_h, grid_w))
+            elif kind == "input_audio":
+                clip, tokens = _gemma4_audio_part(part, audio_limit)
+                parts.append({"type": "input_audio", "_soft_tokens": tokens, "_image_index": len(pictures)})
+                pictures.append(clip)
             else:
                 parts.append(part)
         rewritten.append({**message, "content": parts})
@@ -5505,6 +5547,7 @@ class Engine:
         # True/False when the engine said whether it loaded a vision tower; None when
         # it said nothing (an engine that predates CAPS, or a family without a tower).
         self.vision = {"1": True, "0": False}.get(self.caps.get("vision"))
+        self.audio = {"1": True, "0": False}.get(self.caps.get("audio"))
         # A decision engine says decide=1: /v1/systemone then sends it the record
         # (DECIDE) instead of scoring options through the logprob channel. chat=0
         # means it has nothing else: the generating endpoints answer 400.
@@ -6003,15 +6046,17 @@ class Engine:
                     # One picture is a (patches, grid_h, grid_w) tuple; an engine that takes several (gemma4)
                     # is handed a list of them, sent in order, one IMAGE frame each.
                     for picture in ([] if image is None else [image] if isinstance(image, tuple) else image):
-                        patches, grid_h, grid_w = picture
+                        # (patches, grid_h, grid_w) is a picture; (mel frames, frames, bins, "audio") a clip of audio
+                        patches, grid_h, grid_w = picture[:3]
+                        verb = "AUDIO" if len(picture) > 3 and picture[3] == "audio" else "IMAGE"
                         blob = patches.tobytes() if hasattr(patches, "tobytes") else patches
                         try:
                             _write_all(
                                 self.process.stdin,
-                                f"IMAGE {request_id} {len(blob)} {grid_h} {grid_w}\n".encode()
-                                + blob + b"\n", "IMAGE")
+                                f"{verb} {request_id} {len(blob)} {grid_h} {grid_w}\n".encode()
+                                + blob + b"\n", verb)
                         except OSError as error:
-                            raise RuntimeError(f"failed to write IMAGE to the engine ({error})") from error
+                            raise RuntimeError(f"failed to write {verb} to the engine ({error})") from error
                     _write_all(self.process.stdin, header + payload + xpayload + b"\n", "SUBMIT")
                     self.process.stdin.flush()
                 except OSError as error:
@@ -6505,6 +6550,8 @@ class APIServer(ThreadingHTTPServer):
         modalities = ["text"]
         if family_by_id(ARCH).capabilities.image and getattr(self.engine, "vision", None) is True:
             modalities.append("image")
+        if ARCH == "gemma4" and getattr(self.engine, "audio", None) is True:
+            modalities.append("audio")                    # the E2B and E4B: the engine loaded the conformer
         return modalities
 
     def generate(self, prompt, max_tokens, temperature, top_p, on_text, *args, **kwargs):
@@ -8563,6 +8610,12 @@ class APIHandler(BaseHTTPRequestHandler):
                                    if ARCH == "gemma4" else "")
                                 + ", or send text only.",
                            "messages", "unsupported_content_type")
+        if getattr(self.server.engine, "audio", None) is False and has_audio_parts(messages):
+            raise APIError(400, "this engine loaded no audio tower: only the E2B and E4B have one"
+                                + (" (python c/tools/convert_gemma4.py --src <checkpoint> --out <container> --add-audio adds "
+                                   "it to a container converted without; or unset G4_AUDIO=0)" if ARCH == "gemma4" else "")
+                                + ", so audio cannot be served. Send text or pictures only.",
+                           "messages", "unsupported_content_type")
         if ARCH == "glm53":
             messages, images = expand_glm53_images(messages, model_dir)
         elif ARCH == "deepseek_v41":
@@ -8591,7 +8644,11 @@ class APIHandler(BaseHTTPRequestHandler):
             ceiling = os.environ.get("G4_MAX_IMAGE_TOKENS")
             if ceiling and limit:
                 limit = min(limit, int(ceiling))
-            messages, images = expand_gemma4_images(messages, model_dir, limit)
+            try:
+                audio_limit = int(getattr(self.server.engine, "caps", {}).get("audio_tokens") or 0) or None
+            except (TypeError, ValueError):
+                audio_limit = None
+            messages, images = expand_gemma4_images(messages, model_dir, limit, audio_limit)
             return messages, (images[0] if len(images) == 1 else images or None)
         else:
             return messages, None

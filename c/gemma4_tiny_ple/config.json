@@ -79,5 +79,30 @@
  "vision_soft_tokens_per_image": 12,
  "image_token_id": 500,
  "boi_token_id": 501,
- "eoi_token_id": 502
+ "eoi_token_id": 502,
+ "audio_config": {
+  "hidden_size": 32,
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "hidden_act": "silu",
+  "subsampling_conv_channels": [
+   16,
+   8
+  ],
+  "conv_kernel_size": 3,
+  "residual_weight": 0.5,
+  "attention_chunk_size": 4,
+  "attention_context_left": 5,
+  "attention_context_right": 0,
+  "attention_logit_cap": 50.0,
+  "use_clipped_linears": true,
+  "rms_norm_eps": 1e-06,
+  "gradient_clipping": 10000000000.0,
+  "output_proj_dims": 24,
+  "model_type": "gemma4_audio"
+ },
+ "audio_token_id": 503,
+ "boa_token_id": 504,
+ "eoa_token_index": 505,
+ "eoa_token_id": 505
 }
