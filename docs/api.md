@@ -244,7 +244,7 @@ Known limitations, current build:
 | MiMo-V2.6 | yes | yes | native `<tools>` / `<tool_call>` blocks |
 | Qwen3.6 | yes | yes | native `<tool_call>`/`<tool_response>` blocks, the same XML-ish form as Qwen3.8 |
 | Qwen3.8-Flash-Next | yes | yes | native `<tool_call>`/`<tool_response>` blocks |
-| Gemma 4 | yes | yes | native `<|tool>` declarations, `<|tool_call>call:f{key:<|"|>value<|"|>}` calls and `<|tool_response>` results |
+| Gemma 4 | yes | yes | native `<|tool>` declarations, `<|tool_call>call:f{key:<|"|>value<|"|>}` calls and `<|tool_response>` results; pictures (`image_url`) on every size, WAV audio (`input_audio`) on the E2B and E4B |
 | OLMoE | no | no | active tool declarations/choices return HTTP 400 |
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to

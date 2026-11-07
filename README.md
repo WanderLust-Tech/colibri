@@ -229,7 +229,7 @@ a fast NVMe drive helps most)
 | Model | Download, then on disk | RAM | GPU | Measured |
 |---|---|---|---|---|
 | **OLMoE** (7B): small, to learn the tools on | 14 GB, 7 GB after conversion to int8 | 8 GB | Vulkan | 22-23 tok/s (A, CPU) |
-| **Gemma-4-26B-A4B**: chat with thinking and tools, text only, Apache 2.0 | 52 GB, 15 GB after conversion to int4 | 18 GB with every expert cached | CPU | 14 tok/s decoding, 39 tok/s reading a prompt (i9-14900KF, 8 threads, every expert in RAM) |
+| **Gemma-4-26B-A4B**: chat with thinking and tools, pictures in, Apache 2.0; the same engine runs the 31B, E4B and E2B (audio in too) | 52 GB, 15 GB after conversion to int4 | 18 GB with every expert cached | CPU | 14 tok/s decoding, 39 tok/s reading a prompt (i9-14900KF, 8 threads, every expert in RAM) |
 | Qwen3.8-27B (dense): text and images | 56 GB, 51 GB after conversion | 20 GB in int4, 30 GB in int8 | Vulkan | 3.45 tok/s in int4, 2.1 in int8 (16-thread CPU server) |
 | **GLM-5.3-Flash** (321B): vision and tools | 328 GB, converted shard by shard to 195 GB | 25 GB | CUDA, Vulkan | about 20 s per token warm, 44 s cold (6 cores, 25 GB, ordinary disk) |
 | **DeepSeek V4.1 Flash** (552B): vision and tools, no conversion but a one-off preparation | 510 GB | about 18 GB plus the expert cache (24.8 GB peak with 8 per layer) | Vulkan | 0.21-0.24 tok/s (16-thread CPU server holding 68% of the experts) |
