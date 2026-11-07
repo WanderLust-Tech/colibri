@@ -25,6 +25,10 @@ import gemma4_chat as g  # noqa: E402
 
 TEMPLATE = HERE / "fixtures" / "gemma4_chat_template.jinja"
 TEMPLATE_SHA256 = "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+# google/gemma-4-E2B-it and -E4B-it ship one template (the 31B ships the 26B-A4B's, byte for byte). It differs in one place: with
+# thinking off the cue carries no empty thought channel.
+E_TEMPLATE = HERE / "fixtures" / "gemma4_e_chat_template.jinja"
+E_TEMPLATE_SHA256 = "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
 
 try:
     import jinja2
@@ -135,7 +139,7 @@ CASES = {
 }
 
 
-def reference_render(case, enable_thinking=False, add_generation_prompt=True, preserve_thinking=False):
+def reference_render(case, enable_thinking=False, add_generation_prompt=True, preserve_thinking=False, template_path=None):
     """The template, rendered the way transformers' apply_chat_template does."""
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
@@ -145,7 +149,7 @@ def reference_render(case, enable_thinking=False, add_generation_prompt=True, pr
 
     env.globals["raise_exception"] = raise_exception
     env.filters["tojson"] = lambda x, **kw: json.dumps(x, ensure_ascii=False)
-    template = env.from_string(TEMPLATE.read_text(encoding="utf-8"))
+    template = env.from_string((template_path or TEMPLATE).read_text(encoding="utf-8"))
     kwargs = {"messages": case["messages"], "add_generation_prompt": add_generation_prompt,
               "enable_thinking": enable_thinking, "preserve_thinking": preserve_thinking, "bos_token": "<bos>"}
     if case.get("tools"):
@@ -176,6 +180,16 @@ class TemplateTest(unittest.TestCase):
                 want = reference_render(case, thinking, generation)
                 got = g.render(as_client_sends(case["messages"]), case.get("tools"), thinking, generation)
                 self.assertEqual(got, want)
+
+    def test_the_e2b_and_e4b_template_matches_without_the_empty_thought_on_the_cue(self):
+        self.assertEqual(hashlib.sha256(E_TEMPLATE.read_bytes()).hexdigest(), E_TEMPLATE_SHA256)
+        for (name, case), thinking, generation in itertools.product(CASES.items(), (False, True), (True, False)):
+            with self.subTest(case=name, thinking=thinking, generation_prompt=generation):
+                want = reference_render(case, thinking, generation, template_path=E_TEMPLATE)
+                got = g.render(as_client_sends(case["messages"]), case.get("tools"), thinking, generation, empty_thought=False)
+                self.assertEqual(got, want)
+        self.assertTrue(g.render([{"role": "user", "content": "hi"}]).endswith("<|channel>thought\n<channel|>"))
+        self.assertTrue(g.render([{"role": "user", "content": "hi"}], empty_thought=False).endswith("<|turn>model\n"))
 
     def test_preserved_thinking_matches_too(self):
         for name in ("an agent loop", "reasoning after the last user turn is kept", "an old turn's reasoning is dropped"):

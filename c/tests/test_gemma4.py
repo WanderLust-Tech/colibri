@@ -34,27 +34,52 @@ TINY = os.environ.get("GEMMA4_TINY", os.path.join(C_DIR, "gemma4_tiny"))
 REF = os.path.join(TINY, "ref.json")
 
 
-def ensure_container():
+VARIANT_DIRS = {"dense": TINY + "_dense", "ple": TINY + "_ple"}      # the 31B-like and the E2B-like tiny models
+
+
+def ensure_container(path=TINY, variant="moe"):
     """The weights are not committed (no repo weights are): rebuild them from the fixed recipe, numpy only."""
     import glob
-    if glob.glob(os.path.join(TINY, "model-*.safetensors")) or not os.path.isfile(REF):
+    if glob.glob(os.path.join(path, "model-*.safetensors")) or not os.path.isfile(os.path.join(path, "ref.json")):
         return True
     try:
         import make_gemma4_tiny
-        make_gemma4_tiny.build_container(TINY)
+        make_gemma4_tiny.build_container(path, variant)
         return True
     except ImportError:
         return False
 
 
 HAVE_FIXTURE = bool(EXE) and os.path.isfile(REF) and ensure_container()
+HAVE_VARIANTS = HAVE_FIXTURE and all(os.path.isfile(os.path.join(d, "ref.json")) and ensure_container(d, name)
+                                     for name, d in VARIANT_DIRS.items())
+
+_SNAP = [TINY]                    # the fixture the running test class is about; each class sets it in setUpClass
+
+
+def set_snap(path):
+    _SNAP[0] = path or TINY
+
+
+def snap_dir():
+    return _SNAP[0]
+
+
+def load_ref():
+    with open(os.path.join(snap_dir(), "ref.json"), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def snap_is_moe():
+    with open(os.path.join(snap_dir(), "config.json"), encoding="utf-8") as handle:
+        return bool(json.load(handle)["text_config"].get("enable_moe_block"))
 
 
 def offline(ids, greedy=0, extra=None, images=None):
     """The engine's test mode: logits (and a greedy continuation) of a prompt of token ids. images: (patch bytes,
     grid height, grid width) for each run of picture placeholders in the prompt."""
     import tempfile
-    env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
+    env = dict(os.environ, SNAP=snap_dir(), G4_TEST="1", G4_IDS=",".join(map(str, ids)), G4_GREEDY=str(greedy),
                OMP_NUM_THREADS="2", G4_SLACK="0",          # no slack: the ring is window + chunk, so it wraps
                G4_IMG_TOKENS="1")                          # ... and no room kept for pictures, unless a test says so
     env.update(extra or {})
@@ -76,10 +101,11 @@ def offline(ids, greedy=0, extra=None, images=None):
 
 @unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class LogitsTest(unittest.TestCase):
+    SNAP = None                      # None: the MoE fixture; the variants' subclasses name theirs
     @classmethod
     def setUpClass(cls):
-        with open(REF, encoding="utf-8") as handle:
-            cls.ref = json.load(handle)
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
 
     def check(self, **extra):
         for case in self.ref["cases"]:
@@ -112,20 +138,21 @@ class LogitsTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class BatchTest(unittest.TestCase):
+    SNAP = None                      # None: the MoE fixture; the variants' subclasses name theirs
     """A decode step of several conversations in one pass over the weights (the serve loop's way of decoding): each
     conversation must get, bit for bit, the logits it gets stepping alone. Not a tolerance: a reply must not depend
     on who else is asking."""
 
     @classmethod
     def setUpClass(cls):
-        with open(REF, encoding="utf-8") as handle:
-            cls.ref = json.load(handle)
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
         a, b, c = (case["ids"] for case in cls.ref["cases"])
         cls.prompts = [a, b, c, c[:17], a[:9] + [123, 45], b + [7], c[:30]]       # 23, 4, 41, 17, 11, 5, 30 tokens
 
     def batch(self, count, threads="2", **extra):
         prompts = self.prompts[:count]
-        env = dict(os.environ, SNAP=TINY, G4_TEST="1", G4_IDS=",".join(map(str, prompts[0])),
+        env = dict(os.environ, SNAP=snap_dir(), G4_TEST="1", G4_IDS=",".join(map(str, prompts[0])),
                    G4_IDS2=";".join(",".join(map(str, p)) for p in prompts[1:]), G4_GREEDY="8",
                    OMP_NUM_THREADS=threads, G4_SLACK="0", G4_IMG_TOKENS="1")
         env.update(extra)
@@ -163,6 +190,7 @@ def picture(ref, index):
 
 @unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class VisionTest(unittest.TestCase):
+    SNAP = None                      # None: the MoE fixture; the variants' subclasses name theirs
     """The vision tower and the pictures inside a prompt, against transformers' Gemma4ForConditionalGeneration: the
     soft tokens the tower makes, and the logits of whole prompts with one or two pictures in them. The reference pads
     the pictures to the longest and masks the padding; the engine pads nothing. The sliding layers (window 6) let a
@@ -170,8 +198,8 @@ class VisionTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(REF, encoding="utf-8") as handle:
-            cls.ref = json.load(handle)
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
         cls.cases = cls.ref["vision"]["cases"]
 
     def check(self, features=True, **extra):
@@ -295,6 +323,56 @@ class ContainerTest(unittest.TestCase):
         with open(os.path.join(directory, "model.safetensors.index.json"), encoding="utf-8") as handle:
             return json.load(handle)["weight_map"]
 
+    def test_dense_and_per_layer_embedding_checkpoints_convert(self):
+        import shutil
+        import tempfile
+        import make_gemma4_tiny as tiny
+        for variant in ("dense", "ple"):
+            var = tiny.VARIANTS[variant]
+            state = tiny.random_weights(var["text"], var["seed"])
+            state.update(tiny.random_vision_weights(var["seed"] + 100, var["vision"], var["text"]["hidden_size"]))
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+                tiny.write_committed_files(src, variant)
+                shutil.copyfile(os.path.join(TINY, "tokenizer.json"), os.path.join(src, "tokenizer.json"))
+                tiny.save_f32_safetensors(os.path.join(src, "model.safetensors"), state)
+                import convert_gemma4 as cv
+                meta = cv.convert(src, out, log=lambda *_: None)
+                self.assertFalse(meta["moe"])
+                self.assertEqual((meta["experts"], meta["expert_blob_bytes"]), (0, 0))
+                names = self.names(out)
+                self.assertFalse([n for n in names if "experts" in n or "router" in n])
+                self.assertEqual(sorted(n for n in names if n.endswith(".scale")), sorted(
+                    n + ".scale" for n in state if cv.classify(n) in ("matrix", "embed", "topmatrix", "vmatrix")))
+                if variant == "ple":
+                    lang = "model.language_model."
+                    for n in (lang + "embed_tokens_per_layer.weight", lang + "per_layer_model_projection.weight",
+                              lang + "layers.0.per_layer_input_gate.weight", lang + "layers.5.per_layer_projection.weight"):
+                        self.assertIn(n + ".scale", names)
+                    self.assertIn(lang + "per_layer_projection_norm.weight", names)
+                    self.assertIn(lang + "layers.5.post_per_layer_input_norm.weight", names)
+                    self.assertNotIn(lang + "layers.5.self_attn.k_proj.weight", names)        # a layer that shares has none
+                    self.assertIn(lang + "layers.3.self_attn.k_proj.weight", names)
+                    self.assertIn("model.vision_tower.encoder.layers.1.self_attn.v_proj.input_max", names)   # the clip limits
+                    self.assertNotIn("model.vision_tower.std_bias", names)
+
+    def test_a_table_is_quantized_a_block_of_rows_at_a_time_with_the_same_result(self):
+        import tempfile
+        import numpy as np
+        import convert_gemma4 as cv
+        import make_gemma4_tiny as tiny
+        rng = np.random.default_rng(5)
+        table = rng.normal(0, 1, (37, 24)).astype(np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            tiny.save_f32_safetensors(os.path.join(directory, "model.safetensors"), {"t": table})
+            ck = cv.Checkpoint(directory)
+            try:
+                want = cv.quantize_int8_rows(table)
+                for block in (1, 5, 37, 100):
+                    q, s = cv.quantize_tensor_rows(ck, "t", rows_per_block=block)
+                    self.assertTrue((q == want[0]).all() and (s == want[1]).all(), block)
+            finally:
+                ck.close()
+
     def test_the_vision_tower_is_carried_as_int8_rows_and_exact_vectors(self):
         import tempfile
         import numpy as np
@@ -356,7 +434,7 @@ class Engine:
     """One serving engine: frames come off stdout on a thread, so a test can write while it runs."""
 
     def __init__(self, slots=1, extra=None, cap="128", ctx="4096"):
-        env = dict(os.environ, SNAP=TINY, SERVE="1", SERVE_BATCH="1", KV_SLOTS=str(slots), CTX=ctx,
+        env = dict(os.environ, SNAP=snap_dir(), SERVE="1", SERVE_BATCH="1", KV_SLOTS=str(slots), CTX=ctx,
                    OMP_NUM_THREADS="2", COLI_PREFIX_LOG="1", G4_IMG_TOKENS="1")   # 1: the ring is sized for text, as the tests count it
         env.update(extra or {})
         self.proc = subprocess.Popen([EXE, cap], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -366,10 +444,11 @@ class Engine:
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
         self.next_id = 100
-        while True:                                  # the handshake: READY, CAPS, STAT, HWINFO, TIERS, EMAP
+        last = "EMAP" if snap_is_moe() else "HWINFO"      # the handshake: READY, CAPS, STAT, HWINFO, and for experts TIERS, EMAP
+        while True:
             line = self.get()
             self.startup.append(line)
-            if line[0] == "EMAP":
+            if line[0] == last:
                 break
 
     def _read_err(self):
@@ -465,12 +544,13 @@ class Engine:
 
 @unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class ServeTest(unittest.TestCase):
+    SNAP = None                      # None: the MoE fixture; the variants' subclasses name theirs
     TURN = "<|turn>user\nthe quick brown fox<turn|>\n<|turn>model\n"
 
     @classmethod
     def setUpClass(cls):
-        with open(REF, encoding="utf-8") as handle:
-            cls.ref = json.load(handle)
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
         cls.ids = {e["text"]: e["ids"] for e in cls.ref["encodings"]}
 
     def engine(self, **kw):
@@ -485,7 +565,7 @@ class ServeTest(unittest.TestCase):
         self.assertIn(("CAPS", ["vision=1", "img_tokens=1"]), [(k, a) for k, a, _ in e.startup])
         text_only = self.engine(extra={"G4_VISION": "0"})
         self.assertIn(("CAPS", ["vision=0", "img_tokens=0"]), [(k, a) for k, a, _ in text_only.startup])
-        for kind in ("STAT", "HWINFO", "TIERS", "EMAP"):
+        for kind in ("STAT", "HWINFO") + (("TIERS", "EMAP") if snap_is_moe() else ()):
             self.assertIn(kind, kinds)
 
     def test_the_prompt_is_counted_by_the_tokenizer(self):
@@ -498,11 +578,17 @@ class ServeTest(unittest.TestCase):
     def test_a_greedy_reply_is_the_offline_greedy_continuation(self):
         ids = self.ids["the quick brown fox"]
         want = offline(ids, 6)
+        # a random model may greedily choose a stop token (the end of a turn, the start of a tool response): the reply
+        # then ends there, one token short of what the offline run, which never stops, goes on to say
+        stops = {1, 106, 50}
+        k = next((i for i, t in enumerate(want["greedy"]) if t in stops), 6)
+        if k < 6:
+            want = offline(ids, k)
         e = self.engine()
         out = e.ask("the quick brown fox", max_tokens=6)
-        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]))
-        self.assertEqual(int(out["done"][2]), 6)            # tokens generated
-        self.assertEqual(out["done"][7], "1")              # stopped by the length limit
+        self.assertEqual(out["data"], bytes.fromhex(want["greedy_hex"]) if k else b"")
+        self.assertEqual(int(out["done"][2]), k)            # tokens generated
+        self.assertEqual(out["done"][7], "1" if k == 6 else "0")      # the length limit, or a stop token
         self.assertEqual(e.ask("the quick brown fox", max_tokens=6)["data"], out["data"])
 
     def test_a_turn_that_extends_the_last_reuses_its_cache_and_says_the_same(self):
@@ -708,14 +794,15 @@ class ServeTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
 class ServeVisionTest(unittest.TestCase):
+    SNAP = None                      # None: the MoE fixture; the variants' subclasses name theirs
     """Pictures over the serve protocol: IMAGE frames before the SUBMIT, soft tokens computed when the prompt reaches
     them, a cache that remembers which picture it was built on."""
     VISION = {"G4_IMG_TOKENS": "12"}
 
     @classmethod
     def setUpClass(cls):
-        with open(REF, encoding="utf-8") as handle:
-            cls.ref = json.load(handle)
+        set_snap(cls.SNAP)
+        cls.ref = load_ref()
         cls.ids = {e["text"]: e["ids"] for e in cls.ref["encodings"]}
 
     def engine(self, **kw):
@@ -830,6 +917,20 @@ class ServeVisionTest(unittest.TestCase):
         out = e.collect(rid)
         self.assertIsNotNone(out["done"])
         self.assertEqual(e.ask("hello there", max_tokens=1)["done"][2], "1")
+
+
+def _make_variant_classes():
+    """The same tests on the other sizes of the family: the dense 31B-like model and the E2B-like one (per-layer embeddings,
+    layers that share keys and values, a double-wide MLP, clipped vision linears), each against transformers on its own
+    tiny fixture. A dense engine has no experts: what is about them (the expert cache tests) passes trivially there."""
+    for label, directory in (("Dense", VARIANT_DIRS["dense"]), ("Ple", VARIANT_DIRS["ple"])):
+        for base in (LogitsTest, BatchTest, VisionTest, ServeTest, ServeVisionTest):
+            name = f"{label}{base.__name__}"
+            cls = type(name, (base,), {"SNAP": directory, "__doc__": f"{base.__name__} on the {label.lower()} fixture."})
+            globals()[name] = unittest.skipUnless(HAVE_VARIANTS, "needs the dense and ple fixtures")(cls)
+
+
+_make_variant_classes()
 
 
 if __name__ == "__main__":

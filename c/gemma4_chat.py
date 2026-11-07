@@ -310,9 +310,10 @@ def _arguments(call, where):
 
 
 def render(messages, tools=None, enable_thinking=False, add_generation_prompt=True, preserve_thinking=False,
-           image_order=None):
+           image_order=None, empty_thought=True):
     """The prompt for a conversation, as chat_template.jinja renders it. image_order: a list that receives the
-    `_image_index` of each picture part in the order its marker was written."""
+    `_image_index` of each picture part in the order its marker was written. empty_thought: with thinking off, the cue
+    carries an empty thought channel (the 26B-A4B's and the 31B's template; the E2B's and E4B's do not)."""
     if not isinstance(messages, list) or not messages:
         raise ChatError("`messages` must be a non-empty array.", "messages")
     if tools is not None and not isinstance(tools, list):
@@ -418,7 +419,7 @@ def render(messages, tools=None, enable_thinking=False, add_generation_prompt=Tr
     if add_generation_prompt:
         if prev_type not in ("tool_response", "tool_call"):
             out.append("<|turn>model\n")
-            if not enable_thinking:
+            if not enable_thinking and empty_thought:
                 out.append("<|channel>thought\n<channel|>")
         elif prev_type == "tool_response" and enable_thinking:
             out.append("<|channel>thought\n")

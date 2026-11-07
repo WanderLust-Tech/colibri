@@ -1117,6 +1117,14 @@ def chat_flavor():
 
 def detect_chat_flavor(family_id, model_dir):
     """The template a checkpoint ships, when it differs from its family's (see CHAT_FLAVOR)."""
+    if family_id == "gemma4" and model_dir:
+        # the 26B-A4B's and the 31B's template puts an empty thought channel on the cue when thinking is off; the E2B's and
+        # E4B's does not (their only difference). Said by the template the container carries.
+        try:
+            text = (Path(model_dir) / "chat_template.jinja").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        return None if "<|channel>thought\\n<channel|>" in text else "gemma4_no_cue"
     if family_id != "qwen36" or not model_dir:
         return None
     for name in ("chat_template.jinja", "tokenizer_config.json"):
@@ -1744,7 +1752,8 @@ def render_chat_gemma4(messages, enable_thinking=False, reasoning_effort=None, t
     order = []
     try:
         prompt = gemma4_chat.render(messages, tools, bool(enable_thinking), add_generation_prompt,
-                                    bool(preserve_thinking), image_order=order)
+                                    bool(preserve_thinking), image_order=order,
+                                    empty_thought=chat_flavor() != "gemma4_no_cue")
     except gemma4_chat.ChatError as error:
         raise APIError(400, str(error), error.param, error.code) from error
     # The engine takes the pictures as IMAGE frames in the order the gateway sends them (the order of the

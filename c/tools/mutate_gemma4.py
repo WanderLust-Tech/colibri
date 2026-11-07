@@ -25,6 +25,9 @@ LIBS = ["-lm", "-fopenmp"] + (["-static", "-lpsapi"] if sys.platform == "win32" 
 # the mutant is caught, but by the epsilon and by a hair, not by the router's arithmetic being checked.
 # It is listed here so that a future change of tolerance that lets it live is read for what it is.
 EQUIVALENT = {"top-k weights not renormalised",
+              # a per-layer input only multiplies the gate, goes through a linear projection and meets an RMS norm
+              # (post_per_layer_input_norm): a constant factor on it, here 1/sqrt(2), is divided out again
+              "per-layer inputs not averaged",
               # the main loop ends a cancelled request on its own turn anyway; the check inside the batch loop only
               # spares it one more token, and no test can tell one token from none without a race
               "a cancelled conversation goes on decoding"}
@@ -45,7 +48,7 @@ MUTANTS = [
     ("dense MLP gated with silu", "m->g1[i] = gelu_tanh(m->g1[i]) * m->u1[i];",
      "m->g1[i] = (m->g1[i] / (1.f + expf(-m->g1[i]))) * m->u1[i];"),
     ("experts gated with silu", "#define XF_ACT_GELU_TANH 1\n", ""),
-    ("no layer scalar", "xr[i] = (xr[i] + a[i]) * y->layer_scalar;", "xr[i] = (xr[i] + a[i]);"),
+    ("no layer scalar", "xr[i] *= y->layer_scalar; }", "xr[i] *= 1.f; }"),
     ("embeddings not scaled", "float sc = m->embed.s[id] * emb_scale;", "float sc = m->embed.s[id];"),
     ("no logit soft cap", "out[v] = c->softcap > 0 ? c->softcap * tanhf(l / c->softcap) : l;", "out[v] = l;"),
     ("per-expert scale ignored", "val[s * K + k] = val[s * K + k] / tot * y->router_pes[idx[s * K + k]];",
@@ -103,6 +106,25 @@ MUTANTS = [
     ("placeholder runs not counted against pictures", "if (nf != g_npend) snprintf(msg", "if (0) snprintf(msg", "ServeVisionTest"),
     ("picture size not checked against its placeholders", "if (found[i].ntok != want) snprintf(msg", "if (0) snprintf(msg", "ServeVisionTest"),
     ("picture bytes not checked", "else if ((size_t)cmd.payload_bytes != want) {", "else if (0) {", "ServeVisionTest"),
+    # the other sizes: per-layer embeddings, layers that share keys and values, clipped vision linears
+    ("per-layer embedding block skipped", "        if (c->ple_dim) {                                        /* the per-layer-embedding block",
+     "        if (0) {                                        /* the per-layer-embedding block", "PleLogitsTest"),
+    ("per-layer inputs without the token's row", "v[i] = (v[i] + (float)w[(size_t)l * P + i] * sc) * comb;", "v[i] = v[i] * comb;", "PleLogitsTest"),
+    ("per-layer inputs without the embedding's projection", "mm(m->ple, m->x, S, &m->ple_mproj);",
+     "memset(m->ple, 0, (size_t)S * LP * sizeof(float));", "PleLogitsTest"),
+    ("per-layer token row not scaled", "tscale = sqrtf((float)P)", "tscale = 1.f", "PleLogitsTest"),
+    ("per-layer inputs not averaged", "comb = 0.70710678118654752f", "comb = 1.f", "PleLogitsTest"),
+    ("every layer takes the first layer's per-layer input", "const float *pv = m->ple + (size_t)s * LP + (size_t)l * P;",
+     "const float *pv = m->ple + (size_t)s * LP;", "PleLogitsTest"),
+    ("a picture's rows take their own placeholder's per-layer row", "int id = g ? c->pad_token : ids[s]; if (id < 0 || id >= c->ple_vocab) id = 0;",
+     "int id = ids[s]; if (id < 0 || id >= c->ple_vocab) id = 0;", "PleVisionTest"),
+    ("a sharing layer reads the first layer of its kind, not the last", "for (int j = first_shared - 1; j >= 0; j--) if (c->is_full[j] == c->is_full[l])",
+     "for (int j = 0; j < first_shared; j++) if (c->is_full[j] == c->is_full[l])", "PleLogitsTest"),
+    ("a clipped vision linear does not clamp its input", "for (size_t i = 0; i < n; i++) t[i] = fminf(fmaxf(x[i], W->cl[0]), W->cl[1]);",
+     "for (size_t i = 0; i < n; i++) t[i] = x[i];", "PleVisionTest"),
+    ("a clipped vision linear does not clamp its output", "    for (size_t i = 0; i < o; i++) y[i] = fminf(fmaxf(y[i], W->cl[2]), W->cl[3]);\n", "", "PleVisionTest"),
+    ("a dense layer's MLP is not normalised after", "            rms_w(a, a, y->post_ff_ln, H, c->eps);\n            for (int i = 0; i < H; i++) xr[i] += a[i];",
+     "            for (int i = 0; i < H; i++) xr[i] += a[i];", "DenseLogitsTest"),
     # batched decode (BatchTest: bit for bit against stepping alone; ServeTest: whole conversations)
     ("a decode batch uses the 4-row kernel", "if (!g_rows1)", "if (1)", "BatchTest"),
     ("batch rows all read the first conversation's cache", "const Seq *cq = qs ? qs[s] : q;", "const Seq *cq = qs ? qs[0] : q;", "BatchTest"),

@@ -1066,15 +1066,23 @@ def _gemma4_geometry(config, context, _model_dir):
     hd_s = _required_int(config, "head_dim", "gemma4")
     nkv_s = _required_int(config, "num_key_value_heads", "gemma4")
     hd_g = _optional_int(config, "global_head_dim", hd_s, 1)
-    nkv_g = _optional_int(config, "num_global_key_value_heads", nkv_s, 1)
-    full = sum(1 for kind in kinds if kind == "full_attention")
-    sliding = layers - full
+    moe = bool(config.get("enable_moe_block"))
+    # the global KV head count applies only where keys are values (the config class's own rule); the dense 31B has that too
+    nkv_g = _optional_int(config, "num_global_key_value_heads", nkv_s, 1) if config.get("attention_k_eq_v") else nkv_s
+    shared = int(config.get("num_kv_shared_layers") or 0)          # the last layers read earlier layers' keys and values: no cache of their own
+    own_kinds = kinds[:layers - shared] if shared else kinds
+    full = sum(1 for kind in own_kinds if kind == "full_attention")
+    sliding = len(own_kinds) - full
     chunk, slack = 280, 2048            # 280: the rows of one forward pass (gemma4.c: a prompt chunk of 256, or a picture of 280 soft tokens)
     state = (full * context * nkv_g * hd_g * 2 * 4
              + sliding * min(context, window + chunk + slack) * nkv_s * hd_s * 2 * 4)
     hidden = _required_int(config, "hidden_size", "gemma4")
-    wide = max(heads * max(hd_s, hd_g), _required_int(config, "intermediate_size", "gemma4"), hidden)
-    workspace = chunk * wide * 4 * 6 + 64 * 1024 * 1024        # a chunk's activations, and the scratch of the expert kernel
+    ff = _required_int(config, "intermediate_size", "gemma4") * (2 if config.get("use_double_wide_mlp") and shared else 1)
+    wide = max(heads * max(hd_s, hd_g), ff, hidden)
+    workspace = chunk * wide * 4 * 6 + (64 * 1024 * 1024 if moe else 0)   # a chunk's activations, and the scratch of the expert kernel
+    workspace += chunk * layers * int(config.get("hidden_size_per_layer_input") or 0) * 4   # the per-layer inputs of a chunk
+    if not moe:
+        return PlannerGeometry(state, 0, workspace, 0, dense=True)
     return PlannerGeometry(state, 0, workspace, _required_int(config, "num_experts", "gemma4"))
 
 
@@ -1592,6 +1600,14 @@ FAMILIES = (
         model_types=("gemma4", "gemma4_text"),
         display_name="Gemma-4-26B-A4B",
         display_scale="26B",
+        # One engine, four checkpoints of one model_type: the mixture of experts and the three dense ones. Named by their
+        # layers and hidden size, so a banner never calls a 31B a 26B.
+        display_variants=(
+            DisplayVariant((("num_hidden_layers", 30), ("hidden_size", 2816)), "Gemma-4-26B-A4B", "26B"),
+            DisplayVariant((("num_hidden_layers", 60), ("hidden_size", 5376)), "Gemma-4-31B", "31B", "gemma-4-31b-colibri"),
+            DisplayVariant((("num_hidden_layers", 42), ("hidden_size", 2560)), "Gemma-4-E4B", "E4B", "gemma-4-e4b-colibri"),
+            DisplayVariant((("num_hidden_layers", 35), ("hidden_size", 1536)), "Gemma-4-E2B", "E2B", "gemma-4-e2b-colibri"),
+        ),
         engine_artifact="gemma4",
         engine_aliases=(),
         engine_group="gemma4",

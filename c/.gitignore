@@ -67,3 +67,7 @@ tests/xdna_physical_probe
 gemma4_tiny/gemma4_meta.json
 gemma4_tiny/model.safetensors.index.json
 gemma4_tiny/.coli_*
+gemma4_tiny_*/gemma4_meta.json
+gemma4_tiny_*/model.safetensors.index.json
+gemma4_tiny_*/tokenizer.json
+gemma4_tiny_*/.coli_*

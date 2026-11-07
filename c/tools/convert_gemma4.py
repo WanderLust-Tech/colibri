@@ -178,6 +178,23 @@ def quantize_int8_rows(w):
     return q, scale
 
 
+def quantize_tensor_rows(ck, name, rows_per_block=2048):
+    """quantize_int8_rows of a checkpoint tensor, a block of rows at a time: the per-layer embedding table of the
+    E4B is 5.6 GB in bf16 and 11 GB as float32, and a machine that converts it should not need both."""
+    f = ck.file_of(name)
+    rows, cols = f.shape(name)
+    kind = f.dtype(name)
+    item = {"BF16": 2, "F16": 2, "F32": 4}[kind]
+    raw = f.raw(name)
+    q = np.empty((rows, cols), dtype=np.int8)
+    scale = np.empty(rows, dtype=np.float32)
+    for r0 in range(0, rows, rows_per_block):
+        r1 = min(rows, r0 + rows_per_block)
+        block = f._decode(raw[r0 * cols * item:r1 * cols * item], kind, (r1 - r0, cols))
+        q[r0:r1], scale[r0:r1] = quantize_int8_rows(block)
+    return q, scale
+
+
 def dequantize_int8_rows(q, scale):
     return q.astype(np.float32) * scale[:, None]
 
@@ -229,12 +246,13 @@ LAYER = re.compile(r"^model\.language_model\.layers\.(\d+)\.(.+)$")
 MATRIX_TAILS = {
     "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight",
     "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight",
+    "per_layer_input_gate.weight", "per_layer_projection.weight",           # the per-layer-embedding block (E2B, E4B)
 }
 EXACT_TAILS = {
     "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight",
     "post_feedforward_layernorm.weight", "pre_feedforward_layernorm_2.weight",
     "post_feedforward_layernorm_1.weight", "post_feedforward_layernorm_2.weight",
-    "self_attn.q_norm.weight", "self_attn.k_norm.weight", "layer_scalar",
+    "self_attn.q_norm.weight", "self_attn.k_norm.weight", "layer_scalar", "post_per_layer_input_norm.weight",
     "router.proj.weight", "router.scale", "router.per_expert_scale",
 }
 EXPERT_TAILS = {"experts.gate_up_proj", "experts.down_proj"}
@@ -254,6 +272,7 @@ VISION_MATRICES = {"model.vision_tower.patch_embedder.input_proj.weight",
                    "model.embed_vision.embedding_projection.weight"}
 VISION_EXACT = {"model.vision_tower.patch_embedder.position_embedding_table",
                 "model.vision_tower.std_bias", "model.vision_tower.std_scale"}
+VISION_CLIP = re.compile(r"\.(input|output)_(min|max)$")      # a clipped linear's four limits (E2B, E4B): scalars, kept exact
 
 
 def classify(name):
@@ -267,12 +286,14 @@ def classify(name):
         m = VISION_LAYER.match(name)
         if m and m.group(2) in VISION_MATRIX_TAILS:
             return "vmatrix"
-        if m and m.group(2) in VISION_EXACT_TAILS:
+        if m and (m.group(2) in VISION_EXACT_TAILS or VISION_CLIP.search(m.group(2))):
             return "vexact"
         return None
-    if name == LANG + "embed_tokens.weight":
+    if name in (LANG + "embed_tokens.weight", LANG + "embed_tokens_per_layer.weight"):
         return "embed"
-    if name == LANG + "norm.weight":
+    if name == LANG + "per_layer_model_projection.weight":
+        return "topmatrix"
+    if name in (LANG + "norm.weight", LANG + "per_layer_projection_norm.weight"):
         return "exact"
     m = LAYER.match(name)
     if m:
@@ -394,7 +415,7 @@ def add_tensor_producers(w, ck, names_wanted):
 
             def both(n=name, cache=cache):
                 if "q" not in cache:
-                    cache["q"], cache["s"] = quantize_int8_rows(ck.array(n))
+                    cache["q"], cache["s"] = quantize_tensor_rows(ck, n)
                 return cache
 
             w.add(name, "I8", shape, lambda b=both: b()["q"])
@@ -454,15 +475,10 @@ def convert(src, out, log=print, with_vision=True):
     with open(os.path.join(src, "config.json"), encoding="utf-8") as handle:
         config = json.load(handle)
     tc = text_config(config)
-    hidden, inter = tc["hidden_size"], tc["moe_intermediate_size"]
-    experts, layers = tc["num_experts"], tc["num_hidden_layers"]
-    if tc.get("num_kv_shared_layers", 0):
-        raise SystemExit("num_kv_shared_layers > 0 is not supported (the 26B-A4B has none)")
-    if tc.get("hidden_size_per_layer_input", 0):
-        raise SystemExit("per-layer embeddings are not supported (the 26B-A4B has none)")
-    if not tc.get("enable_moe_block", False):
-        raise SystemExit("this converter is for the mixture-of-experts Gemma 4 (enable_moe_block)")
-    if hidden % BLOCK or inter % BLOCK:
+    moe = bool(tc.get("enable_moe_block", False))          # the 26B-A4B; the others (31B, E2B, E4B) are dense
+    hidden, layers = tc["hidden_size"], tc["num_hidden_layers"]
+    inter, experts = (tc["moe_intermediate_size"], tc["num_experts"]) if moe else (0, 0)
+    if moe and (hidden % BLOCK or inter % BLOCK):
         raise SystemExit(f"hidden_size {hidden} and moe_intermediate_size {inter} must be multiples of {BLOCK}")
 
     ck = Checkpoint(src)
@@ -496,7 +512,7 @@ def convert(src, out, log=print, with_vision=True):
 
         def both(n=name):
             if "q" not in cache:
-                cache["q"], cache["s"] = quantize_int8_rows(ck.array(n))
+                cache["q"], cache["s"] = quantize_tensor_rows(ck, n)
             return cache
 
         w.add(name, "I8", shape, lambda: both()["q"])
@@ -504,6 +520,10 @@ def convert(src, out, log=print, with_vision=True):
 
     add_int8(LANG + "embed_tokens.weight")
     add_f32(LANG + "norm.weight")
+    for top in sorted(n for n, k in kinds.items() if n.startswith(LANG) and not n.startswith(LANG + "layers.")):
+        if top in (LANG + "embed_tokens.weight", LANG + "norm.weight"):
+            continue
+        (add_f32 if kinds[top] == "exact" else add_int8)(top)      # the per-layer embedding table, its projection and norm
     for layer in range(layers):
         prefix = f"{LANG}layers.{layer}."
         for tail in sorted(MATRIX_TAILS):
@@ -512,6 +532,8 @@ def convert(src, out, log=print, with_vision=True):
         for tail in sorted(EXACT_TAILS):
             if prefix + tail in kinds:
                 add_f32(prefix + tail)
+        if not moe:
+            continue
         gate_up, down = prefix + "experts.gate_up_proj", prefix + "experts.down_proj"
         if gate_up not in kinds or down not in kinds:
             raise SystemExit(f"layer {layer}: expert tensors missing")
@@ -532,6 +554,8 @@ def convert(src, out, log=print, with_vision=True):
     for n, k in kinds.items():
         if k == "matrix" and not n.startswith(LANG + "layers."):
             raise SystemExit(f"unexpected matrix outside the layers: {n}")
+        if k == "expert" and not moe:
+            raise SystemExit(f"{n}: expert tensors in a checkpoint whose config says enable_moe_block is false")
 
     add_tensor_producers(w, ck, vision_names)
     size = w.finish()
@@ -542,8 +566,8 @@ def convert(src, out, log=print, with_vision=True):
     meta = {
         "format": META_FORMAT,
         "dense_bits": 8, "expert_bits": 4, "expert_group": BLOCK,
-        "expert_blob_bytes": blob_bytes(hidden, inter),
-        "layers": layers, "experts": experts,
+        "expert_blob_bytes": blob_bytes(hidden, inter) if moe else 0,
+        "layers": layers, "experts": experts, "moe": moe,
         "skipped_tensors": skipped,
     }
     if vision_names:

@@ -89,6 +89,9 @@ typedef struct {
     float eps, softcap, theta_s, theta_g, prf;
     uint8_t is_full[128];
     int stop[16], n_stop;
+    int moe;                            /* enable_moe_block: experts beside the dense MLP (the 26B-A4B); the others are dense */
+    int ple_dim, ple_vocab;             /* hidden_size_per_layer_input (0: none) and the vocabulary of that table */
+    int kv_shared, double_wide, pad_token;   /* layers at the end that read an earlier layer's keys and values; their MLP is twice as wide (E2B) */
     int image_token;                    /* the placeholder id of one soft token (-1: the config names none) */
     struct { int present, hidden, layers, heads, hd, inter, patch, pool, npos, standardize; float eps, theta; } vc;
 } Cfg;
@@ -111,9 +114,17 @@ static void load_cfg(Cfg *c, const char *snap) {
     c->n_layers = (int)jnum(t, "num_hidden_layers", 0);
     c->n_heads = (int)jnum(t, "num_attention_heads", 0);
     c->vocab = (int)jnum(t, "vocab_size", 0);
+    jval *mb = json_get(t, "enable_moe_block");
+    c->moe = mb && mb->t == J_BOOL ? mb->boolean : 0;
     c->n_experts = (int)jnum(t, "num_experts", 0);
     c->topk = (int)jnum(t, "top_k_experts", 0);
     c->moe_inter = (int)jnum(t, "moe_intermediate_size", 0);
+    c->ple_dim = (int)jnum(t, "hidden_size_per_layer_input", 0);
+    c->ple_vocab = (int)jnum(t, "vocab_size_per_layer_input", c->vocab);
+    c->kv_shared = (int)jnum(t, "num_kv_shared_layers", 0);
+    jval *dw = json_get(t, "use_double_wide_mlp");
+    c->double_wide = dw && dw->t == J_BOOL ? dw->boolean : 0;
+    c->pad_token = (int)jnum(t, "pad_token_id", 0);
     c->dense_inter = (int)jnum(t, "intermediate_size", 0);
     c->window = (int)jnum(t, "sliding_window", 0);
     c->hd_s = (int)jnum(t, "head_dim", 0);
@@ -122,6 +133,7 @@ static void load_cfg(Cfg *c, const char *snap) {
     c->nkv_g = (int)jnum(t, "num_global_key_value_heads", c->nkv_s);
     jval *kv = json_get(t, "attention_k_eq_v");
     c->k_eq_v = kv && kv->t == J_BOOL ? kv->boolean : 0;
+    if (!c->k_eq_v) c->nkv_g = c->nkv_s;                   /* the global KV head count applies only to the keys-are-values layers */
     c->eps = (float)jnum(t, "rms_norm_eps", 1e-6);
     c->softcap = (float)jnum(t, "final_logit_softcapping", 0);
     jval *rp = json_get(t, "rope_parameters");
@@ -133,11 +145,12 @@ static void load_cfg(Cfg *c, const char *snap) {
     if (!lt || lt->t != J_ARR || lt->len != c->n_layers) die("config has no layer_types for %d layers", c->n_layers);
     for (int i = 0; i < lt->len && i < 128; i++)
         c->is_full[i] = lt->kids[i]->str && !strcmp(lt->kids[i]->str, "full_attention");
-    if (c->n_layers < 1 || c->n_layers > 128 || c->hidden < 1 || c->n_experts < 1 || c->topk < 1 || c->topk > c->n_experts)
+    if (c->n_layers < 1 || c->n_layers > 128 || c->hidden < 1 || (c->moe && (c->n_experts < 1 || c->topk < 1 || c->topk > c->n_experts)))
         die("config: implausible geometry (%d layers, hidden %d, %d experts, top %d)", c->n_layers, c->hidden, c->n_experts, c->topk);
-    if (c->hidden % 64 || c->moe_inter % 64) die("hidden %d and moe_intermediate_size %d must be multiples of 64", c->hidden, c->moe_inter);
+    if (c->moe && (c->hidden % 64 || c->moe_inter % 64)) die("hidden %d and moe_intermediate_size %d must be multiples of 64", c->hidden, c->moe_inter);
+    if (c->kv_shared < 0 || c->kv_shared >= c->n_layers) die("config: num_kv_shared_layers %d of %d layers", c->kv_shared, c->n_layers);
+    if (c->ple_dim < 0 || (c->ple_dim && c->ple_vocab < 1)) die("config: implausible per-layer embeddings");
     if (c->hd_s % 2 || c->hd_g % 2) die("head sizes must be even");
-    if (jnum(t, "num_kv_shared_layers", 0) || jnum(t, "hidden_size_per_layer_input", 0)) die("kv sharing and per-layer embeddings are not supported");
     c->image_token = (int)jnum(root, "image_token_id", -1);
     jval *vcfg = json_get(root, "vision_config");
     if (vcfg && vcfg->t == J_OBJ) {
@@ -156,8 +169,6 @@ static void load_cfg(Cfg *c, const char *snap) {
             c->vc.patch < 1 || c->vc.pool < 1 || c->vc.npos < 1)
             die("config: implausible vision_config");
         if (jnum(vcfg, "num_key_value_heads", c->vc.heads) != c->vc.heads) die("a vision tower with grouped keys and values is not supported");
-        jval *cl = json_get(vcfg, "use_clipped_linears");
-        if (cl && cl->t == J_BOOL && cl->boolean) die("clipped vision linears are not supported");
     }
     /* stop ids: generation_config.json lists them (eos, end of turn, start of a tool response) */
     snprintf(path, sizeof path, "%s/generation_config.json", snap);
@@ -178,11 +189,14 @@ static void load_cfg(Cfg *c, const char *snap) {
 
 /* ------------------------------------------------------------------------------ weights */
 
-typedef struct { int8_t *q; float *s; int O, I; } QMat;
+typedef struct { int8_t *q; float *s; int O, I; int clipped; float cl[4]; } QMat;      /* cl: a clipped linear's input min, max, output min, max */
 
 typedef struct {
     int full;                                         /* a full-attention layer */
     int hd, nkv;                                      /* this layer's head size and KV heads */
+    int kv_src;                                       /* >= 0: this layer has no keys and values of its own, it reads those of layer kv_src */
+    int ff;                                           /* its dense MLP's width */
+    QMat ple_gate, ple_proj; float *ple_norm;         /* the per-layer-embedding block (PLE models) */
     float *in_ln, *post_attn_ln, *pre_ff_ln, *post_ff_ln, *pre_ff_ln2, *post_ff_ln1, *post_ff_ln2;
     float *q_norm, *k_norm;
     QMat q, k, v, o, gate, up, down;                  /* v.q == NULL on a layer whose values are its keys */
@@ -224,6 +238,10 @@ typedef struct {
     Vision vis; int rows, img_tokens;                 /* rows: the most one forward_chunk takes (a prompt chunk, or a whole picture);
                                                        * img_tokens: the soft tokens of the biggest picture accepted (0: no vision) */
     QMat embed; float *final_norm;
+    QMat ple_embed, ple_mproj; float *ple_pnorm;      /* per-layer embeddings: the token table [ple_vocab][layers*P], the projection of the embedding, its norm */
+    float *ple;                                       /* one chunk's per-layer inputs [rows][layers][P] */
+    float *pg;                                        /* one chunk's gate [rows][P] */
+    int max_ff;                                       /* the widest dense MLP of any layer */
     Layer *L;
     float *inv_s, *inv_g;                             /* rope frequencies: sliding, full */
     int cap; size_t blob_bytes;
@@ -261,6 +279,21 @@ static void load_q(Model *m, const char *name, QMat *w, int O, int I) {
     w->q = xmalloc((size_t)O * I);
     st_read_raw(&m->S, name, w->q, 0);
     load_f32(m, sname, &w->s, O);
+    /* a vision linear of the E2B and E4B is "clipped": its input and output are clamped to four learned limits, stored
+     * beside it as <module>.input_min, .input_max, .output_min, .output_max */
+    size_t nl = strlen(name), tl = strlen(".linear.weight");
+    if (nl > tl && !strcmp(name + nl - tl, ".linear.weight")) {
+        static const char *limit[4] = { ".input_min", ".input_max", ".output_min", ".output_max" };
+        char cn[300];
+        snprintf(cn, sizeof cn, "%.*s%s", (int)(nl - tl), name, limit[0]);
+        if (st_find(&m->S, cn)) {
+            w->clipped = 1;
+            for (int i = 0; i < 4; i++) {
+                snprintf(cn, sizeof cn, "%.*s%s", (int)(nl - tl), name, limit[i]);
+                float *v; load_f32(m, cn, &v, 1); w->cl[i] = v[0]; free(v);
+            }
+        }
+    }
 }
 
 /* The vision tower, when the config describes one and the container carries it. */
@@ -311,34 +344,59 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
     snprintf(nm, sizeof nm, "%snorm.weight", P); load_f32(m, nm, &m->final_norm, c->hidden);
     m->L = calloc((size_t)c->n_layers, sizeof(Layer));
     int H = c->hidden, E = c->n_experts;
+    int first_shared = c->kv_shared > 0 ? c->n_layers - c->kv_shared : c->n_layers;
+    m->max_ff = c->dense_inter;
+    if (c->ple_dim) {                                        /* per-layer embeddings: a table by token, and a projection of the embedding */
+        int LP = c->n_layers * c->ple_dim;
+        snprintf(nm, sizeof nm, "%sembed_tokens_per_layer.weight", P); load_q(m, nm, &m->ple_embed, c->ple_vocab, LP);
+        snprintf(nm, sizeof nm, "%sper_layer_model_projection.weight", P); load_q(m, nm, &m->ple_mproj, LP, H);
+        snprintf(nm, sizeof nm, "%sper_layer_projection_norm.weight", P); load_f32(m, nm, &m->ple_pnorm, c->ple_dim);
+    }
     for (int l = 0; l < c->n_layers; l++) {
         Layer *y = &m->L[l];
         y->full = c->is_full[l];
         y->hd = y->full ? c->hd_g : c->hd_s; y->nkv = y->full ? c->nkv_g : c->nkv_s;
+        y->kv_src = -1;
+        if (l >= first_shared)                               /* the last layer of its kind before the sharing starts */
+            for (int j = first_shared - 1; j >= 0; j--) if (c->is_full[j] == c->is_full[l]) { y->kv_src = j; break; }
+        if (l >= first_shared && y->kv_src < 0) die("layer %d shares keys and values but no earlier layer is of its kind", l);
+        y->ff = c->dense_inter * (c->double_wide && l >= first_shared && c->kv_shared > 0 ? 2 : 1);
+        if (y->ff > m->max_ff) m->max_ff = y->ff;
 #define NAME(tail) (snprintf(nm, sizeof nm, "%slayers.%d.%s", P, l, tail), nm)
         load_f32(m, NAME("input_layernorm.weight"), &y->in_ln, H);
         load_f32(m, NAME("post_attention_layernorm.weight"), &y->post_attn_ln, H);
         load_f32(m, NAME("pre_feedforward_layernorm.weight"), &y->pre_ff_ln, H);
         load_f32(m, NAME("post_feedforward_layernorm.weight"), &y->post_ff_ln, H);
-        load_f32(m, NAME("pre_feedforward_layernorm_2.weight"), &y->pre_ff_ln2, H);
-        load_f32(m, NAME("post_feedforward_layernorm_1.weight"), &y->post_ff_ln1, H);
-        load_f32(m, NAME("post_feedforward_layernorm_2.weight"), &y->post_ff_ln2, H);
+        if (c->moe) {
+            load_f32(m, NAME("pre_feedforward_layernorm_2.weight"), &y->pre_ff_ln2, H);
+            load_f32(m, NAME("post_feedforward_layernorm_1.weight"), &y->post_ff_ln1, H);
+            load_f32(m, NAME("post_feedforward_layernorm_2.weight"), &y->post_ff_ln2, H);
+        }
         load_f32(m, NAME("self_attn.q_norm.weight"), &y->q_norm, y->hd);
-        load_f32(m, NAME("self_attn.k_norm.weight"), &y->k_norm, y->hd);
         load_q(m, NAME("self_attn.q_proj.weight"), &y->q, c->n_heads * y->hd, H);
-        load_q(m, NAME("self_attn.k_proj.weight"), &y->k, y->nkv * y->hd, H);
-        if (y->full && c->k_eq_v) y->v.q = NULL;
-        else load_q(m, NAME("self_attn.v_proj.weight"), &y->v, y->nkv * y->hd, H);
+        if (y->kv_src < 0) {                                 /* a layer that shares keys and values has no projections for them */
+            load_f32(m, NAME("self_attn.k_norm.weight"), &y->k_norm, y->hd);
+            load_q(m, NAME("self_attn.k_proj.weight"), &y->k, y->nkv * y->hd, H);
+            if (y->full && c->k_eq_v) y->v.q = NULL;
+            else load_q(m, NAME("self_attn.v_proj.weight"), &y->v, y->nkv * y->hd, H);
+        }
         load_q(m, NAME("self_attn.o_proj.weight"), &y->o, H, c->n_heads * y->hd);
-        load_q(m, NAME("mlp.gate_proj.weight"), &y->gate, c->dense_inter, H);
-        load_q(m, NAME("mlp.up_proj.weight"), &y->up, c->dense_inter, H);
-        load_q(m, NAME("mlp.down_proj.weight"), &y->down, H, c->dense_inter);
-        load_f32(m, NAME("router.proj.weight"), &y->router_proj, (int64_t)E * H);
-        load_f32(m, NAME("router.scale"), &y->router_scale, H);
-        load_f32(m, NAME("router.per_expert_scale"), &y->router_pes, E);
+        load_q(m, NAME("mlp.gate_proj.weight"), &y->gate, y->ff, H);
+        load_q(m, NAME("mlp.up_proj.weight"), &y->up, y->ff, H);
+        load_q(m, NAME("mlp.down_proj.weight"), &y->down, H, y->ff);
+        if (c->moe) {
+            load_f32(m, NAME("router.proj.weight"), &y->router_proj, (int64_t)E * H);
+            load_f32(m, NAME("router.scale"), &y->router_scale, H);
+            load_f32(m, NAME("router.per_expert_scale"), &y->router_pes, E);
+            snprintf(y->blob_buf, sizeof y->blob_buf, "%slayers.%d.experts.blob", P, l);
+            y->blob_name = y->blob_buf;
+        }
+        if (c->ple_dim) {
+            load_q(m, NAME("per_layer_input_gate.weight"), &y->ple_gate, c->ple_dim, H);
+            load_q(m, NAME("per_layer_projection.weight"), &y->ple_proj, H, c->ple_dim);
+            load_f32(m, NAME("post_per_layer_input_norm.weight"), &y->ple_norm, H);
+        }
         float *ls; load_f32(m, NAME("layer_scalar"), &ls, 1); y->layer_scalar = ls[0]; free(ls);
-        snprintf(y->blob_buf, sizeof y->blob_buf, "%slayers.%d.experts.blob", P, l);
-        y->blob_name = y->blob_buf;
 #undef NAME
     }
     load_vision(m);
@@ -350,15 +408,19 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
         m->img_tokens = img;
         if (img > m->rows) m->rows = img;
     }
-    m->blob_bytes = (size_t)2 * c->moe_inter * (H / 2) + (size_t)H * (c->moe_inter / 2)
-                  + 4 * ((size_t)2 * c->moe_inter * (H / 64) + (size_t)H * (c->moe_inter / 64));
-    st_tensor *b = st_find(&m->S, m->L[0].blob_name);
-    if (!b || b->numel != (int64_t)E * (int64_t)m->blob_bytes) die("expert blobs have the wrong size: the container does not match its config");
+    if (c->moe) {
+        m->blob_bytes = (size_t)2 * c->moe_inter * (H / 2) + (size_t)H * (c->moe_inter / 2)
+                      + 4 * ((size_t)2 * c->moe_inter * (H / 64) + (size_t)H * (c->moe_inter / 64));
+        st_tensor *b = st_find(&m->S, m->L[0].blob_name);
+        if (!b || b->numel != (int64_t)E * (int64_t)m->blob_bytes) die("expert blobs have the wrong size: the container does not match its config");
+    }
+    if (!c->moe) cap = 1;                                    /* nothing to cache */
     if (cap <= 0) {                                          /* nobody chose: what the machine can hold */
         double total = 0, avail = 0; compat_meminfo_gb(&total, &avail);
         if (avail <= 0) avail = total > 0 ? total * 0.5 : 8.0;
         double ring_gb = 0, tok_gb = 0;                      /* KV of one conversation: the rings, and a 8192-token reply's full layers */
         for (int l = 0; l < c->n_layers; l++) {
+            if (m->L[l].kv_src >= 0) continue;                   /* it reads another layer's */
             double per_pos = 2.0 * m->L[l].nkv * m->L[l].hd * 4 / 1e9;
             if (m->L[l].full) tok_gb += per_pos * (max_t < 8192 ? max_t : 8192); else ring_gb += per_pos * (c->window + CHUNK);
         }
@@ -371,17 +433,19 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
                 avail, cap > E ? E : cap, E, (cap > E ? E : cap) * per_cap, g_slots_hint, g_slots_hint == 1 ? "" : "s", kv_gb,
                 cap < 32 ? " -- little memory: reading experts from disk will be slow; --cap or --ctx overrides" : "");
     }
-    if (cap < c->topk) cap = c->topk;
-    if (cap > E) cap = E;
-    m->cap = cap;
-    m->cache = calloc((size_t)c->n_layers, sizeof(LCache));
-    for (int l = 0; l < c->n_layers; l++) {
-        m->cache[l].s = calloc((size_t)cap, sizeof(ESlot));
-        m->cache[l].slot_of = xmalloc((size_t)E * sizeof(int));
-        for (int e = 0; e < E; e++) m->cache[l].slot_of[e] = -1;
-        for (int i = 0; i < cap; i++) m->cache[l].s[i].eid = -1;
+    if (c->moe) {
+        if (cap < c->topk) cap = c->topk;
+        if (cap > E) cap = E;
+        m->cap = cap;
+        m->cache = calloc((size_t)c->n_layers, sizeof(LCache));
+        for (int l = 0; l < c->n_layers; l++) {
+            m->cache[l].s = calloc((size_t)cap, sizeof(ESlot));
+            m->cache[l].slot_of = xmalloc((size_t)E * sizeof(int));
+            for (int e = 0; e < E; e++) m->cache[l].slot_of[e] = -1;
+            for (int i = 0; i < cap; i++) m->cache[l].s[i].eid = -1;
+        }
+        m->ehit = calloc((size_t)c->n_layers * E, 1);
     }
-    m->ehit = calloc((size_t)c->n_layers * E, 1);
     /* rope: sliding layers rotate the whole head; full layers a quarter of it ("proportional":
      * the exponent still counts over the whole head, and the rest of the angles are zero) */
     m->inv_s = xmalloc((size_t)(c->hd_s / 2) * sizeof(float));
@@ -400,7 +464,7 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
     m->ring = c->window + (m->img_tokens > m->chunk ? m->img_tokens : m->chunk) + m->slack;
     int nh = c->n_heads, hdm = c->hd_g > c->hd_s ? c->hd_g : c->hd_s;
     int kvm = c->nkv_s * c->hd_s > c->nkv_g * c->hd_g ? c->nkv_s * c->hd_s : c->nkv_g * c->hd_g;
-    int Fd = c->dense_inter, R = m->rows;
+    int Fd = m->max_ff, R = m->rows;
     m->x = xmalloc((size_t)R * H * 4); m->h = xmalloc((size_t)R * H * 4);
     m->qb = xmalloc((size_t)R * nh * hdm * 4); m->ao = xmalloc((size_t)R * nh * hdm * 4);
     m->kb = xmalloc((size_t)R * kvm * 4); m->vb = xmalloc((size_t)R * kvm * 4);
@@ -411,8 +475,14 @@ static void model_init(Model *m, const char *snap, int cap, int max_t) {
     m->ridx = xmalloc((size_t)R * c->topk * sizeof(int)); m->rval = xmalloc((size_t)R * c->topk * 4);
     m->eptr = xmalloc((size_t)R * c->topk * sizeof(void *));
     m->xe = xmalloc((size_t)E * sizeof(XfExpert));
-    m->scratch_bytes = xf_moe_scratch_bytes(R, c->topk, H, c->moe_inter);
-    m->scratch = xmalloc(m->scratch_bytes);
+    if (c->moe) {
+        m->scratch_bytes = xf_moe_scratch_bytes(R, c->topk, H, c->moe_inter);
+        m->scratch = xmalloc(m->scratch_bytes);
+    }
+    if (c->ple_dim) {
+        m->ple = xmalloc((size_t)R * c->n_layers * c->ple_dim * 4);
+        m->pg = xmalloc((size_t)R * c->ple_dim * 4);
+    }
     int T = 1;
 #ifdef _OPENMP
     T = omp_get_max_threads();
@@ -429,6 +499,7 @@ static void seq_init(Model *m, Seq *q) {
     q->K = calloc((size_t)c->n_layers, sizeof(float *)); q->V = calloc((size_t)c->n_layers, sizeof(float *));
     for (int l = 0; l < c->n_layers; l++) {
         Layer *y = &m->L[l];
+        if (y->kv_src >= 0) continue;                           /* it reads the keys and values of layer kv_src */
         size_t positions = y->full ? (size_t)m->max_t : (size_t)m->ring;
         q->K[l] = xmalloc(positions * y->nkv * y->hd * 4);
         q->V[l] = xmalloc(positions * y->nkv * y->hd * 4);
@@ -647,6 +718,17 @@ static void moe_routed(Model *m, int l, const float *xres, int S) {
 
 /* ------------------------------------------------------------------------------ vision */
 
+/* mm for a vision matrix: a clipped one clamps its input and its output to its limits. */
+static void vmm(float *y, const float *x, int S, const QMat *W) {
+    if (!W->clipped) { mm(y, x, S, W); return; }
+    size_t n = (size_t)S * W->I, o = (size_t)S * W->O;
+    float *t = xmalloc(n * sizeof(float));
+    for (size_t i = 0; i < n; i++) t[i] = fminf(fmaxf(x[i], W->cl[0]), W->cl[1]);
+    mm(y, t, S, W);
+    free(t);
+    for (size_t i = 0; i < o; i++) y[i] = fminf(fmaxf(y[i], W->cl[2]), W->cl[3]);
+}
+
 /* Turn the first half of a head by the patch's column angles and the second half by its row angles; each half
  * is rotated as two halves (rotate_half) by the same hd/4 angles. cx/sx, cy/sy: [hd/4] for this patch. */
 static void rope_axial(float *x, int hd, const float *cx, const float *sx, const float *cy, const float *sy) {
@@ -701,7 +783,7 @@ static float *vision_encode(Model *m, const unsigned char *pix, int gh, int gw) 
         VLayer *y = &v->L[l];
         t1 = now_s();
         for (int p = 0; p < P; p++) rms_w(h + (size_t)p * D, x + (size_t)p * D, y->in_ln, D, eps);
-        mm(q, h, P, &y->q); mm(kk, h, P, &y->k); mm(vv, h, P, &y->v);
+        vmm(q, h, P, &y->q); vmm(kk, h, P, &y->k); vmm(vv, h, P, &y->v);
         t_mm += now_s() - t1;
         for (int p = 0; p < P; p++) for (int hh = 0; hh < nh; hh++) {
             size_t o = ((size_t)p * nh + hh) * hd;
@@ -735,15 +817,15 @@ static float *vision_encode(Model *m, const unsigned char *pix, int gh, int gw) 
         }
         t_attn += now_s() - t1;
         t1 = now_s();
-        mm(t, ao, P, &y->o);
+        vmm(t, ao, P, &y->o);
         for (int p = 0; p < P; p++) {
             rms_w(t + (size_t)p * D, t + (size_t)p * D, y->post_attn_ln, D, eps);
             for (int i = 0; i < D; i++) x[(size_t)p * D + i] += t[(size_t)p * D + i];
         }
         for (int p = 0; p < P; p++) rms_w(h + (size_t)p * D, x + (size_t)p * D, y->pre_ff_ln, D, eps);
-        mm(g, h, P, &y->gate); mm(u, h, P, &y->up);
+        vmm(g, h, P, &y->gate); vmm(u, h, P, &y->up);
         for (size_t i = 0; i < (size_t)P * F; i++) g[i] = gelu_tanh(g[i]) * u[i];
-        mm(t, g, P, &y->down);
+        vmm(t, g, P, &y->down);
         for (int p = 0; p < P; p++) {
             rms_w(t + (size_t)p * D, t + (size_t)p * D, y->post_ff_ln, D, eps);
             for (int i = 0; i < D; i++) x[(size_t)p * D + i] += t[(size_t)p * D + i];
@@ -832,6 +914,27 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         for (int i = 0; i < H; i++) m->x[(size_t)s * H + i] = (float)w[i] * sc;
     }
     trace(m, "embed", -1, m->x + (size_t)(S - 1) * H, H);
+    if (c->ple_dim) {
+        /* per-layer inputs: for each row and layer a vector of ple_dim, made of what the embedding says (its projection,
+         * scaled and normalised) and what the token says (its row of the per-layer table, scaled), averaged. A picture's
+         * rows have the pad token's row for the second part and the picture's soft token for the first. */
+        int P = c->ple_dim, LP = c->n_layers * P;
+        float pscale = 1.f / sqrtf((float)H), tscale = sqrtf((float)P), comb = 0.70710678118654752f;
+        mm(m->ple, m->x, S, &m->ple_mproj);
+        for (int s = 0; s < S; s++) {
+            int p = ps ? ps[s] : pos0 + s;
+            const ImgSpan *g = nsp ? span_at(sp, nsp, p) : NULL;
+            int id = g ? c->pad_token : ids[s]; if (id < 0 || id >= c->ple_vocab) id = 0;
+            const int8_t *w = m->ple_embed.q + (size_t)id * LP; float sc = m->ple_embed.s[id] * tscale;
+            float *pv = m->ple + (size_t)s * LP;
+            for (int l = 0; l < c->n_layers; l++) {
+                float *v = pv + (size_t)l * P;
+                for (int i = 0; i < P; i++) v[i] *= pscale;
+                rms_w(v, v, m->ple_pnorm, P, c->eps);
+                for (int i = 0; i < P; i++) v[i] = (v[i] + (float)w[(size_t)l * P + i] * sc) * comb;
+            }
+        }
+    }
     /* rope tables for the chunk: sliding and full */
     int hs2 = c->hd_s / 2, hg2 = c->hd_g / 2;
     float *cs_s = xmalloc((size_t)S * hs2 * 4), *sn_s = xmalloc((size_t)S * hs2 * 4);
@@ -850,15 +953,19 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         t0 = now_s();
         for (int s = 0; s < S; s++) rms_w(m->h + (size_t)s * H, m->x + (size_t)s * H, y->in_ln, H, c->eps);
         mm(m->qb, m->h, S, &y->q);
-        mm(m->kb, m->h, S, &y->k);
-        if (y->v.q) mm(m->vb, m->h, S, &y->v);
-        else memcpy(m->vb, m->kb, (size_t)S * nkv * hd * sizeof(float));      /* values are the raw keys */
+        int own = y->kv_src < 0, ksrc = own ? l : y->kv_src;         /* a layer that shares reads the keys and values of layer ksrc */
+        if (own) {
+            mm(m->kb, m->h, S, &y->k);
+            if (y->v.q) mm(m->vb, m->h, S, &y->v);
+            else memcpy(m->vb, m->kb, (size_t)S * nkv * hd * sizeof(float));      /* values are the raw keys */
+        }
         for (int s = 0; s < S; s++) {
             for (int h = 0; h < nh; h++) {
                 float *qh = m->qb + ((size_t)s * nh + h) * hd;
                 rms_w(qh, qh, y->q_norm, hd, c->eps);
                 rope_head(qh, hd, cs + (size_t)s * h2, sn + (size_t)s * h2);
             }
+            if (!own) continue;
             for (int h = 0; h < nkv; h++) {
                 float *kh = m->kb + ((size_t)s * nkv + h) * hd, *vh = m->vb + ((size_t)s * nkv + h) * hd;
                 rms_w(kh, kh, y->k_norm, hd, c->eps);
@@ -888,7 +995,7 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
             float mx = -INFINITY;
             for (int j = lo; j <= hi; j++) {
                 size_t slot = y->full ? (size_t)j : (size_t)(j % m->ring);
-                float v = dot_f32(qh, cq->K[l] + (slot * nkv + kvh) * hd, hd);
+                float v = dot_f32(qh, cq->K[ksrc] + (slot * nkv + kvh) * hd, hd);
                 sc[j - lo] = v; if (v > mx) mx = v;
             }
             float sum = 0.f;
@@ -898,7 +1005,7 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
             for (int d = 0; d < hd; d++) out[d] = 0.f;
             for (int j = lo; j <= hi; j++) {
                 size_t slot = y->full ? (size_t)j : (size_t)(j % m->ring);
-                const float *vv = cq->V[l] + (slot * nkv + kvh) * hd; float w = sc[j - lo] * inv;
+                const float *vv = cq->V[ksrc] + (slot * nkv + kvh) * hd; float w = sc[j - lo] * inv;
                 for (int d = 0; d < hd; d++) out[d] += w * vv[d];
             }
         }
@@ -909,24 +1016,43 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         }
         m->t_attn += now_s() - t0;
         trace(m, "attn", l, m->x + (size_t)(S - 1) * H, H);
-        /* ---- feed-forward: dense MLP and experts side by side, both off the same residual ---- */
+        /* ---- feed-forward: the dense MLP, and on a mixture-of-experts layer the experts beside it, both off the same residual ---- */
         t0 = now_s();
-        int Fd = c->dense_inter;
+        int Fd = y->ff;
         for (int s = 0; s < S; s++) rms_w(m->h + (size_t)s * H, m->x + (size_t)s * H, y->pre_ff_ln, H, c->eps);
         mm(m->g1, m->h, S, &y->gate);
         mm(m->u1, m->h, S, &y->up);
         for (size_t i = 0; i < (size_t)S * Fd; i++) m->g1[i] = gelu_tanh(m->g1[i]) * m->u1[i];
         mm(m->m1, m->g1, S, &y->down);
-        for (int s = 0; s < S; s++) rms_w(m->m1 + (size_t)s * H, m->m1 + (size_t)s * H, y->post_ff_ln1, H, c->eps);
-        moe_routed(m, l, m->x, S);
-        for (int s = 0; s < S; s++) {
-            rms_w(m->m2 + (size_t)s * H, m->e_out + (size_t)s * H, y->post_ff_ln2, H, c->eps);
-            float *a = m->m1 + (size_t)s * H, *b = m->m2 + (size_t)s * H;
-            for (int i = 0; i < H; i++) a[i] += b[i];
-            rms_w(a, a, y->post_ff_ln, H, c->eps);
-            float *xr = m->x + (size_t)s * H;
-            for (int i = 0; i < H; i++) xr[i] = (xr[i] + a[i]) * y->layer_scalar;
+        if (c->moe) {
+            for (int s = 0; s < S; s++) rms_w(m->m1 + (size_t)s * H, m->m1 + (size_t)s * H, y->post_ff_ln1, H, c->eps);
+            moe_routed(m, l, m->x, S);
+            for (int s = 0; s < S; s++) {
+                rms_w(m->m2 + (size_t)s * H, m->e_out + (size_t)s * H, y->post_ff_ln2, H, c->eps);
+                float *a = m->m1 + (size_t)s * H, *b = m->m2 + (size_t)s * H;
+                for (int i = 0; i < H; i++) a[i] += b[i];
+            }
         }
+        for (int s = 0; s < S; s++) {
+            float *a = m->m1 + (size_t)s * H, *xr = m->x + (size_t)s * H;
+            rms_w(a, a, y->post_ff_ln, H, c->eps);
+            for (int i = 0; i < H; i++) xr[i] += a[i];
+        }
+        if (c->ple_dim) {                                        /* the per-layer-embedding block: gate, mix in this layer's input, project back */
+            int P = c->ple_dim, LP = c->n_layers * P;
+            mm(m->pg, m->x, S, &y->ple_gate);
+            for (int s = 0; s < S; s++) {
+                float *g = m->pg + (size_t)s * P; const float *pv = m->ple + (size_t)s * LP + (size_t)l * P;
+                for (int i = 0; i < P; i++) g[i] = gelu_tanh(g[i]) * pv[i];
+            }
+            mm(m->m1, m->pg, S, &y->ple_proj);
+            for (int s = 0; s < S; s++) {
+                float *a = m->m1 + (size_t)s * H, *xr = m->x + (size_t)s * H;
+                rms_w(a, a, y->ple_norm, H, c->eps);
+                for (int i = 0; i < H; i++) xr[i] += a[i];
+            }
+        }
+        for (int s = 0; s < S; s++) { float *xr = m->x + (size_t)s * H; for (int i = 0; i < H; i++) xr[i] *= y->layer_scalar; }
         m->t_moe += now_s() - t0;
         trace(m, "layer", l, m->x + (size_t)(S - 1) * H, H);
     }
@@ -1225,6 +1351,7 @@ static const ColiServeWireProfile g4_wire = {
 
 static void serve_hits(Model *m) {
     Cfg *c = &m->c; int E = c->n_experts, rows = c->n_layers;
+    if (!c->moe) return;                                       /* a dense model routes nothing */
     int nb = (rows * E + 7) / 8;
     uint8_t *bm = calloc((size_t)nb, 1); int bit = 0;
     for (int i = 0; i < rows; i++) for (int e = 0; e < E; e++, bit++)
@@ -1247,6 +1374,7 @@ static void serve_hwinfo(void) {
 
 static void serve_tiers_emap(Model *m) {
     Cfg *c = &m->c; int E = c->n_experts, filled = 0;
+    if (!c->moe) return;
     for (int l = 0; l < c->n_layers; l++) for (int i = 0; i < m->cap; i++) filled += m->cache[l].s[i].eid >= 0;
     printf("TIERS 0 %d %d 0.00 %.2f\n", filled, c->n_layers * E - filled, filled * (double)m->blob_bytes / 1e9);
     char *hex = malloc((size_t)c->n_layers * E * 2 + 1); int w = 0;
@@ -1361,7 +1489,8 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
     {   char caps[64]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d", m->vis.loaded, m->img_tokens);
         coli_serve_write_ready_caps(stdout, rss_gb(), caps); }
     serve_hwinfo(); serve_tiers_emap(m);
-    fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);
+    if (c->moe) fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);
+    else fprintf(stderr, "[gemma4] serving %d conversation%s, context %d (a dense model)\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap);
     int input_eof = 0, rr = 0;
     float top_k_env = getenv("G4_TOP_K") ? (float)atoi(getenv("G4_TOP_K")) : 64;
     for (;;) {
