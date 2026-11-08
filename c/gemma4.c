@@ -55,6 +55,7 @@
 #define XF_ACT_GELU_TANH 1
 #include "expert_ffn.h"
 #include "gemma4_tok.h"
+#include "constrain.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1644,6 +1645,7 @@ typedef struct {
     int reuse;
     int *keys;                          /* what the cache records per prompt row: the ids, a picture's rows keyed by the picture */
     ImgSpan *sp; int nsp;               /* the prompt's pictures */
+    Cn *cn;                             /* the request's grammar (response_format), NULL when it has none: constrain.h */
 } Req;
 
 #define MAX_PICS 8
@@ -1652,10 +1654,34 @@ static struct { int kind; unsigned char *pix; int gh, gw; } g_pend[2 * MAX_PICS]
 static int g_npend, g_pend_bad;
 static void pending_clear(void) { for (int i = 0; i < g_npend; i++) free(g_pend[i].pix); g_npend = 0; }
 
+/* The optional 7th numeric field of SUBMIT is the byte length of a grammar that follows the prompt (what the gateway sends
+ * GLM for its grammar-forced drafts); here it constrains the answer (constrain.h). The gateway sends it only after the
+ * CAPS line said grammar=1. */
 static const ColiServeWireProfile g4_wire = {
     .max_header_bytes = 511, .max_payload_bytes = 1u << 25, .max_tokens = 1 << 20,
     .require_exact_lf = 1, .require_finite_sampling = 0,
+    .max_extension_bytes = 1u << 20, .allow_extension_bytes = 1,
 };
+
+/* What each token adds to the answer, for constrain.h: built from the tokenizer the first time a request brings a grammar. */
+static CnVocab *g4_cn_vocab(const Cfg *c, const G4Tok *T) {
+    CnVocab *v = cn_vocab_new(c->vocab);
+    if (!v) return NULL;
+    static char piece[4096];
+    for (int t = 0; t < c->vocab; t++) {
+        if (is_stop(c, t)) { cn_vocab_set(v, t, NULL, 0, CN_END); continue; }
+        if (t >= T->n_ids || !T->piece[t] || T->is_special[t]) continue;            /* stays CN_SPECIAL: never chosen */
+        int n = g4_tok_piece(T, t, piece, sizeof piece);
+        if (n > 0 && n < (int)sizeof piece) cn_vocab_set(v, t, (const unsigned char *)piece, n, CN_TEXT);
+    }
+    return v;
+}
+
+typedef struct { int V, top_k; float temp, top_p; } G4Sampler;
+static int g4_sample_cb(const float *lo, void *ctx) {
+    const G4Sampler *s = (const G4Sampler *)ctx;
+    return pick_token(lo, s->V, s->temp, s->top_p, s->top_k);
+}
 
 static void serve_hits(Model *m) {
     Cfg *c = &m->c; int E = c->n_experts, rows = c->n_layers;
@@ -1695,6 +1721,14 @@ static void serve_tiers_emap(Model *m) {
     free(hex);
 }
 
+static void req_release(Req *r) {
+    free(r->ids); free(r->lo); r->ids = NULL; r->lo = NULL; r->active = 0;
+    free(r->keys); r->keys = NULL;
+    for (int i = 0; i < r->nsp; i++) { free(r->sp[i].pix); free(r->sp[i].feat); }
+    free(r->sp); r->sp = NULL; r->nsp = 0;
+    cn_free(r->cn); r->cn = NULL;
+}
+
 static void req_finish(Model *m, Req *r) {
     double dt = now_s() - r->t0;
     double tot = (double)(m->hits - r->h0 + m->miss - r->m0);
@@ -1707,10 +1741,14 @@ static void req_finish(Model *m, Req *r) {
            m->t_attn - r->attn0, m->t_head - r->head0, m->forwards - r->fwd0);
     fflush(stdout);
     serve_hits(m);
-    free(r->ids); free(r->lo); r->ids = NULL; r->lo = NULL; r->active = 0;
-    free(r->keys); r->keys = NULL;
-    for (int i = 0; i < r->nsp; i++) { free(r->sp[i].pix); free(r->sp[i].feat); }
-    free(r->sp); r->sp = NULL; r->nsp = 0;
+    req_release(r);
+}
+
+/* A request that cannot go on: the gateway gets the ERROR (its answer to the client) and no DONE. */
+static void req_fail(Model *m, Req *r, const char *msg) {
+    coli_serve_write_error(stdout, r->id, msg);
+    serve_hits(m);
+    req_release(r);
 }
 
 static int kv_prefix_off(void) { const char *e = getenv("COLI_KV_PREFIX"); return e && *e == '0'; }
@@ -1804,12 +1842,13 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
     Req *rq = calloc((size_t)n_slots, sizeof(Req));
     for (int i = 0; i < n_slots; i++) seq_init(m, &seq[i]);
     coli_serve_stdio_init();
-    {   char caps[96]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d audio=%d audio_tokens=%d", m->vis.loaded, m->img_tokens, m->aud.loaded, m->aud_tokens);
+    {   char caps[128]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d audio=%d audio_tokens=%d grammar=1", m->vis.loaded, m->img_tokens, m->aud.loaded, m->aud_tokens);
         coli_serve_write_ready_caps(stdout, rss_gb(), caps); }
     serve_hwinfo(); serve_tiers_emap(m);
     if (c->moe) fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);
     else fprintf(stderr, "[gemma4] serving %d conversation%s, context %d (a dense model)\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap);
     int input_eof = 0, rr = 0;
+    CnVocab *cn_vocab_g = NULL;                                  /* made when the first grammar arrives */
     float top_k_env = getenv("G4_TOP_K") ? (float)atoi(getenv("G4_TOP_K")) : 64;
     for (;;) {
         int active = 0; for (int i = 0; i < n_slots; i++) active += rq[i].active;
@@ -1871,8 +1910,22 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
                         snprintf(r->id, sizeof r->id, "%s", cmd.id);
                         r->max_tok = cmd.max_tokens; r->temp = cmd.temperature; r->top_p = cmd.top_p;
                         char *payload = (char *)coli_serve_command_take_payload(&cmd);
-                        if (req_start(m, T, r, &seq[cmd.slot], payload, (int)cmd.payload_bytes, ctx_cap))
+                        int ok = 1;
+                        if (cmd.extension_bytes) {                       /* a grammar: compile it before anything else is touched */
+                            char *gtext = xmalloc((size_t)cmd.extension_bytes + 1), gerr[200];
+                            memcpy(gtext, payload + cmd.payload_bytes + 1, (size_t)cmd.extension_bytes);
+                            gtext[cmd.extension_bytes] = 0;
+                            if (!cn_vocab_g && !(cn_vocab_g = g4_cn_vocab(c, T))) { coli_serve_write_error(stdout, r->id, "out of memory"); ok = 0; }
+                            else if (!(r->cn = cn_new(gtext, gerr, sizeof gerr))) {
+                                char msg[260]; snprintf(msg, sizeof msg, "BAD_GRAMMAR %s", gerr);
+                                coli_serve_write_error(stdout, r->id, msg); ok = 0;
+                            }
+                            free(gtext);
+                            if (!ok) pending_clear();
+                        }
+                        if (ok && req_start(m, T, r, &seq[cmd.slot], payload, (int)cmd.payload_bytes, ctx_cap))
                             coli_serve_write_accept(stdout, r->id, r->np);
+                        else cn_free(r->cn), r->cn = NULL;               /* r is inactive here: a request that ended before it began */
                         free(payload);
                     }
                 } else {
@@ -1909,7 +1962,16 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
             Req *w = &rq[j];
             if (!w->active || w->phase != 1) continue;
             if (w->cancel) { w->limited = 0; req_finish(m, w); serve_tiers_emap(m); continue; }
-            int t = pick_token(w->lo, V, w->temp, w->top_p, (int)top_k_env);
+            int t;
+            if (w->cn) {                                         /* a grammar: only tokens that keep the answer inside it */
+                G4Sampler sm = { V, (int)top_k_env, w->temp, w->top_p };
+                t = cn_pick(w->cn, cn_vocab_g, w->lo, g4_sample_cb, &sm);
+                if (t < 0) {
+                    req_fail(m, w, t == -1 ? "GRAMMAR_STUCK no token of this vocabulary can continue the grammar"
+                                           : "GRAMMAR_LOST the grammar is too ambiguous to follow");
+                    serve_tiers_emap(m); continue;
+                }
+            } else t = pick_token(w->lo, V, w->temp, w->top_p, (int)top_k_env);
             if (is_stop(c, t)) { w->limited = 0; req_finish(m, w); serve_tiers_emap(m); continue; }
             char piece[512]; int np_ = g4_tok_piece(T, t, piece, sizeof piece);
             coli_serve_write_data(stdout, w->id, piece, (size_t)np_);

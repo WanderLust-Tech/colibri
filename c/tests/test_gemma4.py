@@ -20,6 +20,7 @@ What is held:
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -555,9 +556,11 @@ class Engine:
     def get(self, timeout=60):
         return self.frames.get(timeout=timeout)
 
-    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None, images=None, audios=None):
+    def submit(self, text, slot=0, max_tokens=6, temperature=0.0, top_p=1.0, rid=None, images=None, audios=None,
+               grammar=None):
         """images: (patch bytes, grid height, grid width) for each picture, sent as IMAGE frames just before the SUBMIT;
-        audios: (float32 mel bytes, frames, bins) for each clip, sent as AUDIO frames."""
+        audios: (float32 mel bytes, frames, bins) for each clip, sent as AUDIO frames; grammar: GBNF text, or a JSON
+        schema (text starting with '{'), as the 7th numeric field and the bytes after the prompt."""
         rid = rid or str(self.next_id)
         self.next_id += 1
         payload = text.encode("utf-8")
@@ -566,7 +569,9 @@ class Engine:
             frames += f"IMAGE {rid} {len(patches)} {gh} {gw}\n".encode() + patches + b"\n"
         for mel, count, bins in audios or ():
             frames += f"AUDIO {rid} {len(mel)} {count} {bins}\n".encode() + mel + b"\n"
-        self.proc.stdin.write(frames + f"SUBMIT {rid} {slot} {len(payload)} {max_tokens} {temperature} {top_p}\n".encode() + payload + b"\n")
+        gbytes = grammar.encode("utf-8") if grammar else b""
+        header = f"SUBMIT {rid} {slot} {len(payload)} {max_tokens} {temperature} {top_p}" + (f" {len(gbytes)}" if gbytes else "")
+        self.proc.stdin.write(frames + header.encode() + b"\n" + payload + gbytes + b"\n")
         self.proc.stdin.flush()
         return rid
 
@@ -1208,12 +1213,128 @@ class ServeAudioTest(unittest.TestCase):
         self.assertEqual(self.pictures_made(e), 1)                           # a second ask reads neither again: both are cached
 
 
+@unittest.skipUnless(HAVE_FIXTURE, "needs the built gemma4, c/gemma4_tiny and numpy")
+class ServeGrammarTest(unittest.TestCase):
+    """A request that carries a grammar (c/constrain.h): a random model, which left alone writes noise, must write what the
+    grammar allows, judged by Python's json parser and not by the engine's own walker."""
+    SNAP = None
+    TURN = "<|turn>user\nthe quick brown fox<turn|>\n<|turn>model\n"
+    SCHEMA = json.dumps({"type": "object", "properties": {"name": {"type": "string"}, "n": {"type": "integer"},
+                                                          "ok": {"type": "boolean"}},
+                         "required": ["name", "n", "ok"]})
+
+    START = r'\A\s*\{\s*"name"\s*:'                           # whitespace may sit before and between any tokens of the grammar
+
+    @classmethod
+    def setUpClass(cls):
+        set_snap(cls.SNAP)
+        import openai_server
+        cls.generic = openai_server.GENERIC_JSON_GBNF
+
+    def engine(self, **kw):
+        e = Engine(**kw)
+        self.addCleanup(e.close)
+        return e
+
+    def specials(self):
+        with open(os.path.join(snap_dir(), "tokenizer.json"), encoding="utf-8") as handle:
+            return [t["content"] for t in json.load(handle)["added_tokens"] if t["content"]]
+
+    def answers(self, e, grammar, count, slot=0, max_tokens=160):
+        """The answers that ended by themselves (a stop token the grammar allowed), as text."""
+        out = []
+        for _ in range(count):
+            r = e.ask(self.TURN, grammar=grammar, max_tokens=max_tokens, temperature=1.0, top_p=1.0, slot=slot)
+            self.assertIsNone(r["error"])
+            text = r["data"].decode("utf-8", "surrogateescape")
+            for special in self.specials():                 # a control token is never part of an answer, though inside a
+                self.assertNotIn(special, text)             # JSON string its text would still parse
+            if r["done"][7] == "0":
+                out.append(r["data"].decode("utf-8", "surrogateescape"))
+        return out
+
+    def test_the_handshake_says_the_engine_takes_grammars(self):
+        e = self.engine()
+        caps = dict(f.split("=") for k, a, _ in e.startup if k == "CAPS" for f in a)
+        self.assertEqual(caps["grammar"], "1")
+
+    def test_a_random_model_under_the_json_grammar_writes_json(self):
+        e = self.engine()
+        done = self.answers(e, self.generic, 40)
+        self.assertGreater(len(done), 5, "too few answers ended by themselves for the check to mean anything")
+        for text in done:
+            json.loads(text)                                # raises when it is not JSON (any value is allowed at the top)
+        self.assertGreater(len(set(done)), len(done) // 2, "temperature 1 should make different answers")
+
+    def test_a_random_model_under_a_schema_writes_that_shape(self):
+        e = self.engine()
+        done = self.answers(e, self.SCHEMA, 40)
+        self.assertGreater(len(done), 5)
+        for text in done:
+            value = json.loads(text)
+            self.assertEqual(list(value), ["name", "n", "ok"])
+            self.assertIsInstance(value["name"], str)
+            self.assertTrue(isinstance(value["n"], int) and not isinstance(value["n"], bool))
+            self.assertIsInstance(value["ok"], bool)
+
+    def test_greedy_under_a_grammar_is_repeatable_and_obeys_it(self):
+        e = self.engine()
+        first = e.ask(self.TURN, grammar=self.SCHEMA, max_tokens=120)
+        again = e.ask(self.TURN, grammar=self.SCHEMA, max_tokens=120)
+        self.assertEqual(first["data"], again["data"])
+        text = first["data"].decode("utf-8", "surrogateescape")
+        # a greedy random model may spend its tokens on whitespace, which the grammar allows anywhere between tokens: the
+        # answer is then a prefix of the schema's shape, never anything else
+        self.assertRegex(text, re.compile(r'\A\s*(\{\s*("name"\s*:.*)?)?\Z', re.DOTALL))
+        if first["done"][7] == "0":
+            json.loads(text)
+
+    def test_a_grammar_of_gbnf_text_and_a_word_that_must_end(self):
+        e = self.engine()
+        r = e.ask(self.TURN, grammar='root ::= "yes" | "no"', max_tokens=20, temperature=1.0)
+        self.assertIn(r["data"], (b"yes", b"no"))
+        self.assertEqual(r["done"][7], "0")                 # it ended itself: the end token is allowed once the word is whole
+        r = e.ask(self.TURN, grammar='root ::= "ab"', max_tokens=20, temperature=1.0)
+        self.assertEqual(r["data"], b"ab")
+
+    def test_a_request_without_a_grammar_is_not_touched(self):
+        e = self.engine()
+        plain = e.ask(self.TURN, max_tokens=8)
+        e.ask(self.TURN, grammar=self.generic, max_tokens=8)
+        self.assertEqual(e.ask(self.TURN, max_tokens=8)["data"], plain["data"])
+
+    def test_a_grammar_that_does_not_compile_is_refused_by_id_before_anything_is_read(self):
+        e = self.engine()
+        for bad in ("this is not a grammar", '{"type": "object", "properties": {"a": {"type": "mystery"}}, "required": ["a"]}'):
+            r = e.ask(self.TURN, grammar=bad, max_tokens=4)
+            self.assertIsNone(r["accept"], bad)
+            self.assertTrue((r["error"] or "").startswith("BAD_GRAMMAR"), (bad, r["error"]))
+        ok = e.ask(self.TURN, max_tokens=3)                 # the slot is free and the engine goes on
+        self.assertIsNotNone(ok["done"])
+
+    def test_a_grammar_beside_a_plain_request_in_the_other_slot(self):
+        e = self.engine(slots=2)
+        alone = e.ask(self.TURN, max_tokens=10, slot=1)["data"]
+        g = e.submit(self.TURN, grammar=self.SCHEMA, max_tokens=60, temperature=1.0, slot=0)
+        p = e.submit(self.TURN, max_tokens=10, slot=1)
+        seen, done = {g: b"", p: b""}, {}
+        while len(done) < 2:
+            kind, args, body = e.get()
+            if kind == "DATA" and args[0] in seen:
+                seen[args[0]] += body
+            elif kind in ("DONE", "ERROR") and args and args[0] in seen:
+                done[args[0]] = kind
+        self.assertEqual(done, {g: "DONE", p: "DONE"})
+        self.assertEqual(seen[p], alone)                    # the other conversation says what it says alone
+        self.assertRegex(seen[g].decode("utf-8", "surrogateescape"), self.START)
+
+
 def _make_variant_classes():
     """The same tests on the other sizes of the family: the dense 31B-like model and the E2B-like one (per-layer embeddings,
     layers that share keys and values, a double-wide MLP, clipped vision linears), each against transformers on its own
     tiny fixture. A dense engine has no experts: what is about them (the expert cache tests) passes trivially there."""
     for label, directory in (("Dense", VARIANT_DIRS["dense"]), ("Ple", VARIANT_DIRS["ple"])):
-        for base in (LogitsTest, BatchTest, VisionTest, ServeTest, ServeVisionTest):
+        for base in (LogitsTest, BatchTest, VisionTest, ServeTest, ServeVisionTest, ServeGrammarTest):
             name = f"{label}{base.__name__}"
             cls = type(name, (base,), {"SNAP": directory, "__doc__": f"{base.__name__} on the {label.lower()} fixture."})
             globals()[name] = unittest.skipUnless(HAVE_VARIANTS, "needs the dense and ple fixtures")(cls)

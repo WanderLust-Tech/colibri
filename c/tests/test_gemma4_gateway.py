@@ -20,8 +20,8 @@ sys.path.insert(0, str(HERE))
 import gemma4_chat  # noqa: E402
 import openai_server  # noqa: E402
 from openai_server import Engine, read_engine_turn  # noqa: E402
-from test_openai_server import (FakeProcess, ScriptedEngine, _error_body, _post_chat,  # noqa: E402
-                                _post_json, _spawn_test_server)
+from test_openai_server import (READY, BlockingStream, FakeProcess, ScriptedEngine, _error_body,  # noqa: E402
+                                _post_chat, _post_json, _spawn_test_server)
 
 WEATHER = {"type": "function", "function": {
     "name": "get_weather", "description": "Weather of a city.",
@@ -125,6 +125,105 @@ class GatewayTest(unittest.TestCase):
 
     def test_the_model_is_listed_under_its_family_name(self):
         self.assertEqual(openai_server.family_by_id("gemma4").default_model_id, "gemma-4-26b-a4b-colibri")
+
+
+class GrammarEngine(ScriptedEngine):
+    """An engine that says in its CAPS line whether it limits its answer to a request's grammar."""
+    model_dir = None
+
+    def __init__(self, *args, grammar=True, **kw):
+        super().__init__(*args, **kw)
+        self.grammar = grammar
+
+
+class GrammarTest(unittest.TestCase):
+    """response_format on an engine that constrains its answer (CAPS grammar=1): the grammar goes to the engine, and what
+    the engine cannot honour is a 400 here, not a quietly unconstrained answer."""
+    SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+
+    def setUp(self):
+        patcher = patch("openai_server.ARCH", "gemma4")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def server(self, **kw):
+        self.engine = GrammarEngine(chunks=['{"city":"Rome"}'], supports_logprobs_echo=False, supports_tok_ids=False, **kw)
+        return _spawn_test_server(self, self.engine)
+
+    def chat(self, base, **body):
+        body.setdefault("model", "test-model")
+        body.setdefault("messages", [{"role": "user", "content": "Where?"}])
+        with _post_chat(base, body) as response:
+            return json.load(response)
+
+    def test_json_mode_sends_the_generic_json_grammar(self):
+        base = self.server()
+        reply = self.chat(base, response_format={"type": "json_object"})
+        self.assertEqual(reply["choices"][0]["message"]["content"], '{"city":"Rome"}')
+        self.assertEqual(self.engine.calls[0][5], openai_server.GENERIC_JSON_GBNF)
+
+    def test_a_schema_goes_to_the_engine_as_the_schema(self):
+        base = self.server()
+        self.chat(base, response_format={"type": "json_schema", "json_schema": {"name": "where", "schema": self.SCHEMA}})
+        self.assertEqual(json.loads(self.engine.calls[0][5]), self.SCHEMA)
+
+    def test_raw_gbnf_goes_as_it_is(self):
+        base = self.server()
+        self.chat(base, response_format={"type": "gbnf", "grammar": 'root ::= "yes" | "no"'})
+        self.assertEqual(self.engine.calls[0][5], 'root ::= "yes" | "no"')
+
+    def test_a_request_without_response_format_sends_no_grammar(self):
+        base = self.server()
+        self.chat(base)
+        self.assertIsNone(self.engine.calls[0][5])
+
+    def test_an_engine_that_does_not_constrain_still_says_no(self):
+        for grammar in (False, None):
+            base = self.server(grammar=grammar)
+            status, error = _error_body(self, lambda: self.chat(base, response_format={"type": "json_object"}))
+            self.assertEqual((status, error["code"]), (400, "unsupported_parameter"), grammar)
+            self.assertEqual(self.engine.calls, [])
+
+    def test_a_grammar_with_thinking_is_refused_because_it_would_limit_the_reasoning(self):
+        base = self.server()
+        status, error = _error_body(self, lambda: self.chat(base, response_format={"type": "json_object"}, enable_thinking=True))
+        self.assertEqual((status, error["code"]), (400, "invalid_value"))
+        self.assertIn("thinking", error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_a_grammar_with_tools_is_refused_because_it_would_forbid_the_call(self):
+        base = self.server()
+        status, error = _error_body(self, lambda: self.chat(base, response_format={"type": "json_object"}, tools=[WEATHER]))
+        self.assertEqual((status, error["code"]), (400, "invalid_value"))
+        self.assertIn("tools", error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_tools_the_client_forbade_do_not_count(self):
+        base = self.server()
+        self.chat(base, response_format={"type": "json_object"}, tools=[WEATHER], tool_choice="none")
+        self.assertEqual(self.engine.calls[0][5], openai_server.GENERIC_JSON_GBNF)
+
+    def test_the_engines_refusals_are_the_clients_400(self):
+        for frame, words in ((["BAD_GRAMMAR", "grammar:", "unknown", "type", "mystery"], "could not use the grammar"),
+                             (["GRAMMAR_STUCK", "no", "token", "can", "continue"], "could not go on"),
+                             (["GRAMMAR_LOST", "too", "ambiguous"], "could not follow")):
+            error = openai_server._engine_error(frame, " ".join(frame))
+            self.assertIsInstance(error, openai_server.APIError)
+            self.assertEqual((error.status, error.param), (400, "response_format"))
+            self.assertIn(words, error.message)
+
+    def test_the_engine_learns_it_from_the_handshake(self):
+        for line, expected in ((b"CAPS vision=0 grammar=1\n", True), (b"CAPS vision=0 grammar=0\n", False),
+                               (b"CAPS vision=0\n", None), (b"", None)):
+            with self.subTest(line=line):
+                process = FakeProcess(lambda _process, _frame: None)
+                process.stdout = BlockingStream(READY + line + b"STAT 0 0 0 0\n")
+                with patch("openai_server.subprocess.Popen", return_value=process):
+                    engine = Engine("gemma4", "model")
+                try:
+                    self.assertIs(engine.grammar, expected)
+                finally:
+                    engine.close()
 
 
 try:

@@ -175,6 +175,16 @@ def _engine_error(fields, message):
         what = "picture" if fields[0] == "BAD_IMAGE" else "clip"
         return APIError(400, f"The engine refused the {what}: " + " ".join(fields[1:]) + ".", "messages",
                         "invalid_image" if what == "picture" else "invalid_audio")
+    if fields and fields[0] in ("BAD_GRAMMAR", "GRAMMAR_STUCK", "GRAMMAR_LOST"):
+        # An engine that constrains its answer (constrain.h) could not use the request's grammar: it did not compile or
+        # uses something the schema compiler lacks (BAD_GRAMMAR, before anything was read), or part way through no token
+        # of the vocabulary could continue it, or it is too ambiguous to follow. The engine never goes on unconstrained,
+        # so what the client asked for is not something this model can give: its mistake, with the engine's account.
+        reason = " ".join(fields[1:]) or "the grammar could not be used"
+        sentence = {"BAD_GRAMMAR": "The engine could not use the grammar: ",
+                    "GRAMMAR_STUCK": "The answer could not go on within the grammar: ",
+                    "GRAMMAR_LOST": "The engine could not follow the grammar: "}[fields[0]]
+        return APIError(400, sentence + reason + ".", "response_format", "invalid_value")
     return RuntimeError(message)
 
 
@@ -4370,10 +4380,12 @@ def generation_options(body, limit):
         raise APIError(400, "Token penalties are not supported yet.", None, "unsupported_parameter")
     # `seed` is accepted for request-shape compatibility and silently discarded:
     # this server puts no per-request seed on the wire, at any temperature.
-    # response_format -> optional per-request grammar for the engine's grammar-forced
-    # draft source (#70/#148). NEVER a sampling constraint: drafts are verified, so a
+    # response_format -> optional per-request grammar. For glm it feeds the engine's grammar-forced
+    # draft source (#70/#148). NEVER a sampling constraint there: drafts are verified, so a
     # schema the engine cannot compile degrades to "no speedup", not to an error and
-    # not to changed output. json_schema payloads are forwarded as-is (the engine
+    # not to changed output. An engine that says grammar=1 in its CAPS line (gemma4, qwen36) instead
+    # limits its answer to the grammar (c/constrain.h), and refuses one it cannot compile (BAD_GRAMMAR).
+    # json_schema payloads are forwarded as-is (the engine
     # compiles them via schema_gbnf.h); {"type": "gbnf"} is a raw-GBNF extension.
     grammar = None
     response_format = body.get("response_format")
@@ -5548,6 +5560,9 @@ class Engine:
         # it said nothing (an engine that predates CAPS, or a family without a tower).
         self.vision = {"1": True, "0": False}.get(self.caps.get("vision"))
         self.audio = {"1": True, "0": False}.get(self.caps.get("audio"))
+        # grammar=1: the engine limits its answer to a request's grammar (c/constrain.h), so response_format is a
+        # guarantee there, not the speed-up it is for glm. Absent: the engine does not take a grammar.
+        self.grammar = {"1": True, "0": False}.get(self.caps.get("grammar"))
         # A decision engine says decide=1: /v1/systemone then sends it the record
         # (DECIDE) instead of scoring options through the logprob channel. chat=0
         # means it has nothing else: the generating endpoints answer 400.
@@ -8137,9 +8152,13 @@ class APIHandler(BaseHTTPRequestHandler):
         maximum, temperature, top_p, grammar, _requested_stop_sequences = generation_options(
             body, self.server.max_tokens)
         family = family_by_id(ARCH)
-        if grammar is not None and not family.capabilities.grammar_payload:
-            # sibling engines speak the 6-field SUBMIT header only; sending the
-            # grammar payload extension would desync its stdin framing.
+        # Two uses of the same wire field. glm takes the grammar for its grammar-forced drafts (a speed-up, never a limit:
+        # family.capabilities.grammar_payload). An engine that says `grammar=1` in its CAPS line constrains its answer to
+        # the grammar (c/constrain.h); the others speak the 6-field SUBMIT header only, and sending them the grammar
+        # payload extension would desync their stdin framing.
+        constrains = (grammar is not None and not family.capabilities.grammar_payload
+                      and getattr(self.server.engine, "grammar", None) is True)
+        if grammar is not None and not family.capabilities.grammar_payload and not constrains:
             raise APIError(400, f"`response_format` grammars are not supported by the {ARCH} "
                                 "engine yet.", "response_format", "unsupported_parameter")
         engine_k, echo, display_k = logprobs_options(
@@ -8148,6 +8167,13 @@ class APIHandler(BaseHTTPRequestHandler):
         # tools and tool_choice come from chat_completion() already processed/filtered
         if chat and tool_choice == "none":
             tools = None          # client forbade tools: never surface tool_calls
+        if constrains and enable_thinking:
+            raise APIError(400, "`response_format` cannot be combined with thinking: the grammar would limit the "
+                                "reasoning, not only the answer. Turn thinking off for this request.",
+                           "response_format", "invalid_value")
+        if constrains and tools:
+            raise APIError(400, "`response_format` cannot be combined with `tools` on this engine: the grammar "
+                                "would forbid the tokens of a tool call.", "response_format", "invalid_value")
         cache_slot = body.get("cache_slot")
         if (cache_slot is not None and
                 (isinstance(cache_slot, bool) or not isinstance(cache_slot, int) or
