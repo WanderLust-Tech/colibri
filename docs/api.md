@@ -253,9 +253,9 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 
 ### What else each engine takes
 
-| Engine | JSON mode (`response_format`) | Pictures in | Audio in |
+| Engine | `response_format` accepted | Pictures in | Audio in |
 |---|---|---|---|
-| GLM-5.2 (`colibri`) | yes (grammar-forced drafts, [grammar-draft.md](grammar-draft.md)) | no | no |
+| GLM-5.2 (`colibri`) | yes, as a speed-up only: the grammar's forced spans are drafts the model then verifies, so nothing constrains the output and it is not guaranteed to be JSON ([grammar-draft.md](grammar-draft.md)) | no | no |
 | GLM-5.3-Flash | no (HTTP 400) | yes | no |
 | DeepSeek V4 | no (HTTP 400) | no | no |
 | DeepSeek V4.1 | no (HTTP 400) | yes | no |

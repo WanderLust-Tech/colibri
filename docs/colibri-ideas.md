@@ -76,8 +76,11 @@ Needs A1/A2 to mean anything.
     pictures, audio), and `c/tests/test_api_matrix_docs.py` fails when either table drifts from the registry.
   - **Structured JSON: accepted but only works on GLM-5.2.** The gateway reads `response_format` (`json_object`, `json_schema`,
     `gbnf`) and turns it into a grammar, but only the `glm` family takes a grammar payload; every other model, including
-    Qwen3-Coder and Gemma 4, answers HTTP 400 "not supported by the X engine yet". On GLM it is "grammar-forced drafts"
-    (`docs/grammar-draft.md`); I did not check whether that guarantees valid output. **This is the real gap.**
+    Qwen3-Coder and Gemma 4, answers HTTP 400 "not supported by the X engine yet". Even on GLM it does not constrain anything:
+    "grammar-forced drafts" (`docs/grammar-draft.md`) only draft the bytes the grammar forces and the model verifies them, so valid
+    JSON is not guaranteed (checked in the doc, 2026-11-07). **No engine can promise valid JSON; this is the real gap.**
+    Reusable parts exist: `c/grammar.h` (a byte-level GBNF pushdown automaton with `gr_accept` and `gr_admissible`) and
+    `c/schema_gbnf.h` (JSON schema to GBNF).
   - **Embeddings: no.** No `/v1/embeddings` route, and no engine produces embeddings.
   - **Speech to text: only through chat, on Gemma E2B/E4B.** Send `input_audio` (WAV) in a chat message (JFK clip transcribed word
     for word); there is no `/v1/audio/transcriptions` route. Inkling also takes audio (DMel frames, command line only).
