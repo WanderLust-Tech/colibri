@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### JSON mode that cannot be anything else: `response_format` on Gemma 4, Qwen3.6 and Qwen3-Coder
+
+A request that carries `response_format` (`json_object`, `json_schema` or `gbnf`) now gets only tokens that keep the answer
+inside the grammar, so what comes back is valid JSON, and has the schema's shape when a schema was given. Before, these engines
+answered HTTP 400, and GLM-5.2 only used the grammar to draft bytes the model then verifies, which promised nothing.
+`c/constrain.h` masks the logits by the grammar's next byte, lets the engine's own sampler choose, checks the choice byte by
+byte and re-samples a token that fails; the end token is allowed only where the grammar can end. The engines announce
+`grammar=1` in their `CAPS` line and take the grammar on `SUBMIT`; the gateway refuses it with thinking on, with `tools`, and for
+a schema outside the compiler's subset, with the engine's own account. Tested with random-weight models, whose unconstrained
+output is noise, against Python's JSON parser; mutation-tested. Not promised: that an answer finishes inside `max_tokens`.
+[docs/json-mode.md](docs/json-mode.md)
+
 ### Fixed
 
 - The registry said Qwen3.6 (and so Qwen3-Coder) takes no tools, although its tool calls work; the test meant to catch that

@@ -5058,9 +5058,13 @@ static int *read_int_array(jval *o, const char *key, int *n_out) {
  * session hangs forever (#748). compat.h's coli_serve_binary_mode (#749)
  * carries that fix for every engine; see its comment for the full story. */
 
+#include "constrain.h"   /* a request's grammar as a limit on the next token (response_format) */
+
 typedef struct { char id[64]; int slot, max_tok; float temp, top_p; char *payload; int plen;
                  int logprobs;   /* SUBMIT logprobs=k: 0 = canale spento (opt-in) */
                  int pin;        /* SUBMIT pin=1: fotografa lo stato dopo il prefill */
+                 char *grammar; int glen;   /* the 7th numeric field of SUBMIT: a grammar of glen bytes after the prompt */
+                 Cn *cn;                    /* its walker, made by q36_serve_start; NULL for a request without a grammar */
                } ServeReq;
 
 /* An image waiting for the SUBMIT that uses it (IMAGE <id> <bytes> <grid_h>
@@ -5129,6 +5133,7 @@ static int serve_read_req(ServeReq *q){
      * Un client vecchio non manda nessuna chiave e finisce a logprobs=0. */
     q->logprobs = 0;
     q->pin = 0;
+    int glen = 0;
     {
         /* Stessa tecnica di coli_submit_parse: %n da l'offset dopo i campi
          * numerici, e la chiave deve essere separata da spazio (altrimenti
@@ -5142,8 +5147,17 @@ static int serve_read_req(ServeReq *q){
              * e fgets lascia il '\n' in fondo: va tolto, o "logprobs=5\n" e
              * un valore con spazzatura attaccata. Si lavora su una copia per
              * non toccare la riga che il chiamante ha gia parsato. */
+            const char *rest = line + base;
+            while (*rest == ' ' || *rest == '\t') rest++;
+            if (*rest >= '0' && *rest <= '9') {        /* the byte length of a grammar that follows the prompt */
+                char *num; long gl = strtol(rest, &num, 10);
+                if (gl > (1 << 20) || !(*num == 0 || *num == ' ' || *num == '\t' || *num == '\n' || *num == '\r')) {
+                    printf("ERROR %s bad submit header\n", id); fflush(stdout); return 0;
+                }
+                glen = (int)gl; rest = num;
+            }
             char ext_buf[256];
-            snprintf(ext_buf, sizeof ext_buf, "%s", line + base);
+            snprintf(ext_buf, sizeof ext_buf, "%s", rest);
             for (char *e = ext_buf; *e; e++) if (*e == '\n' || *e == '\r') { *e = 0; break; }
             const char *tail = ext_buf;
             while (*tail == ' ' || *tail == '\t') tail++;
@@ -5162,10 +5176,22 @@ static int serve_read_req(ServeReq *q){
     char *payload=malloc((size_t)plen+1);
     if(!payload){ printf("ERROR %s out of memory\n",id); fflush(stdout); return 0; }
     if(fread(payload,1,(size_t)plen,stdin)!=(size_t)plen){ free(payload); return -1; }
-    (void)fgetc(stdin); payload[plen]=0;
+    payload[plen]=0;
+    char *grammar=NULL;
+    if(glen>0){                                  /* the grammar's bytes follow the prompt's, then the newline */
+        grammar=malloc((size_t)glen+1);
+        if(!grammar||fread(grammar,1,(size_t)glen,stdin)!=(size_t)glen){ free(grammar); free(payload); return -1; }
+        grammar[glen]=0;
+    }
+    (void)fgetc(stdin);
+    if(glen>0&&q->logprobs>0){                   /* the numbers would be of the masked distribution: not offered */
+        printf("ERROR %s BAD_GRAMMAR a grammar cannot be combined with logprobs\n",id); fflush(stdout);
+        free(grammar); free(payload); return 0;
+    }
     snprintf(q->id,sizeof(q->id),"%s",id);
     q->max_tok=max_tok; q->temp=temp; q->top_p=top_p;
     q->payload=payload; q->plen=plen;
+    q->grammar=grammar; q->glen=glen;
     return 2;
 }
 
@@ -5239,6 +5265,64 @@ static int serve_eos_ids(int *ids, int cap){
             ids[n++]=g_sp_id[k];
     if(!n) ids[n++]=151645;   /* tokenizer without added_tokens: old default */
     return n;
+}
+
+/* ---- a request's grammar (constrain.h) -------------------------------------------------------
+ * What each token adds to the answer, from the tokenizer, built when the first grammar arrives. The end-of-turn ids
+ * end the answer (allowed only where the grammar can end); every added token (<think>, <tool_call>, the chat markers)
+ * may never be chosen, so a constrained answer is neither thinking nor a tool call. */
+static CnVocab *g_cn_vocab;
+
+static CnVocab *q36_cn_vocab(int V){
+    CnVocab *v=cn_vocab_new(V);
+    if(!v) return NULL;
+    char *added=calloc((size_t)V,1);
+    if(!added){ cn_vocab_free(v); return NULL; }
+    for(int k=0;k<g_nspecial;k++) if(g_sp_id[k]>=0&&g_sp_id[k]<V) added[g_sp_id[k]]=1;
+    int eos[4]; int n_eos=serve_eos_ids(eos,4);
+    for(int e=0;e<n_eos;e++) if(eos[e]>=0&&eos[e]<V) cn_vocab_set(v,eos[e],NULL,0,CN_END);
+    for(int t=0;t<V;t++){
+        if(v->kind[t]==CN_END||added[t]) continue;                    /* an end token, or never chosen */
+        unsigned char b[256]; int n=0; decode_id_to_bytes(t,b,&n);
+        if(n>0) cn_vocab_set(v,t,b,n,CN_TEXT);                        /* no bytes: stays CN_SPECIAL */
+    }
+    free(added);
+    return v;
+}
+
+/* Compile the SUBMIT's grammar into q->cn. 0 with the ERROR written when it cannot be used. */
+static int q36_grammar_begin(Model *m, ServeReq *q){
+    char gerr[200];
+    if(!g_cn_vocab && !(g_cn_vocab=q36_cn_vocab(m->c.vocab))){
+        printf("ERROR %s out of memory\n",q->id); fflush(stdout); free(q->grammar); q->grammar=NULL;
+        q36_pending_image_clear(); return 0;
+    }
+    q->cn=cn_new(q->grammar,gerr,sizeof gerr);
+    free(q->grammar); q->grammar=NULL;
+    if(!q->cn){
+        printf("ERROR %s BAD_GRAMMAR %s\n",q->id,gerr); fflush(stdout);
+        q36_pending_image_clear(); return 0;                         /* its picture, if one came, is not the next request's */
+    }
+    return 1;
+}
+
+typedef struct { int V; float temp, top_p; } Q36Samp;
+static int q36_sample_cb(const float *lo, void *ctx){
+    const Q36Samp *s=(const Q36Samp *)ctx;
+    return serve_sample(lo,s->V,s->temp,s->top_p);
+}
+
+/* The next token of a request: the engine's own sampler, within the grammar when the request has one. Negative when the
+ * grammar leaves no way on (-1 no token continues it, -2 the walker is lost): the request ends with an ERROR. */
+static int q36_pick(ServeReq *q, int V, float *lo){
+    if(!q->cn) return serve_sample(lo,V,q->temp,q->top_p);
+    Q36Samp s={V,q->temp,q->top_p};
+    return cn_pick(q->cn,g_cn_vocab,lo,q36_sample_cb,&s);
+}
+
+static const char *q36_grammar_stuck(int why){
+    return why==-1 ? "GRAMMAR_STUCK no token of this vocabulary can continue the grammar"
+                   : "GRAMMAR_LOST the grammar is too ambiguous to follow";
 }
 
 /* Un CANCEL per la richiesta in corso, visto SENZA bloccare (#1332).
@@ -5329,8 +5413,8 @@ typedef struct { double s_disk, s_attn, s_moe, s_head, t0; } Q36ReqClock;
  * the budget, ACCEPT, the prefix reuse and the pins, the prefill and its read-out.
  * 1 with the prompt's ids and the logits after it; 0 when the request ended here,
  * its ERROR written. serve_one and serve_mux start every request here. */
-static int q36_serve_start(Model *m, ServeReq *q, int **ids_out, int *np_out, float **lo_out,
-                           Q36ReqClock *clk){
+static int q36_serve_start_inner(Model *m, ServeReq *q, int **ids_out, int *np_out, float **lo_out,
+                                 Q36ReqClock *clk){
     int *ids=NULL, np=0;
     encode_text(q->payload, &ids, &np);          /* payload is raw prompt text; qwen36 adds no BOS */
     if(g_pending_image.present){
@@ -5424,6 +5508,15 @@ static int q36_serve_start(Model *m, ServeReq *q, int **ids_out, int *np_out, fl
     return 1;
 }
 
+/* The request's start, grammar first: one that cannot be used ends the request before its prompt is read. */
+static int q36_serve_start(Model *m, ServeReq *q, int **ids_out, int *np_out, float **lo_out, Q36ReqClock *clk){
+    q->cn=NULL;
+    if(q->glen>0 && !q36_grammar_begin(m,q)) return 0;
+    int ok=q36_serve_start_inner(m,q,ids_out,np_out,lo_out,clk);
+    if(!ok){ cn_free(q->cn); q->cn=NULL; }
+    return ok;
+}
+
 static void serve_one(Model *m, ServeReq *q){
     int *ids=NULL, np=0; float *lo=NULL; Q36ReqClock clk;
     if(!q36_serve_start(m,q,&ids,&np,&lo,&clk)) return;
@@ -5434,7 +5527,15 @@ static void serve_one(Model *m, ServeReq *q){
     unsigned char sbuf[16]; int sbn=0;
     Q36Spec spec; q36_spec_begin(m, &spec, ids, np);   /* COLI_LOOKUP=1: drafts, every token still sampled from the exact logits */
     for(int s=0;s<q->max_tok;s++){
-        int tk = serve_sample(lo, m->c.vocab, q->temp, q->top_p);
+        int tk = q36_pick(q, m->c.vocab, lo);
+        if(tk<0){                                /* the grammar leaves no way on: an ERROR, never an unconstrained answer */
+            free(lo); lo=NULL;
+            q36_spec_end(m, &spec); q36_spec_free(&spec);
+            if(sbn>0) serve_data(q->id,(char*)sbuf,sbn);
+            printf("ERROR %s %s\n",q->id,q36_grammar_stuck(tk)); fflush(stdout);
+            free(ids);
+            return;
+        }
         /* La coda si calcola PRIMA della free: dopo, lo non c'e piu. */
         char lptail[1024]; lptail[0]=0;
         if(q->logprobs>0) coli_logprob_tail(lptail,sizeof lptail,lo,m->c.vocab,tk,q->logprobs);
@@ -5853,9 +5954,20 @@ static int q36_mux_alloc(Model *m){
     return 1;
 }
 
+/* A request that cannot go on (its grammar leaves no way on): the ERROR and no DONE, the slot free again. */
+static void q36_mux_abort(Model *m, Q36MuxReq *r, const char *why){
+    free(r->lo); r->lo = NULL; free(r->ids); r->ids = NULL; r->active = 0;
+    cn_free(r->q.cn); r->q.cn = NULL;
+    if (g_q36_mux_cur != r->q.slot) q36_mux_bind(m, r->q.slot);
+    free(m->mpos); m->mpos = NULL; m->mpos_len = m->rope_delta = 0;
+    if (r->sbn > 0) serve_data(r->q.id, (char *)r->sbuf, r->sbn);
+    printf("ERROR %s %s\n", r->q.id, why); fflush(stdout);
+}
+
 /* A request's end, as serve_one ends one. */
 static void q36_mux_finish(Model *m, Q36MuxReq *r){
     free(r->lo); r->lo = NULL; free(r->ids); r->ids = NULL; r->active = 0;
+    cn_free(r->q.cn); r->q.cn = NULL;
     if (g_q36_mux_cur != r->q.slot) q36_mux_bind(m, r->q.slot);
     /* an image turn's rope positions go with the turn, as q36_vision_detach drops them */
     free(m->mpos); m->mpos = NULL; m->mpos_len = m->rope_delta = 0;
@@ -5879,7 +5991,8 @@ static void q36_mux_finish(Model *m, Q36MuxReq *r){
  * with the token when the request goes on, 0 when it ended. */
 static int q36_mux_pick(Model *m, Q36MuxReq *r, const int *eos_ids, int n_eos, int *tk_out){
     if (r->cancel || r->gen >= r->q.max_tok) { q36_mux_finish(m, r); return 0; }
-    int tk = serve_sample(r->lo, m->c.vocab, r->q.temp, r->q.top_p);
+    int tk = q36_pick(&r->q, m->c.vocab, r->lo);
+    if (tk < 0) { q36_mux_abort(m, r, q36_grammar_stuck(tk)); return 0; }   /* the grammar leaves no way on */
     char lptail[1024]; lptail[0] = 0;
     if (r->q.logprobs > 0) coli_logprob_tail(lptail, sizeof lptail, r->lo, m->c.vocab, tk, r->q.logprobs);
     free(r->lo); r->lo = NULL;
@@ -5922,7 +6035,7 @@ static void serve_mux(Model *m){
                     q36_mux_bind(m, q.slot); clef_serve_one(m, &q);
                 } else {
                     Q36MuxReq *t = &rq[q.slot];
-                    memset(t, 0, sizeof *t); t->q = q; q.payload = NULL;
+                    memset(t, 0, sizeof *t); t->q = q; q.payload = NULL; q.grammar = NULL;
                     q36_mux_bind(m, t->q.slot);
                     int ok = q36_serve_start(m, &t->q, &t->ids, &t->np, &t->lo, &t->clk);
                     /* the image's rows are the prompt's: no decode row reads them; its rope
@@ -5934,7 +6047,7 @@ static void serve_mux(Model *m){
                     free(t->q.payload); t->q.payload = NULL;
                     if (ok) emap_emit(m);
                 }
-                free(q.payload);
+                free(q.payload); free(q.grammar);
             }
         }
         active = 0; for (int i = 0; i < n; i++) active += rq[i].active;
@@ -5982,7 +6095,7 @@ static void serve_loop(Model *m){
      * modalita' serve prima della prima richiesta (docs/serve_protocol.md) */
     /* Clef answers DECIDE too, and still chats: decide=1 without chat=0. Its
      * records come in the raw form (decide_record=raw, decide_serve.h). */
-    printf("CAPS vision=%d%s\n",m->vis_ready?1:0,g_clef?" decide=1 decide_record=raw":"");
+    printf("CAPS vision=%d grammar=1%s\n",m->vis_ready?1:0,g_clef?" decide=1 decide_record=raw":"");
     printf("STAT 0 0.00 0.0 %.2f\n",rss_gb());
     fflush(stdout);
     emap_emit(m);          /* dopo READY e STAT: il boot reader legge STAT dopo il sentinel */
@@ -5999,7 +6112,7 @@ static void serve_loop(Model *m){
          * "routed now" flash worked while the residency colour never moved.
          * inkling.c, kimi_k3.c, qwen38.c, deepseek_v41.c and colibri.c
          * already do this. */
-        if(r==2){ serve_one(m,&q); q36_vision_detach(m); free(q.payload); emap_emit(m); }
+        if(r==2){ serve_one(m,&q); cn_free(q.cn); q36_vision_detach(m); free(q.payload); free(q.grammar); emap_emit(m); }
         if(r==3){ clef_serve_one(m,&q); free(q.payload); }
     }
 }

@@ -262,9 +262,9 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 | Inkling | no (HTTP 400) | no | DMel frames, command line only |
 | Kimi K3 | no (HTTP 400) | no | no |
 | MiMo-V2.6 | no (HTTP 400) | yes | no |
-| Qwen3.6 and Qwen3-Coder (family `qwen36`) | no (HTTP 400) | yes, when the checkpoint ships a vision tower | no |
+| Qwen3.6 and Qwen3-Coder (family `qwen36`) | yes, constrained: only tokens that keep the answer inside the grammar are chosen, so it is valid JSON ([json-mode.md](json-mode.md)) | yes, when the checkpoint ships a vision tower | no |
 | Qwen3.8-Flash-Next | no (HTTP 400) | yes | no |
-| Gemma 4 | no (HTTP 400) | yes, on every size | WAV in a chat message (`input_audio`), E2B and E4B only |
+| Gemma 4 | yes, constrained: only tokens that keep the answer inside the grammar are chosen, so it is valid JSON ([json-mode.md](json-mode.md)) | yes, on every size | WAV in a chat message (`input_audio`), E2B and E4B only |
 | OLMoE | no (HTTP 400) | no | no |
 
 "Pictures in" means the gateway can expand them for the family; whether the checkpoint being served loaded its vision tower is

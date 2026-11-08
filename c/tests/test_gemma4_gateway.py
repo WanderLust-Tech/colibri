@@ -140,9 +140,10 @@ class GrammarTest(unittest.TestCase):
     """response_format on an engine that constrains its answer (CAPS grammar=1): the grammar goes to the engine, and what
     the engine cannot honour is a 400 here, not a quietly unconstrained answer."""
     SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+    ARCH = "gemma4"
 
     def setUp(self):
-        patcher = patch("openai_server.ARCH", "gemma4")
+        patcher = patch("openai_server.ARCH", self.ARCH)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -224,6 +225,11 @@ class GrammarTest(unittest.TestCase):
                     self.assertIs(engine.grammar, expected)
                 finally:
                     engine.close()
+
+
+class QwenGrammarTest(GrammarTest):
+    """The same gateway rules for the other constrained family (Qwen3.6 and Qwen3-Coder)."""
+    ARCH = "qwen36"
 
 
 try:

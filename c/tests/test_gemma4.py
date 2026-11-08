@@ -1285,7 +1285,7 @@ class ServeGrammarTest(unittest.TestCase):
         text = first["data"].decode("utf-8", "surrogateescape")
         # a greedy random model may spend its tokens on whitespace, which the grammar allows anywhere between tokens: the
         # answer is then a prefix of the schema's shape, never anything else
-        self.assertRegex(text, re.compile(r'\A\s*(\{\s*("name"\s*:.*)?)?\Z', re.DOTALL))
+        self.assertRegex(text, re.compile(r'\A\s*(\{\s*("name"\s*(:.*)?)?)?\Z', re.DOTALL))
         if first["done"][7] == "0":
             json.loads(text)
 
@@ -1311,6 +1311,28 @@ class ServeGrammarTest(unittest.TestCase):
             self.assertTrue((r["error"] or "").startswith("BAD_GRAMMAR"), (bad, r["error"]))
         ok = e.ask(self.TURN, max_tokens=3)                 # the slot is free and the engine goes on
         self.assertIsNotNone(ok["done"])
+
+    def test_the_gateways_own_engine_class_speaks_it(self):
+        """Not this file's hand-written SUBMIT: openai_server.Engine builds the header, reads CAPS, maps the refusals."""
+        import openai_server
+        from unittest.mock import patch
+        with patch("openai_server.ARCH", "gemma4"):
+            engine = openai_server.Engine(EXE, snap_dir(), cap=128, env=dict(os.environ, OMP_NUM_THREADS="2", G4_IMG_TOKENS="1"))
+        self.addCleanup(engine.close)
+        self.assertIs(engine.grammar, True)
+        ended = 0
+        for _ in range(12):
+            out = []
+            stats = engine.generate(self.TURN, 150, 1.0, 1.0, out.append, grammar=self.SCHEMA)
+            if not stats.get("length_limited"):
+                value = json.loads("".join(out).encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
+                self.assertEqual(list(value), ["name", "n", "ok"])
+                ended += 1
+        self.assertGreater(ended, 0)
+        with self.assertRaises(openai_server.APIError) as caught:
+            engine.generate(self.TURN, 5, 1.0, 1.0, lambda text: None, grammar="nonsense here")
+        self.assertEqual((caught.exception.status, caught.exception.param), (400, "response_format"))
+        self.assertIn("could not use the grammar", caught.exception.message)
 
     def test_a_grammar_beside_a_plain_request_in_the_other_slot(self):
         e = self.engine(slots=2)

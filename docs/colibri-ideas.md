@@ -74,7 +74,9 @@ Needs A1/A2 to mean anything.
     work, and the existing consistency test never noticed because it looked for a renderer named after the family and found none.
     It now asks the gateway's real dispatcher, `docs/api.md` has the missing DeepSeek V4.1 row and a second table (JSON mode,
     pictures, audio), and `c/tests/test_api_matrix_docs.py` fails when either table drifts from the registry.
-  - **Structured JSON: accepted but only works on GLM-5.2.** The gateway reads `response_format` (`json_object`, `json_schema`,
+  - **Structured JSON: built 2026-11-07 on `feat/json-mode` (not merged).** Real constrained decoding on Gemma 4 and
+    Qwen3.6/Qwen3-Coder, [json-mode.md](json-mode.md); the survey text below is what it replaced. *Before:* accepted but only
+    worked on GLM-5.2. The gateway reads `response_format` (`json_object`, `json_schema`,
     `gbnf`) and turns it into a grammar, but only the `glm` family takes a grammar payload; every other model, including
     Qwen3-Coder and Gemma 4, answers HTTP 400 "not supported by the X engine yet". Even on GLM it does not constrain anything:
     "grammar-forced drafts" (`docs/grammar-draft.md`) only draft the bytes the grammar forces and the model verifies them, so valid

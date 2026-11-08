@@ -51,6 +51,19 @@ def yes(cell):
     return cell.lower().startswith("yes")
 
 
+def json_mode(cell):
+    """What a `response_format` cell promises: the answer is "constrained" to the grammar, the grammar only feeds "drafts" the
+    model verifies (a speed-up), or it is "no" (refused)."""
+    text = cell.lower()
+    if text.startswith("yes, constrained"):
+        return "constrained"
+    if text.startswith("yes, as a speed-up only"):
+        return "drafts"
+    if text.startswith("no"):
+        return "no"
+    raise AssertionError(f"a JSON mode cell this test cannot read: {cell!r}")
+
+
 def chat_families():
     return {f.id: f for f in FAMILIES if f.modality == "text" and not f.capabilities.decision}
 
@@ -66,11 +79,25 @@ class ApiMatrixDocsTest(unittest.TestCase):
             self.assertEqual(yes(cells[1]), flag, f"{family_id}: OpenAI `tools` column says {cells[1]!r}, registry says {flag}")
             self.assertEqual(yes(cells[2]), flag, f"{family_id}: Anthropic `tool_use` column says {cells[2]!r}, registry says {flag}")
 
+    def test_the_constrained_families_are_the_engines_that_say_grammar_1(self):
+        """The gateway sends a grammar to an engine whose CAPS line says grammar=1; the registry and docs say which families
+        should. They must name the same engines (a string literal with grammar=1 in an engine's source)."""
+        import re
+        said = {path.stem for path in C_DIR.glob("*.c")
+                if re.search(r'"[^"\n]*\bgrammar=1', path.read_text(encoding="utf-8", errors="replace"))}
+        registered = {family_id for family_id, family in chat_families().items() if family.capabilities.constrained_output}
+        self.assertEqual(said, registered)
+
+    def test_no_family_is_both_draft_only_and_constrained(self):
+        for family_id, family in chat_families().items():
+            self.assertFalse(family.capabilities.grammar_payload and family.capabilities.constrained_output, family_id)
+
     def test_json_mode_and_pictures_match_the_registry(self):
         for family_id, cells in by_family(table_after("### What else each engine takes")).items():
             caps = chat_families()[family_id].capabilities
-            self.assertEqual(yes(cells[1]), caps.grammar_payload,
-                             f"{family_id}: JSON mode column says {cells[1]!r}, registry grammar_payload is {caps.grammar_payload}")
+            registry = "constrained" if caps.constrained_output else "drafts" if caps.grammar_payload else "no"
+            self.assertEqual(json_mode(cells[1]), registry,
+                             f"{family_id}: JSON mode column says {cells[1]!r}, the registry says {registry}")
             self.assertEqual(yes(cells[2]), caps.image,
                              f"{family_id}: pictures column says {cells[2]!r}, registry image is {caps.image}")
 

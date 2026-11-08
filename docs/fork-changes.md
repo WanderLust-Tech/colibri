@@ -32,6 +32,7 @@ the clone that serves port 8000):
 | Chat turn goes to the KV slot that holds it | `feat/smart-kv-slots` | yes | **no** | yes (the restart script runs 1 slot, so it matters only with `-KvSlots 2` or more) |
 | Gemma 4 (26B-A4B, 31B, E4B, E2B; pictures, audio, batched decode) | `feat/gemma4`, `feat/gemma4-setup` | yes | **no** | yes: `gemma4.exe` built, 26B-A4B and E2B containers in `colibri-models` |
 | `coli launch` | `feat/coli-launch` | yes | **no** | yes |
+| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder) | `feat/json-mode` | **no** | **no** | **no** |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -168,6 +169,21 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
 
 Uncommitted in `D:\code\colibri`: 31 web files that differ only in line endings (CRLF), and `docs/colibri-ideas.md`. Left alone.
 
+### 2.10 JSON mode (`feat/json-mode`, not merged, not deployed)
+
+Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder: [json-mode.md](json-mode.md).
+
+- `c/constrain.h` masks the logits by the grammar's next byte (`c/grammar.h`'s byte-level automaton), lets the engine's sampler
+  choose, checks the token byte by byte, re-samples one that fails; the end token only where the grammar can end; an engine
+  that cannot go on says so, never unconstrained.
+- Engines say `grammar=1` in `CAPS`, take the grammar as the seventh `SUBMIT` field, answer `BAD_GRAMMAR`, `GRAMMAR_STUCK`,
+  `GRAMMAR_LOST`. The gateway refuses it with thinking, with tools, and for schemas outside `schema_gbnf.h`'s subset; registry
+  flag `constrained_output`, held to the docs and the engine sources by `test_api_matrix_docs.py`.
+- Checked with random-weight models (noise left alone) against Python's `json.loads` and the schema's shape; mutation-tested.
+  Before this, no engine promised valid JSON, GLM-5.2's grammar being only a draft source.
+- Not promised: finishing inside `max_tokens`; thrifty whitespace; UTF-8 inside strings. Not run yet on the real 26B or the
+  coder model.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -202,7 +218,7 @@ Status as of today (the file itself has been brought into line with this):
 | C2 Named presets (saved sizes, steps, durations that show up as model names) | open, S-M |
 | C3 Windows tray or autostart (would replace the restart script) | open, M |
 | C4 One place for settings, request logging | open, S-M |
-| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | open, unchecked |
+| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, branch `feat/json-mode`, not merged (2.10) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |
 | D2 Free pipeline stages | already in the engine (`COLI_IMG_TE=stage`, about 14 s per new prompt); not needed on 64 GB |
 | D3 Try `TRUNK_RESIDENT_LAYERS` on the dense Qwen3.8-27B | open, S |

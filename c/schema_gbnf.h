@@ -5,11 +5,12 @@
  * {"type":"json_schema"}` and the SCHEMA= env) get grammar-forced drafts without
  * hand-writing GBNF.
  *
- * Safety model: the grammar is a DRAFT SOURCE, never a sampling constraint (see
- * grammar.h). A schema compiled too strictly (or a model that deviates) only costs
- * draft acceptance — output is unchanged. So the compiler can be strict and compact
- * (no whitespace between tokens, exact key order): strictness maximizes forced-span
- * length on conforming outputs and cannot corrupt non-conforming ones.
+ * Two users. For glm the grammar is a DRAFT SOURCE, never a sampling constraint (see
+ * grammar.h): a schema compiled too strictly (or a model that deviates) only costs
+ * draft acceptance, output is unchanged. For gemma4 and qwen36 (constrain.h) it IS the
+ * constraint: the answer cannot leave it, and a schema this file does not support is
+ * refused (NULL) instead of run without a grammar. The compiler is strict (exact key
+ * order, every property required); whitespace is allowed between tokens (jws, below).
  *
  * Supported subset:
  *   type: object   + properties (+ required)     — properties in declared order;

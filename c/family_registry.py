@@ -40,6 +40,10 @@ class FamilyCapabilities:
     # command) and generates nothing. The engine confirms it at start-up with
     # `CAPS decide=1 chat=0`, which is what the gateway routes on.
     decision: bool = False
+    # The engine limits its answer to a request's `response_format` grammar (c/constrain.h): valid JSON by construction,
+    # not the grammar-forced drafts glm uses `grammar_payload` for, which only speed things up. Like `image`, whether the
+    # engine being served does it is its own word: the CAPS line says `grammar=1`.
+    constrained_output: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1543,7 +1547,7 @@ FAMILIES = (
         expert_inventory=_individual_expert_inventory(_GLM_EXPERT),
         config_section="text_config",
         limits=FamilyLimits(8192, 262144, 1024, 8192, 16, 8, "Q36_MAXT"),
-        capabilities=FamilyCapabilities(True, False, False, True, image=True),
+        capabilities=FamilyCapabilities(True, False, False, True, image=True, constrained_output=True),
         has_gateway_adapter=True,
         # coli run stays unwired on purpose: cmd_run dispatches per arch after
         # this gate, and without a qwen36 branch the engine would inherit GLM's
@@ -1628,7 +1632,7 @@ FAMILIES = (
         # implicit_cap 0: the engine sizes its expert cache from free memory when nobody chose a number
         # (gemma4.c), the way olmoe does. Eight slots a layer would stream every expert off the disk.
         limits=FamilyLimits(8192, 262144, 1024, 8192, 16, 0, "CTX"),
-        capabilities=FamilyCapabilities(True, False, False, True, image=True),
+        capabilities=FamilyCapabilities(True, False, False, True, image=True, constrained_output=True),
         has_gateway_adapter=True,
         # coli run stays unwired: its one-shot path would need this family's template, and chat, serve and
         # web all reach it through the gateway.
@@ -2324,5 +2328,6 @@ def public_metadata(family):
             "thinking": family.capabilities.thinking,
             "image": family.capabilities.image,
             "decision": family.capabilities.decision,
+            "constrained_output": family.capabilities.constrained_output,
         },
     }

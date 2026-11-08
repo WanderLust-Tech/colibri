@@ -38,6 +38,12 @@ declares a tower whose tensors are not in the container). Engines that say nothi
 leave the server's flag unknown. glm53, qwen38, qwen36 and deepseek_v41 emit it;
 `openai_server.py` derives `/v1/models` `input_modalities` from it.
 
+`grammar=1` says the engine limits its answer to a request's grammar ([json-mode.md](json-mode.md)): the gateway then sends
+`response_format` to it, as the seventh numeric field of `SUBMIT` (the byte length of a grammar whose bytes follow the
+prompt's, the way glm takes its draft grammar). An engine that cannot use the grammar answers `ERROR <id> BAD_GRAMMAR <why>`
+before reading the prompt; one whose answer gets stuck part way (`GRAMMAR_STUCK`: no token can continue it, `GRAMMAR_LOST`:
+too ambiguous to follow) ends the request with that `ERROR` and no `DONE`. gemma4 and qwen36 emit it.
+
 Two more keys say what kind of engine answers. `decide=1`: the engine takes
 `DECIDE` (below), and the gateway sends `POST /v1/systemone` to it as one record
 instead of scoring options through the logprob channel. `chat=0`: it has nothing
