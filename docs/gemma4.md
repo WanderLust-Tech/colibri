@@ -61,6 +61,10 @@ make -C c gemma4
 
 ## Pictures and audio
 
+The gateway reads pictures and audio before the engine sees them, so the Python that runs `coli serve` (or `coli router`) needs
+`numpy` for both and `Pillow` for pictures (`pip install numpy pillow`). Without them the request is refused with a 400 that
+names the missing package; text chat is not affected.
+
 Send them as OpenAI content parts, or Anthropic image blocks:
 
 ```json
