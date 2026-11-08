@@ -3735,6 +3735,49 @@ def cmd_ps(a):
     print(f"  {where} is a single-model server (not `coli router`); it holds {', '.join(ids)} for as long as it runs")
     return 0
 
+def cmd_launch(a):
+    """Start a coding tool (Claude Code, opencode) pointed at a running colibri server, without touching its settings."""
+    import launch
+    banner("launch")
+    extra=list(getattr(a,"args",None) or [])
+    if not a.tool:
+        print("  usage: coli launch TOOL [--model ID] [--host H] [--port P] [--api-key K] [--dry-run] [-- tool arguments]\n")
+        for key,spec in launch.TOOLS.items():
+            found=launch.find_tool(key)
+            print(f"  {key:<9}{spec['name']:<12}{C.grn+'found'+C.r if found else C.dim+'not installed: '+spec['install']+C.r}")
+        return 0
+    if a.tool not in launch.TOOLS:
+        print(f"  {C.yel}no tool called {a.tool}.{C.r} It is one of: {', '.join(launch.TOOLS)}"); return 1
+    where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
+    status,installed=_api_call(a,"GET","/v1/models/installed",timeout=10)
+    if status is None:
+        print(f"  no server answers on {where}. Start one with `coli serve` or `coli router`, or name it with --host and --port"); return 1
+    if status==401:
+        print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
+    status,models=_api_call(a,"GET","/v1/models",timeout=10)
+    ids=launch.chat_models(installed if isinstance(installed,dict) else None, models if status==200 else None)
+    if a.model and a.model not in ids:
+        print(f"  {C.yel}{where} has no chat model called {a.model}.{C.r} "+("It has: "+", ".join(ids) if ids else "It has no chat model.")); return 1
+    if not ids:
+        print(f"  {C.yel}the server on {where} has no chat model{C.r} (a picture or music model cannot drive a coding tool)"); return 1
+    model=a.model or ids[0]
+    base=launch.base_url(getattr(a,'host',None) or "127.0.0.1",_server_port(a))
+    env,args=launch.plan(a.tool,base,model,ids,a.api_key,extra)
+    path=launch.find_tool(a.tool)
+    spec=launch.TOOLS[a.tool]
+    print(f"  {spec['name']} -> {base}  model {C.b}{model}{C.r}")
+    if a.dry_run:
+        for key,value in env.items():
+            shown="***" if ("TOKEN" in key or "KEY" in key) and value else value
+            print(f"    {key}={shown if len(shown)<=100 else shown[:97]+'...'}")
+        print(f"  would run: {path or spec['binary']} {' '.join(shlex.quote(x) for x in args)}"); return 0
+    if not path:
+        print(f"  {C.yel}{spec['name']} is not installed.{C.r} Install it first: {spec['install']}"); return 1
+    try:
+        return subprocess.call([path,*args],env={**os.environ,**env})
+    except KeyboardInterrupt:
+        return 130
+
 def _stop_one_model(a):
     """`coli stop MODEL`: ask a `coli router` to unload one model, leaving the others and the server as they are."""
     where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
@@ -4232,6 +4275,12 @@ def main():
     pps=sub.add_parser("ps",help="the models a server has loaded, their memory and when they unload")
     pps.add_argument("--host",default="127.0.0.1"); pps.add_argument("--port",type=int,default=None)
     pps.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pl=sub.add_parser("launch",help="start Claude Code or opencode pointed at a running colibri server")
+    pl.add_argument("tool",nargs="?",default=None,help="claude or opencode (without it: the tools and whether they are installed)")
+    pl.add_argument("--model",default=None,help="the chat model to use (default: a loaded one, else the first the server lists)")
+    pl.add_argument("--host",default="127.0.0.1"); pl.add_argument("--port",type=int,default=None)
+    pl.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pl.add_argument("--dry-run",action="store_true",help="show the environment and the command, run nothing")
     pw=sub.add_parser("web", parents=[common], help="serve + open the dashboard in a browser")
     for arg,kw in (("--host",dict(default="127.0.0.1")),("--port",dict(type=int,default=8000)),
                    ("--model-id",dict(default=os.environ.get("COLI_MODEL_ID"))),
@@ -4309,11 +4358,15 @@ def main():
     pc.add_argument("--group-size",type=int,default=None,
         help="int4 scale group size: 64 (default, group-scaled quality) or 0 (legacy per-row)")
     pc.add_argument("--no-mtp",action="store_true",help="skip the MTP head (no speculative drafts)")
-    a=ap.parse_args()
+    argv,tool_args=sys.argv[1:],[]
+    if argv[:1]==["launch"] and "--" in argv:      # what follows `--` is the tool's, not ours (REMAINDER would swallow --port)
+        cut=argv.index("--"); argv,tool_args=argv[:cut],argv[cut+1:]
+    a=ap.parse_args(argv)
+    if a.cmd=="launch": a.args=tool_args
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

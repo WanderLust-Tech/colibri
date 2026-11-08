@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### `coli launch`: Claude Code or opencode on a local model, in one command
+
+`coli launch claude` (or `opencode`) starts the tool already pointed at a running `coli serve` or `coli router`: the server,
+its key and a chat model (a loaded one by default) go in that run's environment, and nothing is written to the tool's own
+settings. `--model`, `--host`, `--port`, `--api-key`, `--dry-run`, and everything after `--` goes to the tool. For Claude Code
+it also turns off the attribution header and the server-side auto-mode check. Codex (Responses API) and tools that keep their
+server in a settings file are not supported. `coli convert --repo` also takes a local Gemma 4 checkpoint directory now.
+[docs/launch.md](docs/launch.md)
+
 ### Gemma 4: the 26B-A4B, the 31B, the E4B and the E2B, with pictures and audio
 
 `c/gemma4.c` runs Google's Gemma 4: the 26B-A4B mixture of experts (25.2B parameters, 3.8B used per token) and the dense
