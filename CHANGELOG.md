@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The registry said Qwen3.6 (and so Qwen3-Coder) takes no tools, although its tool calls work; the test meant to catch that
+  skipped the family because its renderer is not named after it. The test now probes the gateway's real dispatcher for every
+  chat family. `docs/api.md` gained the missing DeepSeek V4.1 row and a table of which engine takes JSON mode, pictures and
+  audio, and `c/tests/test_api_matrix_docs.py` holds both tables to the registry.
+
 ### `coli launch`: Claude Code or opencode on a local model, in one command
 
 `coli launch claude` (or `opencode`) starts the tool already pointed at a running `coli serve` or `coli router`: the server,

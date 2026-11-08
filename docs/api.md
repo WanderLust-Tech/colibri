@@ -239,13 +239,37 @@ Known limitations, current build:
 | GLM-5.2 (`colibri`) | yes | yes | `<tool_call>` blocks |
 | GLM-5.3-Flash | yes | yes | `<tool_call>` blocks, with the 5.3 declaration block |
 | DeepSeek V4 | yes | yes | native DSML tool-call blocks |
+| DeepSeek V4.1 | yes | yes | the checkpoint's own DSML format (`<｜DSML｜ calls>` blocks, `<tool_result>` replies) |
 | Inkling | no | no | active tool declarations/choices return HTTP 400 |
 | Kimi K3 | yes | yes | native XTML `tools`/`call`/`argument` blocks (#1143) |
 | MiMo-V2.6 | yes | yes | native `<tools>` / `<tool_call>` blocks |
-| Qwen3.6 | yes | yes | native `<tool_call>`/`<tool_response>` blocks, the same XML-ish form as Qwen3.8 |
+| Qwen3.6 and Qwen3-Coder (family `qwen36`) | yes | yes | native `<tool_call>`/`<tool_response>` blocks, the same XML-ish form as Qwen3.8; Qwen3-Coder's own `<function=…><parameter=…>` calls inside them |
 | Qwen3.8-Flash-Next | yes | yes | native `<tool_call>`/`<tool_response>` blocks |
 | Gemma 4 | yes | yes | native `<|tool>` declarations, `<|tool_call>call:f{key:<|"|>value<|"|>}` calls and `<|tool_response>` results; pictures (`image_url`) on every size, WAV audio (`input_audio`) on the E2B and E4B |
 | OLMoE | no | no | active tool declarations/choices return HTTP 400 |
+
+The columns above and below are held to the code: `c/tests/test_family_registry.py` asks each family's renderer whether it
+accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here disagrees with the registry.
+
+### What else each engine takes
+
+| Engine | JSON mode (`response_format`) | Pictures in | Audio in |
+|---|---|---|---|
+| GLM-5.2 (`colibri`) | yes (grammar-forced drafts, [grammar-draft.md](grammar-draft.md)) | no | no |
+| GLM-5.3-Flash | no (HTTP 400) | yes | no |
+| DeepSeek V4 | no (HTTP 400) | no | no |
+| DeepSeek V4.1 | no (HTTP 400) | yes | no |
+| Inkling | no (HTTP 400) | no | DMel frames, command line only |
+| Kimi K3 | no (HTTP 400) | no | no |
+| MiMo-V2.6 | no (HTTP 400) | yes | no |
+| Qwen3.6 and Qwen3-Coder (family `qwen36`) | no (HTTP 400) | yes, when the checkpoint ships a vision tower | no |
+| Qwen3.8-Flash-Next | no (HTTP 400) | yes | no |
+| Gemma 4 | no (HTTP 400) | yes, on every size | WAV in a chat message (`input_audio`), E2B and E4B only |
+| OLMoE | no (HTTP 400) | no | no |
+
+"Pictures in" means the gateway can expand them for the family; whether the checkpoint being served loaded its vision tower is
+the engine's word (`GET /v1/models`, `input_modalities`). There is no embeddings route, no speech route
+(`/v1/audio/transcriptions`, `/v1/audio/speech`) and no `/v1/responses`.
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to
 `/v1/chat/completions`. The Anthropic endpoint translates `tools`,

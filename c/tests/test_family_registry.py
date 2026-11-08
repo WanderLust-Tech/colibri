@@ -1123,7 +1123,15 @@ class FamilyRegistryTest(unittest.TestCase):
         while sharing a COMMON_CAP that said they do not, and nothing failed to
         tell anyone. A client asking what a family supports was told the
         opposite of the truth. Ask the renderer instead of trusting the flag.
+
+        It asks the dispatcher the gateway really uses (render_chat_for_arch, with the
+        family made the active one). An earlier version looked for a function named
+        render_chat_<family id>, found none for qwen36 (its renderer is render_chat_qwen),
+        skipped it silently, and so let `tools=False` stand for a family whose tool
+        calls work. Every chat family is now probed, and one that cannot be is a failure.
         """
+        from unittest import mock
+
         import openai_server
 
         probe = [{"role": "user", "content": "hi"}]
@@ -1131,16 +1139,16 @@ class FamilyRegistryTest(unittest.TestCase):
                  "function": {"name": "f", "description": "d",
                               "parameters": {"type": "object", "properties": {}}}}]
         for family in FAMILIES:
-            renderer = getattr(openai_server, f"render_chat_{family.id}", None)
-            if renderer is None:          # kimi/deepseek build their payload in C
-                continue
+            if family.modality != "text" or family.capabilities.decision:
+                continue                  # a picture, music or decision engine renders no chat
             refused = False
-            try:
-                renderer(probe, tools=tool)
-            except openai_server.APIError as exc:
-                refused = getattr(exc, "code", None) == "unsupported_parameter"
-            except Exception:             # nothing else here is a capability answer
-                continue
+            with mock.patch.object(openai_server, "ARCH", family.id):
+                try:
+                    openai_server.render_chat_for_arch(probe, tools=tool)
+                except openai_server.APIError as exc:
+                    self.assertEqual(getattr(exc, "code", None), "unsupported_parameter",
+                                     f"{family.id}: refused tools for a reason that is not a capability answer")
+                    refused = True
             self.assertEqual(
                 family.capabilities.tools, not refused,
                 f"{family.id}: registry says tools={family.capabilities.tools} but the "
