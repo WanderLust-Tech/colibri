@@ -165,3 +165,51 @@ def preprocess(data, max_tokens=750):
     if count == 0:
         raise ValueError("the clip is too short: it makes no audio frame")
     return frames, soft_tokens(count)
+
+
+def load_clip(data):
+    """The 16 kHz mono float32 samples of the bytes of a WAV file, the whole clip (preprocess cuts at 30 s; this does not)."""
+    samples, rate = read_wav(data)
+    return resample(samples, rate)
+
+
+def split_clip(samples, limit=MAX_SAMPLES, search=4 * SAMPLE_RATE, block=SAMPLE_RATE // 10):
+    """[(start, end)] sample ranges that cover `samples`, none longer than `limit`.
+
+    A piece is cut where the clip is quietest: the lowest-energy `block` (100 ms) among the last `search` samples the piece
+    could still hold, so a cut falls between words more often than in them. A clip that fits is one piece."""
+    n = len(samples)
+    search = max(block, min(search, limit // 2))
+    pieces, start = [], 0
+    while n - start > limit:
+        low = start + limit - search
+        window = np.asarray(samples[low:start + limit], dtype=np.float32)
+        count = len(window) // block
+        energy = (window[:count * block].reshape(count, block) ** 2).mean(axis=1)
+        cut = low + int(np.argmin(energy)) * block + block // 2
+        pieces.append((start, cut))
+        start = cut
+    pieces.append((start, n))
+    return pieces
+
+
+def is_silent(samples, floor=1e-4):
+    """Whether a piece is too quiet to hold speech: its RMS is under `floor` (digital silence is 0)."""
+    return len(samples) == 0 or float(np.sqrt(np.mean(np.square(samples, dtype=np.float64)))) < floor
+
+
+def to_wav(samples, minimum=SAMPLE_RATE * 3 // 10):
+    """The bytes of a 16-bit mono 16 kHz WAV file holding `samples`, padded with silence to at least `minimum` samples."""
+    import io
+    import wave
+    x = np.asarray(samples, dtype=np.float32)
+    if len(x) < minimum:
+        x = np.concatenate([x, np.zeros(minimum - len(x), dtype=np.float32)])
+    pcm = (np.clip(x, -1.0, 1.0) * 32767.0).astype("<i2")
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(pcm.tobytes())
+    return out.getvalue()

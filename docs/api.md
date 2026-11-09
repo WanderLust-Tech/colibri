@@ -268,8 +268,9 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 | OLMoE | no (HTTP 400) | no | no |
 
 "Pictures in" means the gateway can expand them for the family; whether the checkpoint being served loaded its vision tower is
-the engine's word (`GET /v1/models`, `input_modalities`). There is no embeddings route, no speech route
-(`/v1/audio/transcriptions`, `/v1/audio/speech`) and no `/v1/responses`.
+the engine's word (`GET /v1/models`, `input_modalities`). Speech to text has its own route on the Gemma E2B and E4B
+([below](#speech-to-text-v1audiotranscriptions)). There is no embeddings route, no text-to-speech route
+(`/v1/audio/speech`) and no `/v1/responses`.
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to
 `/v1/chat/completions`. The Anthropic endpoint translates `tools`,
@@ -453,6 +454,34 @@ behavior.
 > The prefill warning below applies here too, and applies *hardest* to Claude Code:
 > its system prompt and tool catalog are large, and on a disk-streaming CPU path
 > that is a long silent wait before the first token. Read it before you connect.
+
+## Speech to text (`/v1/audio/transcriptions`)
+
+When the served model is a Gemma 4 E2B or E4B (the two with an audio tower), `POST /v1/audio/transcriptions` turns a WAV file
+into text, in the shape OpenAI's SDKs and Whisper-style clients send: multipart/form-data with a `file`, `model`, and
+optionally `language`, `prompt`, `response_format` and `temperature`.
+
+```
+curl http://127.0.0.1:8000/v1/audio/transcriptions -H "Authorization: Bearer $KEY"   -F model=gemma-4-e2b-colibri -F file=@speech.wav -F language=en
+```
+
+- **`response_format`:** `json` (the default, `{"text": ...}`), `text`, or `verbose_json` (adds `duration` and `segments`).
+  `srt` and `vtt` are refused: the model gives no timestamps inside a stretch of speech. Word timestamps are refused too.
+- **File:** WAV only (PCM of 8 to 32 bits or float, any rate, any number of channels; it is mixed to mono and resampled to
+  16 kHz). Up to 25 MB and 15 minutes. A JSON body with `file` as base64 works as well.
+- **Long files:** the model hears 30 seconds at a time. A longer file is cut where it is quietest, within the last four
+  seconds of each piece, the pieces are transcribed one after another, and the texts are joined with a space. The `segments` of
+  `verbose_json` are those pieces (`start` and `end` in seconds), not sentences. A piece with no sound is skipped: asked to
+  transcribe silence, a model makes something up.
+- **`language`** is an ISO-639-1 code and goes into the question the model is asked ("in Italian"); without it the model is
+  asked for the original language, and the answer carries no `language`, as the model does not say what it heard. **`prompt`**
+  is a hint (names, terms) added to the question, at most 1000 characters. Both are suggestions to a language model, not a
+  setting of a recogniser.
+- Any other model answers HTTP 400 (`unsupported_endpoint`), with the reason: no audio tower in this checkpoint, or not a
+  Gemma 4 E model. Through `coli router` the request goes to the model named in `model`, like any other.
+
+Checked with a scripted engine (the prompt, the frames, the cutting, the refusals); a real E2B has not transcribed through this
+route yet. Quality is whatever Gemma's audio understanding gives: it is a chat model asked to transcribe, not a Whisper.
 
 ## Music (`/v1/audio/music`)
 

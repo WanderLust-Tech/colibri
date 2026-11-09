@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Speech to text: `/v1/audio/transcriptions` on the Gemma 4 E models
+
+OpenAI's transcription route, multipart with a `file` (or JSON with base64), answered by a Gemma 4 E2B or E4B: `json`, `text` and
+`verbose_json`; WAV of any rate, up to 25 MB and 15 minutes. A file over the model's 30 seconds is cut where it is quietest,
+the pieces are transcribed in turn and joined; silent pieces are skipped. `srt`, `vtt` and word timestamps are refused (the model
+gives none), and any other model answers HTTP 400 with the reason. `coli router` forwards it. Tested with a scripted engine and
+mutation-tested; not yet run on a real E2B. [docs/api.md](docs/api.md)
+
 ### JSON mode that cannot be anything else: `response_format` on Gemma 4, Qwen3.6 and Qwen3-Coder
 
 A request that carries `response_format` (`json_object`, `json_schema` or `gbnf`) now gets only tokens that keep the answer

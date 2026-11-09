@@ -32,7 +32,8 @@ the clone that serves port 8000):
 | Chat turn goes to the KV slot that holds it | `feat/smart-kv-slots` | yes | **no** | yes (the restart script runs 1 slot, so it matters only with `-KvSlots 2` or more) |
 | Gemma 4 (26B-A4B, 31B, E4B, E2B; pictures, audio, batched decode) | `feat/gemma4`, `feat/gemma4-setup` | yes | **no** | yes: `gemma4.exe` built, 26B-A4B and E2B containers in `colibri-models` |
 | `coli launch` | `feat/coli-launch` | yes | **no** | yes |
-| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder) | `feat/json-mode` | **no** | **no** | **no** |
+| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder) | `feat/json-mode` | yes (`3760f973`, 2026-11-08) | **no** | **no** |
+| `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | **no** | **no** | **no** |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -163,13 +164,13 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
 | Installed models | `C:\Users\kp-mi\colibri-models`: `qwen-image-2.1`, `ace-step-1.5`, `qwen3-coder-30b` |
 | Gemma containers (not installed) | `C:\Users\kp-mi\colibri-staging` |
 | Saved pictures and songs | `~/colibri-images`, `~/colibri-music` |
-| Worktrees | `D:\code\colibri-{acestep,gemma4,imgsave,router,router2,slots,stages,vae-encoder}` |
+| Worktrees | `D:\code\colibri-{acestep,gemma4,imgsave,json,router,router2,slots,stages,stt,vae-encoder}` |
 | Reference environments | `D:\code\gemma4-venv`, `D:\code\gemma4-ref` (logs, configs, `jfk.wav`); ACE-Step and Qwen-Image reference venvs lived in a session scratchpad and may be gone (rebuild from `c/tools/requirements-*.txt`) |
 | Build on this machine | PowerShell with `C:\msys64\ucrt64\bin;C:\msys64\usr\bin` first on PATH, then `make <engine> ARCH=native` (add `VK=1` for Vulkan). `make` fails from Git Bash; for Gemma use the printed gcc command |
 
 Uncommitted in `D:\code\colibri`: 31 web files that differ only in line endings (CRLF), and `docs/colibri-ideas.md`. Left alone.
 
-### 2.10 JSON mode (`feat/json-mode`, not merged, not deployed)
+### 2.10 JSON mode (`feat/json-mode`, merged into local `main` 2026-11-08, not pushed, not deployed)
 
 Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder: [json-mode.md](json-mode.md).
 
@@ -184,13 +185,24 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 - Not promised: finishing inside `max_tokens`; thrifty whitespace; UTF-8 inside strings. Not run yet on the real 26B or the
   coder model.
 
+### 2.11 Speech to text (`feat/audio-transcriptions`, not merged, not deployed)
+
+`POST /v1/audio/transcriptions` on a Gemma 4 E2B or E4B, in OpenAI's multipart shape ([api.md](api.md#speech-to-text-v1audiotranscriptions)).
+
+- A WAV file of any rate is mixed to mono and resampled; one over 30 s is cut at its quietest 100 ms within the last 4 s of
+  each piece (`gemma4_audio.split_clip`), each piece goes through the same chat path as an `input_audio` part, and the texts are
+  joined. Silent pieces are skipped. `json`, `text` and `verbose_json` (segments are the pieces); `srt`, `vtt` and word
+  timestamps are refused. 25 MB, 15 minutes. `coli router` forwards the route (its body limit follows).
+- Checked with the scripted engine of `tests/test_gemma4_gateway.py` (prompt, frames, cutting, refusals), a router test, and
+  9 deliberate breakages that the tests caught. Not run against a real E2B.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
 
 1. ~~Deploy Gemma 4~~ done 2026-11-07 (see section 1).
 2. **Push local `main` to the fork** (song saving, KV slots, Gemma 4, the Gemma convert fix, `coli launch`, the tooling-matrix
-   fix). Nothing goes to upstream.
+   fix, JSON mode). Nothing goes to upstream.
 3. **GPU offload for Gemma 4** (ask first; shares the 5090 with your renders). Move the large matrix multiplications, the
    towers first, to the GPU through the existing Vulkan `coli_vk_matmul` (format 1, int8 rows with a per-row scale, which the
    Gemma matrices already use). Expected to help towers and long-prompt prefill most, decode less (the MoE experts stay on

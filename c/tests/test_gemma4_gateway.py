@@ -568,5 +568,214 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual("".join(chunks), "<|channel>")
 
 
+try:
+    import numpy as np
+    HAVE_NUMPY = True
+except ImportError:
+    HAVE_NUMPY = False
+
+
+def tone_wav(seconds, rate=16000, quiet=None):
+    """A WAV file of a tone; `quiet` = (from, to) in seconds is a gap of digital silence in it."""
+    import io
+    import wave
+    n = int(seconds * rate)
+    x = 0.3 * np.sin(np.arange(n) * 0.2)
+    if quiet:
+        x[int(quiet[0] * rate):int(quiet[1] * rate)] = 0.0
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((x * 32767).astype("<i2").tobytes())
+    return buffer.getvalue()
+
+
+def multipart(fields, file=None, name="file"):
+    """(content type, body) of a multipart/form-data request."""
+    boundary = "----colibri-test"
+    out = b""
+    for key, value in fields.items():
+        out += f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode()
+    if file is not None:
+        out += (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="a.wav"\r\n'
+                "Content-Type: audio/wav\r\n\r\n").encode() + file + b"\r\n"
+    return f"multipart/form-data; boundary={boundary}", out + f"--{boundary}--\r\n".encode()
+
+
+@unittest.skipUnless(HAVE_NUMPY, "needs numpy")
+class SplitClipTest(unittest.TestCase):
+    def setUp(self):
+        import gemma4_audio
+        self.audio = gemma4_audio
+
+    def test_a_clip_that_fits_is_one_piece(self):
+        self.assertEqual(self.audio.split_clip(np.zeros(1000, np.float32), limit=1000), [(0, 1000)])
+
+    def test_the_pieces_cover_the_clip_and_none_is_too_long(self):
+        x = np.random.default_rng(1).normal(size=95_000).astype(np.float32)
+        pieces = self.audio.split_clip(x, limit=30_000, search=8_000, block=800)
+        self.assertEqual(pieces[0][0], 0)
+        self.assertEqual(pieces[-1][1], len(x))
+        for (a, b), (c, d) in zip(pieces, pieces[1:]):
+            self.assertEqual(b, c)
+        for a, b in pieces:
+            self.assertGreater(b, a)
+            self.assertLessEqual(b - a, 30_000)
+
+    def test_a_cut_falls_in_the_quietest_place_it_may(self):
+        x = np.random.default_rng(2).normal(size=50_000).astype(np.float32)
+        x[26_000:26_800] = 0.0
+        (a, cut), _ = self.audio.split_clip(x, limit=30_000, search=8_000, block=800)
+        self.assertTrue(26_000 <= cut <= 26_800, cut)
+
+    def test_silence_is_told_from_sound(self):
+        self.assertTrue(self.audio.is_silent(np.zeros(100, np.float32)))
+        self.assertFalse(self.audio.is_silent(0.1 * np.ones(100, np.float32)))
+
+    def test_a_short_piece_is_padded_to_a_clip_the_front_end_accepts(self):
+        wav = self.audio.to_wav(np.ones(10, np.float32) * 0.1)
+        frames, tokens = self.audio.preprocess(wav)
+        self.assertGreater(tokens, 0)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "needs numpy")
+class TranscriptionTest(unittest.TestCase):
+    """POST /v1/audio/transcriptions on a Gemma 4 with an audio tower: the file becomes chat turns, a long one is cut
+    and the pieces joined, and what the model cannot give is a 400."""
+
+    def setUp(self):
+        patcher = patch("openai_server.ARCH", "gemma4")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def server(self, **kw):
+        kw.setdefault("audio", True)
+        self.engine = PictureEngine(chunks=["It is ", "red."], supports_logprobs_echo=False, supports_tok_ids=False, **kw)
+        return _spawn_test_server(self, self.engine)
+
+    def post(self, base, fields=None, file=None, raw=False):
+        from urllib.request import Request, urlopen
+        kind, body = multipart({"model": "test-model", **(fields or {})}, file)
+        with urlopen(Request(base + "/v1/audio/transcriptions", data=body, headers={
+                "Authorization": "Bearer secret", "Content-Type": kind}), timeout=10) as response:
+            return response.read() if raw else json.load(response)
+
+    def refused(self, base, fields=None, file=None):
+        return _error_body(self, lambda: self.post(base, fields, file))
+
+    def test_a_file_comes_back_as_text(self):
+        base = self.server()
+        reply = self.post(base, file=tone_wav(1.0))
+        self.assertEqual(reply["text"], "It is red.")
+        prompt = self.engine.calls[0][0]
+        self.assertIn("<|audio>" + "<|audio|>" * 25 + "<audio|>Transcribe the following speech segment in its original "
+                      "language.", prompt)
+        self.assertTrue(prompt.endswith("<|turn>model\n<|channel>thought\n<channel|>"))
+        self.assertEqual(self.engine.calls[0][2], 0.0)                    # greedy unless asked otherwise
+        mel, frames, bins, kind = self.engine.images[0]
+        self.assertEqual((frames, bins, kind), (99, 128, "audio"))
+
+    def test_text_format_is_the_bare_text(self):
+        base = self.server()
+        self.assertEqual(self.post(base, {"response_format": "text"}, tone_wav(1.0), raw=True), b"It is red.\n")
+
+    def test_verbose_json_has_segments_and_the_duration(self):
+        base = self.server()
+        reply = self.post(base, {"response_format": "verbose_json", "language": "it"}, tone_wav(2.0))
+        self.assertEqual((reply["task"], reply["language"], reply["duration"]), ("transcribe", "it", 2.0))
+        self.assertEqual(reply["segments"], [{"id": 0, "seek": 0, "start": 0.0, "end": 2.0, "text": "It is red."}])
+        self.assertIn("speech segment in Italian.", self.engine.calls[0][0])
+
+    def test_a_prompt_is_a_hint_in_the_question(self):
+        base = self.server()
+        self.post(base, {"prompt": "Names: Anselm, Brigid."}, tone_wav(1.0))
+        self.assertIn("It may help to know: Names: Anselm, Brigid.", self.engine.calls[0][0])
+
+    def test_a_long_file_is_cut_in_its_quiet_place_and_the_pieces_are_joined(self):
+        base = self.server()
+        reply = self.post(base, {"response_format": "verbose_json"}, tone_wav(70.0, quiet=(27.5, 27.7)))
+        self.assertEqual(reply["text"], "It is red. It is red. It is red.")
+        self.assertEqual(len(self.engine.calls), 3)
+        segments = reply["segments"]
+        self.assertTrue(27.5 <= segments[0]["end"] <= 27.7, segments)
+        self.assertEqual((segments[0]["start"], segments[-1]["end"]), (0.0, 70.0))
+        self.assertTrue(all(a["end"] == b["start"] for a, b in zip(segments, segments[1:])))
+        for _mel, frames, _bins, _kind in self.engine.images:
+            self.assertLessEqual(frames, 3004)                              # at most 30 s of 10 ms frames
+
+    def test_the_engines_own_limit_sets_the_piece_size(self):
+        base = self.server(audio_tokens="125")                              # 5 s
+        self.post(base, file=tone_wav(12.0))
+        self.assertGreaterEqual(len(self.engine.calls), 3)                  # a cut may come early: up to 2.5 s into a piece
+        for _mel, frames, _bins, _kind in self.engine.images:
+            self.assertLessEqual(frames, 503)                               # no piece over 5 s
+
+    def test_a_silent_file_gives_empty_text_and_asks_the_model_nothing(self):
+        base = self.server()
+        self.assertEqual(self.post(base, file=tone_wav(3.0, quiet=(0.0, 3.0)))["text"], "")
+        self.assertEqual(self.engine.calls, [])
+
+    def test_a_silent_piece_is_skipped(self):
+        base = self.server()
+        self.post(base, {"response_format": "verbose_json"}, tone_wav(70.0, quiet=(0.0, 30.0)))
+        self.assertEqual(len(self.engine.calls), 2)                         # the first piece is all silence
+
+    def test_a_json_body_with_a_base64_file_is_taken_too(self):
+        import base64
+        base = self.server()
+        with _post_json(base, "/v1/audio/transcriptions", {"model": "test-model", "response_format": "json",
+                                                           "file": base64.b64encode(tone_wav(1.0)).decode()}) as response:
+            self.assertEqual(json.load(response)["text"], "It is red.")
+
+    def test_what_the_model_cannot_give_is_a_400_before_any_work(self):
+        base = self.server()
+        wav = tone_wav(1.0)
+        for fields, file, code, word in (
+                ({"response_format": "srt"}, wav, "unsupported_value", "timestamps"),
+                ({"response_format": "vtt"}, wav, "unsupported_value", "timestamps"),
+                ({"response_format": "xml"}, wav, "invalid_value", "json, text"),
+                ({"timestamp_granularities[]": "word"}, wav, "unsupported_value", "Word timestamps"),
+                ({"stream": "true"}, wav, "unsupported_parameter", "stream"),
+                ({"language": "english please"}, wav, "invalid_value", "ISO-639-1"),
+                ({"temperature": "2"}, wav, "invalid_value", "temperature"),
+                ({}, None, "missing_required_parameter", "`file` is required"),
+                ({}, b"not a wav file at all", "invalid_audio", "WAV"),
+        ):
+            with self.subTest(fields=fields):
+                status, error = self.refused(base, fields, file)
+                self.assertEqual((status, error["code"]), (400, code))
+                self.assertIn(word, error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_a_file_over_the_limit_is_refused(self):
+        base = self.server()
+        with patch("openai_server.TRANSCRIBE_MAX_SECONDS", 5):
+            status, error = self.refused(base, {}, tone_wav(6.0))
+        self.assertEqual((status, error["code"]), (400, "invalid_audio"))
+        self.assertIn("limit is 5 s", error["message"])
+        self.assertEqual(self.engine.calls, [])
+
+    def test_an_engine_without_the_tower_says_so(self):
+        for audio, why in ((False, "no audio tower"), (None, "only a Gemma 4 E2B or E4B")):
+            base = self.server(audio=audio)
+            status, error = self.refused(base, {}, tone_wav(1.0))
+            self.assertEqual((status, error["code"]), (400, "unsupported_endpoint"))
+            self.assertIn(why, error["message"])
+            self.assertEqual(self.engine.calls, [])
+
+    def test_another_family_does_not_transcribe(self):
+        base = self.server()
+        with patch("openai_server.ARCH", "qwen36"):
+            status, error = self.refused(base, {}, tone_wav(1.0))
+        self.assertEqual((status, error["code"]), (400, "unsupported_endpoint"))
+
+    def test_the_wrong_model_is_a_404(self):
+        base = self.server()
+        status, error = _error_body(self, lambda: self.post(base, {"model": "nope"}, tone_wav(1.0)))
+        self.assertEqual(status, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

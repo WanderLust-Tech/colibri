@@ -6389,6 +6389,56 @@ def parse_multipart_music(content_type, raw):
     return fields
 
 
+# POST /v1/audio/transcriptions, OpenAI's shape (multipart/form-data: a `file`, the rest text fields; JSON with `file` as
+# base64 works too). A Gemma 4 E2B or E4B hears the file; a clip over what the model takes at once (30 s) is cut at its
+# quiet places and each piece is transcribed in turn.
+TRANSCRIBE_ENDPOINT = "/v1/audio/transcriptions"
+TRANSCRIBE_MAX_BODY = 25 << 20                    # OpenAI's own limit on the file
+TRANSCRIBE_MAX_SECONDS = 900                      # a quarter of an hour: 30+ pieces, each a full generation
+TRANSCRIBE_FORMATS = ("json", "text", "verbose_json")
+TRANSCRIBE_LANGUAGES = {
+    "ar": "Arabic", "bg": "Bulgarian", "cs": "Czech", "da": "Danish", "de": "German", "el": "Greek", "en": "English",
+    "es": "Spanish", "et": "Estonian", "fa": "Persian", "fi": "Finnish", "fr": "French", "he": "Hebrew", "hi": "Hindi",
+    "hr": "Croatian", "hu": "Hungarian", "id": "Indonesian", "it": "Italian", "ja": "Japanese", "ko": "Korean",
+    "lt": "Lithuanian", "lv": "Latvian", "nl": "Dutch", "no": "Norwegian", "pl": "Polish", "pt": "Portuguese",
+    "ro": "Romanian", "ru": "Russian", "sk": "Slovak", "sl": "Slovenian", "sr": "Serbian", "sv": "Swedish",
+    "th": "Thai", "tr": "Turkish", "uk": "Ukrainian", "vi": "Vietnamese", "zh": "Chinese"}
+
+
+def parse_multipart_transcription(content_type, raw):
+    """The body of a multipart/form-data transcription request as the dict the JSON form would have been: the audio
+    as bytes under `file`, `temperature` a number. A file sent twice is refused."""
+    fields, files = _parse_multipart(content_type, raw, ("file",), (), ("temperature",))
+    blobs = files.get("file", [])
+    if len(blobs) > 1:
+        raise APIError(400, f"`file` was sent {len(blobs)} times: one file each.", "file", "invalid_value")
+    if "file" in fields:
+        raise APIError(400, "`file` is a file, not a text field.", "file", "invalid_value")
+    if blobs:
+        fields["file"] = blobs[0]
+    return fields
+
+
+def _transcription_json_file(value):
+    """The bytes of a JSON transcription request's `file`: base64 or a base64 data: URL. Nothing is fetched."""
+    import base64
+    import binascii
+    if not isinstance(value, str) or not value.strip():
+        raise APIError(400, "`file` must be base64 audio or a base64 data: URL.", "file", "invalid_value")
+    text = value.strip()
+    if text[:5].lower() == "data:":
+        head, comma, text = text.partition(",")
+        if not comma or not head.lower().endswith(";base64"):
+            raise APIError(400, "`file`: a data: URL must be base64-encoded.", "file", "invalid_value")
+    elif re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", text):
+        raise APIError(400, "`file`: this server does not fetch audio from URLs; send the file or base64.",
+                       "file", "invalid_value")
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise APIError(400, "`file` is not valid base64.", "file", "invalid_value") from None
+
+
 TEXT_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone")
 # The endpoints that generate or score text with a language model, refused with a
 # pointer to /v1/systemone when the model is a decision engine (chat=0).
@@ -6972,6 +7022,21 @@ class APIHandler(BaseHTTPRequestHandler):
             return parse_multipart_music(content_type, raw)
         return self.parse_json_object(raw)
 
+    def read_transcription_request(self):
+        """POST /v1/audio/transcriptions: the body as a dict, `file` as bytes, from multipart/form-data or from JSON
+        (`file` as base64)."""
+        content_type = self.headers.get("Content-Type", "")
+        kind = content_type.split(";", 1)[0].strip().lower()
+        if kind == "multipart/form-data":
+            return parse_multipart_transcription(content_type, self.read_raw_body(TRANSCRIBE_MAX_BODY))
+        if kind not in ("application/json", ""):
+            raise APIError(415, f"POST {TRANSCRIBE_ENDPOINT} takes multipart/form-data or application/json.",
+                           None, "unsupported_media_type")
+        body = self.parse_json_object(self.read_raw_body(TRANSCRIBE_MAX_BODY * 4 // 3 + (1 << 20)))
+        if "file" in body:
+            body["file"] = _transcription_json_file(body["file"])
+        return body
+
     def read_edit_request(self):
         """POST /v1/images/edits: (fields, [picture bytes]).
 
@@ -7213,6 +7278,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     body, blobs = self.read_edit_request()
                 elif path == MUSIC_ENDPOINT:
                     body = self.read_music_request()
+                elif path == TRANSCRIBE_ENDPOINT:
+                    body = self.read_transcription_request()
                 else:
                     body = self.read_json()
             except TimeoutError:
@@ -7240,6 +7307,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                "model", "unsupported_endpoint")
             if path == MUSIC_ENDPOINT:
                 self.music_generation(body, request_id)
+            elif path == TRANSCRIBE_ENDPOINT:
+                self.audio_transcription(body, request_id)
             elif path == "/v1/images/generations":
                 self.image_generation(body, request_id)
             elif path == "/v1/images/edits":
@@ -7913,6 +7982,105 @@ class APIHandler(BaseHTTPRequestHandler):
     # [{"b64_json": a WAV, "format": "wav"}], "colibri": {...}}, or with `response_format`
     # "wav" the WAV itself, or with `stream` an SSE of progress events and the same payload.
     # The queue, its limits, the 503 for a full queue and /metrics mean what they mean for images.
+    def audio_transcription(self, body, request_id):
+        """POST /v1/audio/transcriptions: the speech of a WAV file as text, by a Gemma 4 that has its audio tower.
+
+        The file is read, mixed to mono and resampled to 16 kHz; a clip over what the engine takes at once is cut at its
+        quietest places (gemma4_audio.split_clip) and the pieces are transcribed one after another, in one turn each, under
+        one admission. Pieces with no sound are skipped, not asked about: a model asked to transcribe silence invents
+        something. Segments of verbose_json are those pieces (there are no word times), `language` is what was asked for."""
+        engine = self.server.engine
+        if (is_image_engine(engine) or is_music_engine(engine) or not engine_chats(engine) or ARCH != "gemma4"
+                or getattr(engine, "audio", None) is not True):
+            why = ("it has no audio tower" if ARCH == "gemma4" and getattr(engine, "audio", None) is False
+                   else "only a Gemma 4 E2B or E4B hears audio")
+            raise APIError(400, f"`{self.server.model_id}` cannot transcribe: {why}.", "model", "unsupported_endpoint")
+        data = body.get("file")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise APIError(400, "`file` is required: the audio, as a WAV file.", "file", "missing_required_parameter")
+        fmt = body.get("response_format", "json")
+        if fmt in ("srt", "vtt"):
+            raise APIError(400, f"`response_format` {fmt!r} needs timestamps within a segment, which this model does not "
+                                "give: use json, text or verbose_json.", "response_format", "unsupported_value")
+        if fmt not in TRANSCRIBE_FORMATS:
+            raise APIError(400, f"`response_format` must be one of {', '.join(TRANSCRIBE_FORMATS)}.",
+                           "response_format", "invalid_value")
+        grains = body.get("timestamp_granularities", body.get("timestamp_granularities[]"))
+        if "word" in (grains if isinstance(grains, list) else [grains]):
+            raise APIError(400, "Word timestamps are not available: the model does not give them.",
+                           "timestamp_granularities", "unsupported_value")
+        if str(body.get("stream", False)).lower() in ("true", "1"):
+            raise APIError(400, "`stream` is not supported on transcriptions.", "stream", "unsupported_parameter")
+        language = body.get("language")
+        if language is not None and (not isinstance(language, str) or not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z]{2,4})?", language)):
+            raise APIError(400, "`language` must be an ISO-639-1 code such as \"en\".", "language", "invalid_value")
+        hint = body.get("prompt")
+        if hint is not None and (not isinstance(hint, str) or len(hint) > 1000):
+            raise APIError(400, "`prompt` must be text of at most 1000 characters.", "prompt", "invalid_value")
+        temperature = body.get("temperature", 0.0)
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 1:
+            raise APIError(400, "`temperature` must be a number from 0 to 1.", "temperature", "invalid_value")
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+            import gemma4_audio
+            samples = gemma4_audio.load_clip(bytes(data))
+        except ImportError as problem:
+            raise APIError(400, f"audio support needs numpy ({problem}).", "file")
+        except ValueError as problem:
+            raise APIError(400, str(problem), "file", "invalid_audio")
+        seconds = len(samples) / gemma4_audio.SAMPLE_RATE
+        if seconds > TRANSCRIBE_MAX_SECONDS:
+            raise APIError(400, f"the file is {seconds:.0f} s long; the limit is {TRANSCRIBE_MAX_SECONDS} s.",
+                           "file", "invalid_audio")
+        try:
+            tokens = int(getattr(engine, "caps", {}).get("audio_tokens") or 0) or 750
+        except (TypeError, ValueError):
+            tokens = 750
+        pieces = [(a, b) for a, b in gemma4_audio.split_clip(
+            samples, min(gemma4_audio.MAX_SAMPLES, tokens * gemma4_audio.SAMPLE_RATE // 25))]
+        named = TRANSCRIBE_LANGUAGES.get(language.lower().split("-")[0]) if language else None
+        speech = f"in {named}" if named else "in its original language"
+        question = (f"Transcribe the following speech segment {speech}. Only output the transcription, with no newlines "
+                    "and nothing else. Write numbers as digits.")
+        if hint:
+            question += f" It may help to know: {hint.strip()}"
+        maximum = min(self.server.max_tokens, 1024)
+        segments, texts, usage = [], [], {"input_tokens": 0, "output_tokens": 0}
+        with self.server.scheduler.admit(self.client_disconnected) as admission:
+            queue_wait, cache_slot = admission
+            for start, end in pieces:
+                piece = samples[start:end]
+                if gemma4_audio.is_silent(piece):
+                    continue
+                import base64
+                clip = {"type": "input_audio", "input_audio": {
+                    "data": base64.b64encode(gemma4_audio.to_wav(piece)).decode("ascii"), "format": "wav"}}
+                messages, image = self.expand_images([{"role": "user", "content": [clip, {"type": "text", "text": question}]}])
+                prompt = render_chat_for_arch(messages, False, None, None, None, add_generation_prompt=True,
+                                              preserve_thinking=True)
+                output = []
+                stats = self.server.generate(prompt, maximum, float(temperature), 1.0, output.append, cache_slot,
+                                             self.client_disconnected, image=image)
+                text = " ".join("".join(output).split())
+                usage["input_tokens"] += stats.get("prompt_tokens", 0)
+                usage["output_tokens"] += stats.get("completion_tokens", 0)
+                if text:
+                    texts.append(text)
+                    segments.append({"id": len(segments), "seek": 0, "start": round(start / gemma4_audio.SAMPLE_RATE, 3),
+                                     "end": round(end / gemma4_audio.SAMPLE_RATE, 3), "text": text})
+        headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
+        whole = " ".join(texts)
+        if fmt == "text":
+            self.send_bytes(200, (whole + "\n").encode("utf-8"), "text/plain; charset=utf-8", request_id, headers)
+        elif fmt == "verbose_json":
+            self.send_json(200, {"task": "transcribe", **({"language": language} if language else {}),
+                                 "duration": round(seconds, 3), "text": whole, "segments": segments,
+                                 "usage": {"type": "tokens", **usage}}, request_id, headers)
+        else:
+            self.send_json(200, {"text": whole, "usage": {"type": "tokens", **usage}}, request_id, headers)
+
     def music_generation(self, body, request_id):
         engine = self.server.engine
         if not is_music_engine(engine):

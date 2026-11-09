@@ -212,6 +212,17 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((status, body["model"], body["parts"]), (200, "music-m-colibri", 3))
         self.assertEqual(body["size"], len(raw))
 
+    def test_a_transcription_is_routed_by_its_model_field_and_may_carry_a_long_file(self):
+        rig = Rig(self, [entry("text-a"), entry("music-m", "audio")])
+        boundary = "xyz"
+        raw = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n\r\n'.encode()
+               + bytes(6 << 20) + f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
+               f'text-a-colibri\r\n--{boundary}--\r\n'.encode())          # 6 MiB: over the 4 MiB of a chat body
+        status, _, _, body = rig.call("POST", "/v1/audio/transcriptions", raw=raw,
+                                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        self.assertEqual((status, body["model"]), (200, "text-a-colibri"))
+        self.assertEqual(body["size"], len(raw))
+
     def test_the_workers_get_the_model_by_its_own_id(self):
         rig = Rig(self, [entry("text-a"), entry("music-m", "audio")])
         status, _, _, body = rig.call("POST", "/v1/chat/completions", {"model": "text-a", "keep": "me"})

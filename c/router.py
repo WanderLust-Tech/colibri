@@ -50,7 +50,7 @@ LOOPBACK = {"127.0.0.1", "localhost", "::1", ""}
 # What a worker is asked to compute, and the biggest body each may carry. The workers enforce
 # their own, tighter limits; these only bound what the router reads into memory.
 COMPUTE_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone",
-                 "/v1/images/generations", "/v1/images/edits", "/v1/audio/music")
+                 "/v1/images/generations", "/v1/images/edits", "/v1/audio/music", "/v1/audio/transcriptions")
 
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
               "transfer-encoding", "upgrade", "content-length", "host", "expect"}
@@ -1077,6 +1077,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             limit = openai_server.MUSIC_MAX_BODY_MULTIPART if multipart else openai_server.MUSIC_MAX_BODY_JSON
         elif path == "/v1/images/edits":
             limit = image_engine.MAX_EDIT_BODY
+        elif path == openai_server.TRANSCRIBE_ENDPOINT:
+            limit = openai_server.TRANSCRIBE_MAX_BODY if multipart else openai_server.TRANSCRIBE_MAX_BODY * 4 // 3 + (1 << 20)
         else:
             limit = openai_server.MAX_BODY
         if length < 1 or length > limit:

@@ -74,7 +74,7 @@ Needs A1/A2 to mean anything.
     work, and the existing consistency test never noticed because it looked for a renderer named after the family and found none.
     It now asks the gateway's real dispatcher, `docs/api.md` has the missing DeepSeek V4.1 row and a second table (JSON mode,
     pictures, audio), and `c/tests/test_api_matrix_docs.py` fails when either table drifts from the registry.
-  - **Structured JSON: built 2026-11-07 on `feat/json-mode` (not merged).** Real constrained decoding on Gemma 4 and
+  - **Structured JSON: built 2026-11-07 on `feat/json-mode`, merged into local `main` 2026-11-08 (not deployed).** Real constrained decoding on Gemma 4 and
     Qwen3.6/Qwen3-Coder, [json-mode.md](json-mode.md); the survey text below is what it replaced. *Before:* accepted but only
     worked on GLM-5.2. The gateway reads `response_format` (`json_object`, `json_schema`,
     `gbnf`) and turns it into a grammar, but only the `glm` family takes a grammar payload; every other model, including
@@ -84,8 +84,9 @@ Needs A1/A2 to mean anything.
     Reusable parts exist: `c/grammar.h` (a byte-level GBNF pushdown automaton with `gr_accept` and `gr_admissible`) and
     `c/schema_gbnf.h` (JSON schema to GBNF).
   - **Embeddings: no.** No `/v1/embeddings` route, and no engine produces embeddings.
-  - **Speech to text: only through chat, on Gemma E2B/E4B.** Send `input_audio` (WAV) in a chat message (JFK clip transcribed word
-    for word); there is no `/v1/audio/transcriptions` route. Inkling also takes audio (DMel frames, command line only).
+  - **Speech to text: on Gemma E2B/E4B.** Send `input_audio` (WAV) in a chat message (JFK clip transcribed word
+    for word). *Built 2026-11-08 on `feat/audio-transcriptions` (not merged):* a `/v1/audio/transcriptions` route over the same path,
+    with cutting of long files, [api.md](api.md#speech-to-text-v1audiotranscriptions). Inkling also takes audio (DMel frames, command line only).
   - **Text to speech: no.** ACE-Step makes music, not speech.
   - **Not served at all:** `/v1/responses` (what Codex needs), and `/v1/completions` exists as the legacy route.
   - Pictures in chat: GLM-5.3, Qwen3.6, Qwen3.8, DeepSeek V4.1, MiMo and Gemma 4.
