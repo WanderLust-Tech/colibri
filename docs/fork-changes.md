@@ -32,8 +32,8 @@ the clone that serves port 8000):
 | Chat turn goes to the KV slot that holds it | `feat/smart-kv-slots` | yes | **no** | yes (the restart script runs 1 slot, so it matters only with `-KvSlots 2` or more) |
 | Gemma 4 (26B-A4B, 31B, E4B, E2B; pictures, audio, batched decode) | `feat/gemma4`, `feat/gemma4-setup` | yes | **no** | yes: `gemma4.exe` built, 26B-A4B and E2B containers in `colibri-models` |
 | `coli launch` | `feat/coli-launch` | yes | **no** | yes |
-| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder) | `feat/json-mode` | yes (`3760f973`, 2026-11-08) | **no** | **no** |
-| `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | **no** | **no** | **no** |
+| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder), with the whitespace and UTF-8 fix | `feat/json-mode`, `fix/json-whitespace` | yes (`d31c2dd6`) | **no** | yes (2026-11-09): live clone at `d31c2dd6`, `gemma4.exe` and `qwen36.exe` rebuilt; checked on the real E2B, 26B and Qwen3-Coder |
+| `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | **no** | yes (2026-11-09); the JFK clip came back word for word on the E2B |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -170,7 +170,7 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
 
 Uncommitted in `D:\code\colibri`: 31 web files that differ only in line endings (CRLF), and `docs/colibri-ideas.md`. Left alone.
 
-### 2.10 JSON mode (`feat/json-mode`, merged into local `main` 2026-11-08, not pushed, not deployed)
+### 2.10 JSON mode (`feat/json-mode`, `fix/json-whitespace`; merged, live 2026-11-09, not pushed)
 
 Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder: [json-mode.md](json-mode.md).
 
@@ -183,9 +183,11 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 - Checked with random-weight models (noise left alone) against Python's `json.loads` and the schema's shape; mutation-tested.
   Before this, no engine promised valid JSON, GLM-5.2's grammar being only a draft source.
 - Not promised: finishing inside `max_tokens`; thrifty whitespace (a run is bounded at 20 bytes, since the first real run, on
-  a Gemma E2B, showed an unbounded one eat the whole budget). Strings are valid UTF-8; `json_object` is an object.
+  a Gemma E2B, showed an unbounded one eat the whole budget). Strings are valid UTF-8; `json_object` is an object. Real runs
+  (2026-11-09) on the E2B, 26B-A4B and Qwen3-Coder: schema, `json_object` and `gbnf` all valid; an answer can still carry up to
+  20 whitespace bytes before the object or after it (the E2B and Qwen did before, the 26B after).
 
-### 2.11 Speech to text (`feat/audio-transcriptions`, not merged, not deployed)
+### 2.11 Speech to text (`feat/audio-transcriptions`, merged and live 2026-11-09)
 
 `POST /v1/audio/transcriptions` on a Gemma 4 E2B or E4B, in OpenAI's multipart shape ([api.md](api.md#speech-to-text-v1audiotranscriptions)).
 
@@ -194,7 +196,8 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   joined. Silent pieces are skipped. `json`, `text` and `verbose_json` (segments are the pieces); `srt`, `vtt` and word
   timestamps are refused. 25 MB, 15 minutes. `coli router` forwards the route (its body limit follows).
 - Checked with the scripted engine of `tests/test_gemma4_gateway.py` (prompt, frames, cutting, refusals), a router test, and
-  9 deliberate breakages that the tests caught. Not run against a real E2B.
+  9 deliberate breakages that the tests caught. On the real E2B: the 11 s JFK clip word for word in 9 s; a 44 s file in two
+  pieces, cut at 26.85 s (mid-sentence: the looped clip has no pause). Quality beyond that is unmeasured.
 
 ## 3. Planned and open
 
