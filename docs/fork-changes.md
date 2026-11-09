@@ -35,7 +35,7 @@ the clone that serves port 8000):
 | JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder), with the whitespace and UTF-8 fix | `feat/json-mode`, `fix/json-whitespace` | yes (`d31c2dd6`) | **no** | yes (2026-11-09): live clone at `d31c2dd6`, `gemma4.exe` and `qwen36.exe` rebuilt; checked on the real E2B, 26B and Qwen3-Coder |
 | `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | **no** | yes (2026-11-09); the JFK clip came back word for word on the E2B |
 | Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
-| Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | **no** | **no** | **no** (needs `npm run build` in the live clone, and a router restart for the new routes) |
+| Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
