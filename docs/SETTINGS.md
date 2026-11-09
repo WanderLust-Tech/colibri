@@ -14,6 +14,28 @@ coli <subcommand> [flags]
 
 Flags may also be given **after** the subcommand. Most flags map onto an engine environment variable before `glm` is launched (see the mapping table at the bottom).
 
+## `coli settings` — what is set, and what nothing reads
+
+[ENVIRONMENT.md](ENVIRONMENT.md) describes every variable the engines and the gateway read. `coli settings` reads those
+tables, so there is one text to keep, and tells you what the page cannot:
+
+```
+coli settings                 # the documented settings that are set in this environment, with their defaults
+coli settings kv slots        # search the names and descriptions (every word must match)
+coli settings --all           # every documented setting, by section
+coli settings --json          # the same, for a script
+```
+
+It also catches a typo. A variable of a known family (`COLI_`, `Q36_`, `G4_`, `GLM53_`...) that is set, but is neither in the
+tables nor named anywhere in the program's source, is reported as read by nothing, with the close names:
+
+```
+COLI_KEEP_ALIV is set, but nothing reads it.  did you mean COLI_KEEP_ALIVE?
+```
+
+The exit status is 1 when there is such a variable. Values of variables with `KEY`, `TOKEN` or `SECRET` in the name are not
+printed.
+
 ### Subcommands
 
 | Subcommand | Purpose |
@@ -23,6 +45,8 @@ Flags may also be given **after** the subcommand. Most flags map onto an engine 
 | `plan` | Show the computed RAM/VRAM placement plan (`--json` for machine-readable). |
 | `mirror` | Plan, stage, or verify a usage-ranked partial model mirror (see [multidisk.md](multidisk.md)). |
 | `doctor` | Environment/health check (`--json` report, `--deep` strict preflight). |
+| `preset` | Named presets: a model with settings baked in, offered under a name of its own (`add`, `rm`, `show`; see [presets.md](presets.md)). |
+| `settings` | The settings colibri reads, which are set here, and which that are set are read by nothing (see above). |
 | `tune` | Measure and save the fastest quality-preserving execution profile for this machine/model. |
 | `run "<prompt>"` | One-shot generation for the given prompt (positional, may be multi-word). |
 | `chat` | Interactive REPL chat. |

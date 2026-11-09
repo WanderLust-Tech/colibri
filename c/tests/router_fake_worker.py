@@ -75,8 +75,11 @@ class Handler(BaseHTTPRequestHandler):
             body = {"model": args.id}
             seen = raw.count(b"Content-Disposition")
             keys = sorted(m.decode() for m in re.findall(rb'name="([^"]+)"', raw))
+            received = {k.decode(): v.decode("utf-8", "replace")      # the plain text fields (a file part has a filename)
+                        for k, v in re.findall(rb'name="([^"]+)"\r\n\r\n(.*?)\r\n--', raw, re.S)}
         else:
             body = json.loads(raw)
+            received = body
             seen = 0
             keys = sorted(body)
             if body.get("model") != args.id:
@@ -103,7 +106,8 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(float(body.get("sleep", 0)))
                 self.reply(200, {"model": args.id, "pid": os.getpid(), "path": self.path, "parts": seen,
                                  "origin": origin[0], "authorization": origin[1], "x_test": origin[2],
-                                 "size": length, "keys": keys})
+                                 "size": length, "keys": keys, "received": received,
+                                 "trace": self.headers.get("x-colibri-trace")})
         except OSError:
             note(f"cut {args.id}")
             return

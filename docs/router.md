@@ -13,6 +13,10 @@ Clients and the dashboard see one server. `POST /v1/chat/completions` with `"mod
 `"model": "ace-step-1.5"` all go to the same address, and each is answered by its own model without a
 restart in between.
 
+Two things build on the router: a model can be offered under a name of its own with settings baked in (`coli preset`,
+[presets.md](presets.md)), and every request can be logged to a file, the router's line joined to its worker's
+([request-log.md](request-log.md)).
+
 ## How it works
 
 The router is a separate process. Each model runs in an ordinary `coli serve` on a loopback port (a

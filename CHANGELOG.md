@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Named presets (`coli preset`), a request log, and `coli settings`
+
+**Presets.** A model with settings baked in, offered under a name of its own: `coli preset add terse --model qwen3-coder-30b-a3b
+--system "Answer in one sentence." --set temperature=0.2`, then `"model": "terse"` in any request. The router loads the base model
+and fills in what the request left out (its values win; a system prompt only when the conversation has none), for JSON and
+multipart bodies alike. The file is read again when it changes; presets appear in `GET /v1/models` (with `preset_of`) and
+`GET /v1/presets` says which can be used and why not. A real model's name is never taken by a preset. [docs/presets.md](docs/presets.md)
+
+**Request log.** `COLI_REQUEST_LOG=FILE` (or `--request-log`) writes one JSON line per request that computes, from the router and
+from the gateway behind it, joined by a `trace` id: path, model, preset, status, seconds, and the gateway's prompt and completion
+tokens. The text of requests only with `COLI_REQUEST_LOG_BODIES=1`. One old file kept at the size limit.
+[docs/request-log.md](docs/request-log.md)
+
+**Settings.** `coli settings` lists the documented settings (read from `docs/ENVIRONMENT.md`, so one text) that are set in this
+environment, searches them, and names a set variable that nothing reads, with the close names (a typo of `COLI_KEEP_ALIVE` is found).
+Fifteen router and server settings that were in no document are now in `ENVIRONMENT.md`.
+
 ### JSON mode: bounded whitespace, valid UTF-8 in strings, `json_object` is an object
 
 First run of JSON mode on a real model (Gemma 4 E2B) showed that a schema answer could be nothing but whitespace: with every

@@ -41,6 +41,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import presets as presets_mod
+import request_log
+
 DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its last request
 DEFAULT_MAX_LOADED = 3
 FIT_HEADROOM = 0.8                  # a model must fit in this share of the free memory (Ollama's rule)
@@ -783,16 +786,36 @@ def _multipart_value(raw, name):
     return raw[start + 4:end if end >= 0 else None].decode("utf-8", "replace").strip()
 
 
+def _boundary(content_type):
+    for piece in (content_type or "").split(";")[1:]:
+        key, _, value = piece.strip().partition("=")
+        if key.lower() == "boundary":
+            return value.strip('"')
+    return ""
+
+
+def _multipart_with(raw, content_type, defaults):
+    """The multipart body with a text field for each of `defaults` it does not already have."""
+    boundary = _boundary(content_type)
+    closing = raw.rfind(b"--" + boundary.encode() + b"--") if boundary else -1
+    if closing < 0:
+        return raw
+    parts = b""
+    for key, value in defaults.items():
+        if value is None or _multipart_value(raw, key) is not None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        parts += (b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n' % (boundary.encode(), key.encode())
+                  + text.encode("utf-8") + b"\r\n")
+    return raw[:closing] + parts + raw[closing:]
+
+
 def _multipart_without(raw, name, content_type):
     """The multipart body without the field `name` (its whole part), or the body itself when it has none."""
     at = raw.find(b'name="%s"' % name.encode())
     if at < 0:
         return raw
-    boundary = ""
-    for piece in (content_type or "").split(";")[1:]:
-        key, _, value = piece.strip().partition("=")
-        if key.lower() == "boundary":
-            boundary = value.strip('"')
+    boundary = _boundary(content_type)
     if not boundary:
         return raw
     delimiter = b"--" + boundary.encode()
@@ -833,10 +856,13 @@ class Body:
             return keep_alive_value(text if text else None)
         return keep_alive_value(self.json.get("keep_alive") if self.json is not None else None)
 
-    def for_worker(self, model_id):
+    def for_worker(self, model_id, preset=None, path=""):
         """The body to send on: `model` set to the id the worker knows it by (a client may name it by its key, its
         folder or the id without `-colibri`; a worker accepts only its own id) and without `keep_alive`, which is
-        the router's. The same bytes when there is nothing to change."""
+        the router's. The same bytes when there is nothing to change.
+
+        With a preset, what the request left out is filled in from it: each default the body has no value for, and the
+        preset's system prompt when the conversation has none (see apply_preset)."""
         if self.multipart:
             raw = self.raw
             at = raw.find(b'name="model"')
@@ -846,12 +872,38 @@ class Body:
                 end = len(raw) if end < 0 else end
                 if raw[start + 4:end] != model_id.encode():
                     raw = raw[:start + 4] + model_id.encode() + raw[end:]
-            return _multipart_without(raw, "keep_alive", self.content_type)
-        if self.json is None or (self.json.get("model") == model_id and "keep_alive" not in self.json):
+            raw = _multipart_without(raw, "keep_alive", self.content_type)
+            if preset is not None and preset.defaults:
+                raw = _multipart_with(raw, self.content_type, preset.defaults)
+            return raw
+        if self.json is None:
             return self.raw
         body = {k: v for k, v in self.json.items() if k != "keep_alive"}
         body["model"] = model_id
+        if preset is not None:
+            apply_preset(body, preset, path)
+        if body == self.json:
+            return self.raw
         return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def apply_preset(body, preset, path):
+    """Fill a JSON request body in from a preset, in place. A value the request carries (anything but null) wins. The
+    system prompt is added only when the conversation has none of its own: /v1/chat/completions gets a system message
+    in front, /v1/messages its `system` field; other endpoints have no system prompt to give."""
+    for key, value in preset.defaults.items():
+        if body.get(key) is None:
+            body[key] = value
+    if not preset.system:
+        return
+    if path == "/v1/chat/completions":
+        messages = body.get("messages")
+        if isinstance(messages, list) and not any(
+                isinstance(m, dict) and m.get("role") in ("system", "developer") for m in messages):
+            body["messages"] = [{"role": "system", "content": preset.system}] + messages
+    elif path == "/v1/messages":
+        if body.get("system") in (None, "", []):
+            body["system"] = preset.system
 
 
 def extract_model(content_type, raw):
@@ -869,9 +921,11 @@ class RouterServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
     def __init__(self, address, pool, catalog, gate, api_key=None, cors_origins=(), allowed_hosts=(),
-                 queue_timeout=300.0):
+                 queue_timeout=300.0, presets=None, request_log=None):
         super().__init__(address, RouterHandler)
         self.pool, self.catalog, self.gate = pool, catalog, gate
+        self.presets = presets                 # presets.Presets, or None for a router without any
+        self.request_log = request_log         # request_log.RequestLog, or None
         self.api_key = api_key
         self.cors_origins = tuple(cors_origins)
         self.allowed_hosts = tuple(h.strip().lower() for h in allowed_hosts if h and h.strip())
@@ -969,7 +1023,15 @@ class RouterHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    _status = None
+    _error = None
+
+    def send_response(self, code, message=None):
+        self._status = code                    # what the request log says happened
+        super().send_response(code, message)
+
     def fail(self, error):
+        self._error = error.code or error.message[:200]
         self.drain()
         try:
             self.send_json(error.status, error.body(), error.headers)
@@ -1030,6 +1092,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.models_list())
             if path == "/v1/models/installed":
                 return self.send_json(200, self.installed())
+            if path == "/v1/presets":
+                return self.send_json(200, self.presets_list())
             if path.startswith("/v1/models/"):
                 return self.send_json(200, self.model_object(unquote(path[len("/v1/models/"):])))
             raise ApiError(404, "Not found.", "not_found")
@@ -1040,6 +1104,8 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     # ---- POST
     def do_POST(self):
+        started = time.monotonic()
+        seen = {}                                   # what the request log says about it
         try:
             self._check_host()
             self._require_auth()
@@ -1050,10 +1116,22 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.unload()
             if path not in COMPUTE_PATHS:
                 raise ApiError(404, "Not found.", "not_found")
-            body = Body(self.headers.get("Content-Type"), self.read_body(path))
+            raw = self.read_body(path)
+            body = Body(self.headers.get("Content-Type"), raw)
+            seen.update(path=path, bytes_in=len(raw), model=body.model, stream=bool(body.json and body.json.get("stream")))
+            if self.server.request_log is not None and self.server.request_log.bodies and body.json is not None:
+                seen["request"] = request_log.shorten(body.json)
             keep = body.keep_alive                  # read before anything loads: a bad value must not cost a load
-            entry = self.resolve(path, body.model)
-            self.serve_model(entry, path, body.for_worker(entry["id"]), keep)
+            preset = self.preset_named(body.model)
+            if preset is not None:
+                seen["preset"] = preset.name
+            entry = self.resolve(path, preset.model if preset else body.model, preset)
+            seen["resolved"] = entry["id"]
+            if preset is not None and keep is UNSET:
+                keep = self.preset_keep_alive(preset)
+            if self.server.request_log is not None:
+                self._trace = uuid.uuid4().hex[:16]    # the worker writes it too, so the two lines can be joined
+            self.serve_model(entry, path, body.for_worker(entry["id"], preset, path), keep)
         except ApiError as error:
             self.fail(error)
         except (ConnectionError, TimeoutError):
@@ -1062,6 +1140,37 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.log_error("request failed: %s", error)
             self.fail(ApiError(500, "The colibri router failed to process the request.", "router_error",
                                None, "server_error"))
+        finally:
+            log = self.server.request_log
+            if log is not None and seen:
+                record = {"source": "router", "trace": getattr(self, "_trace", None), "method": "POST",
+                          "status": self._status, "seconds": round(time.monotonic() - started, 3),
+                          "client": self.client_address[0] if self.client_address else None, **seen}
+                if self._error:
+                    record["error"] = self._error
+                log.write({k: v for k, v in record.items() if v is not None})
+            self._status = self._error = None
+
+    def preset_named(self, name):
+        """The preset a request's `model` names, or None. A real model's name is never taken from it."""
+        presets = self.server.presets
+        if presets is None or not isinstance(name, str):
+            return None
+        preset = presets.get(name)
+        if preset is None:
+            return None
+        catalog = self.server.catalog
+        if any(name.lower() in catalog.aliases(e) for e in catalog.entries()):
+            return None
+        return preset
+
+    @staticmethod
+    def preset_keep_alive(preset):
+        try:
+            return keep_alive_value(preset.keep_alive)
+        except ApiError:
+            log(f"preset `{preset.name}`: bad keep_alive {preset.keep_alive!r} ignored")
+            return UNSET
 
     def read_body(self, path):
         import image_engine
@@ -1095,7 +1204,17 @@ class RouterHandler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
         return raw.join(chunks)
 
-    def resolve(self, path, model):
+    def resolve(self, path, model, preset=None):
+        try:
+            return self._resolve(path, model)
+        except ApiError as error:
+            if preset is not None and error.code in ("model_not_found", "not_switchable"):
+                raise ApiError(error.status, f"The preset `{preset.name}` names the model `{preset.model}`, which "
+                                             f"{'does not exist here' if error.code == 'model_not_found' else 'cannot start here'}"
+                                             f" ({error.message})", error.code, "model") from None
+            raise
+
+    def _resolve(self, path, model):
         catalog = self.server.catalog
         if path == "/v1/systemone" and not catalog.find(model):
             # a client written for another server names whatever model it likes: the text model answers
@@ -1132,7 +1251,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             gate.release(entry["key"])
 
     def forwardable_headers(self):
-        return {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
+        headers = {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
+        trace = getattr(self, "_trace", None)
+        if trace:
+            headers["x-colibri-trace"] = trace
+        return headers
 
     def relay(self, worker, method, target, headers, body):
         """Send the request to the worker and stream its answer back as it arrives."""
@@ -1179,7 +1302,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             return payload
         pool, catalog = self.server.pool, self.server.catalog
         wanted = (query.get("model") or [None])[0]
-        entry = catalog.find(wanted) if wanted else None
+        entry = self.entry_for(wanted) if wanted else None
         worker = pool.get(entry["key"]) if entry else pool.most_recent()
         if worker is not None and worker.state == "ready":
             try:
@@ -1229,6 +1352,12 @@ class RouterHandler(BaseHTTPRequestHandler):
             data.append(item)
             if card:
                 cards.append(card)
+        by_id = {item["id"]: item for item in data}
+        for preset in (self.server.presets.all() if self.server.presets is not None else []):
+            entry = self.server.catalog.find(preset.model)
+            base = by_id.get(entry["id"]) if entry is not None else None      # None: not installed, or cannot start here
+            if base is not None and self.preset_named(preset.name) is not None:
+                data.append(self.as_preset(base, preset))
         return {"object": "list", "data": data, "models": cards}
 
     @staticmethod
@@ -1248,15 +1377,50 @@ class RouterHandler(BaseHTTPRequestHandler):
         item["input_modalities"] = ["text"]
         return item
 
+    def entry_for(self, name):
+        """The catalog entry a name stands for: a model's own, or the base model of the preset it names."""
+        preset = self.preset_named(name)
+        return self.server.catalog.find(preset.model if preset else name)
+
     def model_object(self, name):
-        entry = self.server.catalog.find(name)
+        entry = self.entry_for(name)
         if entry is None:
             raise ApiError(404, f"The model `{name}` does not exist.", "model_not_found", "model")
         worker = self.server.pool.get(entry["key"])
         if worker is not None and worker.state == "ready" and worker.model_entry:
-            return dict(worker.model_entry, state="loaded")
-        cached, _card = self.server.pool.state.cached_entry(entry["key"])
-        return dict(cached or self.stub(entry), state="idle")
+            item = dict(worker.model_entry, state="loaded")
+        else:
+            cached, _card = self.server.pool.state.cached_entry(entry["key"])
+            item = dict(cached or self.stub(entry), state="idle")
+        preset = self.preset_named(name)
+        return self.as_preset(item, preset) if preset is not None else item
+
+    @staticmethod
+    def as_preset(item, preset):
+        """A /v1/models object for a preset: the base model's own, under the preset's name."""
+        item = dict(item)
+        item.update({"id": preset.name, "preset_of": item["id"], "preset": preset.public()})
+        return item
+
+    def presets_list(self):
+        """GET /v1/presets: every preset in the file, whether it can be used, and why not."""
+        presets = self.server.presets
+        out = []
+        for preset in (presets.all() if presets is not None else []):
+            base = self.server.catalog.find(preset.model)
+            if base is None:
+                reason = f"the model `{preset.model}` is not installed"
+            elif base["reason"] is not None:
+                reason = f"the model cannot start here: {base['reason']}"
+            elif any(preset.name in self.server.catalog.aliases(e) for e in self.server.catalog.entries()):
+                reason = "the name is a model's own"
+            else:
+                reason = None
+            out.append(dict(preset.public(), available=reason is None, reason=reason,
+                            resolved=base["id"] if base else None))
+        problems = [{"name": name, "reason": why} for name, why in (presets.problems if presets is not None else [])]
+        return {"object": "list", "path": presets.path if presets is not None else None, "data": out,
+                "problems": problems, "error": presets.error if presets is not None else None}
 
     def installed(self):
         pool = self.server.pool
@@ -1295,7 +1459,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if isinstance(key, str) and key:
             entry, param = self.server.catalog.by_key(key), "key"
         elif isinstance(name, str) and name:
-            entry, param = self.server.catalog.find(name), "model"
+            entry, param = self.entry_for(name), "model"
         else:
             raise ApiError(400, "`key` (or `model`) must name an installed model.", "invalid_request_error", "key")
         if entry is None:
@@ -1354,7 +1518,8 @@ def worker_kv_slots(entry, wanted):
 
 def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), keep_alive=DEFAULT_KEEP_ALIVE,
           max_loaded=DEFAULT_MAX_LOADED, max_queue=8, queue_timeout=300.0, parallel_models=False,
-          cors_origins=None, allowed_hosts=(), worker_args=(), preload=(), engine_ready=None, kv_slots=1):
+          cors_origins=None, allowed_hosts=(), worker_args=(), preload=(), engine_ready=None, kv_slots=1,
+          presets_path=None, request_log_path=None):
     """Run the router until it is shut down."""
     import openai_server
     if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
@@ -1381,8 +1546,13 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
                 state=State(default_state_path()), queue_timeout=queue_timeout,
                 make_job=openai_server._win_kill_on_close_job)
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
+    presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
+    if request_log_path:
+        os.environ["COLI_REQUEST_LOG"] = request_log_path          # the workers inherit it and write their own lines
+    logger = request_log.from_env()
     server = RouterServer((host, port), pool, catalog, gate, api_key,
-                          openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout)
+                          openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout,
+                          presets=presets, request_log=logger)
     entries = catalog.entries(refresh=True)
     usable = [e for e in entries if e["reason"] is None]
     print(f"[router] {len(usable)} model(s) available: " + ", ".join(e["id"] for e in usable), file=sys.stderr)
@@ -1393,6 +1563,13 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
           f"{max_loaded or 'any number of'} loaded, "
           f"{'models may compute together' if parallel_models else 'one model computes at a time'}",
           file=sys.stderr)
+    named = presets.all()
+    if named or os.path.exists(presets.path):
+        print(f"[router] {len(named)} preset(s) from {presets.path}"
+              + (": " + ", ".join(p.name for p in named) if named else ""), file=sys.stderr)
+    if logger is not None:
+        print(f"[router] logging requests to {logger.path}" + (" (with their bodies)" if logger.bodies else ""),
+              file=sys.stderr)
     print(f"OpenAI-compatible API listening on http://{host}:{port}/v1", file=sys.stderr)
 
     def stop(*_):

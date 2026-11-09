@@ -3432,6 +3432,7 @@ def cmd_serve(a):
     dashboard with no server."""
     import model_switch
     fallback=os.environ.pop(model_switch.FALLBACK_ENV,None)
+    if getattr(a,"request_log",None): os.environ["COLI_REQUEST_LOG"]=os.path.abspath(os.path.expanduser(a.request_log))
     previous=None
     try:
         target=_cmd_serve(a)
@@ -3735,6 +3736,104 @@ def cmd_ps(a):
     print(f"  {where} is a single-model server (not `coli router`); it holds {', '.join(ids)} for as long as it runs")
     return 0
 
+def cmd_preset(a):
+    """Named presets: a model with settings baked in, offered under a name of its own (presets.py, docs/presets.md).
+    Edits the presets file; a running `coli router` reads it again by itself."""
+    import presets
+    banner("preset")
+    path=os.path.abspath(a.file) if a.file else presets.default_path()
+    action={"remove":"rm"}.get(a.action,a.action)
+    try:
+        if action=="list":
+            found,problems=presets.read(path)
+            print(f"  {path}")
+            if not found and not problems:
+                print("  no presets yet. Add one:  coli preset add terse --model qwen3-coder-30b-a3b --set temperature=0.2 "
+                      "--system \"Answer briefly.\"")
+                return 0
+            table=[("NAME","MODEL","DEFAULTS","")]
+            for p in found.values():
+                extra=[]
+                if p.system: extra.append("system prompt")
+                if p.keep_alive is not None: extra.append(f"keep_alive {p.keep_alive}")
+                table.append((p.name,p.model,", ".join(f"{k}={json.dumps(v) if not isinstance(v,str) else v}" for k,v in p.defaults.items()) or "-",
+                              "; ".join(extra)))
+            widths=[max(len(row[i]) for row in table) for i in range(3)]
+            for row in table: print("  "+"   ".join(cell.ljust(widths[i]) for i,cell in enumerate(row[:3])).rstrip()+("   "+row[3] if row[3] else ""))
+            for name,why in problems: print(f"  {C.yel}{name}:{C.r} not usable: {why}")
+            return 1 if problems else 0
+        if not a.name: sys.exit(f"{C.yel}coli preset {action}{C.r} needs a NAME")
+        if action=="show":
+            found,_=presets.read(path)
+            p=found.get(a.name.lower())
+            if p is None: sys.exit(f"{C.yel}no preset called {a.name!r}{C.r} in {path}")
+            print(json.dumps(p.public(),indent=2,ensure_ascii=False)); return 0
+        if action=="rm":
+            if not presets.remove(path,a.name): sys.exit(f"{C.yel}no preset called {a.name!r}{C.r} in {path}")
+            print(f"  removed {a.name.lower()}"); return 0
+        if action=="add":
+            if not a.model: sys.exit(f"{C.yel}--model{C.r} is required: the model the preset runs")
+            defaults={}
+            for item in a.set or []:
+                key,eq,value=item.partition("=")
+                if not eq or not key.strip(): sys.exit(f"{C.yel}--set{C.r} takes KEY=VALUE (a number, true/false, or text), not {item!r}")
+                try: defaults[key.strip()]=json.loads(value)
+                except ValueError: defaults[key.strip()]=value
+            spec={"model":a.model}
+            if a.description: spec["description"]=a.description
+            if a.system: spec["system"]=a.system
+            if a.keep_alive is not None:
+                try: spec["keep_alive"]=json.loads(a.keep_alive)
+                except ValueError: spec["keep_alive"]=a.keep_alive
+            if defaults: spec["defaults"]=defaults
+            replaced=presets.add(path,a.name,spec)
+            print(f"  {'replaced' if replaced else 'added'} {a.name.lower()} -> {a.model}   ({path})")
+            print("  a running `coli router` picks it up by itself; clients ask for it by this name in `model`")
+            return 0
+    except presets.PresetError as error:
+        sys.exit(f"{C.yel}coli preset:{C.r} {error}")
+    return 0
+
+def cmd_settings(a):
+    """The settings colibri reads, from docs/ENVIRONMENT.md, and which are set here (settings_index.py)."""
+    import settings_index
+    listed=settings_index.settings()
+    if not listed: sys.exit(f"{C.yel}docs/ENVIRONMENT.md was not found{C.r}: it is the list this command reads")
+    if a.json:
+        used,unknown=settings_index.in_effect(os.environ,listed)
+        hits=settings_index.search(listed,a.words) if a.words else (listed if a.all else [s for s,_ in used])
+        print(json.dumps({"settings":[dict(s.public(),value=os.environ.get(s.name)) for s in hits],
+                          "unknown":[{"name":n,"value":v,"did_you_mean":m} for n,v,m in unknown]},indent=2,ensure_ascii=False))
+        return 0
+    banner("settings")
+    if a.words or a.all:
+        hits=settings_index.search(listed,a.words) if a.words else listed
+        if not hits: print(f"  nothing matches {' '.join(a.words)!r} in the {len(listed)} documented settings"); return 1
+        section=None
+        for s in hits:
+            if s.section!=section and not a.words:
+                section=s.section; print(f"\n  {C.b}{section}{C.r}")
+            now=os.environ.get(s.name)
+            print(f"  {s.name}  [default {s.default}]"+(f"  {C.grn}set: {now}{C.r}" if now is not None else ""))
+            print(f"      {s.short(110)}")
+        print(f"\n  {len(hits)} of {len(listed)} documented settings; the full text of each is in docs/ENVIRONMENT.md")
+        return 0
+    used,unknown=settings_index.in_effect(os.environ,listed)
+    if used:
+        print(f"  {C.b}set in this environment{C.r}")
+        for s,value in used:
+            shown=value if len(value)<=60 else value[:57]+"..."
+            if "KEY" in s.name or "TOKEN" in s.name or "SECRET" in s.name: shown="(hidden)"
+            print(f"  {s.name} = {shown}   [default {s.default}]")
+            print(f"      {s.short(110)}")
+    else:
+        print("  none of the documented settings is set here: every one has its default")
+    for name,value,close in unknown:
+        hint=f"  did you mean {', '.join(close)}?" if close else ""
+        print(f"  {C.yel}{name}{C.r} is set, but nothing reads it.{hint}")
+    print(f"\n  coli settings --all        every documented setting ({len(listed)})\n  coli settings WORD...      search the names and the descriptions")
+    return 1 if unknown else 0
+
 def cmd_launch(a):
     """Start a coding tool (Claude Code, opencode) pointed at a running colibri server, without touching its settings."""
     import launch
@@ -3824,7 +3923,8 @@ def _run_router(a,router,keep_alive):
     router.serve(host=a.host,port=a.port,api_key=a.api_key,roots=[] if a.models else None,models=a.models or (),
                  keep_alive=keep_alive,max_loaded=a.max_loaded,max_queue=a.max_queue,queue_timeout=a.queue_timeout,
                  parallel_models=a.parallel_models,cors_origins=a.cors_origin,allowed_hosts=a.allowed_host,
-                 worker_args=list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots)   # the router gives each worker as many slots as its family allows
+                 worker_args=list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots,
+                 presets_path=a.presets,request_log_path=a.request_log)   # the router gives each worker as many slots as its family allows
 
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""
@@ -4220,6 +4320,8 @@ def main():
     ps.add_argument("--max-queue",type=int,default=int(os.environ.get("COLI_MAX_QUEUE","8")))
     ps.add_argument("--queue-timeout",type=float,default=float(os.environ.get("COLI_QUEUE_TIMEOUT","300")))
     ps.add_argument("--kv-slots",type=int,default=int(os.environ.get("COLI_KV_SLOTS","1")))
+    ps.add_argument("--request-log",default=None,metavar="FILE",
+                    help="write one JSON line per request to FILE (same as COLI_REQUEST_LOG); docs/request-log.md")
     ps.add_argument("--allowed-host",action="append",
         default=[h.strip() for h in os.environ.get("COLI_ALLOWED_HOSTS","").split(",") if h.strip()],
         help="additional Host header accepted by the DNS-rebinding guard; repeat as needed")
@@ -4248,6 +4350,10 @@ def main():
     pr.add_argument("--max-queue",type=int,default=int(os.environ.get("COLI_MAX_QUEUE","8")))
     pr.add_argument("--queue-timeout",type=float,default=float(os.environ.get("COLI_QUEUE_TIMEOUT","300")))
     pr.add_argument("--kv-slots",type=int,default=int(os.environ.get("COLI_KV_SLOTS","1")))
+    pr.add_argument("--presets",default=None,metavar="FILE",
+                    help="the presets file (default: presets.json in the setup folder, or COLI_PRESETS); see `coli preset`")
+    pr.add_argument("--request-log",default=None,metavar="FILE",
+                    help="write one JSON line per request, the router's and each worker's, to FILE (COLI_REQUEST_LOG)")
     pr.add_argument("--worker-arg",action="append",default=[],metavar="ARG",
                     help="an extra argument for every `coli serve` the router starts (repeatable)")
     pcluster=sub.add_parser("cluster", help="run the local-cluster control plane or an expert worker")
@@ -4275,6 +4381,20 @@ def main():
     pps=sub.add_parser("ps",help="the models a server has loaded, their memory and when they unload")
     pps.add_argument("--host",default="127.0.0.1"); pps.add_argument("--port",type=int,default=None)
     pps.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    ppreset=sub.add_parser("preset",help="named presets: a model with settings baked in, offered under a name of its own")
+    ppreset.add_argument("action",nargs="?",default="list",choices=("list","show","add","rm","remove"))
+    ppreset.add_argument("name",nargs="?",default=None)
+    ppreset.add_argument("--model",default=None,help="add: the model the preset runs (its name, key or folder)")
+    ppreset.add_argument("--set",action="append",metavar="KEY=VALUE",
+                         help="add: a default for the request, repeatable (temperature=0.2, size=1024x768, steps=20)")
+    ppreset.add_argument("--system",default=None,help="add: a system prompt, used when the request has none")
+    ppreset.add_argument("--description",default=None)
+    ppreset.add_argument("--keep-alive",default=None,metavar="TIME",help="add: how long its model stays loaded (10m, -1 for never)")
+    ppreset.add_argument("--file",default=None,metavar="FILE",help="the presets file (default: the setup folder's presets.json)")
+    psettings=sub.add_parser("settings",help="the settings colibri reads, which are set here, and which that are set are read by nothing")
+    psettings.add_argument("words",nargs="*",help="search the names and descriptions")
+    psettings.add_argument("--all",action="store_true",help="every documented setting, by section")
+    psettings.add_argument("--json",action="store_true")
     pl=sub.add_parser("launch",help="start Claude Code or opencode pointed at a running colibri server")
     pl.add_argument("tool",nargs="?",default=None,help="claude or opencode (without it: the tools and whether they are installed)")
     pl.add_argument("--model",default=None,help="the chat model to use (default: a loaded one, else the first the server lists)")
@@ -4366,7 +4486,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

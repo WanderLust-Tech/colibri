@@ -26,6 +26,7 @@ import v41_dsml                     # ...and V4.1's, whose tag names differ by a
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
+import request_log                  # COLI_REQUEST_LOG: one JSON line per request
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
 from family_registry import default_model_id as registry_default_model_id
@@ -6449,6 +6450,20 @@ def _transcription_json_file(value):
         raise APIError(400, "`file` is not valid base64.", "file", "invalid_value") from None
 
 
+# The request log (request_log.py): the file named by COLI_REQUEST_LOG, read when it is first needed and again if the variable
+# changes. _LOG_CONTEXT.record is the line being written for the request this thread is answering; the generate wrapper adds
+# its tokens to it. A server thread answers one request at a time, so a thread-local is the right scope.
+_LOG_CONTEXT = threading.local()
+_REQUEST_LOG = {"key": None, "log": None}
+
+
+def _request_log():
+    key = (os.environ.get("COLI_REQUEST_LOG"), os.environ.get("COLI_REQUEST_LOG_BODIES"), os.environ.get("COLI_REQUEST_LOG_MAX"))
+    if _REQUEST_LOG["key"] != key:
+        _REQUEST_LOG["key"], _REQUEST_LOG["log"] = key, request_log.from_env()
+    return _REQUEST_LOG["log"]
+
+
 TEXT_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone")
 # The endpoints that generate or score text with a language model, refused with a
 # pointer to /v1/systemone when the model is a decision engine (chat=0).
@@ -6645,8 +6660,14 @@ class APIServer(ThreadingHTTPServer):
         if kwargs.get("on_tool") is not None:
             kwargs["on_tool"] = measured(kwargs["on_tool"])
         try:
-            return self.engine.generate(prompt, max_tokens, temperature, top_p,
-                                        measured(on_text), *args, **kwargs)
+            stats = self.engine.generate(prompt, max_tokens, temperature, top_p,
+                                         measured(on_text), *args, **kwargs)
+            record = getattr(_LOG_CONTEXT, "record", None)          # the request log's line for this request
+            if record is not None and isinstance(stats, dict):
+                record["prompt_tokens"] += int(stats.get("prompt_tokens") or 0)
+                record["completion_tokens"] += int(stats.get("completion_tokens") or 0)
+                record["finish"] = "length" if stats.get("length_limited") else "stop"
+            return stats
         finally:
             self.scheduler.observe_timing("engine_call_seconds", time.monotonic() - started)
 
@@ -6853,6 +6874,7 @@ class APIHandler(BaseHTTPRequestHandler):
         """Single choke point for "the status line is out". Overriding here rather than
         tracking it at each call site means no responder can forget (#597 item 3)."""
         self._committed = True
+        self._status = code                      # for the request log
         # The request is fully read by the time anything answers, so the read
         # deadline has done its job. Restore the plain per-operation timeout:
         # generation legitimately takes minutes and must not inherit a clock
@@ -7277,7 +7299,32 @@ class APIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        """Answer a POST, and when COLI_REQUEST_LOG is set write one line about it (request_log.py)."""
+        log = _request_log()
+        if log is None:
+            return self._do_POST()
+        record = {"source": "gateway", "method": "POST", "prompt_tokens": 0, "completion_tokens": 0}
+        _LOG_CONTEXT.record = record
+        started = time.monotonic()
+        self._status = self._error_code = self._logged_request = None
+        try:
+            return self._do_POST()
+        finally:
+            _LOG_CONTEXT.record = None
+            record.update(trace=self.headers.get("x-colibri-trace"), id=getattr(self, "_rid", None),
+                          status=self._status, seconds=round(time.monotonic() - started, 3),
+                          client=self.client_address[0] if self.client_address else None)
+            if self._error_code:
+                record["error"] = self._error_code
+            if log.bodies and self._logged_request is not None:
+                record["request"] = request_log.shorten(self._logged_request)
+            if not record["prompt_tokens"] and not record["completion_tokens"]:
+                del record["prompt_tokens"], record["completion_tokens"]
+            log.write({k: v for k, v in record.items() if v is not None})
+
+    def _do_POST(self):
         request_id = "req_" + uuid.uuid4().hex
+        self._rid = request_id
         try:
             self._check_host()
             self.require_auth()
@@ -7298,6 +7345,11 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 self.log_error("request read deadline exceeded")
                 return
+            record = getattr(_LOG_CONTEXT, "record", None)
+            if record is not None:                   # what the request log says about the request
+                record.update(path=path, model=body.get("model") if isinstance(body, dict) else None,
+                              stream=bool(body.get("stream")) if isinstance(body, dict) else None)
+                self._logged_request = body if isinstance(body, dict) else None
             # A client written for Jev sends "jev-latest": on that route the
             # served model answers whatever name was asked for.
             if path not in ("/v1/systemone", "/v1/models/switch"):
@@ -8290,6 +8342,7 @@ class APIHandler(BaseHTTPRequestHandler):
         is committed, a second status line would be framed as SSE body -- clients saw a whole
         `HTTP/1.1 500` spliced into the event stream. All we can still do is stop talking; the
         stream ends at the close, which the 200 already announced (#597 item 3)."""
+        self._error_code = getattr(error, "code", None) or str(getattr(error, "message", ""))[:200] or None   # for the request log
         if self._committed:
             self.close_connection = True
             return

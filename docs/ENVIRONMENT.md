@@ -670,6 +670,19 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_MAX_QUEUE` | `8` | Max queued requests. |
 | `COLI_QUEUE_TIMEOUT` | `300` | Seconds a request may wait in the queue. |
 | `COLI_KV_SLOTS` | `1` | Independent KV conversation slots (→ engine `KV_SLOTS`). |
+| `COLI_KEEP_ALIVE` | `10m` | `coli router`: how long a model stays loaded after its last request (`30s`, `10m`, `2h`, `0` to unload at once, `-1` never). A request's own `keep_alive` overrides it. Same as `--keep-alive`; see [router.md](router.md). |
+| `COLI_MAX_LOADED_MODELS` | `3` | `coli router`: most models loaded at once (`0` for no limit). A model that does not fit in the free memory stops idle ones whatever this says. Same as `--max-loaded`. |
+| `COLI_MODELS_ROOT` | unset | Extra folders `coli router` and the dashboard's model switcher scan for models, besides the setup's and `~/colibri-models`; separated by `;` on Windows, `:` elsewhere. |
+| `COLI_ALLOW_INSECURE_BIND` | unset | `1` lets the server or router listen beyond localhost with no `COLI_API_KEY`. Refused otherwise. |
+| `COLI_SETUP_HOME` | `%LOCALAPPDATA%\colibri` (Windows), `~/Library/Application Support/colibri` (macOS), `$XDG_DATA_HOME/colibri` | Where `coli setup` keeps its state, the router's memory notes (`router.json`) and the presets file (`presets.json`). |
+| `COLI_IMAGE_DIR` | `~/colibri-images` | Where the gateway keeps a copy of every finished picture. |
+| `COLI_IMAGE_SAVE` | `1` | `0` stops the gateway keeping finished pictures. |
+| `COLI_MUSIC_DIR` | `~/colibri-music` | Where the gateway keeps a copy of every finished song. |
+| `COLI_MUSIC_SAVE` | `1` | `0` (or `false`, `no`, `off`) stops the gateway keeping finished songs. |
+| `COLI_PRESETS` | `presets.json` in the setup folder | The presets file `coli router` reads: named presets, a model with settings baked in ([presets.md](presets.md), `coli preset`). Same as `coli router --presets`. |
+| `COLI_REQUEST_LOG` | unset (no log) | A file that gets one JSON line per request, from the router and the gateway behind it ([request-log.md](request-log.md)). Same as `--request-log`. |
+| `COLI_REQUEST_LOG_BODIES` | `0` | `1` adds the text of each request to its log line (long strings cut to 500 characters). Off by default: a log of prompts is a privacy decision. |
+| `COLI_REQUEST_LOG_MAX` | `52428800` (50 MB) | The size at which the request log moves to `FILE.1` and a new one starts; one old file is kept. |
 | `COLI_POLICY` | `quality` | Resource policy (shared with the engine): `quality` \| `balanced` \| `experimental-fast`. |
 | `COLI_CHAT_STATS` | `full` | Default for `coli chat --stats`: the footer after each answer. `full` = tokens, seconds, tok/s; `compact` = tokens, tok/s; `off` = no footer. Counts are exact (no `~`) when the server reports `completion_tokens` in the streamed usage block, the chars/4 estimate otherwise. The flag wins over the variable. |
 | `COLI_COLOR` | auto (TTY) | `COLI_COLOR=1` forces colored `coli` output when not a TTY. |

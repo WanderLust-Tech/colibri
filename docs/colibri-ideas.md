@@ -58,12 +58,12 @@ Needs A1/A2 to mean anything.
   (Claude Code, Codex, opencode, Zed and others) to use the local server in one command. Colibri
   already serves `/v1/chat/completions` and `/v1/messages`, so most of the work is writing each
   tool's configuration. Unchecked: which tools are worth supporting.
-- [ ] **C2. Named presets (S-M).** Ollama's Modelfile bakes a system prompt and parameters into a
+- [x] **C2. Named presets (S-M).** *Built 2026-11-09 on `feat/presets-settings`: a presets file, applied by the router, `coli preset`, [presets.md](presets.md).* Ollama's Modelfile bakes a system prompt and parameters into a
   named variant. For colibri: saved presets such as "photo 1024x768, 20 steps" or "lo-fi 60 s" that
   appear as selectable model names.
 - [ ] **C3. Windows tray or autostart (M).** Ollama's `app/` has a tray app and a start at login.
   Would replace `restart-colibri.ps1` for everyday use.
-- [ ] **C4. One place for settings, and request logging (S-M).** Ollama keeps every server setting
+- [x] **C4. One place for settings, and request logging (S-M).** *Built 2026-11-09 on `feat/presets-settings`: `coli settings` over `ENVIRONMENT.md` with a typo check, and a JSON-lines request log ([request-log.md](request-log.md)); both unmerged.* Ollama keeps every server setting
   in `envconfig` and prints them with `ollama serve -h`, and can log each inference request.
   Colibri's settings are spread across `docs/ENVIRONMENT.md` and the code.
 - [x] **C5. Chat model features.** *Surveyed 2026-11-07 (read-only, on `main` at a75c06e4).* Ollama has an embeddings endpoint,
