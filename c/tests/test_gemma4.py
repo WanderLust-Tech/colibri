@@ -67,6 +67,30 @@ def snap_dir():
     return _SNAP[0]
 
 
+def max_whitespace_run(text):
+    """The longest run of JSON whitespace outside the strings of `text` (a string's own spaces are the model's content)."""
+    longest = run = 0
+    inside = escaped = False
+    for ch in text:
+        if inside:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                inside = False
+            continue
+        if ch == '"':
+            inside = True
+            run = 0
+        elif ch in " \t\n\r":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    return longest
+
+
 def load_ref():
     with open(os.path.join(snap_dir(), "ref.json"), encoding="utf-8") as handle:
         return json.load(handle)
@@ -1250,7 +1274,8 @@ class ServeGrammarTest(unittest.TestCase):
             for special in self.specials():                 # a control token is never part of an answer, though inside a
                 self.assertNotIn(special, text)             # JSON string its text would still parse
             if r["done"][7] == "0":
-                out.append(r["data"].decode("utf-8", "surrogateescape"))
+                # strict: the grammar keeps a string's bytes well-formed UTF-8 (an answer cut by max_tokens may stop inside a character)
+                out.append(r["data"].decode("utf-8"))
         return out
 
     def test_the_handshake_says_the_engine_takes_grammars(self):
@@ -1263,7 +1288,8 @@ class ServeGrammarTest(unittest.TestCase):
         done = self.answers(e, self.generic, 40)
         self.assertGreater(len(done), 5, "too few answers ended by themselves for the check to mean anything")
         for text in done:
-            json.loads(text)                                # raises when it is not JSON (any value is allowed at the top)
+            self.assertIsInstance(json.loads(text), dict)   # json_object: an object at the top, never an array or a bare value
+            self.assertLessEqual(max_whitespace_run(text), 20)
         self.assertGreater(len(set(done)), len(done) // 2, "temperature 1 should make different answers")
 
     def test_a_random_model_under_a_schema_writes_that_shape(self):
@@ -1272,6 +1298,7 @@ class ServeGrammarTest(unittest.TestCase):
         self.assertGreater(len(done), 5)
         for text in done:
             value = json.loads(text)
+            self.assertLessEqual(max_whitespace_run(text), 20)
             self.assertEqual(list(value), ["name", "n", "ok"])
             self.assertIsInstance(value["name"], str)
             self.assertTrue(isinstance(value["n"], int) and not isinstance(value["n"], bool))
@@ -1283,9 +1310,12 @@ class ServeGrammarTest(unittest.TestCase):
         again = e.ask(self.TURN, grammar=self.SCHEMA, max_tokens=120)
         self.assertEqual(first["data"], again["data"])
         text = first["data"].decode("utf-8", "surrogateescape")
-        # a greedy random model may spend its tokens on whitespace, which the grammar allows anywhere between tokens: the
-        # answer is then a prefix of the schema's shape, never anything else
+        # a greedy random model that prefers whitespace (this one does) may not live on it: a run of it is bounded, so
+        # the answer opens its object and goes on, instead of spending every token on spaces and newlines as a real
+        # Gemma E2B did before the bound. What comes back is a prefix of the schema's shape, never anything else.
         self.assertRegex(text, re.compile(r'\A\s*(\{\s*("name"\s*(:.*)?)?)?\Z', re.DOTALL))
+        self.assertLessEqual(max_whitespace_run(text), 20)
+        self.assertIn("{", text)
         if first["done"][7] == "0":
             json.loads(text)
 

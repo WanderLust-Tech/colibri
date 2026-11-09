@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### JSON mode: bounded whitespace, valid UTF-8 in strings, `json_object` is an object
+
+First run of JSON mode on a real model (Gemma 4 E2B) showed that a schema answer could be nothing but whitespace: with every
+token it preferred masked, a greedy model filled its budget with spaces and newlines before the object opened. A run of
+whitespace between tokens is now at most 20 bytes. Strings now hold only well-formed UTF-8, and `json_object` returns an object
+(it allowed any value, an array among them). Found along the way: the test harness read an engine's DATA frames with one
+`read(n)` on an unbuffered pipe, which can return part of a payload and lose the rest; it now reads until the payload is whole.
+
 ### Speech to text: `/v1/audio/transcriptions` on the Gemma 4 E models
 
 OpenAI's transcription route, multipart with a `file` (or JSON with base64), answered by a Gemma 4 E2B or E4B: `json`, `text` and

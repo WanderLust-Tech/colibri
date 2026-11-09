@@ -33,6 +33,7 @@
 #include "json.h"
 
 #define SGB_MAX_DEPTH 32
+#define SGB_WS_MAX 20          /* the most whitespace bytes in a row between two tokens (see the jws rule) */
 
 /* an array item that holds an array, compiled once as rule jitem<id> after root */
 typedef struct { jval *sc; int depth; } SgbItemRule;
@@ -273,10 +274,26 @@ static char *schema_to_gbnf(const char *schema_json, char *err, int errsz){
         sgb_put(&C, "\n");
     }
     free(C.items);
-    sgb_put(&C, "jws ::= ( \" \" | \"\\t\" | \"\\n\" | \"\\r\" )*\n");
+    /* Whitespace is bounded: an unbounded run lets a model whose every preferred token is masked fill its whole budget
+     * with spaces and newlines, which a greedy real checkpoint did before the object even opened. After SGB_WS_MAX
+     * bytes only a token that goes on is legal. A chain of rules, as grammar.h has no counted repetition; a reference
+     * that ends its alternate is popped, so the chain costs no stack depth. */
+    sgb_put(&C, "jws ::= jw0\n");
+    for (int i = 0; i < SGB_WS_MAX; i++){
+        char line[96];
+        snprintf(line, sizeof line, "jw%d ::= ( \" \" | \"\\t\" | \"\\n\" | \"\\r\" ) jw%d | \"\"\n", i, i + 1);
+        sgb_put(&C, line);
+    }
+    { char last[24]; snprintf(last, sizeof last, "jw%d ::= \"\"\n", SGB_WS_MAX); sgb_put(&C, last); }
     if (C.use_str)
         sgb_put(&C, "jstr ::= \"\\\"\" jchar* \"\\\"\"\n"
-                    "jchar ::= [^\"\\\\\\x00-\\x1f] | \"\\\\\" ( [\"\\\\/bfnrt] | \"u\" jhex jhex jhex jhex )\n"
+                    /* a string holds valid UTF-8 (RFC 3629): the bytes above 0x7f form whole, well-formed characters, so a
+                     * token that stops inside one is followed by its rest, and the answer decodes whatever the model is */
+                    "jchar ::= [^\"\\\\\\x00-\\x1f\\x80-\\xff] | jutf | \"\\\\\" ( [\"\\\\/bfnrt] | \"u\" jhex jhex jhex jhex )\n"
+                    "jcont ::= [\\x80-\\xbf]\n"
+                    "jutf ::= [\\xc2-\\xdf] jcont | \"\\xe0\" [\\xa0-\\xbf] jcont | [\\xe1-\\xec\\xee\\xef] jcont jcont"
+                    " | \"\\xed\" [\\x80-\\x9f] jcont | \"\\xf0\" [\\x90-\\xbf] jcont jcont | [\\xf1-\\xf3] jcont jcont jcont"
+                    " | \"\\xf4\" [\\x80-\\x8f] jcont jcont\n"
                     "jhex ::= [0-9a-fA-F]\n");
     if (C.use_num)
         sgb_put(&C, "jnum ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( ( \"e\" | \"E\" ) ( \"+\" | \"-\" )? [0-9]+ )?\n");

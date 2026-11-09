@@ -4029,16 +4029,26 @@ def anthropic_tools(body):
 # Generic whitespace-tolerant JSON grammar for response_format {"type": "json_object"}.
 # Draft-source semantics: positions with one legal byte draft; jws points just keep
 # the walker alive through the model's own spacing (see docs/grammar-draft.md).
+#
+# The root is an object (that is what json_object means). Whitespace runs are bounded at JSON_WS_MAX bytes: left unbounded,
+# a model whose preferred tokens the grammar masks fills its budget with spaces and newlines (seen on a real Gemma E2B).
+JSON_WS_MAX = 20                  # keep in step with SGB_WS_MAX in c/schema_gbnf.h
 GENERIC_JSON_GBNF = (
-    'root ::= jws jval jws\n'
+    'root ::= jws jobj jws\n'
     'jval ::= jobj | jarr | jstr | jnum | "true" | "false" | "null"\n'
     'jobj ::= "{" jws ( jstr jws ":" jws jval jws ( "," jws jstr jws ":" jws jval jws )* )? "}"\n'
     'jarr ::= "[" jws ( jval jws ( "," jws jval jws )* )? "]"\n'
     'jstr ::= "\\"" jchar* "\\""\n'
-    'jchar ::= [^"\\\\\\x00-\\x1f] | "\\\\" ( ["\\\\/bfnrt] | "u" jhex jhex jhex jhex )\n'
+    'jchar ::= [^"\\\\\\x00-\\x1f\\x80-\\xff] | jutf | "\\\\" ( ["\\\\/bfnrt] | "u" jhex jhex jhex jhex )\n'
+    'jcont ::= [\\x80-\\xbf]\n'      # a string holds valid UTF-8 (RFC 3629), as in c/schema_gbnf.h
+    'jutf ::= [\\xc2-\\xdf] jcont | "\\xe0" [\\xa0-\\xbf] jcont | [\\xe1-\\xec\\xee\\xef] jcont jcont'
+    ' | "\\xed" [\\x80-\\x9f] jcont | "\\xf0" [\\x90-\\xbf] jcont jcont | [\\xf1-\\xf3] jcont jcont jcont'
+    ' | "\\xf4" [\\x80-\\x8f] jcont jcont\n'
     'jhex ::= [0-9a-fA-F]\n'
     'jnum ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( ( "e" | "E" ) ( "+" | "-" )? [0-9]+ )?\n'
-    'jws ::= ( " " | "\\t" | "\\n" | "\\r" )*\n'
+    'jws ::= jw0\n'
+    + ''.join(f'jw{i} ::= ( " " | "\\t" | "\\n" | "\\r" ) jw{i + 1} | ""\n' for i in range(JSON_WS_MAX))
+    + f'jw{JSON_WS_MAX} ::= ""\n'
 )
 
 DEFAULT_CHAT_STOP_SEQUENCES = ("<|user|>", "<|observation|>")

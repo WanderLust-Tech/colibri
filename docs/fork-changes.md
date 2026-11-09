@@ -182,8 +182,8 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   flag `constrained_output`, held to the docs and the engine sources by `test_api_matrix_docs.py`.
 - Checked with random-weight models (noise left alone) against Python's `json.loads` and the schema's shape; mutation-tested.
   Before this, no engine promised valid JSON, GLM-5.2's grammar being only a draft source.
-- Not promised: finishing inside `max_tokens`; thrifty whitespace; UTF-8 inside strings. Not run yet on the real 26B or the
-  coder model.
+- Not promised: finishing inside `max_tokens`; thrifty whitespace (a run is bounded at 20 bytes, since the first real run, on
+  a Gemma E2B, showed an unbounded one eat the whole budget). Strings are valid UTF-8; `json_object` is an object.
 
 ### 2.11 Speech to text (`feat/audio-transcriptions`, not merged, not deployed)
 

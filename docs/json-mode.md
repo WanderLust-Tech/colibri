@@ -15,7 +15,7 @@ curl http://localhost:8000/v1/chat/completions -H "Authorization: Bearer $KEY" -
     "required": ["city", "country"]}}}}'
 ```
 
-The three forms are the gateway's: `{"type": "json_object"}` (any JSON value), `{"type": "json_schema", ...}` (a schema), and
+The three forms are the gateway's: `{"type": "json_object"}` (a JSON object), `{"type": "json_schema", ...}` (a schema), and
 `{"type": "gbnf", "grammar": "root ::= ..."}` (a grammar of your own, for example `root ::= "yes" | "no"`).
 
 ## How it works
@@ -39,10 +39,14 @@ and a token table built from the tokenizer the first time a request brings a gra
   `json.loads`, with random-weight models whose unconstrained output is noise.
 - **Not promised: that it finishes.** `max_tokens` can cut an answer short; it then ends with `finish_reason: "length"` and
   is a valid beginning, not a whole document. Give a structured answer room.
-- **Not promised: whitespace is thrifty.** The grammar allows whitespace between tokens (the compiler in `c/schema_gbnf.h`
-  adds it at every separator), so a model that likes newlines may spend tokens on them. Real chat models rarely do.
-- **Not promised: text in strings is valid UTF-8.** A JSON string may hold any byte of 0x20 and up; the model's own tokens
-  make it UTF-8 in practice.
+- **Whitespace is bounded, not thrifty.** The grammar allows whitespace between tokens (the compiler in `c/schema_gbnf.h`
+  adds it at every separator), but a run of it is at most 20 bytes, after which only a token that goes on is legal. Without
+  the bound, a model that could not say what it wanted (every token it preferred masked) filled its whole budget with spaces
+  and newlines before the object opened: a real Gemma E2B did exactly that with a schema, found on the first real run
+  (2026-11-09). An answer may still hold up to 20 bytes of whitespace at each separator.
+- **Strings hold valid UTF-8.** Bytes above 0x7f in a string must form whole, well-formed characters (RFC 3629), so a token
+  that stops inside one is followed by its rest. (An answer cut by `max_tokens` can still stop inside a character.)
+- **`json_object` is an object.** The root is an object, not any value, as OpenAI's mode promises.
 
 ## What is refused (HTTP 400, parameter `response_format`)
 

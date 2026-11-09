@@ -118,7 +118,13 @@ class ServeEngine:
             text = line.decode("latin-1").rstrip("\n")
             kind = text.split(" ", 1)[0]
             if kind == "DATA":
-                chunks.append(self.p.stdout.read(int(text.split()[2])))
+                body, want = b"", int(text.split()[2])
+                while len(body) < want:           # an unbuffered pipe may hand over part of a payload
+                    piece = self.p.stdout.read(want - len(body))
+                    if not piece:
+                        raise RuntimeError("engine closed in the middle of a DATA frame")
+                    body += piece
+                chunks.append(body)
                 self.p.stdout.readline()          # the newline after the payload
             elif kind in ("DONE", "END"):
                 return b"".join(chunks)
