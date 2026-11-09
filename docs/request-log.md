@@ -58,5 +58,12 @@ It is appended to and, when it would pass `COLI_REQUEST_LOG_MAX` bytes (50 MB by
 (replacing an older one) and started again, so a log never grows past about twice that. A log that cannot be written (a
 full disk, a folder that is not there) says so once on the server's stderr and never fails a request.
 
-Reading it: every line is a JSON object, so `jq`, or in PowerShell
+The router also serves the end of it. `GET /v1/requests?limit=50` (the API key, up to 500) answers
+`{"enabled", "path", "bodies", "data"}`: the last requests, newest first, one object each: the router's line with the worker's
+tokens and `finish` joined on by `trace` (and the worker's time as `engine_seconds`). The text of requests is never in it,
+even with `COLI_REQUEST_LOG_BODIES=1`. Without a log, `enabled` is false and `data` empty. The dashboard's **Settings,
+Requests** tab reads this every few seconds: time, endpoint, the model or preset asked for (with the model it ran), status,
+seconds and tokens, failed requests in red. It reads only the last megabyte of the file, so a big log is cheap to look at.
+
+Reading it yourself: every line is a JSON object, so `jq`, or in PowerShell
 `Get-Content requests.log | ConvertFrom-Json | Where-Object source -eq gateway | Measure-Object completion_tokens -Sum`.

@@ -52,6 +52,7 @@ LOOPBACK = {"127.0.0.1", "localhost", "::1", ""}
 
 # What a worker is asked to compute, and the biggest body each may carry. The workers enforce
 # their own, tighter limits; these only bound what the router reads into memory.
+PRESET_FILE_LOCK = threading.Lock()      # one change to the presets file at a time (it is read, changed and written back)
 COMPUTE_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone",
                  "/v1/images/generations", "/v1/images/edits", "/v1/audio/music", "/v1/audio/transcriptions")
 
@@ -1094,6 +1095,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.installed())
             if path == "/v1/presets":
                 return self.send_json(200, self.presets_list())
+            if path == "/v1/requests":
+                return self.send_json(200, self.requests_list(query))
             if path.startswith("/v1/models/"):
                 return self.send_json(200, self.model_object(unquote(path[len("/v1/models/"):])))
             raise ApiError(404, "Not found.", "not_found")
@@ -1114,6 +1117,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.switch()
             if path == "/v1/models/unload":
                 return self.unload()
+            if path == "/v1/presets":
+                return self.preset_save()
+            if path == "/v1/presets/delete":
+                return self.preset_delete()
             if path not in COMPUTE_PATHS:
                 raise ApiError(404, "Not found.", "not_found")
             raw = self.read_body(path)
@@ -1422,6 +1429,18 @@ class RouterHandler(BaseHTTPRequestHandler):
         return {"object": "list", "path": presets.path if presets is not None else None, "data": out,
                 "problems": problems, "error": presets.error if presets is not None else None}
 
+    def requests_list(self, query):
+        """GET /v1/requests?limit=N: the last requests the request log holds, newest first (the dashboard's Requests tab)."""
+        log = self.server.request_log
+        if log is None:
+            return {"object": "list", "enabled": False, "data": []}
+        try:
+            limit = max(1, min(500, int((query.get("limit") or ["50"])[0])))
+        except ValueError:
+            raise ApiError(400, "`limit` must be a number.", "invalid_request_error", "limit")
+        return {"object": "list", "enabled": True, "path": log.path, "bodies": log.bodies,
+                "data": request_log.recent(log.path, limit)}
+
     def installed(self):
         pool = self.server.pool
         out = []
@@ -1440,9 +1459,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         out.sort(key=lambda item: (not item["current"], item["name"].lower()))
         return {"object": "list", "switch": True, "reason": None, "router": True, "data": out}
 
-    def management_request(self, path):
-        """The JSON body and the model of a request that manages models (switch, unload): from `key` (what
-        /v1/models/installed gives) or `model` (what a client names it). Same cross-origin rule as the dashboard's."""
+    def management_json(self, path):
+        """The JSON object a management request (switch, unload, presets) carries. Same cross-origin rule as the dashboard's."""
         origin = self.headers.get("Origin")
         if origin and "*" not in self.server.cors_origins and origin not in self.server.cors_origins \
                 and urlsplit(origin).netloc != self.headers.get("Host", ""):
@@ -1455,6 +1473,12 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "Request body must be valid JSON.")
         if not isinstance(body, dict):
             raise ApiError(400, "Request body must be a JSON object.")
+        return body
+
+    def management_request(self, path):
+        """The JSON body and the model of a request that manages models (switch, unload): from `key` (what
+        /v1/models/installed gives) or `model` (what a client names it)."""
+        body = self.management_json(path)
         key, name = body.get("key"), body.get("model")
         if isinstance(key, str) and key:
             entry, param = self.server.catalog.by_key(key), "key"
@@ -1503,6 +1527,52 @@ class RouterHandler(BaseHTTPRequestHandler):
                 pool.release_wake()
             return self.send_json(202, {"status": "unloading when idle", "key": key, "id": entry["id"]})
         self.send_json(200, {"status": outcome, "key": key, "id": entry["id"]})
+
+    def preset_save(self):
+        """Create or replace a preset (the dashboard's Presets tab; `coli preset add` does the same to the file). The body is
+        the preset as the file holds it, plus its `name`. Takes effect at once, like an edit of the file."""
+        if self.server.presets is None:
+            raise ApiError(404, "This router has no presets file.", "not_found")
+        body = self.management_json("/v1/presets")
+        name = body.pop("name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ApiError(400, "`name` must be text.", "invalid_request_error", "name")
+        name = name.strip().lower()
+        try:
+            preset = presets_mod.check(name, body)
+        except presets_mod.PresetError as error:
+            raise ApiError(400, str(error), "invalid_request_error")
+        catalog = self.server.catalog
+        if any(name in catalog.aliases(e) for e in catalog.entries()):
+            raise ApiError(409, f"`{name}` is the name of an installed model; a preset needs a name of its own.",
+                           "name_taken", "name")
+        if catalog.find(preset.model) is None:
+            raise ApiError(404, f"No installed model is called `{preset.model}`.", "model_not_found", "model")
+        try:
+            with PRESET_FILE_LOCK:
+                replaced = presets_mod.add(self.server.presets.path, name, body)
+        except (presets_mod.PresetError, OSError) as error:
+            raise ApiError(500, f"The presets file could not be changed: {error}", "presets_file_error")
+        self.server.presets.reload()
+        self.send_json(200, {"status": "replaced" if replaced else "created", "name": name})
+
+    def preset_delete(self):
+        """Remove a preset from the file."""
+        if self.server.presets is None:
+            raise ApiError(404, "This router has no presets file.", "not_found")
+        body = self.management_json("/v1/presets/delete")
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ApiError(400, "`name` must be text.", "invalid_request_error", "name")
+        try:
+            with PRESET_FILE_LOCK:
+                removed = presets_mod.remove(self.server.presets.path, name.strip())
+        except (presets_mod.PresetError, OSError) as error:
+            raise ApiError(500, f"The presets file could not be changed: {error}", "presets_file_error")
+        if not removed:
+            raise ApiError(404, f"No preset is called `{name.strip()}`.", "preset_not_found", "name")
+        self.server.presets.reload()
+        self.send_json(200, {"status": "deleted", "name": name.strip().lower()})
 
 
 # ----------------------------------------------------------------------------- entry point

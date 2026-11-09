@@ -34,7 +34,8 @@ the clone that serves port 8000):
 | `coli launch` | `feat/coli-launch` | yes | **no** | yes |
 | JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder), with the whitespace and UTF-8 fix | `feat/json-mode`, `fix/json-whitespace` | yes (`d31c2dd6`) | **no** | yes (2026-11-09): live clone at `d31c2dd6`, `gemma4.exe` and `qwen36.exe` rebuilt; checked on the real E2B, 26B and Qwen3-Coder |
 | `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | **no** | yes (2026-11-09); the JFK clip came back word for word on the E2B |
-| Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | **no** | **no** | **no** |
+| Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
+| Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | **no** | **no** | **no** (needs `npm run build` in the live clone, and a router restart for the new routes) |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -200,12 +201,16 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   9 deliberate breakages that the tests caught. On the real E2B: the 11 s JFK clip word for word in 9 s; a 44 s file in two
   pieces, cut at 26.85 s (mid-sentence: the looped clip has no pause). Quality beyond that is unmeasured.
 
-### 2.12 Presets, request log, settings (`feat/presets-settings`, not merged, not deployed)
+### 2.12 Presets, request log, settings (`feat/presets-settings`, merged, pushed and live 2026-11-09)
 
 - **Presets (C2):** `c/presets.py`, applied in `c/router.py`; `coli preset add|rm|show|list`; [presets.md](presets.md).
 - **Request log (C4):** `c/request_log.py`; router and gateway lines joined by a trace id; [request-log.md](request-log.md).
 - **Settings (C4):** `coli settings` over the tables of `ENVIRONMENT.md` plus a scan of the source for what is read; typo report.
-- 43 new tests, 12 deliberate breakages caught. Not run on a real router with real models yet. The dashboard does not list presets.
+- 43 new tests, 12 deliberate breakages caught. Run on a router with the real Gemma E2B (port 8010) before the deploy.
+- **Dashboard (`feat/web-presets`):** Settings gets Presets (list, new, edit, delete, use) and Requests (the log, newest first);
+  presets are a group in the chat's model list and choosing one starts the temperature, length, size and steps from it. New
+  router routes `POST /v1/presets`, `POST /v1/presets/delete`, `GET /v1/requests`. English, German, Italian. Checked in a browser
+  against a router with stub engines (`web/tests/presets_ui.py`); not yet against the live router.
 
 ## 3. Planned and open
 
@@ -238,9 +243,9 @@ Status as of today (the file itself has been brought into line with this):
 | A0 one server per model on separate ports | set aside, the router replaced it |
 | B1-B3 `keep_alive`, `coli ps` / `coli stop`, Unload button | **done**, live |
 | C1 `coli launch` | **done**, branch `feat/coli-launch`, not merged: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
-| C2 Named presets (saved sizes, steps, durations that show up as model names) | **built** on `feat/presets-settings` (2.12), not merged |
+| C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard on `feat/web-presets`, not merged |
 | C3 Windows tray or autostart (would replace the restart script) | open, M |
-| C4 One place for settings, request logging | **built** on `feat/presets-settings` (2.12), not merged |
+| C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |
 | C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, branch `feat/json-mode`, not merged (2.10) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |
 | D2 Free pipeline stages | already in the engine (`COLI_IMG_TE=stage`, about 14 s per new prompt); not needed on 64 GB |

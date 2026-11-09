@@ -176,6 +176,11 @@ class Presets:
                     self.log(f"preset `{name}` ignored: {why}")
             self._found, self.problems = found, problems
 
+    def reload(self):
+        """Read the file again at the next look, whatever its timestamp says (after the router itself changed it)."""
+        with self.lock:
+            self._stamp = "unread"
+
     def get(self, name):
         if not isinstance(name, str):
             return None

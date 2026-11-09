@@ -208,3 +208,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .model-result.error, .model-error { color: #d98a8a; }
 .model-result.fell-back { color: #c9a45c; }
 @media (max-width: 760px) { .model-row { flex-direction: column; align-items: stretch; } .model-confirm { justify-content: flex-start; } }
+
+/* Settings -> Presets and Requests. */
+.preset-panel { gap: 12px; }
+.preset-row .model-info small.preset-system { font-style: italic; overflow-wrap: anywhere; }
+.preset-form { display: flex; flex-direction: column; gap: 16px; }
+.preset-form h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.preset-form label { display: flex; flex-direction: column; gap: 7px; }
+.preset-defaults { border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px 13px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.preset-defaults legend { padding: 0 6px; font-size: 12px; color: var(--muted-foreground); }
+.preset-default-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.preset-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.preset-note { margin-top: -6px; }
+.settings-card.wide { max-width: 1080px; }
+.requests-panel { gap: 12px; }
+.requests-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+.requests-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.requests-table th { text-align: left; font-weight: 500; color: var(--muted-foreground); padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.requests-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.requests-table tr:last-child td { border-bottom: 0; }
+.requests-table td small { color: var(--muted-foreground); }
+.requests-table tr.failed td { color: #d98a8a; }
+@media (max-width: 760px) { .preset-default-row { grid-template-columns: 1fr 1fr auto; } .preset-form input, .preset-form textarea, .preset-form select { font-size: 16px; } }

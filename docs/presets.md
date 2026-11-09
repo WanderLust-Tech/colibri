@@ -45,6 +45,26 @@ curl localhost:8000/v1/images/generations -H "Authorization: Bearer $KEY" -d '{"
 - `GET /v1/presets` lists every preset in the file with `available` and, when not, `reason` (the model is not
   installed, it cannot start here, the name is a model's own), and the entries of the file that could not be read.
 - `POST /v1/models/switch` and `/v1/models/unload` take a preset name and act on its base model.
+- `POST /v1/presets` creates or replaces one: the JSON body is the preset as the file holds it (`model`, `system`,
+  `description`, `keep_alive`, `defaults`) plus its `name`. It answers `created` or `replaced` and takes effect at once.
+  It is refused (400, 404 or 409) for a bad name or key, a model that is not installed, or a name that is a model's own,
+  and then the file is not touched. `POST /v1/presets/delete` with `{"name": ...}` removes one (404 when there is none).
+  Both need the API key and the dashboard's same-origin rule, like switching models.
+
+## In the dashboard
+
+- **The model list** of the chat shows presets under their own group, with a note saying what each is a preset of. Choosing
+  a preset starts the controls from its settings: the temperature and length of a chat, the size and steps of a picture.
+  The page always sends those, and a value a request carries beats the preset's, so without this a preset's temperature
+  would never apply. Anything the page has no control for (a system prompt, `top_p`, a music `duration`) is left to the
+  router, which fills it in because the page does not send it.
+- **Settings, Presets** lists the file with each preset's model, settings and system prompt, and why one cannot be used
+  (shown, not hidden). *Use* opens the conversation on it, *Edit* and *Delete* (with a question first) change the file, and
+  *New preset* opens a form: name, the model to run (from the installed ones), description, a system prompt (for a text
+  model), settings as rows of a name and a value (a number, `true`/`false`, or text; the editor suggests the names that fit
+  the model) and how long the model stays loaded. The router's refusal (a taken name, a key a preset may not set) is shown
+  as it is said.
+- A server that is not a router has no presets; the tab says so.
 
 ## What a preset fills in
 
@@ -71,6 +91,6 @@ The base model sees an ordinary request for itself: the worker is sent the model
 
 ## Not built
 
-The dashboard does not list presets in its model picker yet (the page is not touched); clients and `coli` use the
-API. A preset cannot change what is loaded (quantisation, context window): those belong to the worker, started once for
+The dashboard does not set a preset's music settings (duration, steps) from the preset the way it does a chat's and a
+picture's; the router still fills them in. A preset cannot change what is loaded (quantisation, context window): those belong to the worker, started once for
 the base model, so two presets of one model share it.

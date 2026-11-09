@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Dashboard: presets and recent requests
+
+Settings has two new tabs. **Presets** lists the router's presets with what each runs and why one cannot be used, and makes,
+edits and deletes them (a form with the model, a system prompt, settings as name and value rows and how long the model stays
+loaded); *Use* opens the conversation on one. In the chat, presets are a group of their own in the model list, and choosing one
+starts the temperature and length (or the picture's size and steps) from the preset, which the page would otherwise override.
+**Requests** shows the router's request log, newest first. New router routes behind them: `POST /v1/presets`,
+`POST /v1/presets/delete` and `GET /v1/requests`. English, German and Italian; the other languages fall back to English.
+[docs/presets.md](docs/presets.md), [docs/request-log.md](docs/request-log.md)
+
 ### Named presets (`coli preset`), a request log, and `coli settings`
 
 **Presets.** A model with settings baked in, offered under a name of its own: `coli preset add terse --model qwen3-coder-30b-a3b

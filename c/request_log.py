@@ -62,6 +62,58 @@ class RequestLog:
                     sys.stderr.write("[request-log] cannot write %s: %s\n" % (self.path, error))
 
 
+def tail(path, count, window=1 << 20):
+    """The last `count` records of a log file, oldest first. Reads only the last `window` bytes, so a log of any size is
+    cheap to look at; a line cut by the window, or one that is not JSON, is skipped."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - window)
+            handle.seek(start)
+            data = handle.read()
+    except OSError:
+        return []
+    lines = data.split(b"\n")
+    if start > 0:
+        lines = lines[1:]                           # the first one is probably cut
+    records = []
+    for line in reversed(lines):
+        if len(records) >= count:
+            break
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    records.reverse()
+    return records
+
+
+def recent(path, limit=50):
+    """The last `limit` requests of a log the router wrote, newest first, one object each: the router's line with what the
+    worker's line (same `trace`) adds, the tokens and why it finished. Request text is never included."""
+    records = tail(path, max(1, limit) * 2 + 20)
+    workers = {r["trace"]: r for r in records if r.get("source") == "gateway" and r.get("trace")}
+    fronted = {r["trace"] for r in records if r.get("source") == "router" and r.get("trace")}
+    out = []
+    for record in records:
+        if record.get("source") == "gateway" and record.get("trace") in fronted:
+            continue                                # shown with its router line
+        item = {k: v for k, v in record.items() if k not in ("request", "response", "source")}
+        worker = workers.get(record.get("trace")) if record.get("source") == "router" else None
+        if worker is not None:
+            for key in ("prompt_tokens", "completion_tokens", "finish"):
+                if key in worker:
+                    item[key] = worker[key]
+            if "seconds" in worker:
+                item["engine_seconds"] = worker["seconds"]
+        out.append(item)
+    out.reverse()
+    return out[:limit]
+
+
 def from_env(environ=None):
     """The log the environment asks for, or None."""
     environ = os.environ if environ is None else environ

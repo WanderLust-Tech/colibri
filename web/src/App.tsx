@@ -32,8 +32,9 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
   editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, streamChat,
-  type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type StreamChatResult,
+  type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type PresetInfo, type StreamChatResult,
 } from "@/lib/api"
+import { controlDefaults } from "@/lib/presets"
 import {
   DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, derivedSize, imageFileName, loadPicture, parseSeed,
   parseSize, presetOf, randomSeed, sizeKey, validSide, type EditPicture, type ImageSize,
@@ -54,6 +55,8 @@ import { persistPublicSettings, stored, takeKeyFromLocation } from "@/lib/storag
 import { appendDelta, continuable, continuation, setFinish } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
+import PresetsPanel from "@/components/PresetsPanel"
+import RequestsPanel from "@/components/RequestsPanel"
 import { useLocale } from "./i18n"
 
 const message = (role: ChatMessage["role"], content: string, images?: string[]): ChatMessage => {
@@ -87,6 +90,10 @@ export default function App() {
      them selected the conversation makes songs instead of text. */
   const [musicModels, setMusicModels] = useState<Record<string, MusicLimits>>({})
   const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
+  /* The models that are presets of `coli router`: what each runs and the settings it fills in (docs/presets.md). */
+  const [presetInfos, setPresetInfos] = useState<Record<string, PresetInfo>>({})
+  /* The model whose preset settings the controls were last started from: they follow a change of model, not every reconnect. */
+  const presetApplied = useRef("")
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
   const [thinking, setThinking] = useState(false)
@@ -199,6 +206,23 @@ export default function App() {
     return () => { disposed = true; window.clearInterval(timer) }
   }, [apiKey, baseUrl, connected])
 
+  /* Choosing a preset starts the controls from its settings (a request that carries its own value would override the preset's,
+     and this page always sends temperature and the length): the temperature and length of a chat, the size and steps of a picture. */
+  const startFromPreset = (name: string) => {
+    presetApplied.current = name
+    const preset = presetInfos[name]
+    if (!preset) return
+    const start = controlDefaults(preset.defaults)
+    if (start.temperature !== undefined) setTemperature(start.temperature)
+    if (start.maxTokens !== undefined) setMaxTokens(start.maxTokens)
+    if (start.size) { setImageSize(start.size); setCustomSize(!presetOf(start.size)); setSizeAuto(false) }
+    if (start.steps !== undefined) setImageSteps(clampSteps(start.steps))
+  }
+  useEffect(() => {
+    if (connected && presetApplied.current !== model) startFromPreset(model)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, model, presetInfos])
+
   // EFFECT #5
   useEffect(() => {
     if (cacheSlot >= kvSlots) setCacheSlot(0)
@@ -220,6 +244,7 @@ export default function App() {
       const info = await listModelInfo(baseUrl, apiKey, controller.signal)
       const found = info.map((item) => item.id)
       setModels(found)
+      setPresetInfos(Object.fromEntries(info.flatMap((item) => item.preset ? [[item.id, item.preset] as const] : [])))
       setImageModels(info.filter(generatesImages).map((item) => item.id))
       setEditLimits(Object.fromEntries(info.flatMap((item) => editsImages(item) && item.edit ? [[item.id, item.edit] as const] : [])))
       setMusicModels(Object.fromEntries(info.filter(generatesMusic).map((item) => [item.id, item.music ?? DEFAULT_MUSIC_LIMITS] as const)))
@@ -524,7 +549,8 @@ export default function App() {
         </section></fieldset>)
   const inferenceControls = (<fieldset disabled={loading}><section className="side-section">
           <div className="section-title"><SlidersHorizontal className="size-3.5" /> {t("sidebar.inference")}</div>
-          <label>{t("sidebar.model")}<select id="model-select" value={model} onChange={(event) => setModel(event.target.value)}>{models.length ? models.map((id) => <option key={id}>{id}</option>) : <option>{model}</option>}</select></label>
+          <label>{t("sidebar.model")}<select id="model-select" value={model} onChange={(event) => setModel(event.target.value)}>{models.length ? <>{models.filter((id) => !presetInfos[id]).map((id) => <option key={id}>{id}</option>)}{models.some((id) => presetInfos[id]) && <optgroup label={t("sidebar.presets")}>{models.filter((id) => presetInfos[id]).map((id) => <option key={id}>{id}</option>)}</optgroup>}</> : <option>{model}</option>}</select></label>
+          {presetInfos[model] && <p className="field-help preset-note">{[t("presets.note", { model: presetInfos[model].of }), presetInfos[model].description].filter(Boolean).join(" ")}</p>}
           {music.mode ? <p className="field-help">{t("music.modelNote")}</p> : imageMode ? <p className="field-help">{t("image.modelNote")}</p> : <>
           {health?.kv_slots && health.kv_slots > 1 ? <label>{t("sidebar.kvSession")}<select id="kv-slot" value={cacheSlot} onChange={(event) => setCacheSlot(Number(event.target.value))} disabled={loading}>
             {Array.from({ length: kvSlots }, (_, slot) => <option key={slot} value={slot}>{t("sidebar.sessionLabel", { slot: slot + 1 })}</option>)}
@@ -624,11 +650,16 @@ export default function App() {
       {view === "settings" ? <section className="settings-page">
         <header className="page-heading"><span>COLIBRI</span><h1>{t("ui.settings")}</h1><p>{t("ui.settingsIntro")}</p></header>
         <nav className="settings-tabs" aria-label={t("ui.settings")}>
-          {["general", "model", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
+          {["general", "model", "presets", "requests", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
         </nav>
         {error && <div className="error-banner" role="alert">{t(error)}</div>}
         <div className="settings-content">
           {settingsPage === "general" && <section className="settings-card"><h2>{t("ui.appearance")}</h2><div className="theme-choices">{["dark", "light"].map(value => <button key={value} className={`theme-choice ${value}`} aria-pressed={theme === value} onClick={() => setTheme(value)}><span /><b>{t(`ui.${value}`)}</b></button>)}</div><label className="language-field"><Globe />{t("ui.language")}<select value={locale} onChange={e => setLocale(e.target.value)}>{locales.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}</select></label><p className="settings-help">{t("chat.inputHint")}</p></section>}
+          {settingsPage === "presets" && <section className="settings-card">
+            <PresetsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} onChanged={() => void connect()}
+              onUse={(name) => { startFromPreset(name); setModel(name); setView("chat") }} />
+          </section>}
+          {settingsPage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {settingsPage === "connection" && <section className="settings-card">{connectionControls}</section>}
           {settingsPage === "model" && <section className="settings-card">
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />

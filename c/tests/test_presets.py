@@ -346,6 +346,152 @@ class RouterLogTest(unittest.TestCase):
         self.assertLess(len(json.dumps(line)), 1500)
 
 
+class ManagePresetsTest(unittest.TestCase):
+    """What the dashboard's Presets tab does over HTTP: POST /v1/presets (save), POST /v1/presets/delete."""
+
+    def rig(self, **named):
+        rig = Rig(self, [entry("text-a"), entry("image-b", "image")])
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "presets.json")
+        if named:
+            write(self.path, **named)
+        rig.server.presets = presets.Presets(self.path, log=lambda message: None)
+        return rig
+
+    def stored(self):
+        return json.load(open(self.path, encoding="utf-8"))["presets"]
+
+    def test_a_saved_preset_is_in_the_file_and_works_at_once(self):
+        rig = self.rig()
+        status, _, _, body = rig.call("POST", "/v1/presets", dict(TERSE, name="Terse"))
+        self.assertEqual((status, body), (200, {"status": "created", "name": "terse"}))
+        self.assertEqual(self.stored(), {"terse": TERSE})                     # lower-cased, `name` not stored
+        got = rig.call("POST", "/v1/chat/completions", {"model": "terse", "messages": []})[3]["received"]
+        self.assertEqual(got["temperature"], 0.2)
+        self.assertIn("terse", [m["id"] for m in rig.call("GET", "/v1/models")[3]["data"]])
+        status, _, _, body = rig.call("POST", "/v1/presets", dict(TERSE, name="terse", defaults={"temperature": 0.9}))
+        self.assertEqual(body["status"], "replaced")
+        self.assertEqual(rig.call("POST", "/v1/chat/completions", {"model": "terse", "messages": []})[3]["received"]["temperature"], 0.9)
+
+    def test_other_presets_and_unreadable_entries_in_the_file_are_kept(self):
+        rig = self.rig(photo=PHOTO, odd={"model": "text-a", "future_key": 1})
+        rig.call("POST", "/v1/presets", dict(TERSE, name="terse"))
+        self.assertEqual(set(self.stored()), {"photo", "odd", "terse"})
+        self.assertEqual(self.stored()["odd"]["future_key"], 1)
+
+    def test_what_a_preset_may_not_be_is_refused_and_the_file_is_untouched(self):
+        rig = self.rig(photo=PHOTO)
+        before = open(self.path, encoding="utf-8").read()
+        cases = [
+            (dict(TERSE, name="Bad Name!"), 400, "invalid_request_error"),
+            (dict(TERSE, name=""), 400, "invalid_request_error"),
+            ({"model": "text-a"}, 400, "invalid_request_error"),                              # no name
+            (dict(TERSE, name="x", defaults={"messages": []}), 400, "invalid_request_error"),  # what a request says
+            (dict(TERSE, name="x", surprise=1), 400, "invalid_request_error"),
+            (dict(TERSE, name="x", model="no-such-model"), 404, "model_not_found"),
+            (dict(TERSE, name="text-a"), 409, "name_taken"),                                   # a real model's name
+        ]
+        for body, status, code in cases:
+            with self.subTest(body=body):
+                got = rig.call("POST", "/v1/presets", body)
+                self.assertEqual((got[0], got[3]["error"]["code"]), (status, code))
+        self.assertEqual(open(self.path, encoding="utf-8").read(), before)
+
+    def test_delete_removes_one_and_says_when_there_is_none(self):
+        rig = self.rig(terse=TERSE, photo=PHOTO)
+        status, _, _, body = rig.call("POST", "/v1/presets/delete", {"name": "terse"})
+        self.assertEqual((status, body["status"]), (200, "deleted"))
+        self.assertEqual(set(self.stored()), {"photo"})
+        self.assertEqual(rig.call("POST", "/v1/chat/completions", {"model": "terse", "messages": []})[0], 404)
+        got = rig.call("POST", "/v1/presets/delete", {"name": "terse"})
+        self.assertEqual((got[0], got[3]["error"]["code"]), (404, "preset_not_found"))
+        self.assertEqual(rig.call("POST", "/v1/presets/delete", {})[0], 400)
+
+    def test_it_needs_the_key_json_and_the_same_origin(self):
+        rig = self.rig()
+        rig.server.api_key = "secret"
+        self.assertEqual(rig.call("POST", "/v1/presets", dict(TERSE, name="t"))[0], 401)
+        self.assertEqual(rig.call("POST", "/v1/presets/delete", {"name": "t"})[0], 401)
+        keyed = {"Authorization": "Bearer secret"}
+        self.assertEqual(rig.call("POST", "/v1/presets", raw=b"name=t", headers=dict(
+            keyed, **{"Content-Type": "application/x-www-form-urlencoded"}))[0], 415)
+        self.assertEqual(rig.call("POST", "/v1/presets", dict(TERSE, name="t"), headers=dict(
+            keyed, Origin="http://evil.example"))[0], 403)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(rig.call("POST", "/v1/presets", dict(TERSE, name="t"), headers=keyed)[0], 200)
+
+    def test_a_router_without_a_presets_file_says_so(self):
+        rig = Rig(self, [entry("text-a")])
+        self.assertEqual(rig.call("POST", "/v1/presets", dict(TERSE, name="t"))[0], 404)
+        self.assertEqual(rig.call("POST", "/v1/presets/delete", {"name": "t"})[0], 404)
+
+
+class RecentRequestsTest(unittest.TestCase):
+    """request_log.recent and GET /v1/requests: what the dashboard's Requests tab reads."""
+
+    def lines(self, tmp):
+        path = os.path.join(tmp, "req.log")
+        log = request_log.RequestLog(path)
+        log.write({"source": "router", "trace": "aa", "method": "POST", "status": 200, "seconds": 2.5, "path": "/v1/chat/completions",
+                   "model": "terse", "preset": "terse", "resolved": "text-a-colibri", "request": {"messages": "secret"}})
+        log.write({"source": "gateway", "trace": "aa", "status": 200, "seconds": 2.1, "prompt_tokens": 36,
+                   "completion_tokens": 15, "finish": "stop", "path": "/v1/chat/completions"})
+        log.write({"source": "router", "method": "POST", "status": 404, "seconds": 0.01, "path": "/v1/chat/completions",
+                   "model": "nope", "error": "model_not_found"})
+        return path, log
+
+    def test_the_two_lines_of_a_request_are_one_item_newest_first_and_the_text_is_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, _ = self.lines(tmp)
+            items = request_log.recent(path, 10)
+            self.assertEqual([i.get("model") for i in items], ["nope", "terse"])
+            joined = items[1]
+            self.assertEqual((joined["prompt_tokens"], joined["completion_tokens"], joined["finish"], joined["engine_seconds"]),
+                             (36, 15, "stop", 2.1))
+            self.assertEqual((joined["seconds"], joined["preset"]), (2.5, "terse"))     # the router's time is the request's
+            self.assertNotIn("request", joined)
+            self.assertNotIn("source", joined)
+            self.assertEqual(items[0]["error"], "model_not_found")
+            self.assertEqual(len(request_log.recent(path, 1)), 1)
+
+    def test_a_worker_line_with_no_router_line_is_still_shown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "req.log")
+            request_log.RequestLog(path).write({"source": "gateway", "trace": "zz", "status": 200, "path": "/v1/x"})
+            self.assertEqual([i["trace"] for i in request_log.recent(path, 5)], ["zz"])
+
+    def test_a_big_or_damaged_file_is_read_from_the_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "req.log")
+            log = request_log.RequestLog(path, max_bytes=0)
+            for n in range(400):
+                log.write({"source": "router", "trace": f"t{n}", "n": n, "pad": "x" * 100})
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("this is not json\n")
+            tail = request_log.tail(path, 5, window=2000)                  # the window cuts a line: it is dropped
+            self.assertEqual([r["n"] for r in tail], [395, 396, 397, 398, 399])
+            self.assertEqual([r["n"] for r in request_log.recent(path, 3)], [399, 398, 397])
+            self.assertEqual(request_log.tail(os.path.join(tmp, "absent.log"), 5), [])
+            self.assertEqual(request_log.tail(path, 0), [])
+
+    def test_the_route_says_when_there_is_no_log_and_answers_with_one(self):
+        rig = Rig(self, [entry("text-a")])
+        status, _, _, body = rig.call("GET", "/v1/requests")
+        self.assertEqual((status, body["enabled"], body["data"]), (200, False, []))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        rig.server.request_log = request_log.RequestLog(os.path.join(tmp.name, "req.log"))
+        rig.chat("text-a-colibri")
+        wait_for_lines(rig.server.request_log.path, 1)
+        status, _, _, body = rig.call("GET", "/v1/requests?limit=5")
+        self.assertEqual((status, body["enabled"], len(body["data"])), (200, True, 1))
+        self.assertEqual(body["data"][0]["model"], "text-a-colibri")
+        self.assertEqual(rig.call("GET", "/v1/requests?limit=x")[0], 400)
+        rig.server.api_key = "secret"
+        self.assertEqual(rig.call("GET", "/v1/requests")[0], 401)
+
+
 class GatewayLogTest(unittest.TestCase):
     """The gateway's line: the same file, with the tokens only it knows."""
 

@@ -146,6 +146,18 @@ export interface ModelInfo {
   /* What a music model ("music_generation") accepts, from the `audio` block of its
      /v1/models entry: the range of a clip in seconds, the sampler's steps. */
   music?: MusicLimits
+  /* A preset served by `coli router` (docs/presets.md): the model it runs and the settings it fills in. */
+  preset?: PresetInfo
+}
+
+/* A named model with settings baked in. `defaults` are what a request leaves out; the dashboard starts its own
+   controls from them. */
+export interface PresetInfo {
+  of: string
+  description?: string
+  system?: string
+  defaults: Record<string, unknown>
+  keepAlive?: string | number
 }
 
 const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0
@@ -197,14 +209,28 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
 export async function listModelInfo(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
   const response = await fetch(endpoint(baseUrl, "models"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown; audio?: unknown }> }
-  return (body.data || []).map(({ id, capabilities, image, audio }) => {
-    if (!Array.isArray(capabilities)) return { id }
+  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown; audio?: unknown; preset_of?: unknown; preset?: unknown }> }
+  return (body.data || []).map(({ id, capabilities, image, audio, preset_of, preset }) => {
+    const named = presetInfo(preset_of, preset)
+    if (!Array.isArray(capabilities)) return { id, ...(named ? { preset: named } : {}) }
     const list = capabilities.filter((item): item is string => typeof item === "string")
     const edit = list.includes("image_edit") ? editLimits(image) : undefined
     const music = list.includes("music_generation") ? musicLimits(audio) : undefined
-    return { id, capabilities: list, ...(edit ? { edit } : {}), ...(music ? { music } : {}) }
+    return { id, capabilities: list, ...(edit ? { edit } : {}), ...(music ? { music } : {}), ...(named ? { preset: named } : {}) }
   })
+}
+
+/* `preset_of` and `preset` of a /v1/models entry that is a preset; anything malformed is no preset. */
+export function presetInfo(of: unknown, preset: unknown): PresetInfo | undefined {
+  if (typeof of !== "string" || !preset || typeof preset !== "object") return undefined
+  const raw = preset as Record<string, unknown>
+  const defaults = raw.defaults && typeof raw.defaults === "object" && !Array.isArray(raw.defaults) ? raw.defaults as Record<string, unknown> : {}
+  return {
+    of, defaults,
+    ...(typeof raw.description === "string" && raw.description ? { description: raw.description } : {}),
+    ...(typeof raw.system === "string" && raw.system ? { system: raw.system } : {}),
+    ...(typeof raw.keep_alive === "string" || typeof raw.keep_alive === "number" ? { keepAlive: raw.keep_alive } : {}),
+  }
 }
 
 export async function listModels(baseUrl: string, apiKey: string, signal?: AbortSignal) {
@@ -273,6 +299,96 @@ export async function unloadModel(baseUrl: string, apiKey: string, key: string, 
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { status: string; id: string }
   return { status: body.status, id: body.id }
+}
+
+/* One row of GET /v1/presets: a preset of the router's file, whether it can be used, and why not. */
+export interface PresetRow {
+  name: string
+  model: string
+  defaults: Record<string, unknown>
+  system?: string
+  description?: string
+  keep_alive?: string | number
+  available: boolean
+  reason: string | null
+  resolved: string | null
+}
+
+export interface PresetList {
+  /* False on a plain `coli serve`, which has no presets. */
+  supported: boolean
+  path: string | null
+  presets: PresetRow[]
+  /* Entries of the file the router cannot use, and a file it cannot read at all. */
+  problems: Array<{ name: string; reason: string }>
+  error: string | null
+}
+
+export async function listPresets(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<PresetList> {
+  const response = await fetch(endpoint(baseUrl, "presets"), { headers: headers(apiKey), signal })
+  if (response.status === 404) return { supported: false, path: null, presets: [], problems: [], error: null }
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { path?: string | null; data?: PresetRow[]; problems?: PresetList["problems"]; error?: string | null }
+  return { supported: true, path: body.path ?? null, presets: body.data ?? [], problems: body.problems ?? [], error: body.error ?? null }
+}
+
+/* What a preset is when it is saved: the fields of the file's entry. */
+export interface PresetSpec {
+  model: string
+  system?: string
+  description?: string
+  keep_alive?: string | number
+  defaults?: Record<string, unknown>
+}
+
+/* Creates or replaces a preset in the router's file; it takes effect at once. */
+export async function savePreset(baseUrl: string, apiKey: string, name: string, spec: PresetSpec, signal?: AbortSignal): Promise<"created" | "replaced"> {
+  const response = await fetch(endpoint(baseUrl, "presets"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ name, ...spec }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  return ((await response.json()) as { status: "created" | "replaced" }).status
+}
+
+export async function deletePreset(baseUrl: string, apiKey: string, name: string, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(endpoint(baseUrl, "presets/delete"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ name }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+}
+
+/* One request of the router's request log (docs/request-log.md): the router's line with the worker's tokens joined on. */
+export interface LoggedRequest {
+  ts: string
+  trace?: string
+  path: string
+  status: number
+  seconds: number
+  model?: string
+  preset?: string
+  resolved?: string
+  stream?: boolean
+  prompt_tokens?: number
+  completion_tokens?: number
+  finish?: string
+  error?: string
+  engine_seconds?: number
+}
+
+export interface RequestLogView {
+  /* False when the router was started without a request log. */
+  enabled: boolean
+  path: string | null
+  requests: LoggedRequest[]
+}
+
+/* The router's request log, newest first. A server that has no such route (a plain `coli serve`) is "not enabled". */
+export async function listRequests(baseUrl: string, apiKey: string, limit = 100, signal?: AbortSignal): Promise<RequestLogView> {
+  const response = await fetch(`${endpoint(baseUrl, "requests")}?limit=${limit}`, { headers: headers(apiKey), signal })
+  if (response.status === 404) return { enabled: false, path: null, requests: [] }
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { enabled?: boolean; path?: string | null; data?: LoggedRequest[] }
+  return { enabled: body.enabled === true, path: body.path ?? null, requests: body.data ?? [] }
 }
 
 function pause(ms: number, signal?: AbortSignal) {
