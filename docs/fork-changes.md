@@ -36,6 +36,7 @@ the clone that serves port 8000):
 | `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | **no** | yes (2026-11-09); the JFK clip came back word for word on the E2B |
 | Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
 | Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
+| Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | **no** | **no** | **no** |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -212,6 +213,18 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   router routes `POST /v1/presets`, `POST /v1/presets/delete`, `GET /v1/requests`. English, German, Italian. Checked in a browser
   against a router with stub engines (`web/tests/presets_ui.py`); not yet against the live router.
 
+### 2.13 Tray icon and background service (`feat/tray`, not merged)
+
+- **`c/service.py` / `coli service`:** start, stop, restart, status, link, config for `coli router` in the background: a key kept
+  in `~/colibri-api-key.txt`, the router started without a window with the key in its environment, a stop that refuses while a
+  request runs. The file names and defaults are those of `restart-colibri.ps1`. Settings in `service.json` (typos are errors).
+- **`c/tray.py` / `coli tray`:** the notification-area icon (ctypes, nothing to install) with a menu: state, unload a loaded model,
+  dashboard, copy key or link, start/stop/restart (with a "will be lost" wording while busy), logs, start with Windows (the `Run`
+  key). [tray.md](tray.md)
+- 44 tests (`tests/test_service.py`): config, the command line, a fake `/health` server, the stop rules, a real router started
+  and stopped on a free port, the menu and icon logic, and on Windows the window, its menu and the `Run` key. The real window was
+  also run: icon added, changed and removed, a message shown. Not done: a person clicking the menu.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -244,7 +257,7 @@ Status as of today (the file itself has been brought into line with this):
 | B1-B3 `keep_alive`, `coli ps` / `coli stop`, Unload button | **done**, live |
 | C1 `coli launch` | **done**, branch `feat/coli-launch`, not merged: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
 | C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard on `feat/web-presets`, not merged |
-| C3 Windows tray or autostart (would replace the restart script) | open, M |
+| C3 Windows tray or autostart (would replace the restart script) | **done** (2.13), on `feat/tray`, not merged |
 | C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |
 | C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, branch `feat/json-mode`, not merged (2.10) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |

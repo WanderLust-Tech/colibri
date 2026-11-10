@@ -4395,6 +4395,8 @@ def main():
     psettings.add_argument("words",nargs="*",help="search the names and descriptions")
     psettings.add_argument("--all",action="store_true",help="every documented setting, by section")
     psettings.add_argument("--json",action="store_true")
+    sub.add_parser("service",help="run the router in the background: start, stop, restart, status, link, config (coli service -h)",add_help=False)
+    sub.add_parser("tray",help="the Windows notification-area icon for the server; --install starts it at sign-in (coli tray -h)",add_help=False)
     pl=sub.add_parser("launch",help="start Claude Code or opencode pointed at a running colibri server")
     pl.add_argument("tool",nargs="?",default=None,help="claude or opencode (without it: the tools and whether they are installed)")
     pl.add_argument("--model",default=None,help="the chat model to use (default: a loaded one, else the first the server lists)")
@@ -4479,6 +4481,9 @@ def main():
         help="int4 scale group size: 64 (default, group-scaled quality) or 0 (legacy per-row)")
     pc.add_argument("--no-mtp",action="store_true",help="skip the MTP head (no speculative drafts)")
     argv,tool_args=sys.argv[1:],[]
+    if argv[:1] in (["service"],["tray"]):         # their own options (service.py, tray.py): not for this parser to read
+        module=__import__(argv[0])
+        sys.exit(module.main(argv[1:]))
     if argv[:1]==["launch"] and "--" in argv:      # what follows `--` is the tool's, not ours (REMAINDER would swallow --port)
         cut=argv.index("--"); argv,tool_args=argv[:cut],argv[cut+1:]
     a=ap.parse_args(argv)

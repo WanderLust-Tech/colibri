@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### A tray icon and a background service (`coli tray`, `coli service`)
+
+A circle in the Windows notification area (grey ring: stopped, green: idle, blue: working, amber: starting or stopping, red:
+wrong) with a menu to open the dashboard signed in, copy the key or the network link, start, stop and restart the server, unload a
+model, open the logs, and start with Windows. `coli service start|stop|restart|status|link|config` does the same from a terminal on
+any system: the router in the background without a window, a key made once and kept in a file only you can read, a stop that
+refuses while a request is running. It replaces `restart-colibri.ps1` for everyday use and uses its file names, so the two mix.
+Settings in `service.json`. [docs/tray.md](docs/tray.md)
+
 ### Dashboard: presets and recent requests
 
 Settings has two new tabs. **Presets** lists the router's presets with what each runs and why one cannot be used, and makes,
