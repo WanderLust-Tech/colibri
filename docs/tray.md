@@ -80,6 +80,7 @@ is not in this list is an error, so a typo is not mistaken for a default. `coli 
 | `files_dir` | `"~"` | where the key and the server's logs are kept |
 | `start_with_tray` | `true` | the tray starts the server when it starts |
 | `extra_args` | `[]` | more arguments for `coli router` |
+| `env` | `{}` | more environment variables for the server and its engines, as text: `{"COLI_VULKAN": "1", "COLI_FFMPEG": "C:/tools/ffmpeg.exe"}`. They come last, so one can replace what the service sets (`Q36_MAXT`); `COLI_API_KEY` is refused (the service makes the key) |
 
 A port other than 8000 puts it in the file names (`colibri-api-key-8100.txt`), as the script did.
 

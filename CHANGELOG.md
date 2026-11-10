@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### `env` in the service settings
+
+`service.json` takes `"env": {"NAME": "value"}`, extra environment variables for the server the tray and `coli service` start (for example `COLI_VULKAN`, `COLI_FFMPEG`). [docs/tray.md](docs/tray.md)
+
 ### Gemma 4 reads video, and audio that is not WAV
 
 A `video_url` part (a file, taken apart by ffmpeg) or a `video` part with the frames a client took, up to 32 frames evenly spaced,

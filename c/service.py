@@ -37,9 +37,10 @@ DEFAULTS = {
     "files_dir": "~",                  # where the key and the server's logs are kept
     "start_with_tray": True,           # the tray starts the server when it starts, if it is not running
     "extra_args": [],                  # more arguments for `coli router` / `coli serve`
+    "env": {},                         # more environment variables for the server and its engines, e.g. {"COLI_VULKAN": "1"} (docs/ENVIRONMENT.md)
 }
 TYPES = {"port": int, "router": bool, "keep_alive": str, "kv_slots": int, "cap": int, "ctx": int, "lan": bool,
-         "files_dir": str, "start_with_tray": bool, "extra_args": list}
+         "files_dir": str, "start_with_tray": bool, "extra_args": list, "env": dict}
 
 
 class ServiceError(RuntimeError):
@@ -87,6 +88,11 @@ def load_config(path=None, overrides=None):
     for key in ("model", "request_log"):
         if cfg[key] is not None and not isinstance(cfg[key], str):
             raise ServiceError(f"setting {key!r} must be text, not {cfg[key]!r}")
+    for name, value in cfg["env"].items():
+        if not isinstance(value, str):
+            raise ServiceError(f"setting 'env': {name!r} must be text, not {value!r}")
+        if not name or "=" in name or name.upper() in ("COLI_API_KEY",):
+            raise ServiceError(f"setting 'env': {name!r} cannot be set here" + (" (the service makes the key)" if name.upper() == "COLI_API_KEY" else ""))
     if not cfg["router"] and not cfg["model"]:
         raise ServiceError("setting 'router' is false, so 'model' must name the model directory to serve")
     return cfg
@@ -283,6 +289,7 @@ def environment(cfg, key, base=None):
         env["COLI_REQUEST_LOG"] = log
     if cfg["ctx"] > 0:
         env["Q36_MAXT"] = str(cfg["ctx"])            # read by the chat engine of the Qwen3.6 family; the others ignore it
+    env.update(cfg["env"])                           # the user's own, last: they may replace a default (never the key)
     return env
 
 

@@ -106,6 +106,15 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(service.ServiceError, word, msg=text):
                 service.load_config(self.write(text))
 
+    def test_env_is_text_to_text_and_never_the_key(self):
+        for text, word in (('{"env": "COLI_VULKAN=1"}', "env"), ('{"env": {"COLI_VULKAN": 1}}', "must be text"),
+                           ('{"env": {"COLI_API_KEY": "x"}}', "makes the key"), ('{"env": {"A=B": "x"}}', "cannot be set"),
+                           ('{"env": {"": "x"}}', "cannot be set")):
+            with self.assertRaisesRegex(service.ServiceError, word, msg=text):
+                service.load_config(self.write(text))
+        self.assertEqual(service.load_config(self.write('{"env": {"COLI_VULKAN": "1"}}'))["env"], {"COLI_VULKAN": "1"})
+        self.assertEqual(service.load_config(os.path.join(tempfile.mkdtemp(), "absent.json"))["env"], {})
+
     def test_a_single_model_server_needs_its_model(self):
         with self.assertRaisesRegex(service.ServiceError, "'model'"):
             service.load_config(self.write('{"router": false}'))
@@ -168,6 +177,8 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((env["COLI_API_KEY"], env["Q36_MAXT"], env["PYTHONUTF8"], env["PATH"]), ("SECRET", "65536", "1", "x"))
         self.assertTrue(env["COLI_REQUEST_LOG"].endswith("r.log"))
         self.assertNotIn("SECRET", " ".join(service.command(cfg, python="PY")))
+        mine = service.environment(dict(cfg, env={"COLI_VULKAN": "1", "Q36_MAXT": "1234", "COLI_FFMPEG": "C:/ff.exe"}), "SECRET", base={})
+        self.assertEqual((mine["COLI_VULKAN"], mine["COLI_FFMPEG"], mine["Q36_MAXT"], mine["COLI_API_KEY"]), ("1", "C:/ff.exe", "1234", "SECRET"))
         off = service.environment(dict(cfg, request_log="", ctx=0), "k", base={})
         self.assertNotIn("COLI_REQUEST_LOG", off)
         self.assertNotIn("Q36_MAXT", off)
