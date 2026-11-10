@@ -4,8 +4,8 @@ import { HardDrive, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useLocale } from "@/i18n"
 import {
-  listInstalledModels, switchModel, unloadModel, waitForModel,
-  type InstalledModel, type InstalledModels,
+  getModelSettings, listInstalledModels, setModelSettings, switchModel, unloadModel, waitForModel,
+  type GpuChoice, type InstalledModel, type InstalledModels, type ModelSettings,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
@@ -38,12 +38,17 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
   const [switching, setSwitching] = useState<{ id: string; name: string } | null>(null)
   const [result, setResult] = useState<{ kind: "error" | "fell-back" | "info"; text: string } | null>(null)
   const [unloading, setUnloading] = useState<string | null>(null)
+  const [settings, setSettings] = useState<ModelSettings | null>(null)
+  const [changing, setChanging] = useState<string | null>(null)
   const waiting = useRef<AbortController | null>(null)
   const router = installed?.router === true
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      setInstalled(await listInstalledModels(baseUrl, apiKey, signal))
+      const list = await listInstalledModels(baseUrl, apiKey, signal)
+      setInstalled(list)
+      /* a router that keeps model settings says which models are off and where each is pinned; any other server has none */
+      setSettings(list.router ? await getModelSettings(baseUrl, apiKey, signal).catch(() => null) : null)
       setLoadError("")
     } catch (cause) {
       if (signal?.aborted) return
@@ -98,6 +103,29 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
     }
   }
 
+  /* Router with settings only. Turning a model off unloads it, after the request it is answering. */
+  const change = async (entry: InstalledModel, what: { enabled?: boolean; gpu?: GpuChoice }) => {
+    setResult(null)
+    setChanging(entry.key)
+    try {
+      const outcome = await setModelSettings(baseUrl, apiKey, entry.key, what)
+      if (outcome.unload === "unloading when idle") setResult({ kind: "info", text: t("models.unloadBusy", { name: entry.name }) })
+      onSwitched()
+      await refresh()
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setChanging(null)
+    }
+  }
+
+  const policy = settings?.policy
+  const policyText = !settings ? "" : !policy || policy.mode === "unset" ? t("models.gpuUnset")
+    : typeof policy.free_gb === "number" && typeof policy.total_gb === "number"
+      ? t("models.gpuPolicy", { mode: policy.mode, free: policy.free_gb, total: policy.total_gb, reserve: policy.reserve_gb })
+      : t("models.gpuPolicyNoReading", { mode: policy.mode, reserve: policy.reserve_gb })
+  const gpuLabel = (choice: GpuChoice) => t(choice === "vulkan" ? "models.gpuVulkan" : choice === "cpu" ? "models.gpuCpu" : "models.gpuAuto")
+
   return (
     <section className="side-section model-switcher">
       <div className="section-title"><HardDrive className="size-3.5" /> {t("models.title")}</div>
@@ -116,15 +144,21 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
         </div>
       )}
       {result && <p className={cn("field-help", "model-result", result.kind)} role="alert">{result.text}</p>}
+      {policyText && <p className="field-help model-gpu-policy">{policyText}</p>}
       <ul className="model-list">
-        {installed?.models.map((model) => (
-          <li key={model.key} className={cn("model-row", model.current && "current")}>
+        {installed?.models.map((model) => {
+          const setting = settings?.rows.find((row) => row.key === model.key)
+          const enabled = setting ? setting.enabled : model.enabled !== false
+          return (
+          <li key={model.key} className={cn("model-row", model.current && "current", !enabled && "off")}>
             <div className="model-info">
               <strong>{model.name}</strong>
               <small>{[model.family, formatSize(model.size_bytes), model.verified ? "" : t("models.unverified"),
                 router && model.current && model.resident_bytes ? t("models.inMemory", { size: formatSize(model.resident_bytes) }) : "",
                 router && model.current && typeof model.expires_in === "number" ? t("models.unloadsIn", { minutes: Math.max(1, Math.ceil(model.expires_in / 60)) }) : "",
                 router && model.current && model.keep_alive === null && !model.inflight ? t("models.stays") : "",
+                router && model.current && model.gpu && model.gpu.mode !== "unchanged" ? t(model.gpu.mode === "vulkan" ? "models.onGpu" : "models.onCpu") : "",
+                router && !enabled ? t("models.off") : "",
               ].filter(Boolean).join(" · ")}</small>
               {!model.current && model.reason && <small className="model-reason">{model.reason}</small>}
               {router && !model.current && model.last_error && <small className="model-reason">{t("models.lastError", { message: model.last_error })}</small>}
@@ -139,7 +173,7 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
               )
               : model.current ? <span className="model-current">{t("models.current")}</span>
               : router ? (
-                <Button type="button" size="sm" variant="secondary" disabled={!model.switchable || busy || !!switching}
+                <Button type="button" size="sm" variant="secondary" disabled={!model.switchable || !enabled || busy || !!switching}
                   onClick={() => void run(model)}>{t("models.load")}</Button>
               )
               : confirmKey === model.key ? (
@@ -152,8 +186,23 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
                 <Button type="button" size="sm" variant="secondary" disabled={!model.switchable || busy || !!switching}
                   onClick={() => setConfirmKey(model.key)}>{t("models.switch")}</Button>
               )}
+            {router && setting && (
+              <div className="model-controls">
+                <label>
+                  <span>{t("models.runsOn")}</span>
+                  <select className="model-select" aria-label={`${t("models.runsOn")} ${model.name}`} title={t("models.runsOnHelp")} value={setting.gpu}
+                    disabled={changing !== null} onChange={(event) => void change(model, { gpu: event.target.value as GpuChoice })}>
+                    {(["auto", "vulkan", "cpu"] as const).map((choice) => <option key={choice} value={choice}>{gpuLabel(choice)}</option>)}
+                  </select>
+                </label>
+                <Button type="button" size="sm" variant="secondary" disabled={changing !== null}
+                  aria-label={`${t(enabled ? "models.turnOff" : "models.turnOn")} ${model.name}`}
+                  onClick={() => void change(model, { enabled: !enabled })}>{t(enabled ? "models.turnOff" : "models.turnOn")}</Button>
+              </div>
+            )}
           </li>
-        ))}
+          )
+        })}
       </ul>
       {installed && installed.models.length <= 1 && <p className="field-help">{t("models.empty")}</p>}
     </section>

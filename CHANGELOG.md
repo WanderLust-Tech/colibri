@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### The dashboard turns models off and on, and says where they run
+
+Settings → Model: each model of a router has a "Runs on" choice (Automatic, Graphics card, CPU) and a Turn off / Turn on button; a loaded
+model says whether it was started on the card or the CPU, and a line gives the router's `--gpu` policy and the card's free memory.
+[docs/model-settings.md](docs/model-settings.md#in-the-dashboard)
+
 ### The router chooses the card or the CPU by free memory, and models can be turned off
 
 `coli router --gpu auto` starts each model on the graphics card when it has room (the free memory less `--gpu-reserve-gb`, 6 by

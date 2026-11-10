@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  listInstalledModels, listModelInfo, serverEndpoint, streamChat, switchModel, unloadModel, waitForModel,
+  getModelSettings, listInstalledModels, listModelInfo, serverEndpoint, setModelSettings, streamChat, switchModel, unloadModel,
+  waitForModel,
   type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
@@ -458,6 +459,44 @@ describe("model switching", () => {
   it("says why an unload failed", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ error: { message: "No installed model has that key." } }, 404)))
     await expect(unloadModel("http://localhost:8000/v1", "", "zz")).rejects.toThrow("No installed model has that key.")
+  })
+
+  it("reads the settings of the models and the router's GPU policy, and says nothing where there are none", async () => {
+    const row = { id: "qwen3-coder-30b-a3b-colibri", key: "k1", enabled: false, gpu: "cpu", state: "idle" }
+    const policy = { mode: "auto", reserve_gb: 6, min_gb: 3, free_gb: 8.5, total_gb: 31.8 }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ object: "list", data: [row], gpu_policy: policy, file: "x" }))
+      .mockResolvedValueOnce(json({ error: { message: "This router has no model settings file." } }, 404))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(getModelSettings("http://localhost:8000/v1", "secret")).resolves.toEqual({ rows: [row], policy })
+    await expect(getModelSettings("http://localhost:8000/v1", "secret")).resolves.toBeNull()
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:8000/v1/models/settings")
+    expect(fetchMock.mock.calls[0][1].headers).toEqual(expect.objectContaining({ Authorization: "Bearer secret" }))
+  })
+
+  it("fails loudly when the settings cannot be read for another reason", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ error: { message: "Invalid API key." } }, 401)))
+    await expect(getModelSettings("http://localhost:8000/v1", "")).rejects.toThrow("Invalid API key.")
+  })
+
+  it("turns a model off or pins it by key, and reports the unload", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ id: "m", key: "k1", enabled: false, gpu: "auto", unload: "unloading when idle" }))
+      .mockResolvedValueOnce(json({ id: "m", key: "k1", enabled: true, gpu: "cpu" }))
+    vi.stubGlobal("fetch", fetchMock)
+    await expect(setModelSettings("http://localhost:8000/v1", "secret", "k1", { enabled: false }))
+      .resolves.toEqual({ id: "m", key: "k1", enabled: false, gpu: "auto", unload: "unloading when idle" })
+    await expect(setModelSettings("http://localhost:8000/v1", "secret", "k1", { gpu: "cpu" })).resolves.toMatchObject({ gpu: "cpu" })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("http://localhost:8000/v1/models/settings")
+    expect(init.method).toBe("POST")
+    expect(JSON.parse(init.body)).toEqual({ key: "k1", enabled: false })
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ key: "k1", gpu: "cpu" })
+  })
+
+  it("says why a setting was refused", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ error: { message: "`gpu` must be one of auto, vulkan, cpu." } }, 400)))
+    await expect(setModelSettings("http://localhost:8000/v1", "", "k1", { gpu: "gpu" as never })).rejects.toThrow("`gpu` must be one of")
   })
 
   it("asks for a switch by key and never sends a path", async () => {

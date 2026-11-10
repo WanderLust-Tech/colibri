@@ -110,7 +110,8 @@ Both take `--host`, `--port` (default 8000, or the port `coli setup` configured)
 (`COLI_API_KEY`). `UNLOADS IN` says `in use` while the model is answering and `never` for `keep_alive -1`. `RUNS ON` is `GPU` or
 `CPU` when the router has a `--gpu` policy (or the model is pinned), and `-` when it does not decide.
 Against a plain `coli serve`, `coli ps` names its one model and `coli stop MODEL` says it is not a router.
-The dashboard's Settings → Model has the same as an Unload button on each loaded model.
+The dashboard's Settings → Model has the same as an Unload button on each loaded model, and, for each model, where it runs and a
+switch that turns it off ([model-settings.md](model-settings.md#in-the-dashboard)).
 
 ## What the API shows
 

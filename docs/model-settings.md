@@ -49,4 +49,13 @@ All need the router's key, and a JSON `Content-Type`; a request from another ori
 
 `GET /v1/models/installed` also carries `enabled` for each model, and `gpu_setting` when one is pinned.
 
-Not done: a switch in the dashboard (the API and `coli model` are what it would call).
+## In the dashboard
+
+Settings → Model lists the installed models, and against a router that keeps these settings each row also has:
+
+* **Runs on** (Automatic, Graphics card, CPU): the pin. It takes effect the next time the model loads, and a line above the list gives the
+  router's `--gpu` policy and the card's free memory now.
+* **Turn off / Turn on**: the switch. A model that is off says so, cannot be loaded, and is unloaded when it is turned off.
+* A loaded model says where the router started it (`on the graphics card`, `on the CPU`) beside its memory and when it unloads.
+
+Both go through `POST /v1/models/settings`. A router without a settings file, or an older one, shows the list as before.

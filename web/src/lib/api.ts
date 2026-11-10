@@ -260,6 +260,9 @@ export interface InstalledModel {
   keep_alive?: number | null
   inflight?: number
   last_error?: string
+  /* Only from `coli router`: false when the model is turned off, and where the router started it (card or CPU). */
+  enabled?: boolean
+  gpu?: GpuDecision | null
 }
 
 export interface InstalledModels {
@@ -299,6 +302,61 @@ export async function unloadModel(baseUrl: string, apiKey: string, key: string, 
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { status: string; id: string }
   return { status: body.status, id: body.id }
+}
+
+/* Where a model runs: the graphics card, the CPU, or whatever the router's policy says ("auto"). */
+export type GpuChoice = "auto" | "vulkan" | "cpu"
+
+/* What the router decided about a loaded model's card or CPU, and why. "unchanged": the router did not choose. */
+export interface GpuDecision {
+  mode: "vulkan" | "cpu" | "unchanged"
+  why: string
+  free_gb?: number
+}
+
+/* The router's own policy (`coli router --gpu`): auto, on, off, or unset, and the card's memory when it can be read. */
+export interface GpuPolicy {
+  mode: string
+  reserve_gb: number
+  min_gb: number
+  free_gb?: number
+  total_gb?: number
+}
+
+/* One row of GET /v1/models/settings: a model turned on or off, where it is pinned, and where it runs now. */
+export interface ModelSettingRow {
+  id: string
+  key: string
+  enabled: boolean
+  gpu: GpuChoice
+  state: string
+  running?: GpuDecision
+}
+
+export interface ModelSettings {
+  rows: ModelSettingRow[]
+  policy: GpuPolicy | null
+}
+
+/* The settings of every model, or null when this server has none to offer (not a router, or an older one). */
+export async function getModelSettings(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelSettings | null> {
+  const response = await fetch(endpoint(baseUrl, "models/settings"), { headers: headers(apiKey), signal })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { data?: ModelSettingRow[]; gpu_policy?: GpuPolicy | null }
+  return { rows: body.data ?? [], policy: body.gpu_policy ?? null }
+}
+
+/* Turns a model off or on, and/or pins where it runs. Turning one off unloads it: at once when it is idle, or when it has
+   finished what it is answering (`unload` says "unloading when idle"). */
+export async function setModelSettings(
+  baseUrl: string, apiKey: string, key: string, change: { enabled?: boolean; gpu?: GpuChoice }, signal?: AbortSignal,
+): Promise<{ enabled: boolean; gpu: GpuChoice; unload?: string }> {
+  const response = await fetch(endpoint(baseUrl, "models/settings"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ key, ...change }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  return (await response.json()) as { enabled: boolean; gpu: GpuChoice; unload?: string }
 }
 
 /* One row of GET /v1/presets: a preset of the router's file, whether it can be used, and why not. */

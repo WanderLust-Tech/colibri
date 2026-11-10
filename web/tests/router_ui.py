@@ -8,6 +8,10 @@ What it holds the page to: with a router, the models list says what is loaded an
 the ones that are not (no confirmation, no restart); Load shows that the model is loading, and when the router answers
 the row says Loaded, with its memory and when it unloads; the other model stays as it was; and the page that was open
 is still working.
+
+And what a router adds to a row: where the model was started (the graphics card or the CPU, from the router's --gpu
+policy, here a card with 20 of 32 GB free), a "Runs on" choice that pins it, and a button that turns a model off (it is
+unloaded and cannot be loaded) and on again, all of it written to the router's settings file.
 """
 import os
 import sys
@@ -22,6 +26,8 @@ C_DIR = ROOT.parent / "c"
 sys.path.insert(0, str(C_DIR))
 sys.path.insert(0, str(C_DIR / "tests"))
 
+import gpu  # noqa: E402
+import model_settings  # noqa: E402
 import router  # noqa: E402
 from acestep_fixture import STUB as MUSIC_STUB, make_fake_checkpoint as make_music, stub_env as music_env  # noqa: E402
 from qwen_image_fixture import STUB as IMAGE_STUB, make_fake_pipeline as make_image, stub_env as image_env  # noqa: E402
@@ -42,9 +48,13 @@ class Router:
             return {"COLI_ENGINE": str(MUSIC_STUB), "COLI_MUSIC_DIR": str(root / "music"),
                     **{k: v for k, v in music_env().items() if k.startswith("ACESTEP")}}
 
-        self.pool = router.Pool(catalog, worker_env=worker_env, grace=8.0, state=router.State())
+        self.settings_path = str(root / "model-settings.json")
+        self.settings = model_settings.ModelSettings(self.settings_path)
+        policy = gpu.GpuPolicy("auto", probe=lambda: (20.0, 32.0))
+        self.pool = router.Pool(catalog, worker_env=worker_env, grace=8.0, state=router.State(), gpu=policy,
+                                settings=self.settings)
         self.server = router.RouterServer(("127.0.0.1", 0), self.pool, catalog, router.Gate(), None,
-                                          ("http://127.0.0.1:1",))
+                                          ("http://127.0.0.1:1",), settings=self.settings)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/"
@@ -109,6 +119,32 @@ def run(browser, rig):
     expect(music.locator(".model-current")).to_have_count(0)
     expect(image.locator(".model-current")).to_have_text("Loaded")
     assert rig.states() == {"Qwen-Image-2.1": "ready"}, rig.states()
+
+    # where it runs: the router's policy, and a pin
+    expect(page.locator(".model-gpu-policy")).to_have_text(
+        "Graphics card: auto. 20 of 32 GB free now; 6 GB kept for other programs.")
+    expect(image.locator("small").first).to_contain_text("on the graphics card")
+    pin = image.get_by_label("Runs on Qwen-Image-2.1")
+    expect(pin).to_have_value("auto")
+    pin.select_option("cpu")
+    expect(pin).to_have_value("cpu")
+    assert model_settings.read(rig.settings_path) == {"qwen-image-2.1-colibri": {"gpu": "cpu"}}, rig.settings_path
+    pin.select_option("auto")
+    expect(pin).to_have_value("auto")
+    assert model_settings.read(rig.settings_path) == {}, "auto is no setting at all"
+
+    # off: unloaded, cannot be loaded, marked, and back on
+    image.get_by_role("button", name="Turn off Qwen-Image-2.1", exact=True).click()
+    expect(image.locator("small").first).to_contain_text("turned off", timeout=30000)
+    expect(image.get_by_role("button", name="Load", exact=True)).to_be_disabled()
+    expect(image.locator(".model-current")).to_have_count(0)
+    assert rig.states() == {}, rig.states()
+    assert model_settings.read(rig.settings_path) == {"qwen-image-2.1-colibri": {"enabled": False}}
+    expect(music.get_by_role("button", name="Load", exact=True)).to_be_enabled()      # the others are not affected
+    image.get_by_role("button", name="Turn on Qwen-Image-2.1", exact=True).click()
+    expect(image.get_by_role("button", name="Load", exact=True)).to_be_enabled(timeout=30000)
+    expect(image.locator("small").first).not_to_contain_text("turned off")
+    assert model_settings.read(rig.settings_path) == {}
     assert not errors, errors
     context.close()
 
