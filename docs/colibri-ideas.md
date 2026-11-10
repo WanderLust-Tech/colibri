@@ -130,7 +130,7 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
 - [x] **G1. Deploy Gemma 4 (S).** *Done 2026-11-07: `gemma4.exe` built in the live clone, the 26B-A4B and E2B containers in
   `colibri-models`, router restarted; a chat to the E2B through port 8000 worked.* Build `gemma4.exe` in the live clone, move a container into `colibri-models`, restart the
   router. Interrupts work in flight, so only when the server is idle.
-- [ ] **G2. GPU offload (M-L).** Send the big matrix multiplications, the vision and audio towers first, through the
+- [x] **G2. GPU offload (M-L).** *Dense matrices done 2026-11-10 on `feat/gemma4-vulkan` (`COLI_VULKAN=1`, opt-in): the same text, 1.3-3x on prompts and pictures, 1.4-1.9x on decoding; not deployed (the live `gemma4.exe` is a CPU build). Next step if wanted: an on-device chain per layer, and the experts.* Original note: Send the big matrix multiplications, the vision and audio towers first, through the
   existing Vulkan `coli_vk_matmul`. Ask first: it shares the GPU with renders. Gain unmeasured.
 - [x] **G3. Real runs of the 31B and the E4B (S).** *Done 2026-11-10: the E4B read text, a picture and the JFK clip; the 31B read text and a picture (docs/gemma4.md). Neither is installed in `colibri-models`.*
 - [-] **G4. Offer Gemma in `coli setup` (S).** *Not possible as the catalogue works (2026-11-07): it lists only downloads that
