@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Gemma 4 dense matrices on the Vulkan device (`COLI_VULKAN=1`)
+
+`make gemma4 VK=1` builds the engine against the Vulkan backend; with `COLI_VULKAN=1` the attention, dense MLP, towers and the
+embedding head run on the graphics card (`G4_VK_DENSE=0` keeps them on the CPU). The same words come back; prompts and pictures
+are 1.3 to 3 times faster and decoding 1.4 to 1.9 times on an RTX 5090 beside a running desktop. Not bit-identical to the CPU, so
+it is opt-in. [docs/gemma4.md](docs/gemma4.md#vulkan-for-the-dense-matrices)
+
 ### A tray icon and a background service (`coli tray`, `coli service`)
 
 A circle in the Windows notification area (grey ring: stopped, green: idle, blue: working, amber: starting or stopping, red:

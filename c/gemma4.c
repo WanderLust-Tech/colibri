@@ -56,6 +56,9 @@
 #include "expert_ffn.h"
 #include "gemma4_tok.h"
 #include "constrain.h"
+#ifdef COLI_VULKAN
+#include "backend_vulkan.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -216,7 +219,7 @@ static void load_cfg(Cfg *c, const char *snap) {
 
 /* ------------------------------------------------------------------------------ weights */
 
-typedef struct { int8_t *q; float *s; int O, I; int clipped; float cl[4]; } QMat;      /* cl: a clipped linear's input min, max, output min, max */
+typedef struct { int8_t *q; float *s; int O, I; int clipped; float cl[4]; void *vk; } QMat;      /* vk: the matrix on the Vulkan device (COLI_VULKAN=1), made on its first use */      /* cl: a clipped linear's input min, max, output min, max */
 
 typedef struct {
     int full;                                         /* a full-attention layer */
@@ -319,7 +322,7 @@ static void load_q(Model *m, const char *name, QMat *w, int O, int I) {
     if (!t || !s) die("container lacks %s (or its scale)", name);
     if (t->numel != (int64_t)O * I || t->nbytes != (int64_t)O * I) die("%s: expected int8 [%d,%d]", name, O, I);
     if (s->numel != O) die("%s: expected %d scales", sname, O);
-    w->O = O; w->I = I;
+    w->O = O; w->I = I; w->vk = NULL;
     w->q = xmalloc((size_t)O * I);
     st_read_raw(&m->S, name, w->q, 0);
     load_f32(m, sname, &w->s, O);
@@ -661,8 +664,22 @@ static inline void dot_q8(const int8_t *w, const float *x, int I, int rows, floa
 static int g_rows1 = 0;       /* a decode step: every row goes through the single-row kernel, so a row gets the same bits
                                * whether it is alone or one of several conversations' tokens (the 4-row kernel adds in another order) */
 
+#ifdef COLI_VULKAN
+/* COLI_VULKAN=1: the dense matrices (attention, dense MLP, towers, the embedding that is also the head) run on the Vulkan device,
+ * uploaded once on first use. It is the same int8 rows and scales, but the sums are added in the shader's order, so the logits
+ * are close to the CPU's and not equal to the bit (and a row alone and a row among several may differ). G4_VK_DENSE=0 keeps
+ * them on the CPU with the device otherwise up. A matrix the device refuses (no room, too many rows) falls back to the CPU. */
+static int g_gvk = 0;
+static int vk_mm(float *y, const float *x, int S, const QMat *W) {
+    return g_gvk && coli_vk_matmul((ColiVkTensor **)&((QMat *)W)->vk, y, x, W->q, W->s, 1, S, W->I, W->O, 0);
+}
+#endif
+
 static void mm(float *y, const float *x, int S, const QMat *W) {
     int O = W->O, I = W->I;
+#ifdef COLI_VULKAN
+    if (vk_mm(y, x, S, W)) return;
+#endif
     /* The rows go through in blocks of 32: a block of activations (32 x I floats) stays in the cache while every
      * weight row is read against it, instead of the whole of x being streamed again for each of the O weight rows.
      * That is what lets a picture's 2400 rows (or a chunk's 256) run near the arithmetic's speed. Each dot product
@@ -1371,6 +1388,19 @@ static void head_rows(Model *m, const float *xr, int S, float **out) {
     double t0 = now_s();
     float *hn = xmalloc((size_t)S * H * 4);
     for (int s = 0; s < S; s++) rms_w(hn + (size_t)s * H, xr + (size_t)s * H, m->final_norm, H, c->eps);
+#ifdef COLI_VULKAN
+    if (g_gvk) {                                            /* the head on the device: one product for the S rows, then the soft cap */
+        float *lg = xmalloc((size_t)S * V * 4);
+        if (vk_mm(lg, hn, S, &m->embed)) {
+            for (int s = 0; s < S; s++)
+                for (int v = 0; v < V; v++) { float l = lg[(size_t)s * V + v]; out[s][v] = c->softcap > 0 ? c->softcap * tanhf(l / c->softcap) : l; }
+            free(lg); free(hn);
+            m->t_head += now_s() - t0;
+            return;
+        }
+        free(lg);
+    }
+#endif
 #pragma omp parallel for schedule(static)
     for (int v = 0; v < V; v++) {
         const int8_t *w = m->embed.q + (size_t)v * H; float sc = m->embed.s[v];
@@ -2008,6 +2038,14 @@ int main(int argc, char **argv) {
     if (ctx < 1 || ctx > 262144) { fprintf(stderr, "CTX must be 1..262144 (got %d)\n", ctx); return 2; }
     if (getenv("SEED")) g_rng ^= (uint64_t)atoll(getenv("SEED")) * 0xD1B54A32D192ED03ULL; else g_rng ^= (uint64_t)time(NULL) * 0xD1B54A32D192ED03ULL;
     static Model m;
+#ifdef COLI_VULKAN
+    if (coli_vk_init_env("gemma4")) {                  /* COLI_VULKAN=1 and a usable device */
+        const char *d = getenv("G4_VK_DENSE");
+        g_gvk = d && *d ? atoi(d) != 0 : 1;
+        atexit(coli_vk_shutdown);
+        fprintf(stderr, "[gemma4] dense matrices on %s\n", g_gvk ? coli_vk_device_name() : "the CPU (G4_VK_DENSE=0)");
+    }
+#endif
     double t0 = now_s();
     model_init(&m, snap, cap, ctx);
     fprintf(stderr, "[gemma4] weights loaded in %.1fs, RSS %.2f GB\n", now_s() - t0, rss_gb());

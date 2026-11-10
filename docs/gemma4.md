@@ -206,13 +206,41 @@ python3 c/tools/mutate_gemma4.py [part of a name ...]
 | `COLI_KV_PREFIX` | on | `0` never reuses a cache |
 | `COLI_PREFIX_LOG` | off | `1` says what each request reused, and how long each tower took |
 
+## Vulkan for the dense matrices
+
+Built with `make gemma4 VK=1` (the Vulkan headers and `glslc`; nothing links a Vulkan loader, so the binary still starts on a
+machine without one), and switched on with `COLI_VULKAN=1`, the dense matrices (attention, the dense MLP, the towers, and the
+embedding table that is also the output head) run on the graphics card: the same int8 rows and scales, uploaded once on first
+use. The routed experts stay on the CPU, and a matrix the device will not take (no room, too many rows) falls back to the CPU.
+`G4_VK_DENSE=0` brings the device up and keeps everything on the CPU.
+
+Measured on an RTX 5090 beside a running desktop (renders and a browser open, the engine at low priority, so the numbers are
+noisy), the same questions at temperature 0, the same words back on the card as on the CPU:
+
+| | CPU | card | |
+|---|---|---|---|
+| E2B, 425-token prompt | 8.6 s | 2.8 s | 3 x |
+| E2B, 150 tokens out | 13.1 s | 6.9 s | 1.9 x |
+| E2B, a picture and 40 tokens | 18.1 s | 12.7 s | 1.4 x |
+| 26B-A4B (32 experts cached a layer), 429-token prompt | 19.0 s | 15.1 s | 1.3 x |
+| 26B-A4B, 150 tokens out | 19.2 s | 13.6 s | 1.4 x |
+| 26B-A4B, a picture and 20 tokens | 34.4 s | 23.0 s | 1.5 x |
+
+Decode gains little on the 26B-A4B because the experts, which are most of the work, still run on the CPU, and each of about
+200 dense matrices a token is a synchronous call. The dense 31B (30 GB of int8) would not fit beside anything else on the card.
+
+It is not bit-identical: the card adds in its own order, so the logits are close to the CPU's, not equal, and a row alone
+and the same row among several conversations may differ in the last bits. The 179 engine tests pass on the CPU path; with
+`COLI_VULKAN=1` all pass but the twelve that require batched decode to equal single-row decode to the bit
+(`BatchTest`, `DenseBatchTest`, `PleBatchTest`: two, seven, one-thread and small-cache cases). The CPU stays the default for that
+reason.
+
 ## What is not there
 
 - **Video, and audio that is not WAV.** The models read video as frames; mp3, flac and ogg are not decoded here.
-- **A GPU path.** CPU only. The Vulkan backend's `coli_vk_matmul` computes exactly what this container's dense matrices need
-  (int8 rows, one scale per row), so offloading them to a graphics card is a short step and the experts would stay on the CPU.
-  It is not done: the engine would have to be built against that backend, and how much a launch for each of about 200 matrices
-  a token gains over the CPU has not been measured. The on-device chains the larger families have are a project of their own.
+- **A GPU path for more than the dense matrices.** The experts stay on the CPU, and a graphics card runs the dense matrices only
+  (see [Vulkan](#vulkan-for-the-dense-matrices) below). The on-device chains the larger families have (a layer in one
+  submission) are a project of their own, and are why the decode gain below is modest.
 - **A layer-segment adapter** (`docs/segment-runtime.md`): the family is exempt from that gate until it has one.
 - **The 31B** ran on 2026-11-10 (converted from the download in 279 s to a 31.4 GB container; loaded in 17 s, 29.2 GB resident,
   served on its own port at low priority). "What is the capital of France?" answered "The capital of France is Paris." in

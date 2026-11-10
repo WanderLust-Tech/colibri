@@ -1347,8 +1347,8 @@ ifneq ($(EXE),)
 .PHONY: gemma4
 gemma4: gemma4$(EXE)
 endif
-gemma4$(EXE): gemma4.c gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h .build-config
-	$(CC) $(CFLAGS) gemma4.c -o gemma4$(EXE) $(LDFLAGS)
+gemma4$(EXE): gemma4.c gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) gemma4.c $(VK_OBJ) -o gemma4$(EXE) $(LDFLAGS)
 
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision
 # head, served on POST /v1/systemone through the DECIDE command (docs/laya.md).
