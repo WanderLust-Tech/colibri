@@ -135,7 +135,7 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
   decoding alone.
 - Checked against transformers on three tiny random models (text 4e-5, picture soft tokens 7e-6, clip soft tokens 2e-6), 83
   mutants (three equivalent, the rest caught), and on real weights: 26B-A4B (14.2 tok/s, picture and tools) and E2B (about
-  21 tok/s, picture, JFK clip transcribed word for word, HTTP end to end). The 31B ran only on the tiny model; the E4B was run on real weights on 2026-11-10 (text, picture, audio).
+  21 tok/s, picture, JFK clip transcribed word for word, HTTP end to end). The E4B and 31B were run on real weights on 2026-11-10 (text, picture; audio on the E4B).
 - Registry names the four sizes; gateway knows `gemma4_no_cue`; protocol gained an `AUDIO` frame and `BAD_AUDIO`.
 - CPU only. No video, no audio other than WAV. Docs: `docs/gemma4.md`.
 - The 62 GB of downloaded source checkpoints were deleted 2026-11-07; the converted containers are in
@@ -239,7 +239,7 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 
 ### 3.2 Gemma 4 follow-ups
 
-- A real-weights run of the 31B (needs 33 GB for the container). The E4B ran on 2026-11-10: text, a picture and audio all right; not installed in `colibri-models`.
+- The E4B and the 31B ran on real weights on 2026-11-10 (text, pictures, and audio on the E4B); neither is installed in `colibri-models`. The 31B leaves about 5 GB of a 64 GB machine free.
 - `coli setup` cannot list Gemma: its catalogue holds only ready-to-run downloads, and Gemma needs conversion. That would take a
   container hosted on Hugging Face (publishing, so your call). Instead, `feat/gemma4-setup` (`fdebaae5`, merged) lets `coli convert --repo` take a local directory, tests the routing, documents the conversion and
   fixes the Makefile's "text only" comment.
