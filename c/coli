@@ -3717,7 +3717,7 @@ def cmd_ps(a):
         rows=[m for m in body["data"] if m.get("state") not in (None,"idle")]
         if not rows:
             print(f"  no models loaded on {where} (a model loads when a request asks for it)"); return 0
-        table=[("NAME","STATE","MEMORY","UNLOADS IN")]
+        table=[("NAME","STATE","MEMORY","RUNS ON","UNLOADS IN")]
         for m in rows:
             state={"ready":"loaded"}.get(m["state"],m["state"])
             memory=f"{m['resident_bytes']/2**30:.1f} GB" if m.get("resident_bytes") else "-"
@@ -3725,8 +3725,9 @@ def cmd_ps(a):
             elif m.get("inflight"): left="in use"
             elif m.get("keep_alive") is None: left="never"
             else: left=_duration_text(m["expires_in"] or 0)
-            table.append((m["id"],state,memory,left))
-        widths=[max(len(row[i]) for row in table) for i in range(4)]
+            gpu=(m.get("gpu") or {}).get("mode")
+            table.append((m["id"],state,memory,{"vulkan":"GPU","cpu":"CPU"}.get(gpu,"-"),left))
+        widths=[max(len(row[i]) for row in table) for i in range(5)]
         for row in table: print("  "+"   ".join(cell.ljust(widths[i]) for i,cell in enumerate(row)).rstrip())
         return 0
     status,body=_api_call(a,"GET","/v1/models")
@@ -3734,6 +3735,74 @@ def cmd_ps(a):
     if not ids:
         print(f"  could not read the models of the server on {where} (HTTP {status})"); return 1
     print(f"  {where} is a single-model server (not `coli router`); it holds {', '.join(ids)} for as long as it runs")
+    return 0
+
+def cmd_model(a):
+    """Turn a model off or on, and pin where it runs (model_settings.py, docs/model-settings.md): `coli model`, `coli model
+    disable NAME`, `coli model enable NAME`, `coli model gpu NAME auto|vulkan|cpu`. A running `coli router` is asked; with none,
+    the file is edited and the router reads it when it starts."""
+    banner("model")
+    import model_settings
+    where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
+    if a.action=="list":
+        status,body=_api_call(a,"GET","/v1/models/settings")
+        if status==401:
+            print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
+        if status==200 and body:
+            rows=[("MODEL","ON","RUNS ON","NOW")]
+            for m in body["data"]:
+                running=(m.get("running") or {}).get("mode")
+                rows.append((m["id"],"yes" if m["enabled"] else "off",m["gpu"] if m["gpu"]!="auto" else "auto",
+                             ({"vulkan":"on the GPU","cpu":"on the CPU"}.get(running,"loaded") if m["state"]=="ready" else "-")))
+            widths=[max(len(r[i]) for r in rows) for i in range(4)]
+            for r in rows: print("  "+"   ".join(c.ljust(widths[i]) for i,c in enumerate(r)).rstrip())
+            policy=body.get("gpu_policy")
+            if policy:
+                free=f", {policy['free_gb']} of {policy['total_gb']} GB free now" if "free_gb" in policy else ""
+                print(f"\n  the router's GPU policy: --gpu {policy['mode']}, {policy['reserve_gb']:g} GB kept back{free}")
+            else:
+                print("\n  the router has no --gpu policy: COLI_VULKAN is left as its environment has it")
+            return 0
+        path=a.file or model_settings.default_path()
+        try: models=model_settings.read(path)
+        except model_settings.SettingsError as error:
+            print(f"  {C.yel}{error}{C.r}"); return 1
+        if not models:
+            print(f"  nothing is turned off or pinned ({path}); no server answers on {where}"); return 0
+        print(f"  no server answers on {where}; the file {path} says:")
+        for model,record in sorted(models.items()):
+            print(f"    {model}: "+", ".join(f"{k}={'yes' if v is True else 'no' if v is False else v}" for k,v in record.items()))
+        return 0
+    if not a.name:
+        print(f"  {C.yel}name a model:{C.r} coli model {a.action} NAME"+(" auto|vulkan|cpu" if a.action=="gpu" else "")); return 1
+    body={"model":a.name}
+    if a.action=="gpu":
+        if a.value not in model_settings.GPU_CHOICES:
+            print(f"  {C.yel}where should it run?{C.r} coli model gpu {a.name} auto|vulkan|cpu"); return 1
+        body["gpu"]=a.value
+    else:
+        body["enabled"]=a.action=="enable"
+    status,res=_api_call(a,"POST","/v1/models/settings",body)
+    if status==401:
+        print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
+    if status==404 and isinstance(res,dict) and (res.get("error") or {}).get("code")=="model_not_found":
+        print(f"  {C.yel}no installed model is called {a.name}{C.r}"); return 1
+    if status is None:                                     # no server: edit the file, naming the model as the catalog does
+        import router
+        entry=router.Catalog().find(a.name)
+        if entry is None:
+            print(f"  {C.yel}no installed model is called {a.name}{C.r}"); return 1
+        path=a.file or model_settings.default_path()
+        try:
+            record=model_settings.update(path,entry["id"],enabled=body.get("enabled"),gpu=body.get("gpu"))
+        except (model_settings.SettingsError,OSError) as error:
+            print(f"  {C.yel}{error}{C.r}"); return 1
+        print(f"  {C.grn}✓{C.r} {entry['id']}: {'off' if record.get('enabled') is False else 'on'}, runs on {record.get('gpu','auto')}"
+              f"  (no server answers on {where}; the router reads {path} when it starts)"); return 0
+    if status!=200:
+        print(f"  {C.yel}could not change {a.name}:{C.r} HTTP {status} {res}"); return 1
+    note={"unloaded":", unloaded","unloading when idle":", it unloads when it has finished its request"}.get(res.get("unload"),"")
+    print(f"  {C.grn}✓{C.r} {res['id']}: {'on' if res['enabled'] else 'off'}, runs on {res['gpu']}{note}")
     return 0
 
 def cmd_preset(a):
@@ -3924,7 +3993,8 @@ def _run_router(a,router,keep_alive):
                  keep_alive=keep_alive,max_loaded=a.max_loaded,max_queue=a.max_queue,queue_timeout=a.queue_timeout,
                  parallel_models=a.parallel_models,cors_origins=a.cors_origin,allowed_hosts=a.allowed_host,
                  worker_args=list(a.worker_arg),preload=a.preload,kv_slots=a.kv_slots,
-                 presets_path=a.presets,request_log_path=a.request_log)   # the router gives each worker as many slots as its family allows
+                 presets_path=a.presets,request_log_path=a.request_log,gpu=a.gpu,gpu_reserve_gb=a.gpu_reserve_gb,
+                 gpu_min_gb=a.gpu_min_gb,settings_path=a.model_settings)   # the router gives each worker as many slots as its family allows
 
 def cmd_web(a):
     """serve + open the dashboard in the browser once the API answers."""
@@ -4356,6 +4426,17 @@ def main():
                     help="write one JSON line per request, the router's and each worker's, to FILE (COLI_REQUEST_LOG)")
     pr.add_argument("--worker-arg",action="append",default=[],metavar="ARG",
                     help="an extra argument for every `coli serve` the router starts (repeatable)")
+    pr.add_argument("--gpu",choices=("off","auto","on"),default=os.environ.get("COLI_GPU") or None,
+                    help="where models run (a VK=1 engine): auto looks at the card's free memory each time a model loads "
+                         "and uses it when there is room, on always, off never; unset leaves COLI_VULKAN as the environment has "
+                         "it (COLI_GPU; docs/gpu-offload.md)")
+    pr.add_argument("--gpu-reserve-gb",type=float,default=float(os.environ.get("COLI_GPU_RESERVE_GB","6")),metavar="GB",
+                    help="with --gpu: card memory left free for everything else (default 6)")
+    pr.add_argument("--gpu-min-gb",type=float,default=float(os.environ.get("COLI_GPU_MIN_GB","3")),metavar="GB",
+                    help="with --gpu auto: the least free memory beyond the reserve worth starting on the card (default 3)")
+    pr.add_argument("--model-settings",default=None,metavar="FILE",
+                    help="the models-turned-off and pinned-to-CPU/GPU file (default: model-settings.json in the setup folder, "
+                         "or COLI_MODEL_SETTINGS); see `coli model`")
     pcluster=sub.add_parser("cluster", help="run the local-cluster control plane or an expert worker")
     cluster_sub=pcluster.add_subparsers(dest="cluster_cmd")
     pcoord=cluster_sub.add_parser("coordinator", help="serve worker registration and discovery")
@@ -4391,6 +4472,13 @@ def main():
     ppreset.add_argument("--description",default=None)
     ppreset.add_argument("--keep-alive",default=None,metavar="TIME",help="add: how long its model stays loaded (10m, -1 for never)")
     ppreset.add_argument("--file",default=None,metavar="FILE",help="the presets file (default: the setup folder's presets.json)")
+    pmodel=sub.add_parser("model",help="turn a model off or on, and pin where it runs (CPU or graphics card)")
+    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu"))
+    pmodel.add_argument("name",nargs="?",default=None,metavar="MODEL")
+    pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu")
+    pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)
+    pmodel.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pmodel.add_argument("--file",default=None,metavar="FILE",help="with no server running: the settings file (default: the setup folder's model-settings.json)")
     psettings=sub.add_parser("settings",help="the settings colibri reads, which are set here, and which that are set are read by nothing")
     psettings.add_argument("words",nargs="*",help="search the names and descriptions")
     psettings.add_argument("--all",action="store_true",help="every documented setting, by section")
@@ -4491,7 +4579,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

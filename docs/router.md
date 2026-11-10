@@ -64,6 +64,9 @@ has runners.
 | `--max-queue`, `--queue-timeout` | `8`, `300` | Requests waiting for another model's turn |
 | `--kv-slots N` | `1` (`COLI_KV_SLOTS`) | KV slots for each chat model, so several conversations keep their cache (see [api.md](api.md#isolated-kv-contexts)). A model gets no more than its family allows: picture and music models always have one |
 | `--worker-arg ARG` | | An extra argument for every `coli serve` the router starts (repeatable) |
+| `--gpu off\|auto\|on` | unset (`COLI_GPU`) | Run each model on the graphics card or on the CPU, decided when it loads: `auto` looks at the card's free memory. Unset leaves `COLI_VULKAN` as the environment has it. See [gpu-offload.md](gpu-offload.md) |
+| `--gpu-reserve-gb`, `--gpu-min-gb` | `6`, `3` (`COLI_GPU_RESERVE_GB`, `COLI_GPU_MIN_GB`) | With `--gpu`: card memory kept free for everything else, and the least beyond it worth starting a model on the card for |
+| `--model-settings FILE` | `model-settings.json` in the setup folder (`COLI_MODEL_SETTINGS`) | Models turned off, and models pinned to the card or the CPU; see [model-settings.md](model-settings.md) |
 
 What the router learns is kept in `router.json` in the setup folder (`%LOCALAPPDATA%\colibri` on
 Windows): how much memory each model really took the last time it was loaded.
@@ -95,16 +98,17 @@ curl localhost:8000/v1/models/switch -d '{"model": "qwen3-coder-30b", "keep_aliv
 
 ```
 $ coli ps
-  NAME                          STATE    MEMORY    UNLOADS IN
-  qwen-image-2.1-colibri        loaded   13.3 GB   9m 41s
-  qwen3-coder-30b-a3b-colibri   loaded   2.4 GB    never
+  NAME                          STATE    MEMORY    RUNS ON   UNLOADS IN
+  qwen-image-2.1-colibri        loaded   13.3 GB   CPU       9m 41s
+  qwen3-coder-30b-a3b-colibri   loaded   2.4 GB    GPU       never
 
 $ coli stop qwen-image-2.1          # unload one; the server and the other models stay
   ✓ unloaded qwen-image-2.1-colibri
 ```
 
 Both take `--host`, `--port` (default 8000, or the port `coli setup` configured) and `--api-key`
-(`COLI_API_KEY`). `UNLOADS IN` says `in use` while the model is answering and `never` for `keep_alive -1`.
+(`COLI_API_KEY`). `UNLOADS IN` says `in use` while the model is answering and `never` for `keep_alive -1`. `RUNS ON` is `GPU` or
+`CPU` when the router has a `--gpu` policy (or the model is pinned), and `-` when it does not decide.
 Against a plain `coli serve`, `coli ps` names its one model and `coli stop MODEL` says it is not a router.
 The dashboard's Settings → Model has the same as an Unload button on each loaded model.
 

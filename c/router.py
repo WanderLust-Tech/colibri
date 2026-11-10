@@ -41,6 +41,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import gpu as gpu_mod
+import model_settings as settings_mod
 import presets as presets_mod
 import request_log
 
@@ -77,6 +79,11 @@ class ApiError(Exception):
 
     def body(self):
         return {"error": {"message": self.message, "type": self.error_type, "param": self.param, "code": self.code}}
+
+
+def disabled_error(entry):
+    return ApiError(403, f"The model `{entry['id']}` is turned off. Turn it on with `coli model enable {entry['id']}`.",
+                    "model_disabled", "model")
 
 
 def parse_duration(text):
@@ -348,6 +355,7 @@ class Worker:
         self.last_used = self.started
         self.resident = 0
         self.model_entry, self.jev = None, None
+        self.gpu = None                         # the gpu.Decision it was started with
         self.error = None
         self.log = collections.deque(maxlen=40)
         self.settled = threading.Event()        # set when starting or stopping has finished
@@ -445,8 +453,11 @@ class Pool:
 
     def __init__(self, catalog, *, keep_alive=DEFAULT_KEEP_ALIVE, max_loaded=DEFAULT_MAX_LOADED,
                  worker_command=None, worker_env=None, state=None, memory=None, measure=None,
-                 grace=STOP_GRACE, make_job=None, queue_timeout=300.0):
+                 grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None):
         self.catalog = catalog
+        self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
+        self.settings = settings                         # model_settings.ModelSettings, or None
+        self.decisions = {}                              # key -> the gpu.Decision of its last start
         self.keep_alive, self.max_loaded = keep_alive, max_loaded
         self.worker_command = worker_command
         self.worker_env = worker_env
@@ -530,6 +541,8 @@ class Pool:
         """A ready worker for `entry` with one request counted against it (release it when done).
         Loads the model if needed, after making room. Waiting for room is bounded by the queue
         timeout; the load itself is not."""
+        if self.settings is not None and not self.settings.enabled(entry):
+            raise disabled_error(entry)
         deadline = time.monotonic() + self.queue_timeout
         while True:
             free = self.memory()                         # read outside the lock: it may be slow
@@ -562,6 +575,7 @@ class Pool:
         began = time.monotonic()
         try:
             command, env = self._command(entry)
+            worker.gpu = self.decisions.get(entry["key"])
             worker.spawn(command, env, self.make_job)
             worker.wait_ready()
         except BaseException as error:
@@ -607,6 +621,12 @@ class Pool:
         env["PYTHONUTF8"] = "1"
         if self.worker_env is not None:
             env.update(self.worker_env(entry) or {})
+        if self.gpu is not None or (self.settings is not None and self.settings.gpu(entry)):
+            policy = self.gpu or gpu_mod.GpuPolicy()
+            decision = policy.decide(entry, self.settings.gpu(entry) if self.settings is not None else None)
+            env.update(decision.env)
+            self.decisions[entry["key"]] = decision
+            log(f"`{entry['id']}` will run {decision.summary()}")
         return command, env
 
     def release(self, worker):
@@ -922,11 +942,12 @@ class RouterServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
     def __init__(self, address, pool, catalog, gate, api_key=None, cors_origins=(), allowed_hosts=(),
-                 queue_timeout=300.0, presets=None, request_log=None):
+                 queue_timeout=300.0, presets=None, request_log=None, settings=None):
         super().__init__(address, RouterHandler)
         self.pool, self.catalog, self.gate = pool, catalog, gate
         self.presets = presets                 # presets.Presets, or None for a router without any
         self.request_log = request_log         # request_log.RequestLog, or None
+        self.settings = settings               # model_settings.ModelSettings, or None
         self.api_key = api_key
         self.cors_origins = tuple(cors_origins)
         self.allowed_hosts = tuple(h.strip().lower() for h in allowed_hosts if h and h.strip())
@@ -1091,6 +1112,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._require_auth()
             if path == "/v1/models":
                 return self.send_json(200, self.models_list())
+            if path == "/v1/models/settings":
+                return self.send_json(200, self.settings_list())
             if path == "/v1/models/installed":
                 return self.send_json(200, self.installed())
             if path == "/v1/presets":
@@ -1117,6 +1140,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.switch()
             if path == "/v1/models/unload":
                 return self.unload()
+            if path == "/v1/models/settings":
+                return self.settings_set()
             if path == "/v1/presets":
                 return self.preset_save()
             if path == "/v1/presets/delete":
@@ -1241,6 +1266,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(404, f"The model `{model}` does not exist.", "model_not_found", "model")
         if entry["reason"] is not None:
             raise ApiError(409, f"`{entry['id']}` cannot be started here: {entry['reason']}.", "not_switchable", "model")
+        if self.disabled(entry):
+            raise disabled_error(entry)
         return entry
 
     def serve_model(self, entry, path, raw, keep=UNSET):
@@ -1330,6 +1357,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             "gate": self.server.gate.stats(),
             "free_memory": pool.memory(),
         }
+        if pool.gpu is not None:
+            payload["router"]["gpu"] = pool.gpu.public()
         return payload
 
     def worker_view(self, worker):
@@ -1338,7 +1367,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             left = max(0.0, worker.keep_alive - (time.monotonic() - worker.last_used))
         return {"id": worker.entry["id"], "key": worker.key, "state": worker.state, "port": worker.port,
                 "resident_bytes": worker.resident, "inflight": worker.inflight, "expires_in": left,
-                "keep_alive": worker.keep_alive}
+                "keep_alive": worker.keep_alive, "gpu": worker.gpu.public() if worker.gpu is not None else None}
 
     def models_list(self):
         """Every model that can be asked for, so a client can find them. A loaded one says what its engine
@@ -1356,6 +1385,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 item, card = state.cached_entry(entry["key"])
                 item = dict(item) if item else self.stub(entry)
             item["state"] = "loaded" if ready else "idle"
+            if self.disabled(entry):
+                item["state"] = "disabled"
             data.append(item)
             if card:
                 cards.append(card)
@@ -1363,7 +1394,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         for preset in (self.server.presets.all() if self.server.presets is not None else []):
             entry = self.server.catalog.find(preset.model)
             base = by_id.get(entry["id"]) if entry is not None else None      # None: not installed, or cannot start here
-            if base is not None and self.preset_named(preset.name) is not None:
+            if base is not None and base["state"] != "disabled" and self.preset_named(preset.name) is not None:
                 data.append(self.as_preset(base, preset))
         return {"object": "list", "data": data, "models": cards}
 
@@ -1450,7 +1481,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             item = {k: v for k, v in entry.items() if k != "path"}
             item["current"] = state == "ready"
             item["state"] = state
-            item["switchable"] = entry["reason"] is None and state not in ("starting", "stopping")
+            item["enabled"] = not self.disabled(entry)
+            item["switchable"] = entry["reason"] is None and item["enabled"] and state not in ("starting", "stopping")
+            if self.server.settings is not None and self.server.settings.gpu(entry):
+                item["gpu_setting"] = self.server.settings.gpu(entry)
             if worker is not None:
                 item.update(self.worker_view(worker))
             elif entry["key"] in pool.last_error:
@@ -1528,6 +1562,60 @@ class RouterHandler(BaseHTTPRequestHandler):
             return self.send_json(202, {"status": "unloading when idle", "key": key, "id": entry["id"]})
         self.send_json(200, {"status": outcome, "key": key, "id": entry["id"]})
 
+    def disabled(self, entry):
+        settings = self.server.settings
+        return settings is not None and not settings.enabled(entry)
+
+    def settings_list(self):
+        """Every installed model with what is set for it (GET /v1/models/settings): on or off, and where it runs."""
+        pool, settings = self.server.pool, self.server.settings
+        out = []
+        for entry in self.server.catalog.entries():
+            worker = pool.get(entry["key"])
+            row = {"id": entry["id"], "key": entry["key"], "name": entry["name"], "enabled": not self.disabled(entry),
+                   "gpu": (settings.gpu(entry) if settings is not None else None) or "auto",
+                   "state": worker.state if worker is not None else "idle"}
+            if worker is not None and worker.gpu is not None:
+                row["running"] = worker.gpu.public()
+            out.append(row)
+        out.sort(key=lambda row: row["name"].lower())
+        policy = pool.gpu.public() if pool.gpu is not None else None
+        return {"object": "list", "data": out, "gpu_policy": policy, "file": settings.path if settings is not None else None}
+
+    def settings_set(self):
+        """Turn a model on or off, or pin where it runs (`coli model enable|disable|gpu`). Body: `model` (or `key`), and
+        `enabled` (true/false) and/or `gpu` ("auto", "vulkan", "cpu"). Turning a model off unloads it, at once, or when it
+        has finished what it is answering."""
+        settings = self.server.settings
+        if settings is None:
+            raise ApiError(404, "This router has no model settings file.", "not_found")
+        body, entry, param = self.management_request("/v1/models/settings")
+        enabled, gpu = body.get("enabled"), body.get("gpu")
+        if enabled is None and gpu is None:
+            raise ApiError(400, "Send `enabled` and/or `gpu`.", "invalid_request_error", "enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ApiError(400, "`enabled` must be true or false.", "invalid_request_error", "enabled")
+        if gpu is not None and gpu not in settings_mod.GPU_CHOICES:
+            raise ApiError(400, "`gpu` must be one of " + ", ".join(settings_mod.GPU_CHOICES) + ".",
+                           "invalid_request_error", "gpu")
+        try:
+            record = settings_mod.update(settings.path, entry["id"], enabled=enabled, gpu=gpu)
+        except (settings_mod.SettingsError, OSError) as error:
+            raise ApiError(500, f"The model settings file could not be changed: {error}", "settings_file_error")
+        settings.reload()
+        outcome = None
+        if enabled is False:
+            pool, key = self.server.pool, entry["key"]
+            outcome = pool.unload(key, "turned off")
+            if outcome == "busy":
+                worker = pool.get(key)
+                if worker is not None:
+                    worker.keep_alive = 0
+                    pool.release_wake()
+                outcome = "unloading when idle"
+        self.send_json(200, {"id": entry["id"], "key": entry["key"], "enabled": record.get("enabled", True),
+                             "gpu": record.get("gpu", "auto"), **({"unload": outcome} if outcome else {})})
+
     def preset_save(self):
         """Create or replace a preset (the dashboard's Presets tab; `coli preset add` does the same to the file). The body is
         the preset as the file holds it, plus its `name`. Takes effect at once, like an edit of the file."""
@@ -1589,7 +1677,8 @@ def worker_kv_slots(entry, wanted):
 def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), keep_alive=DEFAULT_KEEP_ALIVE,
           max_loaded=DEFAULT_MAX_LOADED, max_queue=8, queue_timeout=300.0, parallel_models=False,
           cors_origins=None, allowed_hosts=(), worker_args=(), preload=(), engine_ready=None, kv_slots=1,
-          presets_path=None, request_log_path=None):
+          presets_path=None, request_log_path=None, gpu=None, gpu_reserve_gb=gpu_mod.DEFAULT_RESERVE_GB,
+          gpu_min_gb=gpu_mod.DEFAULT_MIN_GB, settings_path=None):
     """Run the router until it is shut down."""
     import openai_server
     if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
@@ -1612,9 +1701,11 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
         return [sys.executable, launcher, "serve", "--model", entry["path"], "--host", "127.0.0.1",
                 "--port", str(free), "--kv-slots", str(worker_kv_slots(entry, kv_slots))] + extra
 
+    policy = gpu_mod.GpuPolicy(gpu, gpu_reserve_gb, gpu_min_gb) if gpu else None
+    settings = settings_mod.ModelSettings(settings_path or settings_mod.default_path(), log=log)
     pool = Pool(catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                 state=State(default_state_path()), queue_timeout=queue_timeout,
-                make_job=openai_server._win_kill_on_close_job)
+                make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings)
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
     presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
     if request_log_path:
@@ -1622,7 +1713,7 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
     logger = request_log.from_env()
     server = RouterServer((host, port), pool, catalog, gate, api_key,
                           openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout,
-                          presets=presets, request_log=logger)
+                          presets=presets, request_log=logger, settings=settings)
     entries = catalog.entries(refresh=True)
     usable = [e for e in entries if e["reason"] is None]
     print(f"[router] {len(usable)} model(s) available: " + ", ".join(e["id"] for e in usable), file=sys.stderr)
@@ -1633,6 +1724,17 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
           f"{max_loaded or 'any number of'} loaded, "
           f"{'models may compute together' if parallel_models else 'one model computes at a time'}",
           file=sys.stderr)
+    if policy is not None:
+        seen = policy.memory()
+        print(f"[router] graphics card: --gpu {policy.mode}, {policy.reserve_gb:g} GB kept back, {policy.min_gb:g} GB needed"
+              + (f"; {seen[0]:.1f} of {seen[1]:.1f} GB free now" if seen else "; no reading of its free memory (nvidia-smi)"),
+              file=sys.stderr)
+    switched = settings.all()
+    if switched:
+        def words(record):
+            return ", ".join(w for w in ("off" if record.get("enabled") is False else "", record.get("gpu", "")) if w)
+        print(f"[router] model settings from {settings.path}: "
+              + "; ".join(f"{model}: {words(record)}" for model, record in switched.items()), file=sys.stderr)
     named = presets.all()
     if named or os.path.exists(presets.path):
         print(f"[router] {len(named)} preset(s) from {presets.path}"

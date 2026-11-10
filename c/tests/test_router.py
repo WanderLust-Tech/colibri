@@ -33,7 +33,8 @@ class Rig:
     """A router on a free port over fake workers."""
 
     def __init__(self, test, entries, *, total=None, keep_alive=600.0, max_loaded=3, api_key=None, parallel=False,
-                 max_queue=8, queue_timeout=10.0, env=None, measure=None, state_path=None, allowed_hosts=()):
+                 max_queue=8, queue_timeout=10.0, env=None, measure=None, state_path=None, allowed_hosts=(), gpu=None,
+                 settings=None):
         self.test = test
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
@@ -53,10 +54,10 @@ class Rig:
         self.pool = router.Pool(self.catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                                 worker_env=worker_env, state=router.State(state_path),
                                 memory=self.free if total else (lambda: None), measure=measure or (lambda pid, job: 0),
-                                grace=0.5, queue_timeout=queue_timeout)
+                                grace=0.5, queue_timeout=queue_timeout, gpu=gpu, settings=settings)
         self.gate = router.Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel)
         self.server = router.RouterServer(("127.0.0.1", 0), self.pool, self.catalog, self.gate, api_key,
-                                          ("http://127.0.0.1:1",), allowed_hosts, queue_timeout)
+                                          ("http://127.0.0.1:1",), allowed_hosts, queue_timeout, settings=settings)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

@@ -219,7 +219,7 @@ static void load_cfg(Cfg *c, const char *snap) {
 
 /* ------------------------------------------------------------------------------ weights */
 
-typedef struct { int8_t *q; float *s; int O, I; int clipped; float cl[4]; void *vk; } QMat;      /* vk: the matrix on the Vulkan device (COLI_VULKAN=1), made on its first use */      /* cl: a clipped linear's input min, max, output min, max */
+typedef struct { int8_t *q; float *s; int O, I; int clipped; float cl[4]; void *vk; int vk_no; } QMat;      /* vk: the matrix on the Vulkan device (COLI_VULKAN=1), made on its first use */      /* cl: a clipped linear's input min, max, output min, max */
 
 typedef struct {
     int full;                                         /* a full-attention layer */
@@ -322,7 +322,7 @@ static void load_q(Model *m, const char *name, QMat *w, int O, int I) {
     if (!t || !s) die("container lacks %s (or its scale)", name);
     if (t->numel != (int64_t)O * I || t->nbytes != (int64_t)O * I) die("%s: expected int8 [%d,%d]", name, O, I);
     if (s->numel != O) die("%s: expected %d scales", sname, O);
-    w->O = O; w->I = I; w->vk = NULL;
+    w->O = O; w->I = I; w->vk = NULL; w->vk_no = 0;
     w->q = xmalloc((size_t)O * I);
     st_read_raw(&m->S, name, w->q, 0);
     load_f32(m, sname, &w->s, O);
@@ -670,8 +670,20 @@ static int g_rows1 = 0;       /* a decode step: every row goes through the singl
  * are close to the CPU's and not equal to the bit (and a row alone and a row among several may differ). G4_VK_DENSE=0 keeps
  * them on the CPU with the device otherwise up. A matrix the device refuses (no room, too many rows) falls back to the CPU. */
 static int g_gvk = 0;
+static double g_gvk_reserve = 0;                 /* G4_VK_RESERVE_GB: device memory left free for everything else (0: take what is needed) */
+static int g_gvk_placed = 0, g_gvk_kept = 0;
 static int vk_mm(float *y, const float *x, int S, const QMat *W) {
-    return g_gvk && coli_vk_matmul((ColiVkTensor **)&((QMat *)W)->vk, y, x, W->q, W->s, 1, S, W->I, W->O, 0);
+    if (!g_gvk || W->vk_no) return 0;
+    if (!W->vk && g_gvk_reserve > 0) {                /* a matrix not yet on the device: only when it leaves the reserve free */
+        size_t need = (size_t)W->O * W->I + (size_t)W->O * 4;
+        if ((double)coli_vk_free_bytes() < (double)need + g_gvk_reserve * 1073741824.0) {
+            ((QMat *)W)->vk_no = 1;
+            if (!g_gvk_kept++) fprintf(stderr, "[gemma4] the card has less than %.1f GB free beyond what a matrix needs: %d matrices are on it, the rest stay on the CPU (G4_VK_RESERVE_GB)\n", g_gvk_reserve, g_gvk_placed);
+            return 0;
+        }
+        g_gvk_placed++;
+    }
+    return coli_vk_matmul((ColiVkTensor **)&((QMat *)W)->vk, y, x, W->q, W->s, 1, S, W->I, W->O, 0);
 }
 #endif
 
@@ -2042,6 +2054,8 @@ int main(int argc, char **argv) {
     if (coli_vk_init_env("gemma4")) {                  /* COLI_VULKAN=1 and a usable device */
         const char *d = getenv("G4_VK_DENSE");
         g_gvk = d && *d ? atoi(d) != 0 : 1;
+        const char *r = getenv("G4_VK_RESERVE_GB");
+        if (r && *r) g_gvk_reserve = atof(r);
         atexit(coli_vk_shutdown);
         fprintf(stderr, "[gemma4] dense matrices on %s\n", g_gvk ? coli_vk_device_name() : "the CPU (G4_VK_DENSE=0)");
     }

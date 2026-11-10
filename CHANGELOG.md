@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### The router chooses the card or the CPU by free memory, and models can be turned off
+
+`coli router --gpu auto` starts each model on the graphics card when it has room (the free memory less `--gpu-reserve-gb`, 6 by
+default, at least `--gpu-min-gb`) and on the CPU when it has not, decided at every load; the reserve is handed to the engines, so
+what they place on the card leaves it free (new `G4_VK_RESERVE_GB` for Gemma's dense matrices). `coli ps` shows where each model
+runs. `coli model disable|enable NAME` turns a model off (it is unloaded, refused with a 403 that says how to turn it on, left out
+of the presets) and `coli model gpu NAME auto|vulkan|cpu` pins one; both are in `model-settings.json` and the API
+(`/v1/models/settings`). New: [docs/gpu-offload.md](docs/gpu-offload.md) (what the card bought on this machine, what each engine does,
+the traps) and [docs/model-settings.md](docs/model-settings.md).
+
 ### `env` in the service settings
 
 `service.json` takes `"env": {"NAME": "value"}`, extra environment variables for the server the tray and `coli service` start (for example `COLI_VULKAN`, `COLI_FFMPEG`). [docs/tray.md](docs/tray.md)
