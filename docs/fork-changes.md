@@ -28,15 +28,15 @@ the clone that serves port 8000):
 | Gateway keeps every finished picture | `fix/gateway-saves-images` | yes | yes | yes |
 | Dashboard takes its key from `#key=` | on `main` | yes | yes | yes |
 | `coli router`, keep-alive, `coli ps`, `coli stop MODEL` | `feat/model-router`, `feat/router-keepalive` | yes | yes | yes |
-| Gateway keeps every finished song | `feat/free-pipeline-stages` | yes | **no** | yes |
-| Chat turn goes to the KV slot that holds it | `feat/smart-kv-slots` | yes | **no** | yes (the restart script runs 1 slot, so it matters only with `-KvSlots 2` or more) |
-| Gemma 4 (26B-A4B, 31B, E4B, E2B; pictures, audio, batched decode) | `feat/gemma4`, `feat/gemma4-setup` | yes | **no** | yes: `gemma4.exe` built, 26B-A4B and E2B containers in `colibri-models` |
-| `coli launch` | `feat/coli-launch` | yes | **no** | yes |
-| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder), with the whitespace and UTF-8 fix | `feat/json-mode`, `fix/json-whitespace` | yes (`d31c2dd6`) | **no** | yes (2026-11-09): live clone at `d31c2dd6`, `gemma4.exe` and `qwen36.exe` rebuilt; checked on the real E2B, 26B and Qwen3-Coder |
-| `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | **no** | yes (2026-11-09); the JFK clip came back word for word on the E2B |
+| Gateway keeps every finished song | `feat/free-pipeline-stages` | yes | yes | yes |
+| Chat turn goes to the KV slot that holds it | `feat/smart-kv-slots` | yes | yes | yes (the restart script runs 1 slot, so it matters only with `-KvSlots 2` or more) |
+| Gemma 4 (26B-A4B, 31B, E4B, E2B; pictures, audio, batched decode) | `feat/gemma4`, `feat/gemma4-setup` | yes | yes | yes: `gemma4.exe` built, 26B-A4B and E2B containers in `colibri-models` |
+| `coli launch` | `feat/coli-launch` | yes | yes | yes |
+| JSON mode (constrained `response_format` on Gemma 4 and Qwen3.6/Qwen3-Coder), with the whitespace and UTF-8 fix | `feat/json-mode`, `fix/json-whitespace` | yes (`d31c2dd6`) | yes | yes (2026-11-09): live clone at `d31c2dd6`, `gemma4.exe` and `qwen36.exe` rebuilt; checked on the real E2B, 26B and Qwen3-Coder |
+| `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | yes | yes (2026-11-09); the JFK clip came back word for word on the E2B |
 | Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
 | Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
-| Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | **no** | **no** | **no** |
+| Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is not installed |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -213,7 +213,7 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   router routes `POST /v1/presets`, `POST /v1/presets/delete`, `GET /v1/requests`. English, German, Italian. Checked in a browser
   against a router with stub engines (`web/tests/presets_ui.py`); not yet against the live router.
 
-### 2.13 Tray icon and background service (`feat/tray`, not merged)
+### 2.13 Tray icon and background service (`feat/tray`, merged, live)
 
 - **`c/service.py` / `coli service`:** start, stop, restart, status, link, config for `coli router` in the background: a key kept
   in `~/colibri-api-key.txt`, the router started without a window with the key in its environment, a stop that refuses while a
@@ -241,8 +241,7 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 
 - Real-weights runs of the 31B (needs 33 GB for the container) and the E4B (never downloaded).
 - `coli setup` cannot list Gemma: its catalogue holds only ready-to-run downloads, and Gemma needs conversion. That would take a
-  container hosted on Hugging Face (publishing, so your call). Instead, `feat/gemma4-setup` (`fdebaae5`, one commit off
-  `main`, not merged) lets `coli convert --repo` take a local directory, tests the routing, documents the conversion and
+  container hosted on Hugging Face (publishing, so your call). Instead, `feat/gemma4-setup` (`fdebaae5`, merged) lets `coli convert --repo` take a local directory, tests the routing, documents the conversion and
   fixes the Makefile's "text only" comment.
 - Video, and audio other than WAV.
 
@@ -255,11 +254,11 @@ Status as of today (the file itself has been brought into line with this):
 | A1-A5 router, load on demand, memory fit, one render at a time, limits | **done**, live |
 | A0 one server per model on separate ports | set aside, the router replaced it |
 | B1-B3 `keep_alive`, `coli ps` / `coli stop`, Unload button | **done**, live |
-| C1 `coli launch` | **done**, branch `feat/coli-launch`, not merged: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
-| C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard on `feat/web-presets`, not merged |
-| C3 Windows tray or autostart (would replace the restart script) | **done** (2.13), on `feat/tray`, not merged |
+| C1 `coli launch` | **done**, merged and live: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
+| C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard live (`feat/web-presets`) |
+| C3 Windows tray or autostart (would replace the restart script) | **done**, live (2.13); started by hand, not yet installed to start at sign-in |
 | C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |
-| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, branch `feat/json-mode`, not merged (2.10) |
+| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, live (2.10) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |
 | D2 Free pipeline stages | already in the engine (`COLI_IMG_TE=stage`, about 14 s per new prompt); not needed on 64 GB |
 | D3 Try `TRUNK_RESIDENT_LAYERS` on the dense Qwen3.8-27B | open, S |
