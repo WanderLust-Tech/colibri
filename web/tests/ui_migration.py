@@ -62,7 +62,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
                 time.sleep(.08 if slow else .12)
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70}}) + "\n\ndata: [DONE]\n\n").encode())
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:  # BrokenPipe, Reset and (Windows) Aborted are all ConnectionError
             cancelled.set()
 
 
