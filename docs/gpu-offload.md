@@ -23,6 +23,12 @@ on a knife edge could differ). The timings are noisy for that reason: read a rat
 | | 150 tokens out | 19.2 s | 13.6 s | 1.4 x |
 | | a picture and 20 tokens | 34.4 s | 23.0 s | 1.5 x |
 
+**Through the live router** (all shaders present, `--gpu auto`, the card at 26 GB free when it loaded): the same 615-token prompt took
+**1.5 s** and the 150-token answers 7.3 s (20 tok/s), 23.5 GB of the card used afterwards. The tree used for the table above was missing
+`expert_act.spv`, which is why its prompt number is so much worse: with the full set of shaders the prompt is about 16 times faster than the
+CPU's 24.2 s, not 1.9 times. Gemma 26B-A4B, asked for while Qwen3-Coder held the card (8.4 GB free, 6 kept back, 3 needed), was started on
+the CPU by the policy, as designed.
+
 **Qwen3-Coder had three states**, and the middle one is a trap: with the card for the dense layers only (the expert tier off because
 a shader was missing, see [below](#traps)) the prompt took 19.6 s and the answers 10.8 s and 7.7 s. With the **expert tier** as
 well, all 6,144 experts (48 layers of 128) sit on the card: 15.2 GiB, uploaded in about 7 s at start (`warm start, 6144 experts`),
@@ -77,6 +83,10 @@ place on the card leaves it free: a Qwen3-Coder started with 14 GB free and a re
 What it does **not** do: it does not move a model that is loaded (a model keeps its choice until it unloads, and the next load
 looks again), it does not make room by unloading a model that is holding the card (`coli stop NAME` does that), and it cannot see a
 card without `nvidia-smi` (an AMD or Intel card: `auto` then leaves the environment alone and says so in the router's log).
+
+`RUNS ON` and `running` report the router's decision. An engine that is not a `VK=1` build ignores `COLI_VULKAN`, so a model can say `GPU`
+and still run on the CPU (ACE-Step does: it has no Vulkan path; the live `qwenimage.exe` is a CPU build). The engine's own log line
+(`[VK] <engine>: device ready, dense matrices on the device`) is the proof.
 
 A loaded model says where it runs: `coli ps` has a RUNS ON column (`GPU`, `CPU`), `coli model` shows it with the policy and the free
 memory now, and `/health` carries it (`router.loaded[].gpu`, `router.gpu`).
