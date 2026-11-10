@@ -1884,7 +1884,7 @@ static void serve_loop(Model *m, G4Tok *T, int ctx_cap, int n_slots) {
     Req *rq = calloc((size_t)n_slots, sizeof(Req));
     for (int i = 0; i < n_slots; i++) seq_init(m, &seq[i]);
     coli_serve_stdio_init();
-    {   char caps[128]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d audio=%d audio_tokens=%d grammar=1", m->vis.loaded, m->img_tokens, m->aud.loaded, m->aud_tokens);
+    {   char caps[160]; snprintf(caps, sizeof caps, "vision=%d img_tokens=%d audio=%d audio_tokens=%d grammar=1 ctx=%d", m->vis.loaded, m->img_tokens, m->aud.loaded, m->aud_tokens, ctx_cap);
         coli_serve_write_ready_caps(stdout, rss_gb(), caps); }
     serve_hwinfo(); serve_tiers_emap(m);
     if (c->moe) fprintf(stderr, "[gemma4] serving %d conversation%s, context %d, %d experts cached per layer\n", n_slots, n_slots == 1 ? "" : "s", ctx_cap, m->cap);

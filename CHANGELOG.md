@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### The model card says how long its context is
+
+`GET /v1/models` carries `context_length` (tokens) for Gemma 4 and Qwen3.6/Qwen3-Coder: the engines announce `ctx=` in their CAPS line.
+The VS Code extension uses it instead of learning the limit from an overflow error.
+
 ### The dashboard turns models off and on, and says where they run
 
 Settings → Model: each model of a router has a "Runs on" choice (Automatic, Graphics card, CPU) and a Turn off / Turn on button; a loaded

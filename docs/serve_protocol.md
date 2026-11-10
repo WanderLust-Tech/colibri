@@ -38,6 +38,10 @@ declares a tower whose tensors are not in the container). Engines that say nothi
 leave the server's flag unknown. glm53, qwen38, qwen36 and deepseek_v41 emit it;
 `openai_server.py` derives `/v1/models` `input_modalities` from it.
 
+`ctx=N` is the context window the engine serves with, in tokens (gemma4: `--ctx`; qwen36: `Q36_MAXT`, else its default). The gateway
+puts it on the model card as `context_length`, so a client can size its prompts without learning the limit from an overflow error. An
+engine that does not say it leaves the field out.
+
 `grammar=1` says the engine limits its answer to a request's grammar ([json-mode.md](json-mode.md)): the gateway then sends
 `response_format` to it, as the seventh numeric field of `SUBMIT` (the byte length of a grammar whose bytes follow the
 prompt's, the way glm takes its draft grammar). An engine that cannot use the grammar answers `ERROR <id> BAD_GRAMMAR <why>`

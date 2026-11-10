@@ -227,6 +227,38 @@ class GrammarTest(unittest.TestCase):
                     engine.close()
 
 
+class ContextLengthTest(unittest.TestCase):
+    """The context window the engine serves with, announced in its CAPS line and published on the model card."""
+
+    def handshake(self, line):
+        process = FakeProcess(lambda _process, _frame: None)
+        process.stdout = BlockingStream(READY + line + b"STAT 0 0 0 0\n")
+        with patch("openai_server.subprocess.Popen", return_value=process):
+            engine = Engine("gemma4", "model")
+        self.addCleanup(engine.close)
+        return engine
+
+    def test_the_engine_says_how_long_its_context_is(self):
+        for line, expected in ((b"CAPS vision=0 grammar=1 ctx=8192\n", 8192), (b"CAPS vision=0 ctx=32768 grammar=1\n", 32768),
+                               (b"CAPS vision=0 grammar=1\n", None), (b"CAPS ctx=0\n", None), (b"CAPS ctx=lots\n", None), (b"", None)):
+            with self.subTest(line=line):
+                self.assertEqual(self.handshake(line).context_length, expected)
+
+    def test_the_model_card_carries_it_in_tokens(self):
+        from urllib.request import Request, urlopen
+        patcher = patch("openai_server.ARCH", "gemma4")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for length, present in ((16384, True), (None, False)):
+            engine = ScriptedEngine(chunks=["x"], supports_logprobs_echo=False, supports_tok_ids=False)
+            engine.context_length = length
+            base = _spawn_test_server(self, engine)
+            with urlopen(Request(base + "/v1/models", headers={"Authorization": "Bearer secret"}), timeout=5) as response:
+                card = json.load(response)["data"][0]
+            self.assertEqual(card.get("context_length"), 16384 if present else None, card)
+            self.assertEqual("context_length" in card, present)
+
+
 class QwenGrammarTest(GrammarTest):
     """The same gateway rules for the other constrained family (Qwen3.6 and Qwen3-Coder)."""
     ARCH = "qwen36"

@@ -268,7 +268,8 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 | OLMoE | no (HTTP 400) | no | no |
 
 "Pictures in" means the gateway can expand them for the family; whether the checkpoint being served loaded its vision tower is
-the engine's word (`GET /v1/models`, `input_modalities`). Speech to text has its own route on the Gemma E2B and E4B
+the engine's word (`GET /v1/models`, `input_modalities`; `context_length`, in tokens, is the window it serves with, for the engines that
+say: Gemma 4 and Qwen3.6/Qwen3-Coder). Speech to text has its own route on the Gemma E2B and E4B
 ([below](#speech-to-text-v1audiotranscriptions)). There is no embeddings route, no text-to-speech route
 (`/v1/audio/speech`) and no `/v1/responses`.
 

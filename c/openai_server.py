@@ -5640,6 +5640,11 @@ class Engine:
         # does (Clef), so the record carries the caller's values, not the gateway's
         # defaults (systemone_decision_record). None: the default form.
         self.decide_record = self.caps.get("decide_record")
+        # The context window the engine serves with, in tokens, when it said (CAPS ctx=): a client sizes its prompts by it
+        try:
+            self.context_length = int(self.caps.get("ctx") or 0) or None
+        except ValueError:
+            self.context_length = None
         self.dispatcher = threading.Thread(target=self._dispatch_stdout,
                                            name="colibri-stdout", daemon=True)
         self.dispatcher.start()
@@ -6623,6 +6628,8 @@ class APIServer(ThreadingHTTPServer):
         entry = model_object(self.model_id, self.created)
         entry["input_modalities"] = self.input_modalities()
         entry["capabilities"] = self.capabilities()
+        if getattr(self.engine, "context_length", None):
+            entry["context_length"] = self.engine.context_length          # tokens: what a prompt and its answer must fit in
         if is_music_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["audio"] = {key: info.get(key) for key in MUSIC_OPTION_KEYS}

@@ -6095,7 +6095,7 @@ static void serve_loop(Model *m){
      * modalita' serve prima della prima richiesta (docs/serve_protocol.md) */
     /* Clef answers DECIDE too, and still chats: decide=1 without chat=0. Its
      * records come in the raw form (decide_record=raw, decide_serve.h). */
-    printf("CAPS vision=%d grammar=1%s\n",m->vis_ready?1:0,g_clef?" decide=1 decide_record=raw":"");
+    printf("CAPS vision=%d grammar=1 ctx=%d%s\n",m->vis_ready?1:0,qwen36_max_ctx(),g_clef?" decide=1 decide_record=raw":"");
     printf("STAT 0 0.00 0.0 %.2f\n",rss_gb());
     fflush(stdout);
     emap_emit(m);          /* dopo READY e STAT: il boot reader legge STAT dopo il sentinel */
