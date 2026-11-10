@@ -132,7 +132,7 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   router. Interrupts work in flight, so only when the server is idle.
 - [ ] **G2. GPU offload (M-L).** Send the big matrix multiplications, the vision and audio towers first, through the
   existing Vulkan `coli_vk_matmul`. Ask first: it shares the GPU with renders. Gain unmeasured.
-- [ ] **G3. Real runs of the 31B and the E4B (S).** Only the tiny random models have run them.
+- [ ] **G3. Real runs of the 31B and the E4B (S).** *E4B done 2026-11-10: text, a picture and the JFK clip all right (docs/gemma4.md). The 31B is not run: it needs 33 GB of the 35 GB free, so it wants the live server's models unloaded and the renders closed.*
 - [-] **G4. Offer Gemma in `coli setup` (S).** *Not possible as the catalogue works (2026-11-07): it lists only downloads that
   run as they are, and Gemma needs `convert_gemma4.py` first. It would need a ready container hosted on Hugging Face, which
   is publishing, so your call. Done instead on `feat/gemma4-setup` (fdebaae5, merged): `coli convert --repo` takes a

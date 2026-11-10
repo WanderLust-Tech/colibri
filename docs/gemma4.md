@@ -7,7 +7,7 @@ dependencies: text, pictures and, on the two small models, audio in; text out. O
 |---|---|---|---|---|
 | [gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) | mixture of experts, 128 experts, 8 a token | 25.2B, 3.8B a token | 14.8 GB | real weights: text, pictures, tools, thinking |
 | [gemma-4-31B-it](https://huggingface.co/google/gemma-4-31B-it) | dense | 31B | about 33 GB | a tiny model against transformers; not run on the real weights (it needs the machine to itself) |
-| [gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | dense, per-layer embeddings, audio | 8B with embeddings, 4B in use | about 8 GB | a tiny model against transformers; same code as the E2B |
+| [gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | dense, per-layer embeddings, audio | 8B with embeddings, 4B in use | 8.06 GB | real weights (2026-11-10): text, a picture, audio; a tiny model against transformers |
 | [gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | dense, per-layer embeddings, audio | 5B with embeddings, 2B in use | 4.8 GB | real weights: text, pictures, audio |
 
 ## What the models are
@@ -214,9 +214,14 @@ python3 c/tools/mutate_gemma4.py [part of a name ...]
   It is not done: the engine would have to be built against that backend, and how much a launch for each of about 200 matrices
   a token gains over the CPU has not been measured. The on-device chains the larger families have are a project of their own.
 - **A layer-segment adapter** (`docs/segment-runtime.md`): the family is exempt from that gate until it has one.
-- **The 31B and E4B on real weights.** Their structure is checked against transformers on tiny models and shares every line
-  with the models that were run, but neither was run here (the 31B in int8 needs 33 GB beside whatever else is loaded; the E4B
-  was not downloaded). The first run on one of them should be a short question and a look at the answer.
+- **The 31B on real weights.** Its structure is checked against transformers on a tiny model and shares every line with the
+  models that were run, but it was not run here: in int8 it needs 33 GB beside whatever else is loaded. The first run should be
+  a short question and a look at the answer.
+- **The E4B** ran on 2026-11-10 (converted from the 16 GB download in 55 s to an 8.06 GB container, served on its own port at
+  low priority): "What is the capital of France?" answered "The capital of France is Paris." in 1.0 s; a 448 by 192 picture
+  with "COLIBRI 4827", a red rectangle and a blue circle was read back right, text, shapes and colours (14.8 s with the tower);
+  the JFK clip came back word for word (7.7 s). Not timed for speed on a quiet machine, and not run against transformers on
+  the real weights.
 - **Speed of the vision tower on a big picture.** A 280-token picture is 2400 patches through 27 layers: tens of seconds on the
   26B-A4B's tower on a busy machine, about eight seconds on the E models' smaller one. It runs once per picture and the cache
   keeps it.
