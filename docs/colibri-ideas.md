@@ -136,7 +136,7 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   run as they are, and Gemma needs `convert_gemma4.py` first. It would need a ready container hosted on Hugging Face, which
   is publishing, so your call. Done instead on `feat/gemma4-setup` (fdebaae5, merged): `coli convert --repo` takes a
   local directory, tests for the routing, the docs say how to convert, and the stale Makefile comment is fixed.*
-- [ ] **G5. Video, and audio other than WAV (M).**
+- [x] **G5. Video, and audio other than WAV (M).** *Done 2026-11-10 on `feat/gemma4-video-audio`: video as up to 32 frames (a file through ffmpeg, or frames the client sends), MP3 by minimp3, FLAC/Ogg/M4A through ffmpeg; the sound of a video is not read (docs/gemma4.md).*
 
 ## F. Considered and set aside
 

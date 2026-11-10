@@ -1350,6 +1350,15 @@ endif
 gemma4$(EXE): gemma4.c gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) gemma4.c $(VK_OBJ) -o gemma4$(EXE) $(LDFLAGS)
 
+# The reader of WAV and MP3 files (acestep_audio.h, minimp3): ACE-Step's audio input, and the gateway's MP3 reader for Gemma 4
+# (tools/gemma4_media.py runs it; without it, MP3 needs ffmpeg).
+ifneq ($(EXE),)
+.PHONY: acestep_audio_tool
+acestep_audio_tool: acestep_audio_tool$(EXE)
+endif
+acestep_audio_tool$(EXE): acestep_audio_tool.c acestep_audio.h third_party/minimp3.h .build-config
+	$(CC) $(CFLAGS) acestep_audio_tool.c -o acestep_audio_tool$(EXE) $(LDFLAGS)
+
 # Laya (Convai Innovations), a decision model: ModernBERT encoder + decision
 # head, served on POST /v1/systemone through the DECIDE command (docs/laya.md).
 # One file; qi_gemm.h is its matrix kernel, decide_serve.h its serve loop.
@@ -2936,7 +2945,7 @@ check:
 	$(MAKE) portable
 	$(MAKE) test
 
-install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) qwenimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
+install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) acestep_audio_tool$(EXE) qwenimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
 	$(if $(filter 1,$(COLI_V4_SUPPORTED)),deepseek-v4,)
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)
@@ -2956,6 +2965,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	$(INSTALL) -m 755 deepseek_v41$(EXE) $(DESTDIR)$(LIBEXECDIR)/deepseek_v41$(EXE)
 	$(INSTALL) -m 755 mimo$(EXE) $(DESTDIR)$(LIBEXECDIR)/mimo$(EXE)
 	$(INSTALL) -m 755 gemma4$(EXE) $(DESTDIR)$(LIBEXECDIR)/gemma4$(EXE)
+	$(INSTALL) -m 755 acestep_audio_tool$(EXE) $(DESTDIR)$(LIBEXECDIR)/acestep_audio_tool$(EXE)
 	@if [ -f deepseek_v4$(EXE) ]; then \
 	  $(INSTALL) -m 755 deepseek_v4$(EXE) $(DESTDIR)$(LIBEXECDIR)/deepseek_v4$(EXE); \
 	fi

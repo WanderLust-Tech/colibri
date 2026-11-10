@@ -219,7 +219,8 @@ IMAGE_BEGIN, IMAGE_END = "<|image>", "<image|>"
 AUDIO_PARTS = ("input_audio", "audio")                  # OpenAI's input_audio, and the template's own name for it
 AUDIO_MARK = "<|audio|>"
 AUDIO_BEGIN, AUDIO_END = "<|audio>", "<audio|>"
-NO_MEDIA = ("video",)
+VIDEO_PARTS = ("video",)                                # a video the gateway has turned into frames (`_frames`, `_times`)
+NO_MEDIA = ("video_url",)                               # a video that was not: the gateway reads these before the prompt is made
 
 
 def image_marker(part, order=None):
@@ -247,8 +248,26 @@ def audio_marker(part, order=None):
     return AUDIO_MARK
 
 
+def video_marker(part, order=None, where="content"):
+    """What a video part becomes: the processor writes one group for each frame, joined by spaces: the frame's time as mm:ss, the
+    begin-of-image token, one placeholder per soft token the frame makes (`_soft_tokens` of each entry of `_frames`) and the
+    end-of-image token. The model's video tokens and its image tokens both stand for vision-tower output, so the placeholders are
+    the engine's image ones and each frame is an IMAGE frame: `order` collects the frames' `_image_index`."""
+    frames, times = part.get("_frames"), part.get("_times")
+    if not isinstance(frames, list) or not frames or not isinstance(times, list) or len(times) != len(frames):
+        _refuse_media(part, where)
+    groups = []
+    for frame, when in zip(frames, times):
+        if order is not None:
+            order.append(frame.get("_image_index"))
+        n = frame.get("_soft_tokens")
+        groups.append(f"{when} {IMAGE_BEGIN}{IMAGE_MARK * n}{IMAGE_END}")
+    return " ".join(groups)
+
+
 def _refuse_media(part, where):
-    raise ChatError("This Gemma 4 engine reads text, pictures and audio: video is not supported.", where, "unsupported_content_type")
+    raise ChatError("This video was not turned into frames: send it through the gateway as a video_url, or as a video with frames.",
+                    where, "unsupported_content_type")
 
 
 def _text_of(content, where, trim_each=False, model=False):
@@ -263,7 +282,7 @@ def _text_of(content, where, trim_each=False, model=False):
         for index, part in enumerate(content):
             if isinstance(part, dict) and part.get("type") == "text":
                 out.append(_s(part.get("text", "")))
-            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS + AUDIO_PARTS:
+            elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS + AUDIO_PARTS + VIDEO_PARTS:
                 continue
             elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
                 _refuse_media(part, f"{where}.{index}")
@@ -281,6 +300,8 @@ def _images_of(content, where, order=None):
             out.append(image_marker(part, order))
         elif isinstance(part, dict) and part.get("type") in AUDIO_PARTS:
             out.append(audio_marker(part, order))
+        elif isinstance(part, dict) and part.get("type") in VIDEO_PARTS:
+            out.append(video_marker(part, order, f"{where}.{index}"))
         elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
             _refuse_media(part, f"{where}.{index}")
     return "".join(out)
@@ -301,10 +322,12 @@ def _captured(content, model, where, order=None):
                 out.append(image_marker(part, order))
             elif isinstance(part, dict) and part.get("type") in AUDIO_PARTS:
                 out.append(audio_marker(part, order))
+            elif isinstance(part, dict) and part.get("type") in VIDEO_PARTS:
+                out.append(video_marker(part, order, f"{where}.{index}"))
             elif isinstance(part, dict) and part.get("type") in NO_MEDIA:
                 _refuse_media(part, f"{where}.{index}")
             else:
-                raise ChatError("Message content parts must be text, pictures or audio.", f"{where}.{index}", "unsupported_content_type")
+                raise ChatError("Message content parts must be text, pictures, audio or video.", f"{where}.{index}", "unsupported_content_type")
         return "".join(out)
     if content is None:
         return ""

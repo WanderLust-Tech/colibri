@@ -2952,15 +2952,13 @@ def has_audio_parts(messages):
 
 
 def _gemma4_audio_part(part, token_limit):
-    """The mel frames (float32 bytes, frames, bins) and soft tokens of an OpenAI input_audio part: base64 WAV data."""
+    """The mel frames (float32 bytes, frames, bins) and soft tokens of an OpenAI input_audio part: base64 data of a WAV, an MP3, or
+    (with ffmpeg) another audio file; which one is read from its first bytes."""
     import base64
     audio = part.get("input_audio")
     if not isinstance(audio, dict) or not isinstance(audio.get("data"), str) or not audio["data"]:
         raise APIError(400, "`input_audio` must be an object with base64 `data` and a `format`.", "messages", "invalid_audio")
-    fmt = str(audio.get("format") or "wav").lower()
-    if fmt not in ("wav", "wave"):
-        raise APIError(400, f"audio is read as WAV only (got {fmt!r}).", "messages", "invalid_audio")
-    try:
+    try:                       # the file says what it is (WAV, MP3, and with ffmpeg FLAC, Ogg, M4A, ...); `format` is only a hint
         raw = base64.b64decode(audio["data"], validate=True)
     except Exception:
         raise APIError(400, "input_audio.data is not valid base64.", "messages", "invalid_audio")
@@ -2975,6 +2973,53 @@ def _gemma4_audio_part(part, token_limit):
     except ValueError as problem:
         raise APIError(400, str(problem), "messages", "invalid_audio")
     return (mel.tobytes(), mel.shape[0], mel.shape[1], "audio"), tokens
+
+
+def has_video_parts(messages):
+    """Whether any message carries a video (a `video_url` part, or a `video` part: a file, or a list of frames)."""
+    for message in messages if isinstance(messages, list) else ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") in ("video_url", "video") for part in content):
+            return True
+    return False
+
+
+def _gemma4_media():
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+    import gemma4_media
+    return gemma4_media
+
+
+def _gemma4_video_part(part, kind):
+    """(frame images as bytes, their times in seconds) of a video part. A `video_url` part is a video file, as in vLLM:
+    {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,..."}}. A `video` part is either the same file
+    ({"type": "video", "video": {"url": ...}}) or frames the client took itself:
+    {"type": "video", "video": {"frames": ["data:image/png;base64,...", ...], "fps": 2}} (fps defaults to 1; more than 32
+    frames are thinned to 32, evenly, the times kept)."""
+    media = _gemma4_media()
+    spec = part.get("video_url") if kind == "video_url" else part.get("video")
+    if isinstance(spec, str):
+        spec = {"url": spec}
+    if not isinstance(spec, dict):
+        raise APIError(400, f"`{kind}` must be an object with a `url`" + (" or `frames`." if kind == "video" else "."),
+                       "messages", "invalid_video")
+    try:
+        frames = spec.get("frames")
+        if frames is not None:
+            if not isinstance(frames, list) or not frames or not all(isinstance(f, (str, dict)) for f in frames):
+                raise APIError(400, "`video.frames` must be a list of image URLs.", "messages", "invalid_video")
+            fps = spec.get("fps", 1)
+            if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not 0 < fps <= 1000:
+                raise APIError(400, "`video.fps` must be a number above 0.", "messages", "invalid_video")
+            keep = media.sample_indices(len(frames), media.NUM_FRAMES)
+            images = [_image_bytes_from_url(frames[i] if isinstance(frames[i], str) else frames[i].get("url")) for i in keep]
+            return images, [i / fps for i in keep]
+        return media.video_frames(_image_bytes_from_url(spec.get("url")))
+    except ValueError as problem:                          # MediaError is a ValueError
+        raise APIError(400, str(problem), "messages", "invalid_video")
 
 
 def expand_gemma4_images(messages, model_dir, token_limit=None, audio_limit=None):
@@ -3006,6 +3051,18 @@ def expand_gemma4_images(messages, model_dir, token_limit=None, audio_limit=None
                 clip, tokens = _gemma4_audio_part(part, audio_limit)
                 parts.append({"type": "input_audio", "_soft_tokens": tokens, "_image_index": len(pictures)})
                 pictures.append(clip)
+            elif kind in ("video_url", "video"):
+                # a video is its frames, each an IMAGE frame of at most 70 soft tokens (the video processor's budget), written
+                # in the prompt with its time
+                media = _gemma4_media()
+                images, seconds = _gemma4_video_part(part, kind)
+                budget_limit = min(token_limit, media.VIDEO_SOFT_TOKENS) if token_limit else media.VIDEO_SOFT_TOKENS
+                frames = []
+                for image in images:
+                    patches, grid_h, grid_w = _preprocess_gemma4_image(image, budget_limit, patch, pool)
+                    frames.append({"_soft_tokens": (grid_h // pool) * (grid_w // pool), "_image_index": len(pictures)})
+                    pictures.append((patches, grid_h, grid_w))
+                parts.append({"type": "video", "_frames": frames, "_times": [media.timestamp_text(t) for t in seconds]})
             else:
                 parts.append(part)
         rewritten.append({**message, "content": parts})
@@ -6640,6 +6697,8 @@ class APIServer(ThreadingHTTPServer):
         modalities = ["text"]
         if family_by_id(ARCH).capabilities.image and getattr(self.engine, "vision", None) is True:
             modalities.append("image")
+        if ARCH == "gemma4" and "image" in modalities:
+            modalities.append("video")                    # a video is read as pictures (frames, or a file with ffmpeg)
         if ARCH == "gemma4" and getattr(self.engine, "audio", None) is True:
             modalities.append("audio")                    # the E2B and E4B: the engine loaded the conformer
         return modalities
@@ -8045,7 +8104,7 @@ class APIHandler(BaseHTTPRequestHandler):
     # "wav" the WAV itself, or with `stream` an SSE of progress events and the same payload.
     # The queue, its limits, the 503 for a full queue and /metrics mean what they mean for images.
     def audio_transcription(self, body, request_id):
-        """POST /v1/audio/transcriptions: the speech of a WAV file as text, by a Gemma 4 that has its audio tower.
+        """POST /v1/audio/transcriptions: the speech of an audio file (WAV, MP3, and with ffmpeg more) as text, by a Gemma 4 that has its audio tower.
 
         The file is read, mixed to mono and resampled to 16 kHz; a clip over what the engine takes at once is cut at its
         quietest places (gemma4_audio.split_clip) and the pieces are transcribed one after another, in one turn each, under
@@ -8059,7 +8118,7 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, f"`{self.server.model_id}` cannot transcribe: {why}.", "model", "unsupported_endpoint")
         data = body.get("file")
         if not isinstance(data, (bytes, bytearray)) or not data:
-            raise APIError(400, "`file` is required: the audio, as a WAV file.", "file", "missing_required_parameter")
+            raise APIError(400, "`file` is required: the audio, as a WAV or MP3 file (or any audio ffmpeg reads, when the server has one).", "file", "missing_required_parameter")
         fmt = body.get("response_format", "json")
         if fmt in ("srt", "vtt"):
             raise APIError(400, f"`response_format` {fmt!r} needs timestamps within a segment, which this model does not "
@@ -8854,7 +8913,8 @@ class APIHandler(BaseHTTPRequestHandler):
         embedding non possono divergere. Both chat endpoints come through here,
         so a picture is one thing whichever API delivered it."""
         model_dir = getattr(self.server.engine, "model_dir", None)
-        if getattr(self.server.engine, "vision", None) is False and has_image_parts(messages):
+        if getattr(self.server.engine, "vision", None) is False and (
+                has_image_parts(messages) or (ARCH == "gemma4" and has_video_parts(messages))):
             # The engine said at its handshake that it loaded no tower. Refuse here,
             # by name, before the picture is preprocessed and before the engine
             # answers it with a bare BAD_REQUEST (a 500 the client cannot act on).

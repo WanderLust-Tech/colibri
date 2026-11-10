@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Gemma 4 reads video, and audio that is not WAV
+
+A `video_url` part (a file, taken apart by ffmpeg) or a `video` part with the frames a client took, up to 32 frames evenly spaced,
+each a picture of at most 70 soft tokens with its time in the prompt as the processor writes it. MP3 audio is decoded by minimp3
+(`make acestep_audio_tool`), and FLAC, Ogg, M4A and the rest by ffmpeg when there is one; the same for `/v1/audio/transcriptions`.
+The engine takes up to 80 pictures and clips a request (was 16). Rebuild `gemma4` to get that. [docs/gemma4.md](docs/gemma4.md#video)
+
 ### Gemma 4 dense matrices on the Vulkan device (`COLI_VULKAN=1`)
 
 `make gemma4 VK=1` builds the engine against the Vulkan backend; with `COLI_VULKAN=1` the attention, dense MLP, towers and the

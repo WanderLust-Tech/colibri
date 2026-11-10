@@ -14,7 +14,8 @@ The frames whose end lies past the clip itself are padding and are dropped (the 
 them). What is left is M frames of 128 float32 values, and the clip makes ceil(ceil(M / 2) / 2) soft tokens (two convolutions
 of stride 2), at most 750 of them.
 
-Only WAV files are read: PCM of 8, 16, 24 or 32 bits and 32- or 64-bit float, any number of channels, any rate.
+WAV files are read here: PCM of 8, 16, 24 or 32 bits and 32- or 64-bit float, any number of channels, any rate. Other files
+(MP3, and with ffmpeg FLAC, Ogg, M4A and more) are decoded by gemma4_media.py first; read_audio tells them apart by their first bytes.
 Needs numpy.
 """
 import math
@@ -154,10 +155,19 @@ def soft_tokens(frames):
     return (half - 1) // 2 + 1 if frames > 0 else 0
 
 
+def read_audio(data):
+    """(samples float32 mono, sample rate) from the bytes of an audio file: a WAV here, anything else through gemma4_media (MP3 by
+    minimp3, the rest by ffmpeg). Raises ValueError (MediaError is one) with a message that says what is wrong or missing."""
+    if data[:4] == b"RIFF":
+        return read_wav(data)
+    import gemma4_media
+    return gemma4_media.decode_audio(data)
+
+
 def preprocess(data, max_tokens=750):
-    """(frames, tokens) for the bytes of a WAV file: frames is float32 [M, 128], tokens the soft tokens it makes. A clip
+    """(frames, tokens) for the bytes of an audio file (read_audio): frames is float32 [M, 128], tokens the soft tokens it makes. A clip
     longer than the model takes (30 s, or what max_tokens allows at 40 ms a token) is cut."""
-    samples, rate = read_wav(data)
+    samples, rate = read_audio(data)
     samples = resample(samples, rate)
     if max_tokens:
         samples = samples[:max(1, max_tokens) * SAMPLE_RATE // 25]
@@ -168,8 +178,8 @@ def preprocess(data, max_tokens=750):
 
 
 def load_clip(data):
-    """The 16 kHz mono float32 samples of the bytes of a WAV file, the whole clip (preprocess cuts at 30 s; this does not)."""
-    samples, rate = read_wav(data)
+    """The 16 kHz mono float32 samples of the bytes of an audio file, the whole clip (preprocess cuts at 30 s; this does not)."""
+    samples, rate = read_audio(data)
     return resample(samples, rate)
 
 

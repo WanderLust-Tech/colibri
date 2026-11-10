@@ -114,13 +114,13 @@ class GatewayTest(unittest.TestCase):
         self.assertIn('<|tool_call>call:get_weather{city:<|"|>Rome<|"|>,days:3}<tool_call|>', prompt)
         self.assertTrue(prompt.endswith('<|tool_response>response:get_weather{value:<|"|>24 C<|"|>}<tool_response|>'))
 
-    def test_video_is_a_clear_400(self):
+    def test_a_video_the_gateway_cannot_read_is_a_clear_400(self):
         base = self.server(["x"])
-        status, error = _error_body(self, lambda: self.chat(base, messages=[{"role": "user", "content": [
-            {"type": "text", "text": "what is this"}, {"type": "video", "video": {"url": "u"}}]}]))
-        self.assertEqual(status, 400)
-        self.assertEqual(error["code"], "unsupported_content_type")
-        self.assertIn("video", error["message"])
+        for part in ({"type": "video", "video": {"url": "u"}}, {"type": "video_url", "video_url": {"url": "u"}}):
+            status, error = _error_body(self, lambda: self.chat(base, messages=[{"role": "user", "content": [
+                {"type": "text", "text": "what is this"}, part]}]))
+            self.assertEqual(status, 400)
+            self.assertIn("local image paths are disabled", error["message"])    # a video is read like a picture: a data: URI, not a path
         self.assertEqual(self.engine.calls, [])
 
     def test_the_model_is_listed_under_its_family_name(self):
@@ -422,10 +422,14 @@ class PictureTest(unittest.TestCase):
         self.assertIn("--add-audio", error["message"])
         self.assertEqual(self.engine.calls, [])
 
-    def test_only_wav_is_read_and_a_bad_file_is_a_400(self):
+    def test_the_file_says_what_it_is_not_the_request(self):
         base = self.server(audio=True)
-        for part, what in ((self.audio_part(0.5, format="mp3"), "WAV only"),
-                           ({"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}, "not a WAV"),
+        self.chat(base, [self.audio_part(0.5, format="mp3")])                   # `format` is a hint: these bytes are a WAV
+        self.assertEqual(len(self.engine.calls), 1)
+
+    def test_a_bad_file_is_a_400(self):
+        base = self.server(audio=True)
+        for part, what in (({"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}, "not audio"),
                            ({"type": "input_audio", "input_audio": {"data": "!!!", "format": "wav"}}, "base64"),
                            ({"type": "input_audio", "input_audio": "x"}, "must be an object")):
             with self.subTest(what=what):

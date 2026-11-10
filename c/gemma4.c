@@ -1678,7 +1678,7 @@ typedef struct {
     Cn *cn;                             /* the request's grammar (response_format), NULL when it has none: constrain.h */
 } Req;
 
-#define MAX_PICS 8
+#define MAX_PICS 40                   /* pictures or clips in one request: 2 * MAX_PICS, enough for a video's 32 frames and some more */
 /* Pictures that arrived (IMAGE frames) for the SUBMIT that follows; the gateway writes them together. */
 static struct { int kind; unsigned char *pix; int gh, gw; } g_pend[2 * MAX_PICS];      /* kind 0 a picture, 1 a clip of audio */
 static int g_npend, g_pend_bad;

@@ -57,9 +57,9 @@ make -C c gemma4
 ```
 
 `coli router` serves it beside the other installed models like any other chat model, and the model card says `image` (and
-`audio`, on the E models) when the engine loaded the tower.
+`audio`, on the E models) when the engine loaded the tower, and `video` with `image`.
 
-## Pictures and audio
+## Pictures, audio and video
 
 The gateway reads pictures and audio before the engine sees them, so the Python that runs `coli serve` (or `coli router`) needs
 `numpy` for both and `Pillow` for pictures (`pip install numpy pillow`). Without them the request is refused with a 400 that
@@ -71,12 +71,13 @@ Send them as OpenAI content parts, or Anthropic image blocks:
 {"role": "user", "content": [
   {"type": "text", "text": "What is written here?"},
   {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
-  {"type": "input_audio", "input_audio": {"data": "<base64 of a WAV file>", "format": "wav"}}]}
+  {"type": "input_audio", "input_audio": {"data": "<base64 of a WAV, MP3, FLAC ... file>", "format": "wav"}},
+  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,..."}}]}
 ```
 
 Pictures are read by the gateway the way Google's image processor reads them (`c/tools/gemma4_image.py`: resized to the
 largest size in multiples of 48 pixels that fits the budget, transparency laid on white, cut into 16-pixel patches); a clip
-is read as WAV (8 to 32 bits or float, any channels, any rate; mixed down and resampled to 16 kHz) and turned into the model's
+is read (a WAV: 8 to 32 bits or float, any channels, any rate; see below for the other formats), mixed down, resampled to 16 kHz and turned into the model's
 128-bin log-mel frames (`c/tools/gemma4_audio.py`). The prompt gets the model's own begin, one placeholder for every soft token and end
 tokens where the chat template writes its marker, the engine gets an `IMAGE` or `AUDIO` frame for each, in the order of the
 conversation, and answers an unreadable or mismatched one by name with a 400. `GET /v1/models` says what the loaded engine takes.
@@ -89,7 +90,41 @@ longer. `G4_AUDIO_TOKENS` (default 750, thirty seconds) is the longest clip; a l
 The cache knows pictures and clips apart: the same words after a different picture are not served from the first picture's
 cache, the same picture again is not read twice, and a conversation extended with a new turn keeps the picture it had.
 
-Not supported: video, audio other than WAV, and audio on the 26B-A4B and the 31B (their checkpoints have no audio tower).
+Not supported: audio on the 26B-A4B and the 31B (their checkpoints have no audio tower), and the sound of a video.
+
+### Other audio formats
+
+The file says what it is (its first bytes; `format` in the request is only a hint). A WAV is read directly. An **MP3** is decoded
+by minimp3 through `acestep_audio_tool` (`make acestep_audio_tool` in `c/`, built beside the engines and installed with them; the
+same reader ACE-Step's audio input uses). **FLAC, Ogg, M4A and anything else** needs ffmpeg (`ffmpeg` on the PATH, or `COLI_FFMPEG`
+naming it); without one the request is a 400 that says so. The same reader serves `/v1/audio/transcriptions`. Checked on the E2B:
+the JFK clip as WAV, MP3, FLAC, Ogg Vorbis and M4A came back as the same words.
+
+### Video
+
+The model reads a video as pictures. The gateway takes up to 32 frames, evenly spaced (transformers' rule, `i * total // n`;
+every frame of a shorter video), runs each through the image processor with a budget of 70 soft tokens, and writes the prompt the way
+the processor does: for each frame its time as `mm:ss`, the begin-of-image token, one placeholder for each soft token, and the
+end-of-image token, the frames joined by spaces. Each frame is an `IMAGE` frame for the engine, so a video is up to 32 pictures
+of at most 70 tokens: about 2,300 tokens of context (the default is 8,192) and, on the CPU, a few seconds of vision tower per
+frame. Two ways to send one:
+
+```text
+{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,..."}}              // a file; needs ffmpeg
+{"type": "video", "video": {"frames": ["data:image/png;base64,...", ...], "fps": 1}}   // frames you took yourself; no ffmpeg
+```
+
+A file is taken apart by ffmpeg (any container and codec it reads; up to 512 MB). Frames are your own: `fps` says how far apart they
+are in time (default 1 a second; more than 32 are thinned evenly, the times kept). The URL rules are those of pictures: a `data:`
+URI, never a web address, and a path only under `COLI_IMAGE_ROOT`. The engine takes up to 80 pictures and clips in a request
+(it took 16 before video).
+
+Checked on the E2B: a 3-second WebM that shows the words ONE, TWO and THREE answered "ONE, TWO, THREE" as a file (32 frames, 62 s
+on the CPU with a busy desktop), and the same three frames sent as `frames` were each named with their time (00:00, 00:01,
+00:02). The frames are the image processor's work with one difference from transformers' video processor, which resizes with
+torchvision where the image processor uses PIL: the patches agree to within 2 of 255 on a few values, and the grid and so the
+soft tokens are identical (`tests/test_gemma4_media.py` compares them where torchvision is installed). Not done: the sound of
+a video, frames chosen by a frame rate (`fps` sampling) instead of a count, and remote URLs.
 
 ## What is in the container
 
@@ -237,7 +272,7 @@ reason.
 
 ## What is not there
 
-- **Video, and audio that is not WAV.** The models read video as frames; mp3, flac and ogg are not decoded here.
+- **Video with sound, and video without ffmpeg.** The sound of a video is not read, and a video file needs an ffmpeg on the server (frames you send yourself do not).
 - **A GPU path for more than the dense matrices.** The experts stay on the CPU, and a graphics card runs the dense matrices only
   (see [Vulkan](#vulkan-for-the-dense-matrices) below). The on-device chains the larger families have (a layer in one
   submission) are a project of their own, and are why the decode gain below is modest.

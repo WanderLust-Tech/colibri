@@ -467,8 +467,8 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions -H "Authorization: Bearer $KE
 
 - **`response_format`:** `json` (the default, `{"text": ...}`), `text`, or `verbose_json` (adds `duration` and `segments`).
   `srt` and `vtt` are refused: the model gives no timestamps inside a stretch of speech. Word timestamps are refused too.
-- **File:** WAV only (PCM of 8 to 32 bits or float, any rate, any number of channels; it is mixed to mono and resampled to
-  16 kHz). Up to 25 MB and 15 minutes. A JSON body with `file` as base64 works as well.
+- **File:** WAV (PCM of 8 to 32 bits or float, any rate, any number of channels), MP3, and with ffmpeg on the server FLAC, Ogg, M4A and
+  more (read from the file's first bytes; mixed to mono and resampled to 16 kHz). Up to 25 MB and 15 minutes. A JSON body with `file` as base64 works as well.
 - **Long files:** the model hears 30 seconds at a time. A longer file is cut where it is quietest, within the last four
   seconds of each piece, the pieces are transcribed one after another, and the texts are joined with a space. The `segments` of
   `verbose_json` are those pieces (`start` and `end` in seconds), not sentences. A piece with no sound is skipped: asked to
