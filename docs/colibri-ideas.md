@@ -107,7 +107,7 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
   (6.95 GB) is needed only at the start of a request, then the transformer (7.09 GB) runs the
   steps. Unloading the encoder after use and reloading it lazily helps two models share memory.
   Unchecked: whether the engine already releases it.
-- [ ] **D3. Check `TRUNK_RESIDENT_LAYERS` on a dense model (S).** It is the closest thing to
+- [-] **D3. Check `TRUNK_RESIDENT_LAYERS` on a dense model (S).** *Not testable on this PC (2026-11-10): it works on Linux, macOS and FreeBSD only; on Windows the trunk stays resident (docs/ENVIRONMENT.md).* It is the closest thing to
   AirLLM's layer streaming. Try it on the dense Qwen3.8-27B and see whether it is useful.
 
 ## E. ACE-Step and image loose ends
@@ -120,8 +120,7 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
 - [ ] **E3. The 5 Hz language-model planner (L).** ACE-Step's optional planner
   (`acestep-5Hz-lm-1.7B`, also 0.6B and 4B), which writes metadata and audio codes first.
 - [ ] **E4. Lego, extract and complete tasks (L).** Need other ACE-Step checkpoints.
-- [ ] **E5. Push `main` to the fork (S).** *Partly done:* the fork's `main` has everything through the router
-  (`e0414e87`). Local `main` is 17 commits ahead (song saving, KV slots, Gemma 4), not pushed. Ask before pushing.
+- [x] **E5. Push `main` to the fork (S).** *Done 2026-11-10: the fork's `main` is at `0b51fd62`, level with local `main` and the live clone.* Ask before each push.
 
 ## G. Gemma 4 follow-ups (added 2026-11-07)
 
