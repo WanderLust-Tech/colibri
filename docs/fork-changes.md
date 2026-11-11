@@ -2,19 +2,20 @@
 
 Written 2026-11-07 for the owner of this fork (WanderLust-Tech/colibri, used on one Windows machine). It lists
 everything that differs from the checkout we started from, where each piece stands (built, merged, pushed, running),
-and what is still open, including the items in [colibri-ideas.md](colibri-ideas.md).
+and what is still open, including the items in [colibri-ideas.md](colibri-ideas.md). Brought up to date on 2026-11-10
+(Gemma on the graphics card, video, the card-or-CPU choice, model settings, context windows, the VS Code extension).
 
 ## 1. The baseline and how far we have moved
 
 | | |
 |---|---|
 | Original checkout | `e0db083c`, upstream PR #2139 merged, 2026-10-17 (upstream v2.0.0 plus what followed) |
-| Local `main` now | the tip of `main` (`git log origin/main..main` lists what the fork lacks: 21 commits on the evening of 2026-11-07) |
-| Size of the difference | 47 commits (43 of ours, 4 merges), 162 files, +41,473 / -266 lines; 108 of those files are outside `c/tests` and the fixtures |
+| Local `main` now | the tip of `main` (`git log origin/main..main` lists what the fork lacks: on 2026-11-10 one docs commit, Gemma's context window) |
+| Size of the difference | 76 commits (72 of ours, 4 merges), 206 files, +51,505 / -314 lines (2026-11-10) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `e0414e87`. Local `main` is ahead of it by song saving, KV slots, Gemma 4, the Gemma convert fix, `coli launch`, and the tooling-matrix fix |
-| Live server | clone `C:\Users\kp-mi\colibri` at `2266b695` (brought there by a local fetch, not through GitHub; deployed 2026-11-07), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` |
+| Fork's `main` | `26af52c9` (pushed 2026-11-10); local `main` is ahead by the docs commits that follow it |
+| Live server | clone `C:\Users\kp-mi\colibri` at `26af52c9` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets) |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -37,11 +38,21 @@ the clone that serves port 8000):
 | Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
 | Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
 | Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is not installed |
+| Gemma 4 dense matrices on the Vulkan device (G2) | `396a774f` | yes | yes | yes (2026-11-10): `gemma4.exe` is the `VK=1` build; the router decides per model whether it runs on the card (2.14) |
+| Gemma 4 video, and audio that is not WAV (G5) | `b6fae35c` | yes | yes | yes (2026-11-10): ffmpeg 9.0.2 installed with winget, `acestep_audio_tool.exe` built |
+| Card or CPU by free memory (`coli router --gpu auto`), models turned off and on, `service.json` `env` | `3b4bd293` | yes | yes | yes (2026-11-10): `COLI_GPU=auto` in the restart script and in `service.json` |
+| Dashboard: Runs on and Turn off/on per model | `7ae38131` | yes | yes | yes (2026-11-10): `web/dist` rebuilt in the live clone |
+| `context_length` on the model card | `26af52c9` | yes | yes | yes (2026-11-10): `gemma4.exe` and `qwen36.exe` relinked, router restarted |
+| VS Code extension 0.4.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
 server was idle). A chat to the E2B through the live router answered in 4.2 s. The 31B and E4B are not installed, and no
 picture or audio request has gone through the live router yet.
+
+Deployed 2026-11-10 (the server was idle each time, and you said to): Gemma on the card and video and audio formats (VK build of
+`gemma4.exe`, ffmpeg), then the card-or-CPU policy (VK build of `qwen36.exe` with the expert tier, `COLI_GPU=auto`), then
+`context_length` (relink of both engines, router restart). Not installed: the 31B (its container is in `colibri-staging`).
 
 Not in `main` at all: `docs/repo-deep-dive` (the repository deep-dive, `fdb25925`, pushed to the fork on its own branch),
 and `pr-2045`, upstream's image-editing PR, kept only for reference (see 2.1).
@@ -137,7 +148,7 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
   mutants (three equivalent, the rest caught), and on real weights: 26B-A4B (14.2 tok/s, picture and tools) and E2B (about
   21 tok/s, picture, JFK clip transcribed word for word, HTTP end to end). The E4B and 31B were run on real weights on 2026-11-10 (text, picture; audio on the E4B).
 - Registry names the four sizes; gateway knows `gemma4_no_cue`; protocol gained an `AUDIO` frame and `BAD_AUDIO`.
-- CPU only. No video, no audio other than WAV. Docs: `docs/gemma4.md`.
+- Video and audio other than WAV came later (2.14), as did the graphics card. Docs: `docs/gemma4.md`.
 - The 62 GB of downloaded source checkpoints were deleted 2026-11-07; the converted containers are in
   `C:\Users\kp-mi\colibri-staging` (`gemma4-26b-a4b`, 14.8 GiB; `gemma4-e2b`, 4.8 GiB).
 
@@ -162,10 +173,14 @@ One engine, `c/gemma4.c`, runs the 26B-A4B (mixture of experts) and the dense 31
 
 | What | Where |
 |---|---|
-| Restart script (LAN, persistent random key, `-NewKey`, `-Router`) | `C:\Users\kp-mi\restart-colibri.ps1` |
+| Restart script (LAN, persistent random key, `-NewKey`, `-Router`). Defaults since 2026-11-10: `-KeepAlive 30m`, `-Ctx 65536` (Qwen3.6 family, `Q36_MAXT`), `-GemmaCtx 32768` (`CTX`), `-Cap 128`, one KV slot; it also sets `COLI_GPU=auto` and `COLI_FFMPEG` | `C:\Users\kp-mi\restart-colibri.ps1` |
+| Service settings (what the tray and `coli service` start with): `env` has `COLI_GPU`, `Q36_MAXT`, `CTX`, `COLI_FFMPEG` | `%LOCALAPPDATA%\colibri\service.json` |
+| ffmpeg 9.0.2 (winget, user scope) | `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*` |
+| VS Code extension (source) | `C:\code\colibri-vscode-extension\colibri-agent-connector` |
+| Per-model settings (turned off, where it runs) | `%LOCALAPPDATA%\colibri\model-settings.json` (docs/model-settings.md) |
 | Live clone | `C:\Users\kp-mi\colibri` (rollback for the image engine: `c/qwenimage.exe.old`) |
-| Installed models | `C:\Users\kp-mi\colibri-models`: `qwen-image-2.1`, `ace-step-1.5`, `qwen3-coder-30b` |
-| Gemma containers (not installed) | `C:\Users\kp-mi\colibri-staging` |
+| Installed models | `C:\Users\kp-mi\colibri-models`: `qwen-image-2.1`, `ace-step-1.5`, `qwen3-coder-30b`, `gemma4-26b-a4b`, `gemma4-e2b`, `gemma4-e4b` |
+| Gemma containers (the 31B is only here, not installed) | `C:\Users\kp-mi\colibri-staging` |
 | Saved pictures and songs | `~/colibri-images`, `~/colibri-music` |
 | Worktrees | `D:\code\colibri-{acestep,gemma4,imgsave,json,router,router2,slots,stages,stt,vae-encoder}` |
 | Reference environments | `D:\code\gemma4-venv`, `D:\code\gemma4-ref` (logs, configs, `jfk.wav`); ACE-Step and Qwen-Image reference venvs lived in a session scratchpad and may be gone (rebuild from `c/tools/requirements-*.txt`) |
@@ -225,17 +240,68 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
   and stopped on a free port, the menu and icon logic, and on Windows the window, its menu and the `Run` key. The real window was
   also run: icon added, changed and removed, a message shown. Not done: a person clicking the menu.
 
+### 2.14 Gemma 4 on the graphics card, video and more audio (G2, G5; merged, pushed, live 2026-11-10)
+
+- **Dense matrices on Vulkan** (`QMat.vk`, `vk_mm` in `c/gemma4.c`, built with `make gemma4 VK=1`): attention, dense MLP, towers and
+  the output head go through the existing `coli_vk_matmul`; the experts of the 26B-A4B stay on the CPU. The same text as the CPU,
+  1.3-3x faster on prompts and pictures, 1.4-1.9x on decoding; not bit-identical (12 batch tests that compare to the bit fail with
+  it on, by design). `G4_VK_RESERVE_GB` keeps device memory free, `G4_VK_DENSE=0` keeps the matrices on the CPU. One binary runs
+  either way: `COLI_VULKAN` decides. [gemma4.md](gemma4.md#vulkan-for-the-dense-matrices), [gpu-offload.md](gpu-offload.md)
+- **Video:** a `video_url` file (taken apart by ffmpeg) or a `video` part with the client's own frames; up to 32 frames of 70 tokens,
+  each with its `mm:ss` as Gemma4Processor writes it. The sound of a video is not read. Engine picture limit 8 to 40.
+- **Audio:** MP3 through minimp3 (`make acestep_audio_tool`), FLAC, Ogg and M4A through ffmpeg (`COLI_FFMPEG`, else the PATH); the
+  declared format is only a hint, the bytes are sniffed. [gemma4.md](gemma4.md#video)
+- Real runs of the E4B and the 31B (G3) came first, and the Stop test's Windows fixture bug was fixed on the way.
+
+### 2.15 Card or CPU by free memory, and models turned off (`3b4bd293`, dashboard `7ae38131`; merged, pushed, live 2026-11-10)
+
+- **`coli router --gpu auto|on|off`** (`c/gpu.py`): when a model loads, the router decides whether its worker runs on the card, from
+  `nvidia-smi`'s free memory: `COLI_GPU_RESERVE_GB` (6) is kept back and `COLI_GPU_MIN_GB` (3) more is needed. The restart script and
+  `service.json` set `COLI_GPU=auto`. `coli ps` says what each model runs on; that is the router's decision, not proof (ACE-Step
+  says GPU but has no Vulkan path).
+- **Measured** on the 5090 with the Qwen3-Coder expert tier: a 600-token prompt 24.2 s to 12.8 s, decoding 10-13 to about 17 tok/s,
+  17.3 GB of the card (Gemma E2B/E4B/26B cost 2.4/4.4/2.5 GB; the desktop alone holds about 5.5 GB). With Coder on the card the
+  26B goes to the CPU. [gpu-offload.md](gpu-offload.md)
+- **Models can be turned off and pinned** (`c/model_settings.py`, `model-settings.json`): `coli model enable|disable|gpu NAME`,
+  `GET` and `POST /v1/models/settings`, a request for a turned-off model is a `403 model_disabled`. The dashboard's Settings > Model
+  has Runs on (automatic, card, CPU) and Turn off/on. [model-settings.md](model-settings.md)
+- **`env` in `service.json`** gives the tray and `coli service` the same environment the restart script sets.
+
+### 2.16 Context windows (`26af52c9`; merged, pushed, live 2026-11-10)
+
+- The engines (`gemma4`, `qwen36`) announce `ctx=N` in their `CAPS` line and the gateway puts it on the model card as
+  `context_length`; the router keeps the card of a model that has run, so it survives an unload. A model that has not run since the
+  build shows none.
+- **What is served is not what the model can do.** Gemma 4 serves 8192 unless `CTX` is set (the router has no per-model `--ctx`, so
+  `CTX` in its environment reaches every Gemma); the Qwen3.6 family reads `Q36_MAXT`. On this machine since 2026-11-10: Gemma
+  32768 and Qwen3-Coder 65536 (checked on the cards; no 65,000-token prompt has been run through Coder). What a larger window
+  costs: [gemma4.md](gemma4.md#context-window).
+
+### 2.17 The VS Code extension, `colibri-agent-connector` 0.4.0 (outside this repository)
+
+Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no commits). Updated for the router:
+
+- **Start, Stop and Restart Server go through `coli service`**, as the tray does, so Restart no longer replaces a router with a
+  one-model `coli serve` (`colibri.serverControl`: `auto`, `service`, `serve`); a stop that would cut a running request asks first.
+- **The API key is read from the key file** `coli service` keeps, for a server on this machine; health checks now send it (without it
+  a keyed server looked like "not Colibri").
+- **Colibri: Models...** and a status bar item: each model's state, memory, where it runs and when it unloads; Use for chat, Load,
+  Unload, Turn off/on, Run on automatic/card/CPU. Models that are turned off are left out of the chat's picker, and a loading model
+  says so instead of "Thinking...".
+- **`context_length` from the card** replaces learning the window from an overflow (the `colibri.contextWindow` setting still wins, so
+  `0` is the right value with a router).
+- 36 unit tests for the parts that do not need VS Code (`npm run test:unit`). The menu and status bar were checked against the live
+  router's API, not clicked through in VS Code.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
 
 1. ~~Deploy Gemma 4~~ done 2026-11-07 (see section 1).
-2. **Push local `main` to the fork** (song saving, KV slots, Gemma 4, the Gemma convert fix, `coli launch`, the tooling-matrix
-   fix, JSON mode). Nothing goes to upstream.
-3. **GPU offload for Gemma 4** (ask first; shares the 5090 with your renders). Move the large matrix multiplications, the
-   towers first, to the GPU through the existing Vulkan `coli_vk_matmul` (format 1, int8 rows with a per-row scale, which the
-   Gemma matrices already use). Expected to help towers and long-prompt prefill most, decode less (the MoE experts stay on
-   the CPU). The gain is unmeasured. Needs a Vulkan build of `gemma4.exe` and a CPU-versus-GPU equality test.
+2. ~~Push local `main` to the fork~~ done; the fork has everything except the latest docs commits (push when you say).
+3. ~~GPU offload for Gemma 4~~ done 2026-11-10 (2.14, 2.15).
+4. **`coli tray --install`** (the Windows sign-in entry for the tray) is yours to run; it was blocked when I tried, so I did not work around it.
+5. **Try the 65536 window on Qwen3-Coder with a real long conversation** and watch memory; go back with `-Ctx 32768` if it is too much.
 
 ### 3.2 Gemma 4 follow-ups
 
@@ -243,7 +309,9 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 - `coli setup` cannot list Gemma: its catalogue holds only ready-to-run downloads, and Gemma needs conversion. That would take a
   container hosted on Hugging Face (publishing, so your call). Instead, `feat/gemma4-setup` (`fdebaae5`, merged) lets `coli convert --repo` take a local directory, tests the routing, documents the conversion and
   fixes the Makefile's "text only" comment.
-- Video, and audio other than WAV.
+- ~~Video, and audio other than WAV~~ done 2026-11-10 (2.14).
+- Gemma's window is 32768 here by `CTX`; the automatic expert-cache sizing counts a conversation's full layers for at most 8192
+  positions, so with a much larger window set `--cap` yourself (gemma4.md, Context window).
 
 ### 3.3 Items from colibri-ideas.md
 
@@ -266,7 +334,7 @@ Status as of today (the file itself has been brought into line with this):
 | E2 Audio-in cases in the small CI fixture | open, S |
 | E3 ACE-Step's 5 Hz planner (1.7B, also 0.6B and 4B) | open, L |
 | E4 Lego, extract and complete tasks (need other checkpoints) | open, L |
-| E5 Push `main` to the fork | open; see 3.1 |
+| E5 Push `main` to the fork | **done** (the latest docs commits wait for your go-ahead) |
 | F (streaming the DiT from disk, LoRA training on streamed layers, AirLLM-style loading for MoE) | decided against |
 
 ### 3.4 Other open points
@@ -275,6 +343,12 @@ Status as of today (the file itself has been brought into line with this):
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
 - **Qwen-Image editing**: Linux, ASan and UBSan runs; a Vulkan check of the chain with an edit prefix; a real edit at the 1024
   reference; translated READMEs (it, ja, zh, id) for editing.
+- **Graphics card**: Qwen-Image on Vulkan (`make qwenimage VK=1`) is unmeasured; ACE-Step has no Vulkan path; unloading an idle model
+  that holds the card to make room for another is not built (the router only picks card or CPU at load time).
+- **Context**: E4B and the 26B show no `context_length` until they have run once; a per-model window would need a per-model setting
+  in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
+- **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
+  attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
 - **ACE-Step**: rebuild `acestep.exe` in the live clone if audio in is wanted (see section 1); the upstream handler once rewrote
   files in `ace-step-1.5` (weights untouched); the 1.7B planner weights sit in that folder unused.
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.

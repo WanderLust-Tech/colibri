@@ -138,6 +138,21 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   local directory, tests for the routing, the docs say how to convert, and the stale Makefile comment is fixed.*
 - [x] **G5. Video, and audio other than WAV (M).** *Done 2026-11-10 on `feat/gemma4-video-audio`: video as up to 32 frames (a file through ffmpeg, or frames the client sends), MP3 by minimp3, FLAC/Ogg/M4A through ffmpeg; the sound of a video is not read (docs/gemma4.md).*
 
+## H. Router and extension follow-ups (added 2026-11-10)
+
+- [ ] **H1. Unload an idle model to make room on the card (M).** The router picks card or CPU when a model loads, from the free
+  memory; a model that sits idle on the card for its keep-alive makes the next one go to the CPU. It could unload the idle one first
+  (the policy would have to know which models hold the card; Windows has no per-process figure, so it would track its own workers).
+- [ ] **H2. A context window per model (S-M).** `CTX` and `Q36_MAXT` are per engine family in the router's environment; the router
+  passes the same arguments to every worker. A `model-settings.json` field would give each model its own, and the model card
+  would say it from the first request.
+- [ ] **H3. Keep `context_length` for models that have not run since the engines announced it (S).** Today the card appears
+  after the model's first load.
+- [ ] **H4. Qwen-Image on Vulkan (M).** `make qwenimage VK=1` builds; unmeasured. ACE-Step has no Vulkan path.
+- [ ] **H5. VS Code extension (its own roadmap lists them):** `cache_slot` per chat so a long conversation is not read again each
+  turn; picture, audio and video attachments for the models whose card lists them; presets from the settings; the reasoning
+  switch per model; the key in SecretStorage.
+
 ## F. Considered and set aside
 
 - [-] **Streaming the denoising transformer from disk.** It runs every layer on every one of 8-35
