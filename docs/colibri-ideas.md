@@ -149,6 +149,9 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
 - [ ] **H3. Keep `context_length` for models that have not run since the engines announced it (S).** Today the card appears
   after the model's first load.
 - [ ] **H4. Qwen-Image on Vulkan (M).** `make qwenimage VK=1` builds; unmeasured. ACE-Step has no Vulkan path.
+- [ ] **H6. Report reused tokens in `usage` (S).** The engines print `[PREFIX] reuse N/np` on stderr; the gateway could put it in
+  `usage.prompt_tokens_details.cached_tokens` so a client (the VS Code extension, the request log) can see whether its prompt was
+  a continuation instead of guessing from the time. The router's log does not carry the workers' stderr today.
 - [ ] **H5. VS Code extension (its own roadmap lists them):** `cache_slot` per chat so a long conversation is not read again each
   turn; picture, audio and video attachments for the models whose card lists them; presets from the settings; the reasoning
   switch per model; the key in SecretStorage.

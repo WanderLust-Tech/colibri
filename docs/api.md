@@ -672,6 +672,15 @@ only when the new prompt starts with everything it already read, which is why on
 continuation is sent back. `GET /health` lists, per slot, how many messages it holds and how
 long ago it was used. With one slot there is nothing to choose.
 
+**For client authors: keep the start of the prompt the same.** The cache is only as good as the prefix match, so anything
+that changes early in the messages (a task list, a clock, a list of recent files, notes rewritten into the system message)
+makes the engine read the whole conversation again. Measured on the live router (Qwen3-Coder, one slot, a 15,600-token
+prompt): a request that continued the last one answered in 2.4 to 3.4 s; the same prompt with one line added to its system
+message took 163 s, as long as the first, cold request (159 s). Put what changes at the end (a new message), build the system
+message once per conversation, and change earlier messages only when you must (trimming). With more than one slot the choice
+of slot also needs the earlier messages to be the same bytes, so a rewritten first message looks like a new conversation and
+goes to another slot. The response does not yet say how much was reused (`usage` has no cached-token count).
+
 Each slot is a full-size context: a Qwen3-Coder-30B slot at a 32768-token window can grow
 to about 6 GB (only the part in use is resident, about 0.2 MB a token), so keep it to the few
 conversations you really run at once. Slots are used one at a time per request; several
