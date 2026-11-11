@@ -21,7 +21,7 @@ dependencies: text, pictures and, on the two small models, audio in; text out. O
 | other | embeddings times sqrt(hidden), a scalar on every layer's output, tied output head, logits capped at 30 |
 | pictures | a 27-layer (26B-A4B, 31B) or 16-layer (E models) vision tower, 2D rotary positions, 3 x 3 pooling: a picture is 70 to 1120 soft tokens, 280 by default; inside one picture the sliding layers let rows see each other |
 | audio | E2B and E4B only: a conformer (twelve layers, chunked local attention with a relative-position bias), 40 ms a soft token, 30 seconds at most |
-| context | 262144 tokens on the large models, 131072 on the E models (the engine's default is 8192; `--ctx` raises it) |
+| context | 262144 tokens on the large models, 131072 on the E models (the engine's default is 8192; `--ctx` raises it: [Context window](#context-window)) |
 | chat format | `<|turn>` / `<turn|>` turns, a thought channel, tool calls in `<|tool_call>call:f{key:<|"|>value<|"|>}<tool_call|>` |
 
 The reference implementation is transformers' `modeling_gemma4.py`; `c/gemma4.c` follows it line by line, and the tests
@@ -157,6 +157,43 @@ position, and the layers that share keys and values keep none:
 
 `--kv-slots N` keeps N conversations apart; the gateway puts each on the slot that holds its earlier turns (docs/api.md).
 
+## Context window
+
+| | tokens |
+|---|---|
+| what the models were trained for | 262144 on the 26B-A4B and the 31B, 131072 on the E2B and E4B |
+| what the engine serves with | **8192**, unless told otherwise |
+| the most `coli serve --ctx` takes | 262144 (more is refused, with the number) |
+
+A prompt plus the reply it asks for that does not fit the served window is refused, not cut: the engine answers
+`CONTEXT_EXCEEDED prompt_tokens=... requested=... capacity=...` and the gateway turns it into a 400
+`context_length_exceeded`. The window is announced to clients as `context_length` on the model card
+(`GET /v1/models`); a client such as the VS Code extension sizes its prompts from it. The router keeps the card of a model
+that has run, so it is still there after the model unloads. A model that has not run since its engine started
+announcing it (before 2026-11-10) shows none until it has run once.
+
+What counts against 8192: a picture is 280 soft tokens (`G4_IMG_TOKENS`; 70 to 1120), a video up to 32 frames of 70
+plus their timestamps (about 2,300), audio 40 ms a token (750 for the 30 seconds it takes at most), and the reply you ask
+for with `max_tokens`. Two pictures, a question and a long answer fit; a long document and a video do not.
+
+**Setting it.** `coli serve --ctx N` (or `CTX=N`) sets it for one server. `coli router` starts its workers without
+`--ctx` (the same arguments go to every model, and `--ctx` does not apply to an image or a music model), so under the router
+every Gemma serves 8192 unless `CTX` is in the router's environment:
+
+- the router's own environment: `$env:CTX = "32768"` before `restart-colibri.ps1`, or `"CTX": "32768"` in the `env` of
+  `service.json` for `coli service` and the tray (docs/tray.md);
+- it reaches every worker, and only the engines that read `CTX` use it: Gemma and the DeepSeek-style engines. The Qwen3.6 family
+  reads `Q36_MAXT` instead, which is what the restart script's `-Ctx` sets (Qwen3-Coder is at 32768 there); `-Ctx` does
+  nothing for Gemma. An image or a music model reads neither.
+
+There is one setting for all Gemma models in a router, and it needs a restart (the model reloads with the new window the
+next time it is asked for). `GET /v1/models` shows what each one serves.
+
+**What a larger window costs.** The sliding layers keep a ring of their window whatever the conversation, so only the full
+layers grow with the window (the table under [Memory](#memory): the 26B-A4B's conversation cache is 1.7 GB at 8192, 2.7 GB at
+32768 and 12.1 GB at 262144), and each `--kv-slots` conversation has its own. A longer prompt also takes longer to read. The automatic expert cache (no `--cap`) counts a conversation's full layers for at most 8192
+positions, so with a much larger window it leaves less room than it should: set `--cap` yourself, or leave headroom.
+
 ## Chat, thinking and tools
 
 The gateway renders the model's own chat template (`c/gemma4_chat.py`, tested byte for byte against the releases'
@@ -229,7 +266,7 @@ python3 c/tools/mutate_gemma4.py [part of a name ...]
 
 | Variable | Default | |
 |---|---|---|
-| `CTX` | 8192 | context window in tokens (`--ctx`) |
+| `CTX` | 8192 | context window in tokens (`--ctx`); under the router it is the router's own environment, see [Context window](#context-window) |
 | `KV_SLOTS` | 1 | conversations kept apart (`--kv-slots`, up to 16) |
 | `G4_SLACK` | 2048 | positions beyond window + chunk the sliding layers keep, for rewinding a conversation |
 | `G4_TOP_K` | 64 | sampling keeps this many candidates when the temperature is above zero (the model's recommendation) |

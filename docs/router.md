@@ -135,6 +135,10 @@ switch that turns it off ([model-settings.md](model-settings.md#in-the-dashboard
 
 ## Limits
 
+- **One context window per engine family, set by the router's environment.** The workers are started with the same
+  arguments, so there is no per-model `--ctx`. Gemma 4 serves 8192 unless `CTX` is set in the router's environment (every Gemma
+  gets it); the Qwen3.6 family reads `Q36_MAXT` (the restart script's `-Ctx`). Each model's card says what it serves
+  (`context_length`); how to set it, and what it costs, is in [gemma4.md](gemma4.md#context-window).
 - The memory check is only as good as its estimate. The first time a model loads, its size on disk is
   used; after that, what it measured. Models that size their cache from the free memory when they start
   (the large streamed ones) take most of what is free, so they push the others out.
