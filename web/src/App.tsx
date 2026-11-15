@@ -54,6 +54,7 @@ import { Profiling } from "./Profiling"
 import { persistPublicSettings, stored, takeKeyFromLocation } from "@/lib/storage"
 import { appendDelta, continuable, continuation, setFinish, setStats } from "@/lib/transcript"
 import { buildReplyStats, replyParts } from "@/lib/replyStats"
+import { explainError } from "@/lib/explainError"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
@@ -552,6 +553,18 @@ export default function App() {
     setArchives(items => [...(currentMessages.length ? [{ id: message("system", "").id, slot, messages: currentMessages }] : []), ...items.filter(item => item.id !== entry.id)])
     setConversations(items => ({ ...items, [slot]: entry.messages })); setCacheSlot(slot); setView("chat"); setHistoryOpen(false); setLastRun(null); setError(""); setDraft("")
   }
+  /* The server's own message stays on screen; when it is one we know, a sentence in plain words goes above it. */
+  const errorBanner = (() => {
+    if (!error) return null
+    const shown = t(error)
+    const known = explainError(shown)
+    if (!known) return <div className="error-banner" role="alert">{shown}</div>
+    return <div className="error-banner" role="alert">
+      <div className="error-explain">{t(known.key, known.vars)}</div>
+      <div className="error-original">{shown}</div>
+      {known.action === "newChat" && <Button type="button" variant="secondary" size="sm" onClick={newChat} disabled={loading}>{t("explain.newChat")}</Button>}
+    </div>
+  })()
   const empty = messages.length === 0
   const connectionControls = (<fieldset disabled={loading}><section className="side-section">
           <div className="section-title"><Link2 className="size-3.5" /> {t("sidebar.connection")}</div>
@@ -668,7 +681,7 @@ export default function App() {
         <nav className="settings-tabs" aria-label={t("ui.settings")}>
           {["general", "model", "presets", "requests", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
         </nav>
-        {error && <div className="error-banner" role="alert">{t(error)}</div>}
+        {errorBanner}
         <div className="settings-content">
           {settingsPage === "general" && <section className="settings-card"><h2>{t("ui.appearance")}</h2><div className="theme-choices">{["dark", "light"].map(value => <button key={value} className={`theme-choice ${value}`} aria-pressed={theme === value} onClick={() => setTheme(value)}><span /><b>{t(`ui.${value}`)}</b></button>)}</div><label className="language-field"><Globe />{t("ui.language")}<select value={locale} onChange={e => setLocale(e.target.value)}>{locales.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}</select></label><p className="settings-help">{t("chat.inputHint")}</p></section>}
           {settingsPage === "presets" && <section className="settings-card">
@@ -702,7 +715,7 @@ export default function App() {
           </article>)}<div ref={bottomRef} /></div>
         </div>}
         <div className="composer-wrap">
-          {error && <div className="error-banner" role="alert">{t(error)}</div>}
+          {errorBanner}
           <form className={cn("composer", (imageMode || music.mode) && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
             onDragOver={e => { if (((music.mode && music.audioIn) || (!music.mode && (!imageMode || canEdit))) && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
             onDrop={e => {

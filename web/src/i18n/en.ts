@@ -131,6 +131,20 @@ const en: Record<string, string> = {
   "status.serverError": "Could not reach the server.",
   "status.generationFailed": "Generation failed.",
 
+  // what went wrong, in plain words (shown above the server's own message)
+  "explain.context": "This chat is longer than the model's window ({{used}} tokens against {{limit}}). Start a new chat, or ask for a shorter conversation; the server's CTX setting sets the window.",
+  "explain.contextPlain": "This chat is longer than the model's window. Start a new chat.",
+  "explain.gpu": "The GPU stopped answering, so the model's experts now run on the CPU. Replies are slower until the model is unloaded and loaded again.",
+  "explain.memory": "The machine ran out of memory. Unload a model you are not using, or close other programs, then try again.",
+  "explain.key": "The server did not accept the API key. Check it in the sidebar; the dashboard link carries it as #key=.",
+  "explain.unreachable": "The dashboard cannot reach the server. Check that it is running and that the endpoint in the sidebar is right.",
+  "explain.busy": "The engine is busy with other requests. Wait a moment and send it again.",
+  "explain.shutdown": "The server is shutting down or restarting. Try again in a moment.",
+  "explain.noModel": "The server has no model called {{model}}. Pick one from the model list.",
+  "explain.wrongKind": "This model does not do chat. Pick a language model from the model list.",
+  "explain.engine": "The engine stopped or failed on this request. The line below says what it reported; unloading the model and loading it again often clears it.",
+  "explain.newChat": "New chat",
+
   // sidebar — runtime
   "sidebar.runtime": "Runtime",
   "sidebar.runtimeProbe": "Probe the server to inspect runtime state.",
