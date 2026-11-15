@@ -1,4 +1,5 @@
 import type { ChatMessage } from "./api"
+import type { ReplyStats } from "./replyStats"
 
 /* Stream a delta into one bubble of the transcript. Both a fresh answer and a
    continued turn go through here; the only difference is which bubble. */
@@ -12,6 +13,13 @@ export function appendDelta(messages: ChatMessage[], targetId: string, field: "c
    so the reply was cut off, and is recorded as "incomplete", not as done. */
 export function setFinish(messages: ChatMessage[], targetId: string, finish: string | null): ChatMessage[] {
   return messages.map((item) => item.id === targetId ? { ...item, finish: finish ?? "incomplete" } : item)
+}
+
+/* Attach a finished reply's stats (tokens, speed, cache, model) to its bubble. Nothing to attach leaves the bubble
+   as it was; a continued turn gets the figures of its latest request, replacing the earlier ones. */
+export function setStats(messages: ChatMessage[], targetId: string, stats: ReplyStats | null): ChatMessage[] {
+  if (!stats) return messages
+  return messages.map((item) => item.id === targetId ? { ...item, stats } : item)
 }
 
 /* An assistant turn is open, and worth continuing, when it hit max_tokens or

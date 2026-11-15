@@ -1,3 +1,5 @@
+import type { ReplyStats } from "./replyStats"
+
 export type ChatRole = "system" | "user" | "assistant"
 
 export interface ChatMessage {
@@ -19,6 +21,9 @@ export interface ChatMessage {
      the message so it travels with the transcript through slot switches and
      archives; never sent to the server. */
   finish?: string
+  /* What an assistant turn cost and where it ran: tokens, speed, the share of the prompt that was not read again, and
+     which model answered. Set when the reply finishes; kept with the transcript, never sent to the server. */
+  stats?: ReplyStats
   /* Both turns of a text-to-image exchange, the prompt and its picture, carry
      mode "image". They stay in the conversation on screen but are never sent to
      a text model, which would read a question followed by an empty answer. */
@@ -98,11 +103,16 @@ export interface TokenUsage {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  /* How much of the prompt the engine did not read again (a continuation of the last request). Left out by a server
+     or an engine that does not say, which is not the same as 0. */
+  prompt_tokens_details?: { cached_tokens?: number } | null
 }
 
 export interface StreamChatResult {
   finishReason: string | null
   usage: TokenUsage | null
+  /* The model that answered, as the stream names it: behind a preset or a short alias this is the real model. */
+  model: string | null
   requestId: string | null
   queueWaitMs: number | null
 }
@@ -148,6 +158,9 @@ export interface ModelInfo {
   music?: MusicLimits
   /* A preset served by `coli router` (docs/presets.md): the model it runs and the settings it fills in. */
   preset?: PresetInfo
+  /* The context window, in tokens, the engine serves this model with (the card's `context_length`). Absent until the
+     engine has said, which for some models is only after their first run. */
+  contextLength?: number
 }
 
 /* A named model with settings baked in. `defaults` are what a request leaves out; the dashboard starts its own
@@ -209,14 +222,16 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
 export async function listModelInfo(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
   const response = await fetch(endpoint(baseUrl, "models"), { headers: headers(apiKey), signal })
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown; audio?: unknown; preset_of?: unknown; preset?: unknown }> }
-  return (body.data || []).map(({ id, capabilities, image, audio, preset_of, preset }) => {
+  const body = (await response.json()) as { data?: Array<{ id: string; capabilities?: unknown; image?: unknown; audio?: unknown; preset_of?: unknown; preset?: unknown; context_length?: unknown }> }
+  return (body.data || []).map(({ id, capabilities, image, audio, preset_of, preset, context_length }) => {
     const named = presetInfo(preset_of, preset)
-    if (!Array.isArray(capabilities)) return { id, ...(named ? { preset: named } : {}) }
+    const window = typeof context_length === "number" && Number.isInteger(context_length) && context_length > 0
+      ? { contextLength: context_length } : {}
+    if (!Array.isArray(capabilities)) return { id, ...(named ? { preset: named } : {}), ...window }
     const list = capabilities.filter((item): item is string => typeof item === "string")
     const edit = list.includes("image_edit") ? editLimits(image) : undefined
     const music = list.includes("music_generation") ? musicLimits(audio) : undefined
-    return { id, capabilities: list, ...(edit ? { edit } : {}), ...(music ? { music } : {}), ...(named ? { preset: named } : {}) }
+    return { id, capabilities: list, ...(edit ? { edit } : {}), ...(music ? { music } : {}), ...(named ? { preset: named } : {}), ...window }
   })
 }
 
@@ -597,13 +612,16 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
   let buffer = ""
   let finishReason: string | null = null
   let usage: TokenUsage | null = null
+  let answeredBy: string | null = null
 
   const consume = (data: string) => {
     if (data === "[DONE]") return
     const event = JSON.parse(data) as {
+      model?: unknown
       choices?: Array<{ delta?: { content?: string; reasoning_content?: string }; finish_reason?: string | null }>
       usage?: TokenUsage | null
     }
+    if (!answeredBy && typeof event.model === "string" && event.model) answeredBy = event.model
     const choice = event.choices?.[0]
     const text = choice?.delta?.content
     if (text) options.onDelta(text)
@@ -627,6 +645,7 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
   return {
     finishReason,
     usage,
+    model: answeredBy,
     requestId: response.headers.get("x-request-id"),
     queueWaitMs: parsedQueueWait !== null && Number.isFinite(parsedQueueWait) ? parsedQueueWait : null,
   }

@@ -52,7 +52,8 @@ import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
 import { persistPublicSettings, stored, takeKeyFromLocation } from "@/lib/storage"
-import { appendDelta, continuable, continuation, setFinish } from "@/lib/transcript"
+import { appendDelta, continuable, continuation, setFinish, setStats } from "@/lib/transcript"
+import { buildReplyStats, replyParts } from "@/lib/replyStats"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
@@ -92,6 +93,8 @@ export default function App() {
   const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
   /* The models that are presets of `coli router`: what each runs and the settings it fills in (docs/presets.md). */
   const [presetInfos, setPresetInfos] = useState<Record<string, PresetInfo>>({})
+  /* Each model's window in tokens, from its card, for the share of it a reply used. */
+  const [contextLengths, setContextLengths] = useState<Record<string, number>>({})
   /* The model whose preset settings the controls were last started from: they follow a change of model, not every reconnect. */
   const presetApplied = useRef("")
   const [temperature, setTemperature] = useState(0.7)
@@ -245,6 +248,7 @@ export default function App() {
       const found = info.map((item) => item.id)
       setModels(found)
       setPresetInfos(Object.fromEntries(info.flatMap((item) => item.preset ? [[item.id, item.preset] as const] : [])))
+      setContextLengths(Object.fromEntries(info.flatMap((item) => item.contextLength ? [[item.id, item.contextLength] as const] : [])))
       setImageModels(info.filter(generatesImages).map((item) => item.id))
       setEditLimits(Object.fromEntries(info.flatMap((item) => editsImages(item) && item.edit ? [[item.id, item.edit] as const] : [])))
       setMusicModels(Object.fromEntries(info.filter(generatesMusic).map((item) => [item.id, item.music ?? DEFAULT_MUSIC_LIMITS] as const)))
@@ -330,6 +334,7 @@ export default function App() {
     setTtft(null)
     const t0 = performance.now()
     let firstToken = true
+    let firstTokenMs: number | null = null
     let count = 0
     const controller = new AbortController()
     abortRef.current = controller
@@ -348,7 +353,7 @@ export default function App() {
            first one is the real time-to-first-token. The answer's first token
            arrives much later on a reasoning model. */
         onReasoning: (delta) => {
-          if (firstToken) { setTtft(performance.now() - t0); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
+          if (firstToken) { firstTokenMs = performance.now() - t0; setTtft(firstTokenMs); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
           count++
           setTokenCount(count)
           const since = (performance.now() - decodeStart) / 1000
@@ -356,7 +361,7 @@ export default function App() {
           updateMessages((current) => appendDelta(current, targetId, "reasoning", delta))
         },
         onDelta: (delta) => {
-          if (firstToken) { setTtft(performance.now() - t0); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
+          if (firstToken) { firstTokenMs = performance.now() - t0; setTtft(firstTokenMs); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
           count++
           setTokenCount(count)
           /* The live rate is DECODE speed: measured from the first token, not
@@ -377,7 +382,18 @@ export default function App() {
         completion: prev.completion + (result.usage?.completion_tokens || 0),
       }))
       setLastRun(result)
-      updateMessages((current) => setFinish(current, targetId, result.finishReason))
+      /* The line under the reply: what it cost, whether the engine read the prompt again, and which model answered
+         (behind a preset it is not the one in the picker). The window comes from the model that answered. */
+      const stats = buildReplyStats({
+        usage: result.usage,
+        model: result.model,
+        preset: presetInfos[model] ? model : undefined,
+        tokPerSec: count > 1 && decodeElapsed > 0 ? (count - 1) / decodeElapsed : null,
+        ttftMs: firstTokenMs,
+        elapsedMs: performance.now() - t0,
+        contextLength: (result.model ? contextLengths[result.model] : undefined) ?? contextLengths[model],
+      })
+      updateMessages((current) => setStats(setFinish(current, targetId, result.finishReason), targetId, stats))
       setConnected(true)
     } catch (cause) {
       /* Drop the target bubble only if it is empty -- a first turn that never got
@@ -682,6 +698,7 @@ export default function App() {
                 </details>
               : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
             {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}</div>}
+            {item.role === "assistant" && item.stats && (() => { const parts = replyParts(item.stats, t); return parts.length ? <div className="reply-stats" title={t("reply.help")}>{parts.join(" · ")}</div> : null })()}
           </article>)}<div ref={bottomRef} /></div>
         </div>}
         <div className="composer-wrap">

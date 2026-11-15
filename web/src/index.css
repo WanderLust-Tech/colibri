@@ -236,3 +236,5 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .requests-table td small { color: var(--muted-foreground); }
 .requests-table tr.failed td { color: #d98a8a; }
 @media (max-width: 760px) { .preset-default-row { grid-template-columns: 1fr 1fr auto; } .preset-form input, .preset-form textarea, .preset-form select { font-size: 16px; } }
+
+.reply-stats { font-size: 11px; line-height: 1.5; color: var(--muted-foreground); margin-top: -4px; font-variant-numeric: tabular-nums; }
