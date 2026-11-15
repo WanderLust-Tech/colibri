@@ -98,14 +98,29 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 - [-] **Session folders, bulk select, swipe to delete, incognito chats** (`sessions.js`): our history is small and local.
 - [-] **Theme editor, tours, welcome screen with suggested actions:** not what this dashboard is for.
 
+## Status (2026-11-15)
+
+| Item | State |
+|---|---|
+| C1 + C2 reply stats and answering model | done, live in the dashboard (`2a3a2bad`) |
+| C3 errors in plain words | done, live in the dashboard (`e76c2273`, merged `82046715`) |
+| B1 threat model | done, `docs/THREAT_MODEL.md` |
+| A1 tool output marked as data | built in the extension 0.6.1; **the vsix is built but not installed**, and the extension folder has no git history, so it is only in the working files |
+| A2 summarise old turns | open |
+| A3, B2, B3 | notes for later (B2 and B3 only matter if the gateway starts fetching URLs or sending side requests) |
+| C4 message actions, C5 compare view, C6 phone install | open |
+
+Not checked by eye: the reply line and the error banner (no browser here). Not exercised live: the "via preset" label
+(no presets configured) and the extension's wrapper in a real chat (only the model, through the API, with three
+injected files). Other languages fall back to English for the new dashboard text.
+
 ## Suggested order
 
-1. **C1 + C2** (small, finish H6's display and clear up router confusion).
-2. **A1** (small, closes a real gap in the extension).
-3. **C3** (medium, the most useful new thing for you).
-4. **B1** (docs, any time).
+Done: 1 (C1 + C2), 2 (A1), 3 (C3), 4 (B1). Next:
+
 5. **A2** (medium; do it when long chats start to hurt).
-6. The rest only if something annoys you.
+6. **C4**, then **C5**, if you want more from the dashboard: fork-from-here is cheap on our cache.
+7. The rest only if something annoys you.
 
 ## Where to look in Odysseus (read only)
 
