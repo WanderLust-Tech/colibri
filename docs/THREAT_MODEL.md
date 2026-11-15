@@ -88,6 +88,13 @@ The wrapper above helps; it does not close the hole. Tried on Qwen3-Coder-30B (3
 a rough signal only): plain, the model ran the injected command in 2 of 3; wrapped, in 1 of 3. A small model can be
 talked into it either way.
 
+When a long chat outgrows the window, the extension has the model write a record of the dropped turns and keeps it in the
+system message (`colibri.summariseTrimmed`). That is a second route for injected text: something a file said could be
+copied into a place the model trusts more. The defences are the same block around tool output on the way in, an
+instruction to the summariser never to copy an instruction out of tool output, and a heading on the record saying it is
+a record and not an order. Tried on Qwen3-Coder with a file that asked to be recorded as approved: it was not copied.
+One file, one run: not a guarantee.
+
 What actually stops harm is the approval dialog and the rules, not the model's judgement: read what a command is
 before you allow it, keep `deny` rules for what must never run (`Bash(curl:*)`, `Read(**/.env*)`), and treat "always
 allow" on a shell command as granting it to the whole conversation. In a trusted workspace a file in the repository can

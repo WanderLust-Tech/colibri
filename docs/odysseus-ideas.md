@@ -25,7 +25,7 @@ apply to us. The parts below do.
   reaches the model as plain text. Permission rules and the approval dialog still ask, but the model is not warned.
   *Care:* test on Qwen3-Coder first; small models treat wrappers unevenly. A tool result is appended, never rewritten,
   so a fixed wrapper does not disturb the cached prompt start.
-- [ ] **A2. Summarise old turns instead of dropping them (M).** At 85% of the model's window their compactor replaces
+- [x] **A2. Summarise old turns instead of dropping them (M).** *Built 2026-11-15 in the extension 0.7.0 (`src/summary.ts`, setting `colibri.summariseTrimmed`, on by default; vsix built, not installed). Triggered when turns are dropped (our trim is lazy, so there is no fixed 85% line), folded into one rolling record kept in the system message. Tried on Qwen3-Coder: exact error and paths kept, an injected instruction in a tool result not followed; a first wording counted an unfinished test as done, fixed in the instructions.* At 85% of the model's window their compactor replaces
   older turns with a short structured summary: goal, what was done, current state, next steps, key values
   (`src/context_compactor.py`). It also repairs orphaned tool messages after a cut.
   *Us today:* we keep the last 150 messages and trim to fit the window, so the oldest context disappears silently and
@@ -106,7 +106,7 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 | C3 errors in plain words | done, live in the dashboard (`e76c2273`, merged `82046715`) |
 | B1 threat model | done, `docs/THREAT_MODEL.md` |
 | A1 tool output marked as data | built in the extension 0.6.1; **the vsix is built but not installed**, and the extension folder has no git history, so it is only in the working files |
-| A2 summarise old turns | open |
+| A2 summarise old turns | built in the extension 0.7.0 (vsix built, not installed); the end-to-end path in a real chat is not exercised, only the request and the model's answer |
 | A3, B2, B3 | notes for later (B2 and B3 only matter if the gateway starts fetching URLs or sending side requests) |
 | C4 message actions, C5 compare view, C6 phone install | open |
 
@@ -116,9 +116,9 @@ injected files). Other languages fall back to English for the new dashboard text
 
 ## Suggested order
 
-Done: 1 (C1 + C2), 2 (A1), 3 (C3), 4 (B1). Next:
+Done: 1 (C1 + C2), 2 (A1), 3 (C3), 4 (B1), 5 (A2). Next:
 
-5. **A2** (medium; do it when long chats start to hurt).
+5. **A2** (done).
 6. **C4**, then **C5**, if you want more from the dashboard: fork-from-here is cheap on our cache.
 7. The rest only if something annoys you.
 
