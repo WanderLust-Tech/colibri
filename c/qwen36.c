@@ -5407,7 +5407,7 @@ static int qwen36_serve_budget(int np, int max_tok, int max_ctx, int read_only){
 }
 
 /* The counters when a request's decoding began: PROF and DONE report its share. */
-typedef struct { double s_disk, s_attn, s_moe, s_head, t0; } Q36ReqClock;
+typedef struct { double s_disk, s_attn, s_moe, s_head, t0; int reused; } Q36ReqClock;   /* reused: prompt tokens not read again, DONE's last field */
 
 /* A request's prompt into the conversation the Model holds: its tokens and image,
  * the budget, ACCEPT, the prefix reuse and the pins, the prefill and its read-out.
@@ -5503,6 +5503,7 @@ static int q36_serve_start_inner(Model *m, ServeReq *q, int **ids_out, int *np_o
     if (q->pin) pin_save(m, ids, np, lo);
     clk->s_disk=m->t_disk; clk->s_attn=tm_sum(0)+tm_sum(1); clk->s_moe=tm_sum(2); clk->s_head=tm_sum(5);
     clk->t0=now_s();
+    clk->reused=reuse;
     g_echo_k = 0; g_echo_id = NULL;   /* la lettura riguarda il prefill, non la decodifica */
     *ids_out=ids; *np_out=np; *lo_out=lo;
     return 1;
@@ -5583,8 +5584,8 @@ static void serve_one(Model *m, ServeReq *q){
                (unsigned long long)forwards);   /* contati, non dedotti: l'ultimo token non ne fa uno */
         fflush(stdout);
     }
-    printf("DONE %s STAT %d %.3f %.1f %.2f %d %d\n",q->id,gen,
-           dt>0?gen/dt:0.0,0.0,rss_gb(),np,limited);
+    printf("DONE %s STAT %d %.3f %.1f %.2f %d %d %d\n",q->id,gen,
+           dt>0?gen/dt:0.0,0.0,rss_gb(),np,limited,clk.reused);
     fflush(stdout);
     {char scope[96]; snprintf(scope, sizeof scope, "turn %s", q->id); q36_spec_report(&spec, scope);}
     q36_spec_free(&spec);
@@ -5982,8 +5983,8 @@ static void q36_mux_finish(Model *m, Q36MuxReq *r){
                tm_sum(5) - r->clk.s_head, (unsigned long long)r->forwards);
         fflush(stdout);
     }
-    printf("DONE %s STAT %d %.3f %.1f %.2f %d %d\n", r->q.id, r->gen,
-           dt > 0 ? r->gen / dt : 0.0, 0.0, rss_gb(), r->np, r->limited);
+    printf("DONE %s STAT %d %.3f %.1f %.2f %d %d %d\n", r->q.id, r->gen,
+           dt > 0 ? r->gen / dt : 0.0, 0.0, rss_gb(), r->np, r->limited, r->clk.reused);
     fflush(stdout);
 }
 

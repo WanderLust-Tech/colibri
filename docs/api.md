@@ -679,7 +679,10 @@ prompt): a request that continued the last one answered in 2.4 to 3.4 s; the sam
 message took 163 s, as long as the first, cold request (159 s). Put what changes at the end (a new message), build the system
 message once per conversation, and change earlier messages only when you must (trimming). With more than one slot the choice
 of slot also needs the earlier messages to be the same bytes, so a rewritten first message looks like a new conversation and
-goes to another slot. The response does not yet say how much was reused (`usage` has no cached-token count).
+goes to another slot. The response says how much was reused: `usage.prompt_tokens_details.cached_tokens`, the prompt tokens
+the engine did not read again (the same field OpenAI uses). A continuation shows nearly all of `prompt_tokens`; a cold or
+changed prompt shows 0 or only the part before the change. The field is left out when the engine does not report it (today
+the Qwen3.6 family, Gemma 4 and DeepSeek V4 do), so a missing field is not the same as 0.
 
 Each slot is a full-size context: a Qwen3-Coder-30B slot at a 32768-token window can grow
 to about 6 GB (only the part in use is resident, about 0.2 MB a token), so keep it to the few

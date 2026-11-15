@@ -5105,7 +5105,20 @@ def read_engine_turn(stream, sentinel, on_bytes, caps=None):
         "rss_gb": float(fields[4]),
         "prompt_tokens": int(fields[5]) if len(fields) > 5 else 0,
         "length_limited": bool(int(fields[6])) if len(fields) > 6 else False,
+        "cached_tokens": _cached_tokens(fields),
     }
+
+
+def _cached_tokens(fields):
+    """The prompt tokens the engine did not read again (the last field of a DONE STAT line, after
+    length_limited), or None when the engine does not say. 0 means it said none were reused, which is not
+    the same as not saying."""
+    if len(fields) > 7:
+        try:
+            return max(0, int(fields[7]))
+        except ValueError:
+            pass
+    return None
 
 
 def model_arch(model):
@@ -5660,6 +5673,7 @@ class Engine:
             "rss_gb": float(fields[4]),
             "prompt_tokens": int(fields[5]) if len(fields) > 5 else 0,
             "length_limited": bool(int(fields[6])) if len(fields) > 6 else False,
+            "cached_tokens": _cached_tokens(fields),
         }
 
     def _fail_pending(self, error):
@@ -6732,6 +6746,8 @@ class APIServer(ThreadingHTTPServer):
             if record is not None and isinstance(stats, dict):
                 record["prompt_tokens"] += int(stats.get("prompt_tokens") or 0)
                 record["completion_tokens"] += int(stats.get("completion_tokens") or 0)
+                if stats.get("cached_tokens") is not None:
+                    record["cached_tokens"] = record.get("cached_tokens", 0) + int(stats["cached_tokens"])
                 record["finish"] = "length" if stats.get("length_limited") else "stop"
             return stats
         finally:
@@ -8825,8 +8841,12 @@ class APIHandler(BaseHTTPRequestHandler):
     def usage(stats):
         prompt = stats["prompt_tokens"]
         completion = stats["completion_tokens"]
-        return {"prompt_tokens": prompt, "completion_tokens": completion,
-                "total_tokens": prompt + completion}
+        usage = {"prompt_tokens": prompt, "completion_tokens": completion,
+                 "total_tokens": prompt + completion}
+        cached = stats.get("cached_tokens")
+        if cached is not None:       # only when the engine said: a missing count must not read as "nothing reused"
+            usage["prompt_tokens_details"] = {"cached_tokens": min(cached, prompt)}
+        return usage
 
     def chat_completion(self, body, request_id):
         strict_tools = body.get("strict_tool_calls", False)

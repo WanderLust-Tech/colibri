@@ -2136,6 +2136,39 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(stats["prompt_tokens"], 5)
         self.assertFalse(stats["length_limited"])
 
+    def test_done_line_reports_reused_prompt_tokens_when_the_engine_says(self):
+        for line, expected in ((b"DONE 1 STAT 1 2.500 50.0 1.25 42 0 17\n", 17),
+                               (b"DONE 1 STAT 1 2.500 50.0 1.25 42 0 0\n", 0),
+                               (b"DONE 1 STAT 1 2.500 50.0 1.25 42 0\n", None),
+                               (b"DONE 1 STAT 1 2.500 50.0 1.25 42 0 junk\n", None),
+                               (b"DONE 1 STAT 1 2.500 50.0 1.25 42 0 -3\n", 0)):
+            def respond(process, frame, line=line):
+                process.stdout.feed(b"DATA 1 1\nA\n" + line)
+
+            process = FakeProcess(respond)
+            with patch("openai_server.ARCH", "olmoe"), \
+                 patch("openai_server.subprocess.Popen", return_value=process):
+                engine = Engine("olmoe", "model")
+            stats = engine.generate("Hi", 3, 0.25, 0.9, lambda text: None)
+            engine.close()
+            self.assertEqual(stats["prompt_tokens"], 42)
+            self.assertEqual(stats["cached_tokens"], expected, line)
+
+    def test_usage_carries_cached_tokens_only_when_known(self):
+        stats = {"prompt_tokens": 100, "completion_tokens": 5, "cached_tokens": 60}
+        self.assertEqual(APIHandler.usage(stats), {
+            "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
+            "prompt_tokens_details": {"cached_tokens": 60}})
+        self.assertEqual(APIHandler.usage({**stats, "cached_tokens": 0})["prompt_tokens_details"],
+                         {"cached_tokens": 0})
+        self.assertEqual(APIHandler.usage({**stats, "cached_tokens": 900})["prompt_tokens_details"],
+                         {"cached_tokens": 100})                    # never more than the prompt
+        for unknown in (None, "absent"):
+            partial = {k: v for k, v in stats.items() if k != "cached_tokens"}
+            if unknown is None:
+                partial["cached_tokens"] = None
+            self.assertNotIn("prompt_tokens_details", APIHandler.usage(partial))
+
     def test_dispatches_interleaved_requests_by_id(self):
         submitted = []
 

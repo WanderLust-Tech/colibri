@@ -135,8 +135,12 @@ TOPK <id> 5 <logprob> <hextext> ... ×5     # candidates for the sampled token (
 HITS <rows> <cols> <hex>                   # ~every 6 tokens: routed-expert bitmap since last HITS
 REPIN <layer> <eid> <old_tier> <gpu>       # live re-pin swap events, as they happen
 ...
-DONE <id> STAT <emitted> <tok_s> <hit_pct> <rss_gb> <prompt_tokens> <length_limited>
+DONE <id> STAT <emitted> <tok_s> <hit_pct> <rss_gb> <prompt_tokens> <length_limited> [<reused>]
 ```
+
+`<reused>` is optional: the prompt tokens the engine did not read again because the state it held already covered them
+(the `[PREFIX] reusing N of M` figure). The gateway returns it as `usage.prompt_tokens_details.cached_tokens` and in the
+request log. An engine that leaves it off is reported as "unknown", never as 0. qwen36, gemma4 and deepseek_v4 write it.
 
 and for `DECIDE`:
 

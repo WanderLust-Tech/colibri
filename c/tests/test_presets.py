@@ -436,7 +436,7 @@ class RecentRequestsTest(unittest.TestCase):
         log.write({"source": "router", "trace": "aa", "method": "POST", "status": 200, "seconds": 2.5, "path": "/v1/chat/completions",
                    "model": "terse", "preset": "terse", "resolved": "text-a-colibri", "request": {"messages": "secret"}})
         log.write({"source": "gateway", "trace": "aa", "status": 200, "seconds": 2.1, "prompt_tokens": 36,
-                   "completion_tokens": 15, "finish": "stop", "path": "/v1/chat/completions"})
+                   "completion_tokens": 15, "cached_tokens": 30, "finish": "stop", "path": "/v1/chat/completions"})
         log.write({"source": "router", "method": "POST", "status": 404, "seconds": 0.01, "path": "/v1/chat/completions",
                    "model": "nope", "error": "model_not_found"})
         return path, log
@@ -449,6 +449,8 @@ class RecentRequestsTest(unittest.TestCase):
             joined = items[1]
             self.assertEqual((joined["prompt_tokens"], joined["completion_tokens"], joined["finish"], joined["engine_seconds"]),
                              (36, 15, "stop", 2.1))
+            self.assertEqual(joined["cached_tokens"], 30)               # what the worker said was not read again
+            self.assertNotIn("cached_tokens", items[0])                 # a line that says nothing carries nothing
             self.assertEqual((joined["seconds"], joined["preset"]), (2.5, "terse"))     # the router's time is the request's
             self.assertNotIn("request", joined)
             self.assertNotIn("source", joined)

@@ -1777,7 +1777,7 @@ static void req_finish(Model *m, Req *r) {
     ColiServeDone done = { .completion_tokens = r->gen, .tokens_per_second = dt > 0 ? r->gen / dt : 0.0,
                            .cache_hit_percent = tot ? 100.0 * (double)(m->hits - r->h0) / tot : 100.0,
                            .rss_gb = rss_gb(), .prompt_tokens = r->np, .length_limited = r->cancel ? 0 : r->limited };
-    coli_serve_write_done(stdout, r->id, &done);
+    coli_serve_write_done_i32_suffix(stdout, r->id, &done, &r->reuse, 1);   /* last field: prompt tokens not read again */
     double disk = m->disk_s - r->disk0, mm_s = (m->t_moe - r->moe0) - disk; if (mm_s < 0) mm_s = 0;
     printf("PROF %.6f %d %d %.6f 0.0 %.6f %.6f %.6f %lld\n", dt, r->np, r->gen, disk, mm_s,
            m->t_attn - r->attn0, m->t_head - r->head0, m->forwards - r->fwd0);

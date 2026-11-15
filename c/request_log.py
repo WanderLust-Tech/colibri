@@ -104,7 +104,7 @@ def recent(path, limit=50):
         item = {k: v for k, v in record.items() if k not in ("request", "response", "source")}
         worker = workers.get(record.get("trace")) if record.get("source") == "router" else None
         if worker is not None:
-            for key in ("prompt_tokens", "completion_tokens", "finish"):
+            for key in ("prompt_tokens", "cached_tokens", "completion_tokens", "finish"):
                 if key in worker:
                     item[key] = worker[key]
             if "seconds" in worker:

@@ -149,9 +149,12 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
 - [ ] **H3. Keep `context_length` for models that have not run since the engines announced it (S).** Today the card appears
   after the model's first load.
 - [ ] **H4. Qwen-Image on Vulkan (M).** `make qwenimage VK=1` builds; unmeasured. ACE-Step has no Vulkan path.
-- [ ] **H6. Report reused tokens in `usage` (S).** The engines print `[PREFIX] reuse N/np` on stderr; the gateway could put it in
-  `usage.prompt_tokens_details.cached_tokens` so a client (the VS Code extension, the request log) can see whether its prompt was
-  a continuation instead of guessing from the time. The router's log does not carry the workers' stderr today.
+- [x] **H6. Report reused tokens in `usage` (S).** Done on `feat/cached-tokens`: the engine puts the reused count on the end of its
+  `DONE ... STAT` line (qwen36, gemma4 and deepseek_v4 do; the others leave it off), and the gateway returns it as
+  `usage.prompt_tokens_details.cached_tokens` (also on the streamed usage chunk) and as `cached_tokens` in the request log. A field
+  the engine did not send is left out, never shown as 0. Measured on Qwen3-Coder and Gemma E2B: cold 0, a continuation nearly all
+  of the last prompt; after an edit to the system message Qwen reports 0 (all or nothing) and Gemma the part before the edit.
+  Still to do: the VS Code extension showing it (the `cache:` log line could say "kept, N of M tokens").
 - [ ] **H5. VS Code extension (its own roadmap lists them):** `cache_slot` per chat so a long conversation is not read again each
   turn; picture, audio and video attachments for the models whose card lists them; presets from the settings; the reasoning
   switch per model; the key in SecretStorage.
