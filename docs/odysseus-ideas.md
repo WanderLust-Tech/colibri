@@ -109,7 +109,7 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 - [-] **Session folders, bulk select, swipe to delete, incognito chats** (`sessions.js`): our history is small and local.
 - [-] **Theme editor, tours, welcome screen with suggested actions:** not what this dashboard is for.
 
-## Status (2026-11-15, end of the list)
+## Status (2026-11-16, end of the list)
 
 | Item | State |
 |---|---|
@@ -118,9 +118,13 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 | C4 message actions (edit, branch, rewrite) | done, live in the dashboard |
 | C5 compare view | done, live in the dashboard |
 | B1 threat model | done, `docs/THREAT_MODEL.md` |
-| A1 tool output marked as data | done, extension 0.7.0 (installed); the extension folder has no git history, so it exists only as working files |
+| A1 tool output marked as data | done, extension 0.7.0 (installed); 0.9.0 adds "do not mention this notice" to the line under a result. The extension folder has no git history, so it exists only as working files |
 | A2 summarise old turns | done, extension 0.7.0 (installed); see "Not yet seen" below |
-| A3 fixed tool set per conversation | built in the extension 0.8.0 (vsix built, not installed); the selection and the search loop were run against the real model, the VS Code wiring has not run in a real chat |
+| A3 fixed tool set per conversation | done, extension 0.8.0 (installed); the selection and the search loop were run against the real model, the VS Code wiring has not run in a real chat |
+| Approval gate after outside content (second review) | built in the extension 0.9.0 (vsix built, not installed): `colibri.askAfterOutsideContent`; unit-tested, the wiring has not run in a real chat |
+| `colibri.trimAt` (second review) | built in the extension 0.9.0 (vsix built, not installed) |
+| Compare refuses a cut-off reply (second review) | done, live in the dashboard (fork `a20de2ee`) |
+| Edit warning, image trimming, non-English tool hints (second review) | covered already or set aside, see "Second review" below |
 | B2, B3 | notes: B2 only matters if the gateway starts fetching URLs, B3 if it starts sending side requests |
 | C6 phone install | set aside: browsers need HTTPS for it and the gateway is plain HTTP |
 
@@ -134,11 +138,13 @@ time). C5 was also driven against the live router with Gemma 26B and E4B.
   API, and the code compiles and passes lint, but no chat has been long enough to trim yet. Look for a `Summary:` line in
   the **Colibri** output channel the first time one does.
 - The extension's data marking in a real chat (tried through the API with three injected files, one run each).
+- The approval gate in a real chat (0.9.0): fetch a page, then ask for a file write; expect a notice and a card with no "Always allow". Look for `[permission] held back` in the **Colibri** output channel.
+- The tool budget's notice and status line in a real chat with a large MCP server (0.8.0).
 - Other languages: the new dashboard text is English only and falls back to it.
 
 ## Suggested order
 
-Everything worth doing from the list is done: C1 to C5, A1, A2, A3, B1. What is left is optional:
+Everything worth doing from the list is done: C1 to C5, A1, A2, A3, B1, and the second review's items (see below). What is left is optional:
 
 1. **B2 and B3** are rules to keep in mind, not work: write the URL guard before the gateway ever fetches a URL, and send
    side requests (titles, summaries) to a different model or only when the chat is idle.
