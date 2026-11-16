@@ -25,7 +25,7 @@ apply to us. The parts below do.
   reaches the model as plain text. Permission rules and the approval dialog still ask, but the model is not warned.
   *Care:* test on Qwen3-Coder first; small models treat wrappers unevenly. A tool result is appended, never rewritten,
   so a fixed wrapper does not disturb the cached prompt start.
-- [x] **A2. Summarise old turns instead of dropping them (M).** *Built 2026-11-15 in the extension 0.7.0 (`src/summary.ts`, setting `colibri.summariseTrimmed`, on by default; vsix built, not installed). Triggered when turns are dropped (our trim is lazy, so there is no fixed 85% line), folded into one rolling record kept in the system message. Tried on Qwen3-Coder: exact error and paths kept, an injected instruction in a tool result not followed; a first wording counted an unfinished test as done, fixed in the instructions.* At 85% of the model's window their compactor replaces
+- [x] **A2. Summarise old turns instead of dropping them (M).** *Built 2026-11-15 in the extension 0.7.0 (`src/summary.ts`, setting `colibri.summariseTrimmed`, on by default; installed by you 2026-11-15). Triggered when turns are dropped (our trim is lazy, so there is no fixed 85% line), folded into one rolling record kept in the system message. Tried on Qwen3-Coder: exact error and paths kept, an injected instruction in a tool result not followed; a first wording counted an unfinished test as done, fixed in the instructions.* At 85% of the model's window their compactor replaces
   older turns with a short structured summary: goal, what was done, current state, next steps, key values
   (`src/context_compactor.py`). It also repairs orphaned tool messages after a cut.
   *Us today:* we keep the last 150 messages and trim to fit the window, so the oldest context disappears silently and
@@ -67,7 +67,7 @@ apply to us. The parts below do.
 Compared against `web/src` (App, Brain, Brio, Profiling, ModelSwitcher, PresetsPanel, RequestsPanel). We already have
 tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and the model switcher.
 
-- [x] **C1. A metrics line under each reply (S).** *Built 2026-11-15 on `feat/web-reply-stats` (not merged, not live).* Odysseus shows tok/s, tokens, time and the share of the context
+- [x] **C1. A metrics line under each reply (S).** *Built 2026-11-15, live in the dashboard (`2a3a2bad`).* Odysseus shows tok/s, tokens, time and the share of the context
   window used under every reply (`displayMetrics` in `static/js/chatRenderer.js`). We can show more, because the
   server now says how much of the prompt was not read again: `266 of 279 tokens cached · 18 tok/s · 4.1 s · 0.4%
   of 65536`. This is the display half of H6 (`usage.prompt_tokens_details.cached_tokens` is live) and answers "why was
@@ -81,11 +81,11 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
   raise Q36_MAXT"; "the device stopped answering, the experts stay on the CPU" → "the GPU dropped out; replies are
   slower until the model reloads"; out-of-memory on load → "free memory or unload X". This is the most useful item in
   this section, because we have already hit the GPU one.
-- [x] **C4. Message actions: edit, fork from here, one-click rewrite (M).** *Built 2026-11-15 on `feat/web-message-actions`: a pencil on every user message (edit and resend), a branch button on every finished reply, and "rewrite shorter" / "explain simpler" on the last reply. Edit and branch put the original in Conversations first, so nothing is lost. Delete was left out (it breaks the turn order and the cache). Verified in a real browser against a fixture server: `web/tests/reply_ui.py`, which also covers C1 and C3 (first time either was seen on a screen).* Their per-reply footer has edit, regenerate
+- [x] **C4. Message actions: edit, fork from here, one-click rewrite (M).** *Built 2026-11-15, live in the dashboard (`0edb878b`): a pencil on every user message (edit and resend), a branch button on every finished reply, and "rewrite shorter" / "explain simpler" on the last reply. Edit and branch put the original in Conversations first, so nothing is lost. Delete was left out (it breaks the turn order and the cache). Verified in a real browser against a fixture server: `web/tests/reply_ui.py`, which also covers C1 and C3 (first time either was seen on a screen).* Their per-reply footer has edit, regenerate
   from here, fork conversation, "rewrite shorter", "explain simpler" and delete (`createMsgFooter`). Fork fits our
   cache well: the fork starts from the same prefix, so a continuation is cheap. Editing a middle message costs a cache
   miss from that point on; say so in the button's tooltip.
-- [x] **C5. Compare view (M-L).** *Built 2026-11-15 on `feat/web-compare`: a Compare page in the dashboard's navigation. Choose two to four chat models (presets too), type one prompt, and the models answer one after another into side-by-side columns, each with its stats line and a loading timer. Blind mode (on by default) shows "Answer A, B, C" in random order until you pick "This one is best" or reveal; a scoreboard (wins, rounds, %) is kept in the browser. A model that fails shows its plain-words reason and the rest go on. Checked in a browser against a fixture server (`web/tests/compare_ui.py`, including that the requests never overlap) and against the real router.* Same prompt to up to eight models side by side, blind voting, a scoreboard, and a
+- [x] **C5. Compare view (M-L).** *Built 2026-11-15, live in the dashboard: a Compare page in the dashboard's navigation. Choose two to four chat models (presets too), type one prompt, and the models answer one after another into side-by-side columns, each with its stats line and a loading timer. Blind mode (on by default) shows "Answer A, B, C" in random order until you pick "This one is best" or reveal; a scoreboard (wins, rounds, %) is kept in the browser. A model that fails shows its plain-words reason and the rest go on. Checked in a browser against a fixture server (`web/tests/compare_ui.py`, including that the requests never overlap) and against the real router.* Same prompt to up to eight models side by side, blind voting, a scoreboard, and a
   **parallel or sequential** switch (`static/js/compare/`). Sequential is the mode that suits us: the router holds one
   model at a time, so running them one after another is the natural order (each load is slow, so show progress). Fun and
   useful for choosing between Coder and Gemma on your own prompts; not urgent.
@@ -98,31 +98,41 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 - [-] **Session folders, bulk select, swipe to delete, incognito chats** (`sessions.js`): our history is small and local.
 - [-] **Theme editor, tours, welcome screen with suggested actions:** not what this dashboard is for.
 
-## Status (2026-11-15)
+## Status (2026-11-15, end of the list)
 
 | Item | State |
 |---|---|
-| C1 + C2 reply stats and answering model | done, live in the dashboard (`2a3a2bad`) |
-| C3 errors in plain words | done, live in the dashboard (`e76c2273`, merged `82046715`) |
+| C1 + C2 reply stats and answering model | done, live in the dashboard |
+| C3 errors in plain words | done, live in the dashboard |
+| C4 message actions (edit, branch, rewrite) | done, live in the dashboard |
+| C5 compare view | done, live in the dashboard |
 | B1 threat model | done, `docs/THREAT_MODEL.md` |
-| A1 tool output marked as data | built in the extension 0.6.1; **the vsix is built but not installed**, and the extension folder has no git history, so it is only in the working files |
-| A2 summarise old turns | built in the extension 0.7.0 (vsix built, not installed); the end-to-end path in a real chat is not exercised, only the request and the model's answer |
-| C4 message actions | built on `feat/web-message-actions` (not merged, not live) |
-| A3, B2, B3 | notes for later (B2 and B3 only matter if the gateway starts fetching URLs or sending side requests) |
-| C5 compare view | built on `feat/web-compare` (not merged, not live) |
-| C6 phone install | open, set aside: browsers need HTTPS for it and the gateway is plain HTTP |
+| A1 tool output marked as data | done, extension 0.7.0 (installed); the extension folder has no git history, so it exists only as working files |
+| A2 summarise old turns | done, extension 0.7.0 (installed); see "Not yet seen" below |
+| A3, B2, B3 | notes for later: B2 only matters if the gateway starts fetching URLs, B3 if it starts sending side requests |
+| C6 phone install | set aside: browsers need HTTPS for it and the gateway is plain HTTP |
 
-Checked in a real browser (2026-11-15, fixture server): the reply line, the error banner and the message actions. Not exercised live: the "via preset" label
-(no presets configured) and the extension's wrapper in a real chat (only the model, through the API, with three
-injected files). Other languages fall back to English for the new dashboard text.
+**How the dashboard items were checked.** In a real browser (Playwright, headless Chromium) against a fixture server:
+`web/tests/reply_ui.py` (C1, C3, C4) and `web/tests/compare_ui.py` (C5, including that the compared models run one at a
+time). C5 was also driven against the live router with Gemma 26B and E4B.
+
+**Not yet seen.**
+- The "via preset X" label on a reply (no presets are configured, so only unit tests cover it).
+- The extension's summary in a real, long VS Code chat: the summary request and the model's answer were tried through the
+  API, and the code compiles and passes lint, but no chat has been long enough to trim yet. Look for a `Summary:` line in
+  the **Colibri** output channel the first time one does.
+- The extension's data marking in a real chat (tried through the API with three injected files, one run each).
+- Other languages: the new dashboard text is English only and falls back to it.
 
 ## Suggested order
 
-Done: 1 (C1 + C2), 2 (A1), 3 (C3), 4 (B1), 5 (A2). Next:
+Everything worth doing from the list is done: C1 to C5, A1, A2, B1. What is left is optional:
 
-5. **A2** (done).
-6. **C4** (done), **C5** (done).
-7. The rest only if something annoys you.
+1. **B2 and B3** are rules to keep in mind, not work: write the URL guard before the gateway ever fetches a URL, and send
+   side requests (titles, summaries) to a different model or only when the chat is idle.
+2. **A3** only if tool descriptions grow into a real share of a prompt.
+3. Translations of the new dashboard text, if you use another language.
+4. C6 only if the gateway ever gets HTTPS.
 
 ## Where to look in Odysseus (read only)
 
