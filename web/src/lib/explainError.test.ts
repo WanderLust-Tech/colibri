@@ -6,7 +6,7 @@ import { explainError } from "./explainError"
 describe("explainError", () => {
   it("reads the window and the prompt out of a context error, and offers a new chat", () => {
     const message = "This model's maximum context length is 65536 tokens, however your messages resulted in at least 70123 tokens. Please shorten the conversation, or restart the server with a larger CTX."
-    expect(explainError(message)).toEqual({ key: "explain.context", vars: { limit: 65536, used: 70123 }, action: "newChat" })
+    expect(explainError(message)).toEqual({ key: "explain.context", vars: { limit: "65,536", used: "70,123" }, action: "newChat" })
   })
 
   it("still recognises a context error whose figures are missing", () => {

@@ -29,6 +29,12 @@ const en: Record<string, string> = {
   "ui.copyError": "Could not copy the text. Select the response to copy it.",
   "ui.regenerate": "Regenerate response",
   "ui.continue": "Continue this reply",
+  "ui.edit": "Edit and resend: the chat is cut here and everything after this message leaves the prompt, so the model reads from here again (the original stays in History)",
+  "ui.branch": "Branch from here: a new chat with this reply and what came before (the original stays in History)",
+  "ui.rewriteShorter": "Rewrite shorter (adds a message, so what came before stays cached)",
+  "ui.rewriteSimpler": "Explain simpler (adds a message, so what came before stays cached)",
+  "rewrite.shorterPrompt": "Rewrite your last answer shorter. Keep what matters and drop the rest.",
+  "rewrite.simplerPrompt": "Explain your last answer again in simpler words, as if to someone new to the subject.",
   "ui.archived": "Archived conversation",
   "ui.historyMemory": "Conversations are kept for this open session. Export a conversation to save it.",
   "ui.explore": "Explore",
@@ -132,7 +138,7 @@ const en: Record<string, string> = {
   "status.generationFailed": "Generation failed.",
 
   // what went wrong, in plain words (shown above the server's own message)
-  "explain.context": "This chat is longer than the model's window ({{used}} tokens against {{limit}}). Start a new chat, or ask for a shorter conversation; the server's CTX setting sets the window.",
+  "explain.context": "This chat is longer than the model's window ({{used}} tokens against {{limit}}). Start a new chat, or restart the server with a larger CTX.",
   "explain.contextPlain": "This chat is longer than the model's window. Start a new chat.",
   "explain.gpu": "The GPU stopped answering, so the model's experts now run on the CPU. Replies are slower until the model is unloaded and loaded again.",
   "explain.memory": "The machine ran out of memory. Unload a model you are not using, or close other programs, then try again.",

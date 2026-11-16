@@ -81,7 +81,7 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
   raise Q36_MAXT"; "the device stopped answering, the experts stay on the CPU" → "the GPU dropped out; replies are
   slower until the model reloads"; out-of-memory on load → "free memory or unload X". This is the most useful item in
   this section, because we have already hit the GPU one.
-- [ ] **C4. Message actions: edit, fork from here, one-click rewrite (M).** Their per-reply footer has edit, regenerate
+- [x] **C4. Message actions: edit, fork from here, one-click rewrite (M).** *Built 2026-11-15 on `feat/web-message-actions`: a pencil on every user message (edit and resend), a branch button on every finished reply, and "rewrite shorter" / "explain simpler" on the last reply. Edit and branch put the original in Conversations first, so nothing is lost. Delete was left out (it breaks the turn order and the cache). Verified in a real browser against a fixture server: `web/tests/reply_ui.py`, which also covers C1 and C3 (first time either was seen on a screen).* Their per-reply footer has edit, regenerate
   from here, fork conversation, "rewrite shorter", "explain simpler" and delete (`createMsgFooter`). Fork fits our
   cache well: the fork starts from the same prefix, so a continuation is cheap. Editing a middle message costs a cache
   miss from that point on; say so in the button's tooltip.
@@ -107,10 +107,11 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 | B1 threat model | done, `docs/THREAT_MODEL.md` |
 | A1 tool output marked as data | built in the extension 0.6.1; **the vsix is built but not installed**, and the extension folder has no git history, so it is only in the working files |
 | A2 summarise old turns | built in the extension 0.7.0 (vsix built, not installed); the end-to-end path in a real chat is not exercised, only the request and the model's answer |
+| C4 message actions | built on `feat/web-message-actions` (not merged, not live) |
 | A3, B2, B3 | notes for later (B2 and B3 only matter if the gateway starts fetching URLs or sending side requests) |
-| C4 message actions, C5 compare view, C6 phone install | open |
+| C5 compare view, C6 phone install | open |
 
-Not checked by eye: the reply line and the error banner (no browser here). Not exercised live: the "via preset" label
+Checked in a real browser (2026-11-15, fixture server): the reply line, the error banner and the message actions. Not exercised live: the "via preset" label
 (no presets configured) and the extension's wrapper in a real chat (only the model, through the API, with three
 injected files). Other languages fall back to English for the new dashboard text.
 
@@ -119,7 +120,7 @@ injected files). Other languages fall back to English for the new dashboard text
 Done: 1 (C1 + C2), 2 (A1), 3 (C3), 4 (B1), 5 (A2). Next:
 
 5. **A2** (done).
-6. **C4**, then **C5**, if you want more from the dashboard: fork-from-here is cheap on our cache.
+6. **C4** (done), then **C5**, if you want more from the dashboard.
 7. The rest only if something annoys you.
 
 ## Where to look in Odysseus (read only)

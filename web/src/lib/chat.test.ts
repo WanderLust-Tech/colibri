@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { streamChat, type ChatMessage } from "./api"
-import { resendFrom } from "./chat"
+import { branchAt, editFrom, isPlainTurn, REWRITES, resendFrom } from "./chat"
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -111,5 +111,54 @@ describe("regenerate request body", () => {
     expect(body.messages[0].content).toEqual([
       { type: "image_url", image_url: { url: photo } },
     ])
+  })
+})
+
+describe("editFrom", () => {
+  const photo = "data:image/png;base64,ccc"
+  const chat: ChatMessage[] = [user("first"), assistant("one"), user("second", [photo]), assistant("two")]
+
+  it("cuts the conversation at the message and hands back its text and pictures", () => {
+    const turn = editFrom(chat, 2)
+    expect(turn).toEqual({ text: "second", pictures: [photo], previous: chat.slice(0, 2) })
+  })
+
+  it("can start the conversation over from its first message", () => {
+    expect(editFrom(chat, 0)).toEqual({ text: "first", pictures: [], previous: [] })
+  })
+
+  it("does not touch the original array, and refuses what is not a plain user turn", () => {
+    editFrom(chat, 2)
+    expect(chat).toHaveLength(4)
+    expect(editFrom(chat, 1)).toBeNull()
+    expect(editFrom(chat, 9)).toBeNull()
+    expect(editFrom([{ id: "i", role: "user", content: "a cat", mode: "image" }], 0)).toBeNull()
+  })
+})
+
+describe("branchAt", () => {
+  const chat: ChatMessage[] = [user("first"), assistant("one"), user("second"), assistant("two")]
+
+  it("keeps the reply and everything before it", () => {
+    expect(branchAt(chat, 1)).toEqual(chat.slice(0, 2))
+    expect(branchAt(chat, 3)).toEqual(chat)
+  })
+
+  it("is null for a user message, an empty reply or an image turn", () => {
+    expect(branchAt(chat, 0)).toBeNull()
+    expect(branchAt([user("q"), assistant("  ")], 1)).toBeNull()
+    expect(branchAt([user("q"), { id: "g", role: "assistant", content: "", mode: "image" }], 1)).toBeNull()
+  })
+})
+
+describe("one-click rewrites", () => {
+  it("name dictionary keys, so the wording follows the language", () => {
+    expect(REWRITES.shorter).toBe("rewrite.shorterPrompt")
+    expect(REWRITES.simpler).toBe("rewrite.simplerPrompt")
+  })
+
+  it("plain means no image or music mode", () => {
+    expect(isPlainTurn(assistant("x"))).toBe(true)
+    expect(isPlainTurn({ id: "m", role: "assistant", content: "", mode: "music" })).toBe(false)
   })
 })

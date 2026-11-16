@@ -24,7 +24,7 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Camera, Grid3x3, Palette, Music, Waves, Guitar} from "lucide-react"
+  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -39,7 +39,7 @@ import {
   DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, derivedSize, imageFileName, loadPicture, parseSeed,
   parseSize, presetOf, randomSeed, sizeKey, validSide, type EditPicture, type ImageSize,
 } from "@/lib/images"
-import { resendFrom } from "@/lib/chat"
+import { branchAt, editFrom, isPlainTurn, resendFrom, REWRITES, type Rewrite } from "@/lib/chat"
 import { DEFAULT_MUSIC_LIMITS } from "@/lib/music"
 import { useMusic } from "@/lib/useMusic"
 import { activeRequests, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
@@ -539,6 +539,25 @@ export default function App() {
     if (messages.length) setArchives(items => [{ id: message("system", "").id, slot: cacheSlot, messages: [...messages] }, ...items])
     clearChat(); setDraft(""); setView("chat"); requestAnimationFrame(() => draftRef.current?.focus())
   }
+  /* The conversation on screen goes to History first, so editing or branching never loses it. */
+  const archiveChat = () => { if (messages.length) setArchives(items => [{ id: message("system", "").id, slot: cacheSlot, messages: [...messages] }, ...items]) }
+  const editMessage = (index: number) => {
+    if (loading) return
+    const turn = editFrom(messages, index)
+    if (!turn) return
+    archiveChat()
+    updateMessages(turn.previous); setDraft(turn.text); setPending(turn.pictures); setError("")
+    requestAnimationFrame(() => draftRef.current?.focus())
+  }
+  const branchFrom = (index: number) => {
+    if (loading) return
+    const kept = branchAt(messages, index)
+    if (!kept) return
+    archiveChat()
+    updateMessages(kept); setError("")
+    requestAnimationFrame(() => draftRef.current?.focus())
+  }
+  const rewrite = (kind: Rewrite) => { if (!loading) void send(t(REWRITES[kind]), messages, [], false) }
   const exportChat = () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify({ model, messages }, null, 2)], { type: "application/json" }))
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = "colibri-chat.json"; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
@@ -710,7 +729,8 @@ export default function App() {
                   <div className="reasoning-body">{item.reasoning}</div>
                 </details>
               : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
-            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}</div>}
+            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}{!loading && !imageMode && isPlainTurn(item) && <button className="icon-action" aria-label={t("ui.branch")} title={t("ui.branch")} onClick={() => branchFrom(index)}><GitBranch /></button>}{index === messages.length - 1 && !loading && !imageMode && isPlainTurn(item) && <><button className="icon-action" aria-label={t("ui.rewriteShorter")} title={t("ui.rewriteShorter")} onClick={() => rewrite("shorter")}><Minimize2 /></button><button className="icon-action" aria-label={t("ui.rewriteSimpler")} title={t("ui.rewriteSimpler")} onClick={() => rewrite("simpler")}><Lightbulb /></button></>}</div>}
+            {item.role === "user" && !loading && !imageMode && isPlainTurn(item) && <div className="message-actions"><button className="icon-action" aria-label={t("ui.edit")} title={t("ui.edit")} onClick={() => editMessage(index)}><Pencil /></button></div>}
             {item.role === "assistant" && item.stats && (() => { const parts = replyParts(item.stats, t); return parts.length ? <div className="reply-stats" title={t("reply.help")}>{parts.join(" · ")}</div> : null })()}
           </article>)}<div ref={bottomRef} /></div>
         </div>}

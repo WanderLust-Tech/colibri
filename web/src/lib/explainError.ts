@@ -11,14 +11,14 @@ export interface ErrorExplanation {
   action?: "newChat"
 }
 
-const number = (value: string) => Number(value.replace(/[,_]/g, ""))
+const grouped = (value: string) => Number(value.replace(/[,_]/g, "")).toLocaleString("en-US")
 
 export function explainError(message: string): ErrorExplanation | null {
   const text = (message || "").trim()
   if (!text) return null
 
   const context = /maximum context length is\s+([\d,_]+)\s+tokens.*?(?:at least|resulted in)\s+([\d,_]+)\s+tokens/is.exec(text)
-  if (context) return { key: "explain.context", vars: { limit: number(context[1]), used: number(context[2]) }, action: "newChat" }
+  if (context) return { key: "explain.context", vars: { limit: grouped(context[1]), used: grouped(context[2]) }, action: "newChat" }
   if (/context_length_exceeded|CONTEXT_EXCEEDED/.test(text)) return { key: "explain.contextPlain", action: "newChat" }
 
   /* The GPU path says this on the engine's own log; it reaches the page only if a server forwards it. */
