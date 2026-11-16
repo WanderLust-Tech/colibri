@@ -47,7 +47,7 @@ claims about ComfyUI are theirs and were not re-read.
 | 7 Keep the API spec honest | open |
 | 8 Security headers on the dashboard | open |
 | 9 Model catalogue (offline entries, verify, header info) | open |
-| 10 Smaller ideas (priority lane, SSIM baselines, log tail, echoed metadata) | open |
+| 10 Smaller ideas | priority lane done 2026-11-16 (local main, not deployed: the router needs a restart); SSIM baselines, log tail, echoed metadata open |
 
 Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), then 2 and 3 as one project, then memory
 (4a, 4b) once there is a measurement of what the reaper gets wrong today.
@@ -150,8 +150,9 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   the first load); name the missing piece when a container is not recognised. *Where:* `app/assets/`,
   `comfy/model_detection.py`, `app/model_manager.py`.
 - [ ] **10. Smaller ideas.**
-  - A priority lane, so a short chat goes ahead of queued music and image jobs (ComfyUI never interrupts a running job
-    either). *Where:* `number` / `front` in `post_prompt`. *Nearest here:* a first-in-first-out gate.
+  - **Done 2026-11-16:** a priority lane, so a short chat goes ahead of queued music and image jobs (ComfyUI never
+    interrupts a running job either; neither does this). Pictures and songs are low, the rest normal, and the header
+    `X-Colibri-Priority: low|normal|high` overrides it; see "Priority" in `docs/router.md`. *Where:* `number` / `front` in `post_prompt`. *Nearest here:* a first-in-first-out gate.
   - An image-quality check by structural similarity against saved baselines (ComfyUI uses 0.95), which would settle open
     item H4 (Qwen-Image on Vulkan, unmeasured). *Where:* `tests/compare/test_quality.py`.
   - A live log tail (dashboard tab, VS Code output channel) for load failures and slow loads. *Where:*

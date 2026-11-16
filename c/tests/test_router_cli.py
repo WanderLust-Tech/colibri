@@ -40,7 +40,7 @@ class PsAndStopTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         header = next(line for line in out.splitlines() if "NAME" in line)
         row = next(line for line in out.splitlines() if "text-a-colibri" in line)
-        self.assertEqual(header.split(), ["NAME", "STATE", "MEMORY", "UNLOADS", "IN"])
+        self.assertEqual(header.split(), ["NAME", "STATE", "MEMORY", "RUNS", "ON", "UNLOADS", "IN"])
         self.assertEqual(row.split()[1], "loaded")
         self.assertRegex(row, r"\d+m \d\ds")                           # about 10 minutes left
         self.assertNotIn("text-b-colibri", out, "a model that is not loaded is not listed")

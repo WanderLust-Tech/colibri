@@ -441,6 +441,77 @@ class OneModelAtATimeTest(unittest.TestCase):
         self.assertEqual((status, body["error"]["code"]), (429, "queue_timeout"))
 
 
+class PriorityTest(unittest.TestCase):
+    def test_the_priority_of_a_request(self):
+        self.assertEqual(router.request_priority("/v1/chat/completions", {}), 0)
+        self.assertEqual(router.request_priority("/v1/images/generations", {}), -1)
+        self.assertEqual(router.request_priority("/v1/images/edits", {}), -1)
+        self.assertEqual(router.request_priority("/v1/audio/music", {}), -1)
+        self.assertEqual(router.request_priority("/v1/audio/transcriptions", {}), 0)
+        self.assertEqual(router.request_priority("/v1/images/generations", {"X-Colibri-Priority": "HIGH"}), 1)
+        self.assertEqual(router.request_priority("/v1/chat/completions", {"X-Colibri-Priority": " low "}), -1)
+        self.assertEqual(router.request_priority("/v1/chat/completions", {"X-Colibri-Priority": "urgent"}), 0, "a value it does not know is ignored")
+        self.assertEqual(router.request_priority("/v1/images/generations", {"X-Colibri-Priority": ""}), -1)
+
+    def order(self, arrivals, running="runner"):
+        """Arrivals are (name, key, priority) in the order they ask; returns the order they get through. A request
+        for another key is already running, so every arrival has to wait; it is released when all are queued."""
+        gate = router.Gate(max_queue=20, timeout=10.0)
+        gate.acquire(running)
+        through, threads = [], []
+
+        def go(name, key, priority):
+            gate.acquire(key, priority)
+            through.append(name)
+            time.sleep(0.05)
+            gate.release(key)
+
+        for name, key, priority in arrivals:
+            thread = threading.Thread(target=go, args=(name, key, priority))
+            thread.start()
+            threads.append(thread)
+            time.sleep(0.15)                      # so they ask in the order given
+        self.assertEqual(gate.stats()["queued"], len(arrivals))
+        gate.release(running)
+        for thread in threads:
+            thread.join()
+        return through
+
+    def test_a_chat_goes_ahead_of_waiting_renders_but_not_ahead_of_an_earlier_chat(self):
+        got = self.order([("render1", "image1", -1), ("render2", "image2", -1), ("chat1", "text1", 0),
+                          ("render3", "image3", -1), ("chat2", "text2", 0)])
+        self.assertEqual(got, ["chat1", "chat2", "render1", "render2", "render3"])
+
+    def test_the_same_priority_keeps_its_order(self):
+        got = self.order([("a", "m1", 0), ("b", "m2", 0), ("c", "m3", 0)])
+        self.assertEqual(got, ["a", "b", "c"])
+
+    def test_high_goes_ahead_of_normal(self):
+        got = self.order([("normal", "m1", 0), ("high", "m2", 1), ("low", "m3", -1)])
+        self.assertEqual(got, ["high", "normal", "low"])
+
+    def test_through_the_router_the_header_lets_a_later_request_overtake_a_waiting_one(self):
+        rig = Rig(self, [entry("text-a"), entry("text-b"), entry("text-c")])
+        for name in ("text-a", "text-b", "text-c"):
+            rig.chat(name + "-colibri")                      # loaded, so the order below is the gate's alone
+        open(rig.log, "w").close()
+        threads = []
+
+        def ask(model, headers=None, sleep=0.3):
+            rig.call("POST", "/v1/chat/completions", {"model": model, "messages": [], "sleep": sleep}, headers)
+
+        for model, headers, sleep in (("text-a-colibri", None, 1.2), ("text-b-colibri", None, 0.3),
+                                      ("text-c-colibri", {"X-Colibri-Priority": "high"}, 0.3)):
+            thread = threading.Thread(target=ask, args=(model, headers, sleep))
+            thread.start()
+            threads.append(thread)
+            time.sleep(0.4)                                  # a runs; b waits; c arrives last, with the header
+        for thread in threads:
+            thread.join()
+        started = [name for _, kind, name in rig.events() if kind == "start"]
+        self.assertEqual(started, ["text-a-colibri", "text-c-colibri", "text-b-colibri"])
+
+
 class MakingRoomTest(unittest.TestCase):
     def test_a_model_that_does_not_fit_stops_the_idle_one(self):
         rig = Rig(self, [entry("text-a", size=6 * GB), entry("text-b", size=6 * GB)], total=10 * GB)

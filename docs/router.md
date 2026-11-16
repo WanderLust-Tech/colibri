@@ -38,7 +38,7 @@ router
   finish first, so it can save what it learned;
 - **lets one model compute at a time**. colibri's models share the CPU, so two renders at once each run
   several times slower. Requests for the same model still run together (its own queue decides), but a
-  request for another model waits until the running ones finish, in order, up to `--max-queue` waiting
+  request for another model waits until the running ones finish, in order (a chat goes ahead of waiting pictures and songs, see "Priority"), up to `--max-queue` waiting
   and `--queue-timeout` seconds, with the same `429` the workers use. `--parallel-models` turns this
   off;
 - **streams**: server-sent events and progress lines reach the client as they are made. A client that
@@ -70,6 +70,25 @@ has runners.
 
 What the router learns is kept in `router.json` in the setup folder (`%LOCALAPPDATA%\colibri` on
 Windows): how much memory each model really took the last time it was loaded.
+
+## Priority
+
+A picture or a song takes minutes, sometimes an hour; a chat takes seconds. While the gate lets only one model compute,
+a chat for another model has to wait for the render in front of it, and, in a first-come queue, for every render queued
+before the chat. So the queue has a priority: **a chat that arrives while renders are waiting goes ahead of them.**
+Nothing is interrupted: a request that is already running always finishes, and requests of the same priority keep their
+order.
+
+| Request | Priority |
+|---|---|
+| `/v1/images/generations`, `/v1/images/edits`, `/v1/audio/music` | low |
+| everything else (chat, completions, messages, transcriptions, System One) | normal |
+
+A client can choose with the header `X-Colibri-Priority: low`, `normal` or `high`; any other value is ignored (the
+default applies), since priority is a hint and never a reason to refuse a request. Two things to know: a low-priority
+request that keeps being overtaken still gives up after `--queue-timeout`, so a long run of chats can starve a waiting
+render into a `429`; and the priority only orders what is *waiting*, so a chat still waits for the render that is
+*running* (stop it with a client disconnect, or see `coli stop`).
 
 ## Keep-alive, per request
 

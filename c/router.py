@@ -58,6 +58,24 @@ PRESET_FILE_LOCK = threading.Lock()      # one change to the presets file at a t
 COMPUTE_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone",
                  "/v1/images/generations", "/v1/images/edits", "/v1/audio/music", "/v1/audio/transcriptions")
 
+# Who goes first in the queue. A render (a picture, a song) takes minutes to an hour and a chat takes seconds, so a chat
+# that arrives while renders are waiting goes ahead of them. Nothing is interrupted: a request that is already
+# running always finishes, and requests of the same priority keep their order. A client can say otherwise with the
+# header `X-Colibri-Priority: low | normal | high`.
+PRIORITY_HEADER = "X-Colibri-Priority"
+PRIORITIES = {"low": -1, "normal": 0, "high": 1}
+LOW_PRIORITY_PATHS = ("/v1/images/generations", "/v1/images/edits", "/v1/audio/music")
+
+
+def request_priority(path, headers):
+    """The queue priority of a request: what its header says, else low for a render and normal for the rest.
+    A header that says something else is ignored, not an error: priority is a hint, never a reason to refuse."""
+    said = (headers.get(PRIORITY_HEADER) or "").strip().lower() if headers is not None else ""
+    if said in PRIORITIES:
+        return PRIORITIES[said]
+    return PRIORITIES["low"] if path in LOW_PRIORITY_PATHS else PRIORITIES["normal"]
+
+
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
               "transfer-encoding", "upgrade", "content-length", "host", "expect"}
 DROP_REQUEST = HOP_BY_HOP | {"authorization", "x-api-key", "origin", "referer", "accept-encoding"}
@@ -716,7 +734,11 @@ class Gate:
 
     A request for model M may start when no other model has requests running and no request
     for another model is waiting ahead of it. Waiters are served in order, so a model that is
-    asked for continuously cannot starve the others. Bounded like a worker's own queue."""
+    asked for continuously cannot starve the others. Bounded like a worker's own queue.
+
+    A request with a higher priority goes ahead of the waiting requests with a lower one (it never interrupts a
+    running one), and keeps its order among those of the same priority. A low-priority request that keeps being
+    overtaken still gives up with the usual timeout."""
 
     def __init__(self, max_queue=8, timeout=300.0, parallel=False):
         self.max_queue, self.timeout, self.parallel = max_queue, timeout, parallel
@@ -727,14 +749,20 @@ class Gate:
     def _may_run(self, ticket, key):
         if any(k != key and n > 0 for k, n in self.active.items()):
             return False
-        for other, other_key in self.waiting:
+        for other, other_key, _ in self.waiting:
             if other is ticket:
                 return True
             if other_key != key:
                 return False
         return True
 
-    def acquire(self, key):
+    def _enqueue(self, ticket, key, priority):
+        position = len(self.waiting)
+        while position > 0 and self.waiting[position - 1][2] < priority:
+            position -= 1
+        self.waiting.insert(position, (ticket, key, priority))
+
+    def acquire(self, key, priority=0):
         if self.parallel:
             with self.cv:
                 self.active[key] += 1
@@ -748,7 +776,7 @@ class Gate:
             if len(self.waiting) >= self.max_queue:
                 raise ApiError(429, "The inference queue is full.", "queue_full", None, "rate_limit_error",
                                {"Retry-After": "1"})
-            self.waiting.append((ticket, key))
+            self._enqueue(ticket, key, priority)
             try:
                 while not self._may_run(ticket, key):
                     left = deadline - time.monotonic()
@@ -758,7 +786,7 @@ class Gate:
                     self.cv.wait(left)
                 self.active[key] += 1
             finally:
-                self.waiting.remove((ticket, key))
+                self.waiting.remove((ticket, key, priority))
                 self.cv.notify_all()
 
     def release(self, key):
@@ -1272,7 +1300,7 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def serve_model(self, entry, path, raw, keep=UNSET):
         gate, pool = self.server.gate, self.server.pool
-        gate.acquire(entry["key"])
+        gate.acquire(entry["key"], request_priority(path, self.headers))
         try:
             worker = pool.acquire(entry)
             if keep is not UNSET:
