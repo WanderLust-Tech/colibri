@@ -3,6 +3,17 @@
 What we can learn from [Odysseus](https://github.com/pewdiepie-archdaemon/odysseus), a self-hosted AI chat and
 agent workspace. Read on 2026-11-15 from a local clone (`C:\code\odysseus`, branch `dev`, commit `fc8e6366`, June 2026).
 
+**Reviewed up to this Odysseus commit** (so the next look only needs what came after):
+
+| | |
+|---|---|
+| Repository | https://github.com/odysseus-dev/odysseus (local clone `C:\code\odysseus`, branch `dev`) |
+| Commit | `fc8e6366ddb627935af092ba81ea5faa5d05e1b3` — "test: mark first slow tests from duration evidence (#3711)", 2026-06-10 |
+| Reviewed | 2026-11-15; every item in this list was taken from that tree |
+| Next review | `git -C C:\code\odysseus fetch` then `git -C C:\code\odysseus log --oneline fc8e6366..origin/dev`; look at changes under `src/prompt_security.py`, `src/context_compactor.py`, `src/tool_index.py`, `static/js/chatRenderer.js`, `static/js/compare/`, `static/js/cookbook-diagnosis.js`, `THREAT_MODEL.md` (the files the table at the end of this page lists) |
+
+When a later review is done, change the commit above to the new one.
+
 **Licence: read this first.** Odysseus is AGPL-3.0-or-later; Colibri is Apache-2.0. Copying its code into
 Colibri would force a licence change, so **nothing here is copied**. The file names below say where an idea lives
 so we can re-read it; every item is to be written from scratch. (The same rule we used for the Claude Code source.)
