@@ -59,6 +59,8 @@ import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
 import RequestsPanel from "@/components/RequestsPanel"
+import { Compare } from "@/components/Compare"
+import { isChatModel } from "@/lib/compare"
 import { useLocale } from "./i18n"
 
 const message = (role: ChatMessage["role"], content: string, images?: string[]): ChatMessage => {
@@ -82,6 +84,8 @@ export default function App() {
   })
   const [apiKey, setApiKey] = useState(linkKey)
   const [models, setModels] = useState<string[]>([])
+  const [modelInfos, setModelInfos] = useState<ModelInfo[]>([])
+  const chatModelInfos = useMemo(() => modelInfos.filter(isChatModel), [modelInfos])
   /* Models the server marks with the image_generation capability. With one of
      them selected the conversation generates pictures instead of text. */
   const [imageModels, setImageModels] = useState<string[]>([])
@@ -248,6 +252,7 @@ export default function App() {
       const info = await listModelInfo(baseUrl, apiKey, controller.signal)
       const found = info.map((item) => item.id)
       setModels(found)
+      setModelInfos(info)
       setPresetInfos(Object.fromEntries(info.flatMap((item) => item.preset ? [[item.id, item.preset] as const] : [])))
       setContextLengths(Object.fromEntries(info.flatMap((item) => item.contextLength ? [[item.id, item.contextLength] as const] : [])))
       setImageModels(info.filter(generatesImages).map((item) => item.id))
@@ -716,6 +721,7 @@ export default function App() {
           {settingsPage === "system" && <section className="settings-card">{runtimeControls}{metrics}</section>}
         </div>
       </section> : view === "brain" ? <BrainWorkspace baseUrl={baseUrl} apiKey={apiKey} connected={connected} />
+      : view === "compare" ? <Compare baseUrl={baseUrl} apiKey={apiKey} connected={connected} models={chatModelInfos} settings={{ temperature, maxTokens, thinking }} />
       : view === "profiling" ? <section className="profiling-workspace"><header className="page-heading"><span>COLIBRI / ENGINE</span><h1>Profiling</h1></header>{metrics}<Profiling baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>
       : <section className={cn("chat-view", empty && "empty")} hidden={view === "brio"}>
         {empty ? <div className="welcome-brand"><Brand word /></div> : <div className="conversation" role="log" aria-label={t("nav.chat")}>
