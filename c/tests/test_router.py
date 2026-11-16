@@ -512,6 +512,45 @@ class PriorityTest(unittest.TestCase):
         self.assertEqual(started, ["text-a-colibri", "text-c-colibri", "text-b-colibri"])
 
 
+class LogsEndpointTest(unittest.TestCase):
+    def test_logs_returns_what_came_after_a_number(self):
+        rig = Rig(self, [entry("text-a")])
+        status, _, _, body = rig.call("GET", "/v1/logs")
+        self.assertEqual(status, 200)
+        mark = body["next"]
+        router.log_tail.TAIL.add("router", "a model is loading")
+        router.log_tail.TAIL.add("text-a-colibri", "loaded 3 of 48 layers")
+        status, _, _, body = rig.call("GET", f"/v1/logs?since={mark}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["object"], "list")
+        self.assertEqual([(l["source"], l["text"]) for l in body["data"]],
+                         [("router", "a model is loading"), ("text-a-colibri", "loaded 3 of 48 layers")])
+        self.assertEqual(body["next"], mark + 2)
+        _, _, _, only = rig.call("GET", f"/v1/logs?since={mark}&source=text-a-colibri")
+        self.assertEqual([l["text"] for l in only["data"]], ["loaded 3 of 48 layers"])
+        _, _, _, none = rig.call("GET", f"/v1/logs?since={body['next']}")
+        self.assertEqual(none["data"], [])
+
+    def test_a_workers_own_output_reaches_the_tail(self):
+        rig = Rig(self, [entry("text-a")])
+        mark = rig.call("GET", "/v1/logs")[3]["next"]
+        rig.chat("text-a-colibri")                         # the fake worker prints "fake worker ... listening" when it starts
+        deadline = time.monotonic() + 5
+        seen = []
+        while time.monotonic() < deadline and not any("listening" in l["text"] for l in seen):
+            seen = rig.call("GET", f"/v1/logs?since={mark}&source=text-a-colibri")[3]["data"]
+            time.sleep(0.1)
+        self.assertTrue(any("listening" in l["text"] for l in seen), seen)
+
+    def test_logs_needs_the_key_and_a_number(self):
+        rig = Rig(self, [entry("text-a")], api_key="sekrit")
+        self.assertEqual(rig.call("GET", "/v1/logs")[0], 401)
+        auth = {"Authorization": "Bearer sekrit"}
+        self.assertEqual(rig.call("GET", "/v1/logs", headers=auth)[0], 200)
+        status, _, _, body = rig.call("GET", "/v1/logs?since=abc", headers=auth)
+        self.assertEqual((status, body["error"]["param"]), (400, "since"))
+
+
 class MakingRoomTest(unittest.TestCase):
     def test_a_model_that_does_not_fit_stops_the_idle_one(self):
         rig = Rig(self, [entry("text-a", size=6 * GB), entry("text-b", size=6 * GB)], total=10 * GB)

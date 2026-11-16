@@ -454,6 +454,7 @@ const en: Record<string, string> = {
   "music.clipsLost": "The clips are not kept after a reload: choose them again",
   "ui.presets": "Presets",
   "ui.requests": "Requests",
+  "ui.log": "Log",
   "sidebar.presets": "Presets",
   "presets.title": "Presets",
   "presets.intro": "A preset is a model with a name of its own: a system prompt and settings that go with it. It is in the model list like any model, and a request that names it gets what it carries; what you set yourself wins.",
@@ -503,6 +504,16 @@ const en: Record<string, string> = {
   "requests.status": "Status",
   "requests.seconds": "Seconds",
   "requests.tokens": "Tokens in → out",
+  "log.title": "Server log",
+  "log.intro": "What the router and the models it started printed lately: a model loading, a start that failed, the GPU giving way to the CPU. Kept in the router's memory only, so a restart empties it.",
+  "log.unavailable": "This server has no log to read. The log is a router feature: start it with coli router (restart-colibri.ps1 -Router).",
+  "log.empty": "Nothing has been printed yet.",
+  "log.pause": "Pause",
+  "log.resume": "Resume",
+  "log.clear": "Clear",
+  "log.source": "From",
+  "log.all": "Everything",
+  "log.dropped": "Some lines were dropped before the page could read them (the router keeps the last 2,000).",
 }
 
 export default en

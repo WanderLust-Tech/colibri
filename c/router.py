@@ -44,6 +44,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import gpu as gpu_mod
 import model_settings as settings_mod
 import presets as presets_mod
+import log_tail
 import request_log
 
 DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its last request
@@ -85,6 +86,7 @@ DROP_RESPONSE = HOP_BY_HOP | {"server", "date", "vary"}
 def log(message):
     sys.stderr.write("[router] %s\n" % message)
     sys.stderr.flush()
+    log_tail.TAIL.add("router", message)
 
 
 class ApiError(Exception):
@@ -387,6 +389,7 @@ class Worker:
             if line:
                 self.log.append(line)
                 sys.stderr.write("[%s] %s\n" % (self.entry["id"], line))
+                log_tail.TAIL.add(self.entry["id"], line)
         sys.stderr.flush()
         try:
             self.proc.stdout.close()
@@ -1148,6 +1151,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.presets_list())
             if path == "/v1/requests":
                 return self.send_json(200, self.requests_list(query))
+            if path == "/v1/logs":
+                return self.send_json(200, self.logs_list(query))
             if path.startswith("/v1/models/"):
                 return self.send_json(200, self.model_object(unquote(path[len("/v1/models/"):])))
             raise ApiError(404, "Not found.", "not_found")
@@ -1499,6 +1504,21 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "`limit` must be a number.", "invalid_request_error", "limit")
         return {"object": "list", "enabled": True, "path": log.path, "bodies": log.bodies,
                 "data": request_log.recent(log.path, limit)}
+
+    def logs_list(self, query):
+        """GET /v1/logs?since=N&limit=N&source=ID: the lines the router and its workers printed after number N, oldest
+        first (the dashboard's Log view and the editor's output channel). `next` is the number to ask for next time."""
+        def number(name, default, low, high):
+            try:
+                return max(low, min(high, int((query.get(name) or [str(default)])[0])))
+            except ValueError:
+                raise ApiError(400, f"`{name}` must be a number.", "invalid_request_error", name)
+        since = number("since", 0, 0, 1 << 62)
+        limit = number("limit", 500, 1, log_tail.DEFAULT_LINES)
+        source = (query.get("source") or [""])[0] or None
+        out = log_tail.TAIL.read(since, limit, source)
+        out["object"] = "list"
+        return out
 
     def installed(self):
         pool = self.server.pool

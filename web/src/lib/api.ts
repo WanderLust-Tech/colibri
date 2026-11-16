@@ -1,3 +1,4 @@
+import type { LogLine, LogRead } from "./logTail"
 import type { ReplyStats } from "./replyStats"
 
 export type ChatRole = "system" | "user" | "assistant"
@@ -462,6 +463,16 @@ export async function listRequests(baseUrl: string, apiKey: string, limit = 100,
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { enabled?: boolean; path?: string | null; data?: LoggedRequest[] }
   return { enabled: body.enabled === true, path: body.path ?? null, requests: body.data ?? [] }
+}
+
+/* The lines the router and its models printed after number `since` (GET /v1/logs). A server that has no such route (a plain
+   `coli serve`) is "not available". */
+export async function listLogs(baseUrl: string, apiKey: string, since = 0, signal?: AbortSignal): Promise<LogRead> {
+  const response = await fetch(`${endpoint(baseUrl, "logs")}?since=${since}&limit=500`, { headers: headers(apiKey), signal })
+  if (response.status === 404) return { available: false, lines: [], next: since, first: 0 }
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { data?: LogLine[]; next?: number; first?: number }
+  return { available: true, lines: body.data ?? [], next: body.next ?? since, first: body.first ?? 0 }
 }
 
 function pause(ms: number, signal?: AbortSignal) {

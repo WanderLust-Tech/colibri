@@ -580,3 +580,23 @@ describe("model switching", () => {
     await expect(waitForModel("http://localhost:8000/v1", "", "new", { signal: controller.signal, sleep })).rejects.toThrow()
   })
 })
+
+describe("listLogs", () => {
+  it("asks for the lines after a number and returns them with where to continue", async () => {
+    const seen: string[] = []
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      seen.push(url)
+      return new Response(JSON.stringify({ object: "list", data: [{ seq: 8, time: 5, source: "router", text: "loading" }], next: 8, first: 3 }), { headers: { "content-type": "application/json" } })
+    }))
+    const { listLogs } = await import("./api")
+    const result = await listLogs("http://localhost:8000/v1", "", 7)
+    expect(seen[0]).toContain("/logs?since=7")
+    expect(result).toEqual({ available: true, lines: [{ seq: 8, time: 5, source: "router", text: "loading" }], next: 8, first: 3 })
+  })
+
+  it("says not available on a server without the route", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 404 })))
+    const { listLogs } = await import("./api")
+    expect(await listLogs("http://localhost:8000/v1", "", 4)).toEqual({ available: false, lines: [], next: 4, first: 0 })
+  })
+})

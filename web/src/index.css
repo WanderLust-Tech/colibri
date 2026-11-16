@@ -270,3 +270,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .compare-scores th, .compare-scores td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #1f282c; }
 .compare-scores th:first-child, .compare-scores td:first-child { text-align: left; }
 @media (max-width: 900px) { .compare-grid { grid-template-columns: 1fr !important; } }
+
+.log-panel { gap: 12px; }
+.log-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.log-source { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted-foreground); }
+.log-source select { background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 12px; }
+.log-scroll { max-height: 55vh; overflow: auto; border: 1px solid var(--border); border-radius: 12px; padding: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; }
+.log-line { display: grid; grid-template-columns: 76px 130px 1fr; gap: 10px; padding: 1px 12px; }
+.log-line:hover { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.log-time { color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.log-source-name { color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-line.bad .log-text { color: #d98a8a; }
+@media (max-width: 640px) { .log-line { grid-template-columns: 1fr; gap: 0; } .log-time, .log-source-name { font-size: 11px; } }

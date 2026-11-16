@@ -58,6 +58,7 @@ import { explainError } from "@/lib/explainError"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
+import LogPanel from "@/components/LogPanel"
 import RequestsPanel from "@/components/RequestsPanel"
 import { Compare } from "@/components/Compare"
 import { isChatModel } from "@/lib/compare"
@@ -703,7 +704,7 @@ export default function App() {
       {view === "settings" ? <section className="settings-page">
         <header className="page-heading"><span>COLIBRI</span><h1>{t("ui.settings")}</h1><p>{t("ui.settingsIntro")}</p></header>
         <nav className="settings-tabs" aria-label={t("ui.settings")}>
-          {["general", "model", "presets", "requests", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
+          {["general", "model", "presets", "requests", "log", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
         </nav>
         {errorBanner}
         <div className="settings-content">
@@ -713,6 +714,7 @@ export default function App() {
               onUse={(name) => { startFromPreset(name); setModel(name); setView("chat") }} />
           </section>}
           {settingsPage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
+          {settingsPage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {settingsPage === "connection" && <section className="settings-card">{connectionControls}</section>}
           {settingsPage === "model" && <section className="settings-card">
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />

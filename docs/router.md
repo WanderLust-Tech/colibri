@@ -147,6 +147,13 @@ switch that turns it off ([model-settings.md](model-settings.md#in-the-dashboard
 - `POST /v1/models/unload` with `key` or `model` stops a model and leaves the others and the server as
   they are: `200` `{"status": "unloaded"}` (or `"not loaded"`). A model that is answering a request is not
   cut off: it answers `202` `"unloading when idle"` and the model goes when the request has finished.
+- `GET /v1/logs?since=N&limit=N&source=ID` returns what the router and the models it started printed, oldest first: a
+  model loading, a start that failed, the GPU giving way to the CPU. Each line has a number that only grows (`seq`), a
+  `time`, a `source` (`router`, or the model's id) and the `text`. Send the `next` of the last answer as `since` and you get only
+  the new lines; `first` is the number of the oldest line still held, and when it is more than `since` + 1 lines were dropped
+  between two reads. The router keeps the last 2,000 lines in memory only (nothing is written to disk), so a restart empties
+  it. It needs the API key, since a worker's output can hold whatever its engine prints. The dashboard's Settings → Log and
+  the extension's "Colibri: Show Server Log" read it.
 - `GET /health` is the loaded model's own health plus a `router` block: the workers and their states,
   `max_loaded`, `keep_alive`, the queue, and the free memory. `GET /health?model=ID` is that model's.
 - Errors have the workers' shape. A model that does not start answers `503` with `model_load_failed` and

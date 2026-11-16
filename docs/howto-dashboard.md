@@ -150,6 +150,24 @@ The gateway now reports how much of the prompt the engine did not read again, in
 
 This is what the reply line and the extension's `cache:` log line are built on.
 
+## See why a model is slow to load, or failed to start
+
+**What it is.** The router prints what it and its models do (a model loading, a start that failed, the GPU giving way
+to the CPU), but you cannot see that console from the dashboard or from an editor. **Settings → Log** shows the router's
+last lines, and reads again every two seconds.
+
+**What you do.** Open Settings → Log. Each line has the time, who printed it (`router`, or the model's id) and the text; lines
+that mention a failure are tinted. **From** limits it to one model. **Pause** stops reading (what is printed meanwhile is
+fetched when you resume), **Clear** empties the view and only newer lines come back. The view follows the newest line until
+you scroll up.
+
+**What to know.**
+- The router keeps the last 2,000 lines, in memory only. A restart empties the log, and a page that is open for hours
+  of heavy output can miss some: it then says "Some lines were dropped".
+- It needs the API key, like the rest of the page. A plain `coli serve` has no log to read; the page says so.
+- A model that failed to start is also named, with the last lines it printed, in the error the dashboard shows
+  ("did not start: ...") and in Settings → Model as `last_error`.
+
 ## If the key leaks, or you want to share the server
 
 Read [THREAT_MODEL.md](THREAT_MODEL.md). In short:
