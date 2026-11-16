@@ -47,7 +47,7 @@ claims about ComfyUI are theirs and were not re-read.
 | 7 Keep the API spec honest | open |
 | 8 Security headers on the dashboard | open |
 | 9 Model catalogue (offline entries, verify, header info) | open |
-| 10 Smaller ideas | priority lane done 2026-11-16 (local main, not deployed: the router needs a restart); SSIM baselines, log tail, echoed metadata open |
+| 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM baselines and echoed metadata open |
 
 Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), then 2 and 3 as one project, then memory
 (4a, 4b) once there is a measurement of what the reaper gets wrong today.
@@ -155,7 +155,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
     `X-Colibri-Priority: low|normal|high` overrides it; see "Priority" in `docs/router.md`. *Where:* `number` / `front` in `post_prompt`. *Nearest here:* a first-in-first-out gate.
   - An image-quality check by structural similarity against saved baselines (ComfyUI uses 0.95), which would settle open
     item H4 (Qwen-Image on Vulkan, unmeasured). *Where:* `tests/compare/test_quality.py`.
-  - A live log tail (dashboard tab, VS Code output channel) for load failures and slow loads. *Where:*
+  - **Done 2026-11-16:** a live log tail for load failures and slow loads: `GET /v1/logs` (the last 2000 router and worker lines, in memory, needs the key), the dashboard's Settings → Log, and the extension's "Colibri: Show Router Log" (0.10.0). *Where:*
     `api_server/services/terminal_service.py`.
   - A small, size-capped client object echoed on every event and written to the request log, so the Requests tab and the
     extension can group by chat. Weak without item 2.
