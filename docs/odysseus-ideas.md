@@ -33,7 +33,7 @@ apply to us. The parts below do.
   for the orphan case. The model card's `context_length` gives a real threshold.
   *Care:* a summary also rewrites the prompt start, so it costs one cold read. Make it a visible, rare event
   ("Summarising the first N messages"), not a silent one, and keep the summary's text frozen afterwards.
-- [ ] **A3. Fixed tool set per conversation for small windows (S).** Their agent keeps a tiny always-on tool set and adds
+- [x] **A3. Fixed tool set per conversation for small windows (S).** *Built 2026-11-15 in the extension 0.8.0 (`src/toolSelection.ts`, setting `colibri.toolBudget`, a fifth of the window by default): the set is chosen once, from the first message, over the budget only; a `find_tools` tool and a "not run yet, here are its parameters" answer reach the rest. Found on the live Qwen3-Coder that the model never searches by itself (0 of 6, it guesses names), so the nudges are what make it work.* Their agent keeps a tiny always-on tool set and adds
   domain tools by intent (`src/tool_index.py`), because tool schemas eat small windows. Doing it per message would
   break our cache (a changed tool list forces a full re-read, measured). Choosing the set once when a chat starts
   would not. Only worth it if tool schemas become a real share of a prompt.
@@ -109,7 +109,8 @@ tok/s in the top bar, stop, regenerate, copy, presets, a request log panel and t
 | B1 threat model | done, `docs/THREAT_MODEL.md` |
 | A1 tool output marked as data | done, extension 0.7.0 (installed); the extension folder has no git history, so it exists only as working files |
 | A2 summarise old turns | done, extension 0.7.0 (installed); see "Not yet seen" below |
-| A3, B2, B3 | notes for later: B2 only matters if the gateway starts fetching URLs, B3 if it starts sending side requests |
+| A3 fixed tool set per conversation | built in the extension 0.8.0 (vsix built, not installed); the selection and the search loop were run against the real model, the VS Code wiring has not run in a real chat |
+| B2, B3 | notes: B2 only matters if the gateway starts fetching URLs, B3 if it starts sending side requests |
 | C6 phone install | set aside: browsers need HTTPS for it and the gateway is plain HTTP |
 
 **How the dashboard items were checked.** In a real browser (Playwright, headless Chromium) against a fixture server:
@@ -126,13 +127,12 @@ time). C5 was also driven against the live router with Gemma 26B and E4B.
 
 ## Suggested order
 
-Everything worth doing from the list is done: C1 to C5, A1, A2, B1. What is left is optional:
+Everything worth doing from the list is done: C1 to C5, A1, A2, A3, B1. What is left is optional:
 
 1. **B2 and B3** are rules to keep in mind, not work: write the URL guard before the gateway ever fetches a URL, and send
    side requests (titles, summaries) to a different model or only when the chat is idle.
-2. **A3** only if tool descriptions grow into a real share of a prompt.
-3. Translations of the new dashboard text, if you use another language.
-4. C6 only if the gateway ever gets HTTPS.
+2. Translations of the new dashboard text, if you use another language.
+3. C6 only if the gateway ever gets HTTPS.
 
 ## Where to look in Odysseus (read only)
 
