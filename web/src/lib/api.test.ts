@@ -121,6 +121,35 @@ describe("reasoning stream", () => {
   })
 })
 
+describe("a reply that is cut off", () => {
+  const run = (body: string) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { headers: { "content-type": "text/event-stream" } })))
+    const content: string[] = []
+    const result = streamChat({
+      baseUrl: "http://localhost:8000/v1", apiKey: "", model: "test-model", messages: [], temperature: 0,
+      maxTokens: 8, enableThinking: false, signal: new AbortController().signal, onDelta: (text) => content.push(text),
+    })
+    return { result, content }
+  }
+  const delta = 'data: {"choices":[{"delta":{"content":"The beginning"}}]}\n\n'
+
+  it("comes back with no finish reason, so the caller can tell (the chat offers Continue, Compare refuses the vote)", async () => {
+    const { result, content } = run(delta)
+    await expect(result).resolves.toMatchObject({ finishReason: null })
+    expect(content).toEqual(["The beginning"])
+  })
+
+  it("comes back with the finish reason when the server gave one", async () => {
+    const { result } = run(delta + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n')
+    await expect(result).resolves.toMatchObject({ finishReason: "stop" })
+  })
+
+  it("reports an error frame with what the server said", async () => {
+    const { result } = run(delta + 'data: {"error":{"message":"The engine failed: out of memory","type":"server_error"}}\n\n')
+    await expect(result).rejects.toThrow("The engine failed: out of memory")
+  })
+})
+
 describe("askSystemOne", () => {
   /* The options must travel as the labels of a `choice`, never folded into the
      state: the gateway reads each one as the answer's continuation, and a

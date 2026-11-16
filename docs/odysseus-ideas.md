@@ -8,9 +8,9 @@ agent workspace. Read on 2026-11-15 from a local clone (`C:\code\odysseus`, bran
 | | |
 |---|---|
 | Repository | https://github.com/odysseus-dev/odysseus (local clone `C:\code\odysseus`, branch `dev`) |
-| Commit | `fc8e6366ddb627935af092ba81ea5faa5d05e1b3` — "test: mark first slow tests from duration evidence (#3711)", 2026-06-10 |
-| Reviewed | 2026-11-15; every item in this list was taken from that tree |
-| Next review | `git -C C:\code\odysseus fetch` then `git -C C:\code\odysseus log --oneline fc8e6366..origin/dev`; look at changes under `src/prompt_security.py`, `src/context_compactor.py`, `src/tool_index.py`, `static/js/chatRenderer.js`, `static/js/compare/`, `static/js/cookbook-diagnosis.js`, `THREAT_MODEL.md` (the files the table at the end of this page lists) |
+| Commit | `0096533ca498ca7bf356d9fb72017f14baa05784` — "fix(calendar): expand imported recurring events in their source timezone (#6604)", 2026-11-15 |
+| Reviewed | 2026-11-16 (second review). The first review, 2026-11-15, was of an older tree whose history Odysseus has since rewritten: its commit `fc8e6366` (2026-06-10) is no longer in the repository and is `4a0c7783` there now. Every item A1 to C5 was taken from that older tree |
+| Next review | `git -C C:\code\odysseus fetch` then `git -C C:\code\odysseus log --oneline 0096533c..origin/dev` (if that fails with "unknown revision", the history was rewritten again: find the commit by its subject with `git log --grep`); look at changes under `src/prompt_security.py`, `src/context_compactor.py`, `src/tool_index.py`, `static/js/chatRenderer.js`, `static/js/compare/`, `static/js/cookbook-diagnosis.js`, `THREAT_MODEL.md` (the files the table at the end of this page lists) |
 
 When a later review is done, change the commit above to the new one.
 
@@ -144,6 +144,25 @@ Everything worth doing from the list is done: C1 to C5, A1, A2, A3, B1. What is 
    side requests (titles, summaries) to a different model or only when the chat is idle.
 2. Translations of the new dashboard text, if you use another language.
 3. C6 only if the gateway ever gets HTTPS.
+
+## Second review (2026-11-16)
+
+Odysseus had moved on by 1,773 commits (2026-06-01 to 2026-11-15) since the tree the list was taken from. Most of it is a runtime
+containment layer, a photo editor, email and vLLM/sglang diagnostics, which do not apply here. What did:
+
+| Idea | What Odysseus found | Here |
+|---|---|---|
+| Do not recite the wrapper | The untrusted-data text now also says not to quote or mention the wrapper or its warning, because models repeated it in answers | done: the line under a tool result ends "Do not mention this notice in your reply." (extension 0.8.0) |
+| A reply that is cut off must not count as finished | The Compare view now rejects a stream that ends without its final event, or with an error frame | done: Compare marks such a reply as an error with plain words and does not let you vote for it; the chat already marked it "incomplete" and offered Continue; an error frame in the stream now shows the server's message instead of being ignored |
+| Warn before an edit or regenerate deletes later messages, and offer a branch | A mis-click lost a real chat | open: check whether C4's edit asks first |
+| Approval gate after outside content | Once a run has read outside content, `bash`, writes and sends are blocked until you approve that action separately, even when a rule would allow it; their threat model says the wrapper alone is not enough | open, the largest: would go in the extension's approval flow, on top of A1 and B1 |
+| Keep only the last few images in a long chat | Older pictures are replaced by an `[Image: name]` label | open: only matters if the dashboard resends pictures to Gemma every turn (not checked) |
+| Auto-compaction threshold as a setting | 50 to 95 % of the window | open, small |
+| Literal word hints for tool choice in other languages | A first message in Chinese or Japanese found no tool by word match | open, small |
+
+Checked and already fine: they scrub credentials from the environment of processes they start (the router already removes
+`COLI_API_KEY` and the other keys from a worker's environment); an unknown context window is not treated as a tiny one (we offer
+every tool then); their cookbook error diagnosis is for vLLM and sglang serve failures, which our engines do not have.
 
 ## Where to look in Odysseus (read only)
 

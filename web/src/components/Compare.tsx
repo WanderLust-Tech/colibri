@@ -122,6 +122,9 @@ export function Compare({ baseUrl, apiKey, connected, models, settings }: {
             patch(column.key, (c) => ({ status: "running", text: c.text + delta, firstMs: first }))
           },
         })
+        /* A stream that closed without a finish reason was cut off (the engine died, the connection dropped). The
+           chat keeps such a reply and offers Continue; here it must not be voted on as if it were a whole answer. */
+        if (result.finishReason === null) throw new Error("The reply stopped before it was finished: the connection to the server closed.")
         const elapsed = performance.now() - start
         const decode = first === null ? 0 : (elapsed - first) / 1000
         patch(column.key, {

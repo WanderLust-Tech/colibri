@@ -2,7 +2,7 @@
 
 Run `npm run build`, then `python3 tests/compare_ui.py [dist-dir [screenshot-dir]]` (needs Playwright and its Chromium;
 set CHROME_PATH to use another Chromium binary). A local fixture server stands in for the gateway with three models:
-"alpha" and "beta" answer (alpha slowly, so an overlap would show), "gamma" fails with a full queue. No model or
+"alpha" and "beta" answer (alpha slowly, so an overlap would show), "gamma" fails with a full queue (and, for the prompt "Cut off", is cut off after one word). No model or
 credentials needed. Screenshots go to the temp folder.
 """
 import json
@@ -60,7 +60,8 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         model = body["model"]
         start = time.monotonic()
-        if model == "gamma-colibri":
+        cut = model == "gamma-colibri" and body["messages"][0]["content"] == "Cut off"
+        if model == "gamma-colibri" and not cut:
             self.reply({"error": {"message": "The inference queue is full."}}, 429)
             with lock:
                 spans.append((model, start, time.monotonic()))
@@ -69,6 +70,12 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         time.sleep(0.8 if model == "alpha-colibri" else 0.2)   # a model "loading"
+        if cut:   # the engine dies after one word: no finish reason, no [DONE]
+            self.wfile.write(("data: " + json.dumps({"model": model, "choices": [{"delta": {"content": "Gamma starts "}}]}) + "\n\n").encode())
+            self.wfile.flush()
+            with lock:
+                spans.append((model, start, time.monotonic()))
+            return
         for word in ANSWERS[model].split(" "):
             self.wfile.write(("data: " + json.dumps({"model": model, "choices": [{"delta": {"content": word + " "}}]}) + "\n\n").encode())
             self.wfile.flush()
@@ -170,6 +177,17 @@ with sync_playwright() as p:
     check("the scoreboard survives a reload", page.locator(".compare-scores tbody tr").count() == 2)
     page.get_by_role("button", name="Clear the scoreboard").click()
     check("and can be cleared", page.locator(".compare-scores").count() == 0)
+
+    # a reply that is cut off is shown as such and cannot be voted for as if it were whole
+    page.locator(".compare-chip:has-text('gamma')").click()
+    page.locator("#compare-prompt").fill("Cut off")
+    page.get_by_role("button", name="Compare", exact=True).last.click()
+    expect(page.locator(".compare-column")).to_have_count(3)
+    expect(page.get_by_role("button", name="This one is best").first).to_be_visible(timeout=30000)
+    expect(page.get_by_role("button", name="Stop")).to_have_count(0)
+    cut_text = page.locator(".compare-grid").inner_text()
+    check("a cut-off reply says so in plain words and keeps what arrived", "connection closed before the reply was finished" in cut_text and "Gamma starts" in cut_text)
+    check("and only the two whole answers can be voted for", page.get_by_role("button", name="This one is best").count() == 2, str(page.get_by_role("button", name="This one is best").count()))
 
     # stop in the middle: the model that is answering and those waiting are marked stopped
     page.locator("#compare-prompt").fill("Slow one")

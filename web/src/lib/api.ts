@@ -618,8 +618,14 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
     if (data === "[DONE]") return
     const event = JSON.parse(data) as {
       model?: unknown
+      error?: { message?: unknown } | string
       choices?: Array<{ delta?: { content?: string; reasoning_content?: string }; finish_reason?: string | null }>
       usage?: TokenUsage | null
+    }
+    /* An error frame in the middle of the answer is the server saying why it stopped. */
+    if (event.error) {
+      const said = typeof event.error === "string" ? event.error : event.error.message
+      throw new Error(typeof said === "string" && said.trim() ? said : "The server reported an error while answering.")
     }
     if (!answeredBy && typeof event.model === "string" && event.model) answeredBy = event.model
     const choice = event.choices?.[0]

@@ -65,6 +65,7 @@ smaller, the server's own message (always kept, so nothing is hidden by a wrong 
 | "The server has no model called X…" | The model name is not served. | Pick one from the model list. |
 | "This model does not do chat…" | An image, music or decision model was chosen for chat. | Pick a language model. |
 | "The engine stopped or failed on this request…" | The engine reported a failure. | Unload the model (Settings → Model) and send again; it loads fresh. |
+| "The connection closed before the reply was finished…" | The stream stopped without the server's finish marker: the engine died or the connection dropped. In the chat the part that arrived stays and **Continue** is offered; in Compare the column shows this and cannot be voted for. | Send again; if it repeats, unload the model (Settings → Model) and let it load fresh. |
 | "The machine ran out of memory…" | Not enough memory to load or run. | Unload a model you are not using, or close other programs. |
 | "The GPU stopped answering…" | The graphics card dropped out; the model's experts now run on the CPU. | Replies are slower until the model is unloaded and loaded again. (This message only reaches the page if a server forwards the engine's log line.) |
 

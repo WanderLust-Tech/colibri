@@ -28,6 +28,7 @@ export function explainError(message: string): ErrorExplanation | null {
   if (/invalid or missing api key/i.test(text) || /^401\b/.test(text)) return { key: "explain.key" }
   if (/failed to fetch|networkerror|load failed|fetch failed|could not reach the server/i.test(text)) return { key: "explain.unreachable" }
 
+  if (/reply stopped before it was finished/i.test(text)) return { key: "explain.cutOff" }
   if (/inference queue is full|timed out waiting for the inference engine/i.test(text)) return { key: "explain.busy" }
   if (/scheduler is shutting down/i.test(text)) return { key: "explain.shutdown" }
 

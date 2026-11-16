@@ -13,6 +13,10 @@ describe("explainError", () => {
     expect(explainError("code: context_length_exceeded")).toEqual({ key: "explain.contextPlain", action: "newChat" })
   })
 
+  it("explains a reply that was cut off", () => {
+    expect(explainError("The reply stopped before it was finished: the connection to the server closed.")?.key).toBe("explain.cutOff")
+  })
+
   it("names an unreachable server, a bad key and a busy queue", () => {
     expect(explainError("Failed to fetch")?.key).toBe("explain.unreachable")
     expect(explainError("status.serverError")).toBeNull()
