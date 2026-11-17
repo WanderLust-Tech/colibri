@@ -225,7 +225,23 @@
                           "verified": { "type": "boolean", "description": "Every file the setup's download manifest lists is present at its size." },
                           "current": { "type": "boolean" },
                           "switchable": { "type": "boolean" },
-                          "reason": { "type": ["string", "null"] }
+                          "reason": { "type": ["string", "null"], "description": "Why it cannot be loaded: an engine that is not built, a download that is not finished, a drive that is not connected." },
+                          "missing": { "type": "boolean", "description": "Seen on an earlier scan and not found now (`coli router` only). `reason` says why." },
+                          "unfinished": { "type": "boolean", "description": "A download that did not finish; `reason` says how many of its files are there." },
+                          "details": {
+                            "type": "object",
+                            "description": "What the folder says about itself, read from its small files and the headers of its safetensors files, never the weights: so it is there before the model has ever run (`coli router` only).",
+                            "properties": {
+                              "architecture": { "type": "string" },
+                              "quantisation": { "type": "string", "example": "bf16" },
+                              "context_length": { "type": "integer", "description": "The model's own limit in tokens; the server may serve less." },
+                              "shards": { "type": "integer" },
+                              "bytes": { "type": "integer" },
+                              "source": { "type": "string", "description": "The repository `coli setup` fetched it from." },
+                              "problems": { "type": "array", "items": { "type": "string" } }
+                            }
+                          },
+                          "reload_seconds": { "type": "number", "description": "How long the model took to load, the slowest of its last three starts (`coli router`, a loaded model)." }
                         }
                       }
                     }

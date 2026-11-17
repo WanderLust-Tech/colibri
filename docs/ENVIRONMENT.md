@@ -687,6 +687,8 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_IMAGE_SAVE` | `1` | `0` stops the gateway keeping finished pictures. |
 | `COLI_MUSIC_DIR` | `~/colibri-music` | Where the gateway keeps a copy of every finished song, and where the Library reads them from (as `COLI_IMAGE_DIR`). |
 | `COLI_MUSIC_SAVE` | `1` | `0` (or `false`, `no`, `off`) stops the gateway keeping finished songs. |
+| `COLI_MEMORY_FLOOR_GB` | the larger of 1.5 and 3% of the machine's memory | Free memory, in GB, under which `coli router` stops an idle model (`0` turns the watch off). See [router](router.md#which-model-goes-first-and-when-memory-runs-low). |
+| `COLI_CARD_EVICT` | `1` | `0` stops the router stopping an idle model that holds the graphics card so the next one can use it. |
 | `COLI_JOBS` | `jobs.jsonl` in the setup folder | Where `coli router` keeps the records of its background jobs ([api](api.md#background-jobs)). |
 | `COLI_MEDIA_META` | `1` | `0` (or `false`, `no`, `off`) stops the gateway writing the prompt, seed and other settings inside the pictures and songs it makes (a PNG text chunk, a WAV comment); they come out plain. |
 | `COLI_PRESETS` | `presets.json` in the setup folder | The presets file `coli router` reads: named presets, a model with settings baked in ([presets.md](presets.md), `coli preset`). Same as `coli router --presets`. |

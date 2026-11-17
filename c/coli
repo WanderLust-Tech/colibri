@@ -3737,11 +3737,56 @@ def cmd_ps(a):
     print(f"  {where} is a single-model server (not `coli router`); it holds {', '.join(ids)} for as long as it runs")
     return 0
 
+def _model_folders(a):
+    """[(name, folder)] for `coli model info|verify [NAME]`: the folder or installed model named, else every installed model."""
+    import router
+    if a.name and os.path.isdir(a.name):
+        return [(os.path.basename(os.path.abspath(a.name)),os.path.abspath(a.name))]
+    catalog=router.Catalog()
+    if a.name:
+        entry=catalog.find(a.name)
+        if entry is None:
+            print(f"  {C.yel}no installed model is called {a.name}{C.r} (a folder works too)"); return None
+        return [(entry["id"],entry["path"])]
+    return [(e["id"],e["path"]) for e in catalog.entries()]
+
+def _cmd_model_files(a):
+    """`coli model info [NAME]`: what a model folder is, from its small files only (architecture, weights, context, source).
+    `coli model verify [NAME] [--quick]`: that its files are whole, by size and checksum against the download's manifest, or by
+    each safetensors file's own header when there is none. Nothing is loaded; no server is needed (model_info.py)."""
+    import model_info
+    folders=_model_folders(a)
+    if folders is None: return 1
+    if not folders:
+        print("  no installed models found"); return 0
+    bad=0
+    for name,folder in folders:
+        if a.action=="info":
+            for line in model_info.describe(model_info.inspect(folder)): print(line)
+            print()
+            continue
+        def progress(done,total,path,name=name):
+            if not a.quick: print(f"  {C.dim}{name}: checking {path} ({done+1}/{total}){C.r}",flush=True)
+        result=model_info.verify_model(folder,quick=a.quick,progress=progress)
+        if result["status"]=="ok":
+            print(f"  {C.grn}✓{C.r} {name}: {result['checked']} files whole ({result['how']})")
+        elif result["status"]=="unverifiable":
+            print(f"  {C.yel}?{C.r} {name}: {result['reason']}")
+        else:
+            bad+=1
+            print(f"  {C.yel}✗{C.r} {name}: {len(result['bad'])} problem(s) in {result['path']}")
+            for item in result["bad"][:20]: print(f"      {item['path']}: {item['problem']}")
+            if len(result["bad"])>20: print(f"      ... and {len(result['bad'])-20} more")
+            print(f"      fix: rerun `coli setup` for this model, or delete the folder and fetch it again")
+    return 1 if bad else 0
+
 def cmd_model(a):
     """Turn a model off or on, and pin where it runs (model_settings.py, docs/model-settings.md): `coli model`, `coli model
     disable NAME`, `coli model enable NAME`, `coli model gpu NAME auto|vulkan|cpu`. A running `coli router` is asked; with none,
     the file is edited and the router reads it when it starts."""
     banner("model")
+    if a.action in ("info","verify"):
+        return _cmd_model_files(a)
     import model_settings
     where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
     if a.action=="list":
@@ -4472,8 +4517,9 @@ def main():
     ppreset.add_argument("--description",default=None)
     ppreset.add_argument("--keep-alive",default=None,metavar="TIME",help="add: how long its model stays loaded (10m, -1 for never)")
     ppreset.add_argument("--file",default=None,metavar="FILE",help="the presets file (default: the setup folder's presets.json)")
-    pmodel=sub.add_parser("model",help="turn a model off or on, and pin where it runs (CPU or graphics card)")
-    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu"))
+    pmodel=sub.add_parser("model",help="turn a model off or on, pin where it runs (CPU or graphics card), look inside one (info) or check its files (verify)")
+    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","info","verify"))
+    pmodel.add_argument("--quick",action="store_true",help="verify: sizes only, no checksums (fast on a slow drive)")
     pmodel.add_argument("name",nargs="?",default=None,metavar="MODEL")
     pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu")
     pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)

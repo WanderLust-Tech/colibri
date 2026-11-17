@@ -386,6 +386,8 @@ const en: Record<string, string> = {
   "job.keepsGoing": "This keeps going if you close the page. Find it under Settings → Library.",
   "job.background": "Keep going if I leave",
   "job.backgroundHelp": "Make it as a background job: it keeps going if you close this page, and the result is kept in the Library",
+  "models.contextUpTo": "up to {{n}} tokens",
+  "models.source": "from {{repo}}",
   "media.open": "Open the settings of a saved picture or song",
   "media.noSettings": "That file carries no Colibri settings (a picture or song from somewhere else, or made with COLI_MEDIA_META=0).",
   "media.kindImage": "picture",

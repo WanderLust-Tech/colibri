@@ -77,6 +77,23 @@ def _manifest(model_dir):
         return None, False
 
 
+def _unfinished(model_dir, manifest):
+    """Why a folder the downloader started is not a model yet, in words for the list: how many of its files are there."""
+    import setup_download
+    files = manifest.get("files") or []
+    present = 0
+    for spec in files:
+        try:
+            path = setup_download.safe_join(model_dir, spec["path"])
+            if os.path.exists(path) and os.path.getsize(path) == int(spec["size"]):
+                present += 1
+        except Exception:
+            continue
+    if not manifest.get("complete"):
+        return f"download incomplete ({present} of {len(files)} files here); run `coli setup` to finish it"
+    return f"files missing or changed ({present} of {len(files)} whole); run `coli model verify`"
+
+
 def _children(root):
     try:
         names = sorted(os.listdir(root))
@@ -145,8 +162,7 @@ def scan_installed(ctx, engine_ready):
         if not any(os.path.isfile(os.path.join(real, name)) for name in MARKERS):
             continue
         manifest, complete = _manifest(real)
-        if manifest and not complete:
-            continue                      # a download still in progress, or damaged
+        unfinished = _unfinished(real, manifest) if manifest and not complete else None
         try:
             resolved = resolve_model(real)
         except Exception:
@@ -161,12 +177,14 @@ def scan_installed(ctx, engine_ready):
         reason = None if current else why_not(family, ctx, engine_ready)
         if not ctx.enabled:
             reason = ctx.reason
+        if unfinished:
+            reason = unfinished           # listed, so it can be seen and finished, but never offered
         entries.append({
             "key": model_key(real), "path": real, "id": default_model_id(resolved),
             "name": label, "family": family.id, "modality": family.modality,
             "size_bytes": size or None, "verified": bool(manifest and complete),
             "current": current, "switchable": ctx.enabled and not current and reason is None,
-            "reason": reason,
+            "reason": reason, "unfinished": bool(unfinished),
         })
     entries.sort(key=lambda entry: (not entry["current"], entry["name"].lower()))
     return entries

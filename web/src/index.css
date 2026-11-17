@@ -323,3 +323,5 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .library-actions svg { width: 12px; height: 12px; }
 .library-more { margin-top: 12px; }
 .settings-chip[aria-pressed="true"] { color: var(--primary); opacity: 1; background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.model-details { color: var(--muted-foreground); font-size: 11px; opacity: .85; }
+.model-row.missing { opacity: .6; }

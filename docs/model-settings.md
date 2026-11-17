@@ -49,6 +49,20 @@ All need the router's key, and a JSON `Content-Type`; a request from another ori
 
 `GET /v1/models/installed` also carries `enabled` for each model, and `gpu_setting` when one is pinned.
 
+## Looking inside a model, and checking its files
+
+`coli model info [MODEL]` says what a model folder is from its small files only, without loading anything and without a server: the
+engine that reads it, the architecture, the weights (`bf16`, `int8`, `u8 packed`: the header cannot tell a packed int4 from other bytes),
+the context limit the model was made for (the server may serve less: that is the `context_length` of its card), how many files and tensors,
+and where it came from. It names what is missing when a folder is not recognised ("no config.json that can be read", "Colibri has no
+engine for it"). `MODEL` is a name, an id or a folder; without one it describes every installed model.
+
+`coli model verify [MODEL] [--quick]` checks that the files are whole. With the manifest `coli setup` wrote it checks every listed file's
+size and, where the manifest holds one, its checksum (a manifest from an older download lists sizes only, and the answer says so); it
+also checks that each safetensors file is as long as its own header says, which is what a download cut short looks like. A model
+fetched another way has no manifest, and gets just the header check. `--quick` skips the checksums, which on a slow drive is the
+difference between seconds and minutes. It exits 1 when something is wrong.
+
 ## In the dashboard
 
 Settings → Model lists the installed models, and against a router that keeps these settings each row also has:

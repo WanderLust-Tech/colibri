@@ -41,12 +41,12 @@ claims about ComfyUI are theirs and were not re-read.
 | 1 Settings inside saved media | done 2026-11-16 (PNG iTXt, WAV LIST/INFO; the dashboard reads them back through a button; `coli run` and `coli music`, which write their own files, do not tag them) |
 | 2 Jobs that survive the page | done 2026-11-16 (router jobs, `Prefer: respond-async`; dashboard switch and Jobs panel; not done: the extension, events instead of polling) |
 | 3 A Library tab | done 2026-11-16 (`/v1/library`, Settings → Library; not done: server-made thumbnails, a URL instead of base64 in the response, delete) |
-| 4 Smarter memory (4a cost-aware eviction, 4b pressure watchdog, 4c demote instead of stop) | open |
+| 4 Smarter memory | 4a, 4b, 4d and the router half of 4c done 2026-11-16 (eviction by cost, a pressure watch, learned peaks, stopping an idle model that holds the card); open: demoting a running model off the card (engine), 4e |
 | 5 Failure ladder for a worker that will not load | done 2026-11-16 |
 | 6 Gateway feature list | done 2026-11-16 (server and dashboard; the extension still reads a 404) |
 | 7 Keep the API spec honest | done 2026-11-16 |
 | 8 Security headers on the dashboard | done 2026-11-16 |
-| 9 Model catalogue (offline entries, verify, header info) | open |
+| 9 Model catalogue | done 2026-11-16 (known-models list, `coli model verify`, `coli model info`, details on the dashboard card) |
 | 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM baselines and echoed metadata open |
 
 Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), then 2 and 3 as one project, then memory
@@ -94,12 +94,12 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
 
 ## B. Memory and the router
 
-- [ ] **4a. Cost-aware eviction (S).** Instead of "least recently used", score each idle worker by idle time times bytes
+- [x] **4a. Cost-aware eviction (S).** Instead of "least recently used", score each idle worker by idle time times bytes
   freed, divided by what it costs to load again. Record each model's measured load time and where its files live (USB or
   spinning disk versus NVMe), so a model on the slow D: drive stays loaded longer than one on fast storage. *Where:*
   `comfy/model_management.py` (`free_memory`'s sort key), `comfy_execution/caching.py` (`RAMPressureCache`),
   `comfy/storage.py`. *Nearest here:* `_plan` in `c/router.py`.
-- [ ] **4b. Pressure watchdog in the reaper (S to M).** The reaper only reacts to the 30-minute timer, and memory is read
+- [x] **4b. Pressure watchdog in the reaper (S to M).** The reaper only reacts to the 30-minute timer, and memory is read
   only when a model loads, so a browser or game that spikes RAM pages the model that is answering. Idea: react to RAM or
   card pressure between requests, with hysteresis (free a little more than the shortfall, so it does not thrash) and a
   ladder: caches and KV slots first, then demote, then stop idle workers. On Windows, judge RAM pressure by swap use or
@@ -110,7 +110,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   or CPU. A reload from the USB disk costs minutes, and this would also fix the case where Qwen3-Coder on the card sends
   the next model to the CPU. *Where:* `model_management.free_memory`, `ModelPatcher.partially_unload`. *Nearest here:*
   open item H1; `GpuPolicy.decide` reads only `nvidia-smi`.
-- [ ] **4d. Learn each job's peak memory (M).** Store the peak working set per model and size class, make room before a
+- [x] **4d. Learn each job's peak memory (M).** Store the peak working set per model and size class, make room before a
   render, and size KV slots or batches from free memory. `c/image_engine.py` says its working buffers are "not included
   (being measured)". *Where:* `comfy/model_base.py` (`memory_required`), `comfy/samplers.py`.
 - [ ] **4e. Working-set trim for idle workers (S, measure first).** After a short idle time, ask Windows to move a worker's
@@ -142,7 +142,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   origin allow-list. Defence in depth only: `web/src/components/Markdown.tsx` does not use `innerHTML`. Add a "static
   headers" line to `docs/THREAT_MODEL.md`. *Where:* `server.py` (`create_block_external_middleware`,
   `create_origin_only_middleware`).
-- [ ] **9. Model catalogue (S to M).** (a) Keep an unplugged drive's models or a half-downloaded one visible, disabled,
+- [x] **9. Model catalogue (S to M).** (a) Keep an unplugged drive's models or a half-downloaded one visible, disabled,
   with a reason ("drive not connected", "download incomplete"), from a small last-known list; today `scan_installed`
   silently skips them. (b) `coli model verify` to re-check files against the manifest (the downloader has the check, the
   CLI does not expose it). (c) A header-only look at a container for architecture, quantisation, context length and

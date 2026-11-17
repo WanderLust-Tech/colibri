@@ -4,8 +4,9 @@ server can start, and the one-way trip from POST /v1/models/switch to a relaunch
 A server process serves exactly one model, so a switch is a restart. What these
 tests pin is everything that must be true for that restart to be safe: the browser
 names a model by key and never by path, a foreign web page cannot trigger one, a
-model the launcher could not start is not offered, a half-downloaded model is not
-listed, and the relaunch command drops the flags that named the old model."""
+model the launcher could not start is not offered, a half-downloaded model is listed
+with why it cannot be used (and never offered), and the relaunch command drops the flags
+that named the old model."""
 import importlib.machinery
 import importlib.util
 import json
@@ -109,14 +110,24 @@ class ScanTest(unittest.TestCase):
         self.assertEqual([e["name"] for e in entries][0], entries[0]["name"])
         self.assertTrue(entries[0]["current"])
         self.assertEqual(entries[0]["id"], "glm-5.2-colibri")
-        flash = next(e for e in entries if e["id"] == "mimo-v2.6-flash")
+        flash = next(e for e in entries if e["path"] == os.path.realpath(self.flash))
         self.assertEqual((flash["family"], flash["size_bytes"], flash["verified"]), ("mimo", 4, True))
         self.assertTrue(flash["switchable"])
-        self.assertEqual(len(entries), 2)
+        self.assertEqual(len(entries), 3)                                 # the half-downloaded one is listed too, with a reason
 
-    def test_leaves_out_downloads_in_progress_and_folders_we_do_not_serve(self):
-        paths = {e["path"] for e in self.scan()}
-        self.assertEqual(paths, {os.path.realpath(self.current), os.path.realpath(self.flash)})
+    def test_lists_downloads_in_progress_with_why_they_cannot_be_used_and_leaves_out_folders_we_do_not_serve(self):
+        found = {e["path"]: e for e in self.scan()}
+        half = found[os.path.realpath(self.root / "half-downloaded")]
+        self.assertFalse(half["switchable"])
+        self.assertFalse(half["verified"])
+        self.assertIn("download incomplete (1 of 1 files here)", half["reason"])
+        self.assertEqual(set(found), {os.path.realpath(self.current), os.path.realpath(self.flash), os.path.realpath(self.root / "half-downloaded")})
+
+    def test_a_finished_download_that_lost_a_file_says_so(self):
+        os.remove(self.root / "mimo-flash" / "weights.bin")
+        flash = next(e for e in self.scan() if e["path"] == os.path.realpath(self.flash))
+        self.assertTrue(flash["reason"].startswith("files missing or changed (0 of 1 whole)"))
+        self.assertFalse(flash["switchable"])
 
     def test_a_model_fetched_by_hand_is_listed_as_unverified(self):
         by_hand = write_model(self.root, "by-hand", MIMO_FLASH)

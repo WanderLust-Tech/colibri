@@ -107,6 +107,45 @@ the 503 of the second try, and nothing is remembered. The 30 minutes are `CARD_F
 Qwen-Image's decoder already falls back on its own: its Vulkan VAE decode works in bands and returns to the CPU when the device
 is lost or refuses its weights (`c/qwenimage_vae_vk.h`), so a picture that gets as far as decoding is not lost to that.
 
+## Models that are not there
+
+A model the router has seen is remembered (`known-models.json` beside `router.json`). When one is no longer found it stays on the
+list, switched off, with the reason: **the drive E: is not connected** (a Windows drive that is not there, or an empty mount point),
+or **its files are no longer recognised as a model** (the folder is there and something in it was deleted or changed; `coli model
+verify` says what). It is not offered by `/v1/models`, a request for it is the usual 409 "cannot be started here" with that reason, and
+it is an ordinary row again when the folder is back. A folder that was deleted from a place that is there is forgotten.
+
+A download that did not finish is listed too, with how many of its files are there (`download incomplete (3 of 5 files here); run
+`coli setup` to finish it`), and cannot be loaded. If a complete copy of the same model sits beside an unfinished one, a request for the
+model finds the complete one.
+
+## Which model goes first, and when memory runs low
+
+When the router has to stop a model, to make room for another or to keep under `--max-loaded`, it no longer takes simply the one
+used least recently. Each idle model gets a score: how long it has sat idle, times the memory stopping it frees, divided by what it
+costs to load again, and the highest goes. The cost is measured: the router times every start (`ready in 42 s`), keeps the slowest of
+the last three in its state file (`router.json`) and shows it as `reload_seconds` in `/health`, so a model on the slow D: drive, which
+takes minutes to come back, stays loaded longer than one on fast storage with the same size and idle time. When memory is what is
+short, a model that frees enough by itself is preferred to a string of small stops. A model never timed is guessed from its size.
+
+**Memory that runs low between requests.** The reaper, which looked only at the keep-alive timer, now also reads the free memory each
+second. Under a floor (the larger of 1.5 GB and 3% of the total; `COLI_MEMORY_FLOOR_GB` sets it, 0 turns it off) it stops one idle
+model, the best by the score above, preferring one whose stop frees past the shortfall by half the floor. Then it waits 15 seconds for the
+memory to show up as free before it would stop another, so one spike from a browser or a game does not empty the router. A model that is
+answering is never touched, and one used in the last 20 seconds is left alone unless the free memory is under half the floor. Each
+stop says why in the Log page, and `/health` shows `router.memory_pressure`: the floor, how many stops, and the last one.
+
+**What a model grows to.** The router measured a model only right after it loaded, but it grows as its caches fill. Every five seconds
+it now reads the memory of each model that is answering and remembers the most it saw (`peak_bytes`, only raised); the next "will it
+fit" uses that, not the smaller figure from just after the load.
+
+**An idle model that holds the graphics card.** With `--gpu auto`, a model that would go to the CPU only because the card's memory is
+taken now makes the router stop an idle model that holds the card first, if it has been idle for a minute (so two models that both want
+the card do not trade it back and forth) and is not pinned to either side. It waits for the card to show its memory free, then starts
+the new model on it. The model stopped starts again when it is next asked for. `COLI_CARD_EVICT=0` turns this off. This is the router half
+of moving a model off the card: telling a running engine to drop its card memory and carry on from the CPU would keep it loaded, and needs
+work in the engines, which is not done.
+
 ## Background jobs
 
 `Prefer: respond-async` on a picture or song request makes it a job: the router answers `202` with an id and makes the render apart from the
@@ -164,7 +203,9 @@ switch that turns it off ([model-settings.md](model-settings.md#in-the-dashboard
   last time it ran (kept in `router.json`), or, if it never ran here, what its family can do.
 - `GET /v1/models/installed` lists every model on the machine with its `state` (`idle`, `starting`,
   `ready`, `stopping`), its memory use, `keep_alive`, and how long until it is unloaded (`expires_in`). A
-  model that failed to load has `last_error`.
+  model that failed to load has `last_error`. Each also has `details` (what its folder says about itself: architecture, weights,
+  the model's own context limit, where it came from), read from the small files only, so it is there before the model has ever been
+  loaded; and `reload_seconds` once it has been loaded.
 - `POST /v1/models/switch` with a model's `key` (or its `model` name) loads it, as the dashboard's Load
   button does, and answers when it is ready. It does not stop the other models; the memory check does that
   when it must. Add `keep_alive` to preload with that keep-alive, or to change it on a model that is

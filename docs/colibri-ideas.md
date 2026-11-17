@@ -140,13 +140,13 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
 
 ## H. Router and extension follow-ups (added 2026-11-10)
 
-- [ ] **H1. Unload an idle model to make room on the card (M).** The router picks card or CPU when a model loads, from the free
+- [x] **H1. Unload an idle model to make room on the card (M). Done 2026-11-16** (router.md, "An idle model that holds the graphics card"; `COLI_CARD_EVICT=0` turns it off). The router picks card or CPU when a model loads, from the free
   memory; a model that sits idle on the card for its keep-alive makes the next one go to the CPU. It could unload the idle one first
   (the policy would have to know which models hold the card; Windows has no per-process figure, so it would track its own workers).
 - [ ] **H2. A context window per model (S-M).** `CTX` and `Q36_MAXT` are per engine family in the router's environment; the router
   passes the same arguments to every worker. A `model-settings.json` field would give each model its own, and the model card
   would say it from the first request.
-- [ ] **H3. Keep `context_length` for models that have not run since the engines announced it (S).** Today the card appears
+- [x] **H3. Keep `context_length` for models that have not run since the engines announced it (S). Partly done 2026-11-16:** `details.context_length` in `/v1/models/installed` is the folder's own limit from config.json, shown on the Model page before a first load; the card's `context_length` (what the server serves) is still only known after a load. Today the card appears
   after the model's first load.
 - [ ] **H4. Qwen-Image on Vulkan (M).** `make qwenimage VK=1` builds; unmeasured. ACE-Step has no Vulkan path.
 - [x] **H6. Report reused tokens in `usage` (S).** Done on `feat/cached-tokens`: the engine puts the reused count on the end of its

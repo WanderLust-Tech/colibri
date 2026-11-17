@@ -7,6 +7,7 @@ import {
   getModelSettings, listInstalledModels, setModelSettings, switchModel, unloadModel, waitForModel,
   type GpuChoice, type InstalledModel, type InstalledModels, type ModelSettings,
 } from "@/lib/api"
+import { detailsLine } from "@/lib/modelDetails"
 import { cn } from "@/lib/utils"
 
 interface ModelSwitcherProps {
@@ -31,7 +32,7 @@ function formatSize(bytes: number | null) {
    model if the new one does not start (lib/api.ts, waitForModel). A `coli router` holds
    several: Load starts one (the call answers when it is ready) and nothing restarts. */
 export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwitched }: ModelSwitcherProps) {
-  const { t } = useLocale()
+  const { t, locale } = useLocale()
   const [installed, setInstalled] = useState<InstalledModels | null>(null)
   const [loadError, setLoadError] = useState("")
   const [confirmKey, setConfirmKey] = useState<string | null>(null)
@@ -160,6 +161,9 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
                 router && model.current && model.gpu && model.gpu.mode !== "unchanged" ? t(model.gpu.mode === "vulkan" ? "models.onGpu" : "models.onCpu") : "",
                 router && !enabled ? t("models.off") : "",
               ].filter(Boolean).join(" · ")}</small>
+              {model.details && detailsLine(model.details, (count) => t("models.contextUpTo", { n: count }), (repo) => t("models.source", { repo }), locale) &&
+                <small className="model-details">{detailsLine(model.details, (count) => t("models.contextUpTo", { n: count }), (repo) => t("models.source", { repo }), locale)}</small>}
+              {model.details?.problems?.length ? <small className="model-reason">{model.details.problems.join("; ")}</small> : null}
               {!model.current && model.reason && <small className="model-reason">{model.reason}</small>}
               {router && !model.current && model.last_error && <small className="model-reason">{t("models.lastError", { message: model.last_error })}</small>}
             </div>

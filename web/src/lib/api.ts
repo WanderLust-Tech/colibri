@@ -1,4 +1,5 @@
 import { PREFER_ASYNC, runBackground, type Job } from "./jobs"
+import type { ModelDetails } from "./modelDetails"
 import type { LogLine, LogRead } from "./logTail"
 import type { ReplyStats } from "./replyStats"
 
@@ -283,6 +284,13 @@ export interface InstalledModel {
   /* Only from `coli router`: false when the model is turned off, and where the router started it (card or CPU). */
   enabled?: boolean
   gpu?: GpuDecision | null
+  /* What the folder says about itself, read from its small files (architecture, weights, the model's own context limit, source). */
+  details?: ModelDetails
+  /* Seen on an earlier scan and not found now (a drive that is not connected: `reason` says), or a download that is not finished. */
+  missing?: boolean
+  unfinished?: boolean
+  /* Only from `coli router`: how long the model took to load, the slowest of its last three starts, in seconds. */
+  reload_seconds?: number
 }
 
 export interface InstalledModels {

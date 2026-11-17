@@ -35,7 +35,7 @@ class Rig:
 
     def __init__(self, test, entries, *, total=None, keep_alive=600.0, max_loaded=3, api_key=None, parallel=False,
                  max_queue=8, queue_timeout=10.0, env=None, measure=None, state_path=None, allowed_hosts=(), gpu=None,
-                 settings=None, job_log=None):
+                 settings=None, job_log=None, memory=None, pool_kw=None):
         self.test = test
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
@@ -54,8 +54,8 @@ class Rig:
 
         self.pool = router.Pool(self.catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                                 worker_env=worker_env, state=router.State(state_path),
-                                memory=self.free if total else (lambda: None), measure=measure or (lambda pid, job: 0),
-                                grace=0.5, queue_timeout=queue_timeout, gpu=gpu, settings=settings)
+                                memory=memory or (self.free if total else (lambda: None)), measure=measure or (lambda pid, job: 0),
+                                grace=0.5, queue_timeout=queue_timeout, gpu=gpu, settings=settings, **(pool_kw or {}))
         self.gate = router.Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel)
         self.jobs_path = job_log or os.path.join(self.tmp.name, "jobs.jsonl")
         self.jobs = jobs.JobManager(jobs.JobStore(self.jobs_path))
@@ -616,10 +616,13 @@ class MakingRoomTest(unittest.TestCase):
         self.assertEqual(rig.states(), {"text-a-colibri": "idle", "text-b-colibri": "ready"})
 
     def test_the_least_recently_used_goes_first(self):
+        """Among models that cost the same to load again and free the same, the one idle longest goes (see MemoryTest for when they differ)."""
         rig = Rig(self, [entry("text-a", size=int(3.5 * GB)), entry("text-b", size=int(3.5 * GB)),
                          entry("text-c", size=int(3.5 * GB))], total=10 * GB)
         rig.chat("text-a-colibri")
         rig.chat("text-b-colibri")
+        for item in rig.entries[:2]:                                   # the fake workers start in slightly different times: make them equal
+            rig.pool.state.data[item["key"]]["loads"] = [10.0]
         rig.chat("text-a-colibri")                                      # a is now newer than b
         rig.chat("text-c-colibri")                                      # 3.5 GB does not fit in 80% of the 3 GB left: evict
         self.assertEqual(rig.states()["text-b-colibri"], "idle")

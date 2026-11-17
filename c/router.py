@@ -54,6 +54,16 @@ import jobs
 DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its last request
 DEFAULT_MAX_LOADED = 3
 FIT_HEADROOM = 0.8                  # a model must fit in this share of the free memory (Ollama's rule)
+# Memory pressure between requests (Pool.relieve): below the floor, an idle model is stopped, then the next look waits.
+PRESSURE_FLOOR_GB = 1.5             # free memory below this (or below PRESSURE_FLOOR_SHARE of the total, if more) is pressure
+PRESSURE_FLOOR_SHARE = 0.03
+PRESSURE_TARGET = 1.5               # stop idle models until about this many times the floor is free: a little more than the shortfall
+PRESSURE_MIN_IDLE = 20.0            # seconds a model must have been idle to be stopped for pressure (unless free memory is under half the floor)
+PRESSURE_COOLDOWN = 15.0            # seconds to wait after a stop for the memory to show up as free before stopping another
+PEAK_SAMPLE_S = 5.0                 # how often a busy worker's memory is read, to learn the most it grows to
+CARD_MIN_IDLE = 60.0                # seconds a model must have been idle before it is stopped to give the card to another
+CARD_SETTLE_S = 10.0                # how long to wait for the card to show its memory free again after a stop
+RELOAD_BYTES_PER_S = 150e6          # what a model never timed is assumed to load at (a slow disk): only used to compare
 STOP_GRACE = 25.0                   # seconds a worker gets to save its state before it is killed
 CARD_FALLBACK_S = 1800.0            # after a start on the graphics card failed, the model starts on the CPU for this long
 LOOPBACK = {"127.0.0.1", "localhost", "::1", ""}
@@ -242,6 +252,49 @@ class State:
         value = (self.data.get(key) or {}).get("resident_bytes")
         return int(value) if isinstance(value, (int, float)) and value > 0 else None
 
+    def load_seconds(self, key):
+        """How long this model takes to load, as its slowest of the last three starts: a cold read from a slow drive is what a
+        wrong eviction would cost again, and the next start is faster only by luck (the disk cache). None when never timed."""
+        loads = [v for v in ((self.data.get(key) or {}).get("loads") or []) if isinstance(v, (int, float)) and v > 0]
+        return max(loads) if loads else None
+
+    def peak(self, key):
+        value = (self.data.get(key) or {}).get("peak_bytes")
+        return int(value) if isinstance(value, (int, float)) and value > 0 else None
+
+    def record_load(self, key, model_id, seconds):
+        with self.lock:
+            saved = dict(self.data.get(key) or {})
+            saved["id"] = model_id
+            saved["loads"] = (list(saved.get("loads") or []) + [round(float(seconds), 1)])[-3:]
+            self.data[key] = saved
+            self._save()
+
+    def record_peak(self, key, model_id, peak):
+        """The most memory this model was seen to hold while working. Only ever raised, and written only for a rise of 3% or more."""
+        with self.lock:
+            saved = dict(self.data.get(key) or {})
+            before = saved.get("peak_bytes") or 0
+            if peak <= before * 1.03:
+                return False
+            saved["id"], saved["peak_bytes"] = model_id, int(peak)
+            self.data[key] = saved
+            self._save()
+            return True
+
+    def _save(self):
+        """Write the file (call with the lock held)."""
+        if not self.path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self.data, handle, indent=1)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
     def cached_entry(self, key):
         """The /v1/models object and card the model announced the last time it ran, or (None, None)."""
         saved = self.data.get(key) or {}
@@ -271,12 +324,50 @@ class State:
                 pass
 
 
+KNOWN_FIELDS = ("path", "id", "name", "family", "modality", "size_bytes")
+
+
+def why_missing(path, exists=os.path.exists, empty=lambda folder: not os.listdir(folder)):
+    """(reason, forget) for a model that was found on an earlier scan and is not now. A drive or share that is not there is the
+    reason to keep it listed; a folder that is there but is no longer a model says its files are not what they were; a folder gone
+    from a place that is there was deleted, and is forgotten. `exists` and `empty` (is this folder empty?) are parameters for tests."""
+    path = path.rstrip("/\\")
+    if exists(path):
+        return "its files are no longer recognised as a model (something was deleted or changed): try `coli model verify`", False
+    drive = os.path.splitdrive(path)[0]
+    if drive and not exists(drive + os.sep):
+        return f"the drive {drive} is not connected", False
+    probe = os.path.dirname(path)                   # the nearest folder above it that is there
+    while probe and not exists(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    if not drive and probe and not exists(os.path.dirname(path)) and len([p for p in probe.replace("\\", "/").split("/") if p]) <= 3:
+        try:
+            if empty(probe):                                # a drive that is not plugged in leaves its mount point an empty folder
+                return f"the drive or share at {probe} is not mounted", False
+        except OSError:
+            pass
+    return None, True
+
+
 def default_state_path():
     try:
         import setup_flow
         return os.path.join(setup_flow.setup_home(), "router.json")
     except Exception:
         return os.path.join(os.path.expanduser("~"), ".colibri-router.json")
+
+
+def pressure_floor():
+    """Free memory, in bytes, under which an idle model is stopped: PRESSURE_FLOOR_GB or PRESSURE_FLOOR_SHARE of the total, whichever
+    is more. COLI_MEMORY_FLOOR_GB overrides it (0 turns the watch off). None when the machine's memory cannot be read."""
+    explicit = os.environ.get("COLI_MEMORY_FLOOR_GB")
+    if explicit:
+        try:
+            return int(float(explicit) * 2**30) or None
+        except ValueError:
+            log(f"COLI_MEMORY_FLOOR_GB={explicit!r} is not a number of GB; ignored")
+    total = total_memory()
+    return int(max(PRESSURE_FLOOR_GB * 2**30, (total or 0) * PRESSURE_FLOOR_SHARE)) if total else None
 
 
 def default_jobs_path():
@@ -310,12 +401,14 @@ def job_logger(logger):
 class Catalog:
     """The models on this machine, by the names clients use for them."""
 
-    def __init__(self, roots=None, models=(), engine_ready=None, worker_kv_slots=1, ttl=10.0, entries=None):
+    def __init__(self, roots=None, models=(), engine_ready=None, worker_kv_slots=1, ttl=10.0, entries=None, known_path=None):
         self.roots, self.models = roots, tuple(models)
+        self.known_path = known_path          # where the models seen before are remembered, or None: a model that goes is simply gone
         self.engine_ready = engine_ready or (lambda family: True)
         self.kv_slots, self.ttl = worker_kv_slots, ttl
         self._fixed = entries                  # tests give the entries directly
         self._entries, self._at = [], 0.0
+        self._details = {}                     # key -> (mtime of its folder, what model_info found)
         self.lock = threading.Lock()
 
     def _scan(self):
@@ -339,6 +432,50 @@ class Catalog:
         for entry in entries:
             entry["current"] = False
             entry["switchable"] = entry["reason"] is None
+        return self._with_known(entries)
+
+    # ---- models that were here and are not
+    def _load_known(self):
+        try:
+            with open(self.known_path, encoding="utf-8") as handle:
+                found = json.load(handle).get("models")
+            return found if isinstance(found, dict) else {}
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def _with_known(self, entries):
+        """Add the models seen on an earlier scan that are not found now, listed and switched off with the reason: a drive that is
+        not plugged in, files that are no longer a model. A model whose folder was deleted (its parent is there, it is not) is
+        forgotten, so the list does not keep what somebody removed on purpose."""
+        if not self.known_path:
+            return entries
+        known, changed = self._load_known(), False
+        present = {entry["key"] for entry in entries}
+        for entry in entries:
+            if entry.get("unfinished"):
+                continue                       # not a model yet: nothing to come back to
+            record = {name: entry.get(name) for name in KNOWN_FIELDS}
+            if known.get(entry["key"]) != record:
+                known[entry["key"]], changed = record, True
+        for key, record in list(known.items()):
+            if key in present:
+                continue
+            reason, forget = why_missing(record.get("path") or "")
+            if forget:
+                del known[key]
+                changed = True
+                continue
+            entries.append({**record, "key": key, "reason": reason, "missing": True, "current": False, "switchable": False,
+                            "verified": False, "unfinished": False})
+        if changed:
+            try:
+                os.makedirs(os.path.dirname(self.known_path), exist_ok=True)
+                tmp = self.known_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump({"version": 1, "models": known}, handle, indent=1)
+                os.replace(tmp, self.known_path)
+            except OSError:
+                pass
         return entries
 
     def entries(self, refresh=False):
@@ -347,6 +484,30 @@ class Catalog:
             if not self._entries or age > self.ttl or (refresh and age > 2.0):
                 self._entries, self._at = self._scan(), time.monotonic()
             return [dict(entry) for entry in self._entries]
+
+    def details(self, entry):
+        """What the model folder says about itself, from its small files only (model_info.inspect): architecture, weights, the
+        model's own context limit, where it came from. Read once and kept until the folder changes; None for a model that is not there."""
+        if entry.get("missing") or not entry.get("path"):
+            return None
+        try:
+            stamp = os.stat(entry["path"]).st_mtime_ns
+        except OSError:
+            return None
+        with self.lock:
+            cached = self._details.get(entry["key"])
+        if cached and cached[0] == stamp:
+            return cached[1]
+        import model_info
+        found = model_info.inspect(entry["path"])
+        out = {name: found[name] for name in ("architecture", "quantisation", "context_length", "shards", "bytes") if found.get(name)}
+        if (found.get("source") or {}).get("repo"):
+            out["source"] = found["source"]["repo"]
+        if found["problems"]:
+            out["problems"] = found["problems"][:3]
+        with self.lock:
+            self._details[entry["key"]] = (stamp, out)
+        return out
 
     def aliases(self, entry):
         names = {entry["id"], entry["key"], os.path.basename(entry["path"].rstrip("/\\")), entry.get("name", "")}
@@ -361,9 +522,10 @@ class Catalog:
             return None
         wanted = name.lower()
         for refresh in (False, True):
-            for entry in self.entries(refresh):
-                if wanted in self.aliases(entry):
-                    return entry
+            matches = [entry for entry in self.entries(refresh) if wanted in self.aliases(entry)]
+            if matches:
+                # a copy that cannot be used (half downloaded, a drive that is unplugged) must not hide one that can
+                return next((entry for entry in matches if entry["reason"] is None), matches[0])
         return None
 
     def by_key(self, key):
@@ -508,7 +670,9 @@ class Pool:
     def __init__(self, catalog, *, keep_alive=DEFAULT_KEEP_ALIVE, max_loaded=DEFAULT_MAX_LOADED,
                  worker_command=None, worker_env=None, state=None, memory=None, measure=None,
                  grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None,
-                 fallback_memory=CARD_FALLBACK_S):
+                 fallback_memory=CARD_FALLBACK_S, pressure_floor=None, pressure_min_idle=PRESSURE_MIN_IDLE,
+                 pressure_cooldown=PRESSURE_COOLDOWN, peak_sample=PEAK_SAMPLE_S, watch_pressure=True,
+                 card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S):
         self.catalog = catalog
         self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
         self.settings = settings                         # model_settings.ModelSettings, or None
@@ -522,6 +686,14 @@ class Pool:
         self.memory = memory or available_memory         # bytes free for a new model, or None
         self.measure = measure or resident_bytes
         self.grace, self.make_job, self.queue_timeout = grace, make_job, queue_timeout
+        # Memory pressure between requests: free memory under `pressure_floor` bytes stops an idle model (None: never, as before).
+        self.pressure_floor, self.pressure_min_idle, self.pressure_cooldown = pressure_floor, pressure_min_idle, pressure_cooldown
+        self.card_evict, self.card_min_idle, self.card_settle = card_evict, card_min_idle, card_settle
+        self.watch_pressure = watch_pressure              # the reaper's loop calls relieve(); a test that calls it itself turns this off
+        self.pressure = {"stops": 0, "last": None}
+        self._relief_until = 0.0
+        self.peak_sample = peak_sample
+        self._sampled = 0.0
         self.workers = {}
         self.cv = threading.Condition(threading.Lock())
         self.closed = False
@@ -532,10 +704,12 @@ class Pool:
 
     # ---- sizes
     def estimate(self, entry):
-        """What loading this model will take: what it took last time, else its size on disk."""
+        """What loading this model will take: the most it was seen to hold (it grows as its caches fill, so more than it held right
+        after loading), else what it took after loading last time, else its size on disk."""
         known = self.state.resident(entry["key"])
-        if known:
-            return known
+        peak = self.state.peak(entry["key"])
+        if known or peak:
+            return max(known or 0, peak or 0)
         size = entry.get("size_bytes") or directory_bytes(entry["path"])
         total = total_memory()
         return min(size, int(total * 0.9)) if total else size
@@ -579,7 +753,8 @@ class Pool:
             return "load", self._register(entry)
         victims = [w for w in others if w.state == "ready" and w.inflight == 0]
         if victims:
-            victim = min(victims, key=lambda w: w.last_used)
+            need = self.estimate(entry) / FIT_HEADROOM - free if (free is not None and not self.fits(entry, free)) else 0
+            victim = self.pick_victim(victims, need)
             victim.state = "stopping"
             victim.settled.clear()
             return "evict", victim
@@ -588,6 +763,31 @@ class Pool:
                 f"{self.estimate(entry) / 2**30:.1f} GB), loading it anyway")
             return "load", self._register(entry)
         return "block", None                             # others are busy or loading: wait for them
+
+    # ---- who goes first
+    def reload_seconds(self, worker_or_entry):
+        """What stopping this model would cost to undo: its measured load time, else a guess from its size (a slow disk), which
+        is only good for comparing models nobody has timed."""
+        entry = getattr(worker_or_entry, "entry", worker_or_entry)
+        measured = self.state.load_seconds(entry["key"])
+        if measured:
+            return measured
+        size = self.state.resident(entry["key"]) or entry.get("size_bytes") or 0
+        return max(5.0, size / RELOAD_BYTES_PER_S)
+
+    def victim_score(self, worker, now=None):
+        """Idle time times the memory stopping it frees, over what it costs to load again: the higher, the better a victim. A model
+        that has sat idle a long time, is big, and loads quickly goes first; one on a slow drive stays."""
+        now = time.monotonic() if now is None else now
+        idle = max(now - worker.last_used, 1.0)
+        return idle * max(worker.resident or 1, 1) / max(self.reload_seconds(worker), 1.0)
+
+    def pick_victim(self, victims, need=0):
+        """The idle worker to stop. When memory is what is short (`need` bytes), one that frees enough by itself is preferred,
+        so a single stop settles it instead of a string of small ones; among those, the best score."""
+        enough = [w for w in victims if w.resident >= need] if need > 0 else victims
+        now = time.monotonic()
+        return max(enough or victims, key=lambda w: (self.victim_score(w, now), now - w.last_used))      # a tie goes to the longest idle
 
     def _register(self, entry):
         worker = Worker(entry, self.keep_alive)
@@ -683,6 +883,7 @@ class Pool:
     def _loaded(self, worker, entry, began):
         worker.resident = self.measure(worker.proc.pid, worker.job)
         self.state.record(worker.key, entry["id"], worker.resident, worker.model_entry, worker.jev)
+        self.state.record_load(worker.key, entry["id"], time.monotonic() - began)
         with self.cv:
             worker.state = "ready"
             worker.inflight += 1
@@ -712,7 +913,10 @@ class Pool:
             env.update(self.worker_env(entry) or {})
         if self.gpu is not None or (self.settings is not None and self.settings.gpu(entry)):
             policy = self.gpu or gpu_mod.GpuPolicy()
-            decision = policy.decide(entry, self.settings.gpu(entry) if self.settings is not None else None)
+            pinned = self.settings.gpu(entry) if self.settings is not None else None
+            if card_failure is None:
+                self._free_the_card(policy, entry, pinned)
+            decision = policy.decide(entry, pinned)
             env.update(decision.env)
             self.decisions[entry["key"]] = decision
             log(f"`{entry['id']}` will run {decision.summary()}")
@@ -730,6 +934,30 @@ class Pool:
             self.decisions[entry["key"]] = decision
             log(f"`{entry['id']}` will run {decision.summary()}")
         return command, env
+
+    def _free_the_card(self, policy, entry, pinned):
+        """A model about to start would go to the CPU only because the card's memory is taken. If an idle model holds the card, stop
+        it first (the best victim by the usual score, and only one that has been idle a while, so two models that both want the card
+        do not trade it back and forth), and wait for the card to show its memory free. The model stopped loads again, on the CPU or
+        the card, when it is next asked for. Off with `card_evict=False`; never for a model pinned to either side."""
+        if not self.card_evict or pinned in ("cpu", "vulkan") or policy.mode != "auto":
+            return
+        for _ in range(4):
+            if policy.decide(entry, pinned).mode != "cpu":
+                return
+            now = time.monotonic()
+            with self.cv:
+                holders = [w for w in self.workers.values() if w.state == "ready" and w.card and w.inflight == 0 and w.alive()
+                           and w.key != entry["key"] and now - w.last_used >= self.card_min_idle]
+                if not holders:
+                    return
+                victim = self.pick_victim(holders)
+                victim.state = "stopping"
+                victim.settled.clear()
+            self._stop(victim, f"it holds the graphics card, which `{entry['id']}` needs, and has been idle for {now - victim.last_used:.0f} s")
+            end = time.monotonic() + self.card_settle
+            while time.monotonic() < end and policy.decide(entry, pinned).mode == "cpu":
+                time.sleep(0.25)                                   # the driver gives the memory back when the process has gone
 
     def release(self, worker):
         with self.cv:
@@ -774,6 +1002,9 @@ class Pool:
             self._wake.clear()
             try:
                 self.reap()
+                self.sample_peaks()
+                if self.watch_pressure:
+                    self.relieve()
             except Exception as error:                    # the reaper must not die
                 log(f"reaper: {error}")
 
@@ -801,6 +1032,52 @@ class Pool:
                     due.append(worker)
         for worker in due:
             self._stop(worker, "idle for %d s" % worker.keep_alive if worker.keep_alive else "keep-alive is 0")
+
+    def sample_peaks(self, now=None):
+        """Read the memory of each worker that is answering, every few seconds, and remember the most any of them reached: the
+        router measures a model only right after it loads, and it grows as its caches fill."""
+        now = time.monotonic() if now is None else now
+        if now - self._sampled < self.peak_sample:
+            return
+        self._sampled = now
+        with self.cv:
+            busy = [w for w in self.workers.values() if w.state == "ready" and w.inflight > 0 and w.alive()]
+        for worker in busy:
+            seen = self.measure(worker.proc.pid, worker.job)
+            if seen and seen > worker.resident:
+                worker.resident = seen                   # what the planner counts for it from now on
+            if seen and self.state.record_peak(worker.key, worker.entry["id"], seen):
+                log(f"`{worker.entry['id']}` now holds {seen / 2**30:.1f} GB while working")
+
+    def relieve(self, now=None):
+        """Memory pressure between requests: when the memory free falls under the floor, stop the best idle model (the one
+        whose stopping frees enough, longest idle, cheapest to load again), then leave a while for the memory to come back before
+        looking again, so one spike does not empty the router. A model that is answering is never touched, nor one used just
+        now unless memory is nearly gone. Returns the model stopped, or None."""
+        floor = self.pressure_floor
+        if not floor or self.closed:
+            return None
+        now = time.monotonic() if now is None else now
+        if now < self._relief_until:
+            return None
+        free = self.memory()
+        if free is None or free >= floor:
+            return None
+        with self.cv:
+            urgent = free < floor / 2
+            victims = [w for w in self.workers.values() if w.state == "ready" and w.inflight == 0 and w.alive()
+                       and (urgent or now - w.last_used >= self.pressure_min_idle)]
+            if not victims:
+                return None
+            victim = self.pick_victim(victims, floor * PRESSURE_TARGET - free)
+            victim.state = "stopping"
+            victim.settled.clear()
+        self._relief_until = now + self.pressure_cooldown
+        self.pressure["stops"] += 1
+        self.pressure["last"] = {"model": victim.entry["id"], "free_bytes": free, "at": int(time.time())}
+        self._stop(victim, f"memory is low: {free / 2**30:.1f} GB free, under {floor / 2**30:.1f} GB; it was idle for "
+                           f"{now - victim.last_used:.0f} s and held {victim.resident / 2**30:.1f} GB")
+        return victim.entry["id"]
 
     def close(self):
         self.closed = True
@@ -1715,6 +1992,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "parallel_models": self.server.gate.parallel,
             "gate": self.server.gate.stats(),
             "free_memory": pool.memory(),
+            "memory_pressure": {"floor_bytes": pool.pressure_floor, **pool.pressure},
         }
         if pool.gpu is not None:
             payload["router"]["gpu"] = pool.gpu.public()
@@ -1791,7 +2069,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             left = max(0.0, worker.keep_alive - (time.monotonic() - worker.last_used))
         return {"id": worker.entry["id"], "key": worker.key, "state": worker.state, "port": worker.port,
                 "resident_bytes": worker.resident, "inflight": worker.inflight, "expires_in": left,
-                "keep_alive": worker.keep_alive, "gpu": worker.gpu.public() if worker.gpu is not None else None}
+                "keep_alive": worker.keep_alive, "gpu": worker.gpu.public() if worker.gpu is not None else None,
+                "reload_seconds": round(self.server.pool.reload_seconds(worker), 1)}
 
     def models_list(self):
         """Every model that can be asked for, so a client can find them. A loaded one says what its engine
@@ -1918,6 +2197,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             worker = pool.get(entry["key"])
             state = worker.state if worker is not None else "idle"
             item = {k: v for k, v in entry.items() if k != "path"}
+            details = self.server.catalog.details(entry)
+            if details:
+                item["details"] = details
             item["current"] = state == "ready"
             item["state"] = state
             item["enabled"] = not self.disabled(entry)
@@ -2130,7 +2412,7 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
             sys.exit(1)
     if allowed_hosts and "*" in allowed_hosts:
         print("WARNING: --allowed-host '*' accepts ANY Host header (DNS-rebinding guard disabled)", file=sys.stderr)
-    catalog = Catalog(roots=roots, models=models,
+    catalog = Catalog(roots=roots, models=models, known_path=os.path.join(os.path.dirname(default_state_path()), "known-models.json"),
                       engine_ready=engine_ready or (lambda family: openai_server.default_engine(family).exists()),
                       worker_kv_slots=1)          # every family can run one slot; kv_slots is clamped per model below
     extra = list(worker_args)
@@ -2144,7 +2426,8 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
     settings = settings_mod.ModelSettings(settings_path or settings_mod.default_path(), log=log)
     pool = Pool(catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                 state=State(default_state_path()), queue_timeout=queue_timeout,
-                make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings)
+                make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings,
+                pressure_floor=pressure_floor(), card_evict=os.environ.get("COLI_CARD_EVICT", "1").strip().lower() not in ("0", "false", "no", "off"))
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
     presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
     if request_log_path:

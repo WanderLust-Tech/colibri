@@ -310,6 +310,16 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Settings inside saved media** (`c/media_meta.py`): every picture's PNG and song's WAV carries a JSON record (prompt, size, steps, seed,
   model, a song's lyrics and language) that the dashboard's "Open the settings…" button reads back into the controls
   ([qwen-image.md](qwen-image.md#where-the-images-go), [acestep.md](acestep.md)). `COLI_MEDIA_META=0` leaves the files plain.
+- **Model catalogue** ([router.md](router.md#models-that-are-not-there), [model-settings.md](model-settings.md#looking-inside-a-model-and-checking-its-files)): `coli model info` and
+  `coli model verify [--quick]` (`c/model_info.py`: headers only; the manifest check plus each safetensors file against its own header, which
+  finds a cut-short download without a manifest); the router remembers the models it has seen, so a drive that is unplugged or a folder
+  that was damaged stays on the list with the reason, and a half-downloaded model is listed with how far it got instead of silently
+  skipped; `GET /v1/models/installed` carries `details` and `reload_seconds`, and the Model page shows them.
+- **Who the router stops, and memory pressure** ([router.md](router.md#which-model-goes-first-and-when-memory-runs-low)): eviction scores idle time times memory
+  freed over the measured time to load again (kept in `router.json`, shown as `reload_seconds`), so a model off the slow drive stays; the
+  reaper reads free memory each second and stops one idle model under a floor, then waits; the router remembers the peak memory of a model
+  while it answers and plans with that; and with `--gpu auto` an idle model that holds the card is stopped when the next one would
+  otherwise go to the CPU (`COLI_CARD_EVICT=0` for off). Not done: demoting a running model off the card (engine work).
 - **Background jobs and the Library** (`c/jobs.py`, `c/library.py`; [api.md](api.md#background-jobs), [router.md](router.md#background-jobs)):
   `Prefer: respond-async` on a picture or song request makes the router answer 202 with a job and make the render apart from the connection,
   so a closed tab no longer cancels an hour of work. `GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/cancel` (one call in every state);
