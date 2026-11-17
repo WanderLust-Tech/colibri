@@ -213,6 +213,13 @@ picture to that folder before they send it (the server's log says `[image] saved
 hour cannot be lost to a browser tab that was put to sleep, or closed, while it ran. A failed save is logged and
 the picture is still sent. `COLI_IMAGE_SAVE=0` turns this off.
 
+The PNG also says how it was made. The server writes one `iTXt` text chunk named `colibri` before the pixels (the saved
+file and the copy it sends are the same bytes): a JSON record with the prompt, size, steps, seed and model, plus `edit`
+(how many pictures an edit started from, never the pictures) and `ref_resolution` for an edit. Any viewer ignores it; the
+dashboard's "Open the settings of a saved picture or song" button reads it and puts the model, prompt, size, steps and seed
+back, so a picture from last week can be made again or varied. `COLI_MEDIA_META=0` leaves the files plain, which is the
+thing to do before sharing pictures whose prompts you would rather keep.
+
 ## Terminal support
 
 coli picks the best way to draw that your terminal supports, and falls back to

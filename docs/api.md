@@ -341,6 +341,15 @@ request keeps priority across all slots. A full waiting queue does not reject
 a request that can immediately take an unreserved free slot; the queue limit
 bounds waiting requests, independently of active capacity.
 
+## Settings inside pictures and songs
+
+A finished picture is a PNG with one `iTXt` chunk named `colibri` before the pixels, and a finished song is a WAV with a
+`LIST`/`INFO` chunk after the samples whose `ICMT` comment is the same kind of record. The record is JSON: `app` (`"colibri"`),
+`version` (1), `kind` (`"image"` or `"music"`), `model`, `prompt`, `seed`, `steps`, then `width` and `height` (a picture; `edit` is
+how many pictures an edit started from) or `lyrics`, `language`, `duration`, `shift`, `bpm`, `key`, `time_signature` and `task` (a
+song). Fields the request did not set are left out. The bytes are the same in the response (`b64_json`, the WAV download) and in
+the saved file. A server started with `COLI_MEDIA_META=0` writes neither.
+
 ## Which features this server has
 
 `GET /health` with the API key carries a `features` block, so a client (the dashboard, the editor extension) can hide a control

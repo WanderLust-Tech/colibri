@@ -150,6 +150,19 @@ The gateway now reports how much of the prompt the engine did not read again, in
 
 This is what the reply line and the extension's `cache:` log line are built on.
 
+## Make a saved picture or song again
+
+The server writes the prompt, size, steps, seed and model into every picture (a PNG text chunk) and the prompt, lyrics,
+language, length, steps, seed and model into every song (a WAV comment), so a file says how it was made. In a picture or music
+model's composer, the file button beside the send button ("Open the settings of a saved picture or song") takes such a file and
+puts everything back: it switches to the file's model (or the first model of that kind, if this server has not got it),
+fills the prompt and the controls, and leaves the rest as it was. Send it for the same render, or change the seed for a
+variation. It is a button because dropping a picture in image mode already attaches it for editing.
+
+A file from somewhere else, or made by a server started with `COLI_MEDIA_META=0`, says "That file carries no Colibri settings"
+and changes nothing. The file is read in the browser; nothing is uploaded. The settings travel with the file, so sharing it
+shares the prompt; `COLI_MEDIA_META=0` on the server leaves them out.
+
 ## Pages that are only there with a router
 
 Settings shows Presets, Requests and Log only when the server is a `coli router`: against a plain `coli serve` they would only say

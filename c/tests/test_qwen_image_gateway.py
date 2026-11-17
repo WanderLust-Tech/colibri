@@ -18,6 +18,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from qwen_image_fixture import STUB, make_fake_pipeline, stub_env  # noqa: E402
 
 import image_engine  # noqa: E402
+import media_meta  # noqa: E402
 from openai_server import APIServer  # noqa: E402
 
 MODEL_ID = "qwen-image-2.1-colibri"
@@ -438,6 +440,30 @@ class SavedImagesTest(unittest.TestCase):
         self.assertEqual(len(names), 1, names)
         self.assertTrue(names[0].endswith("-a-lighthouse-s3.png"), names)
         self.assertEqual(Path(self.out.name, names[0]).read_bytes(), base64.b64decode(completed[0]["data"][0]["b64_json"]))
+
+    def test_the_file_and_the_copy_sent_carry_the_settings_that_made_them(self):
+        status, _h, raw = self.gw.generate(prompt="A red fox, in the snow!", size="288x256", seed=7, steps=2)
+        self.assertEqual(status, 200, raw)
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        found = media_meta.read_png(sent)
+        self.assertEqual(found, {"app": "colibri", "version": 1, "kind": "image", "model": MODEL_ID,
+                                 "prompt": "A red fox, in the snow!", "width": 288, "height": 256, "steps": 2, "seed": 7})
+        self.assertEqual(media_meta.read_png(Path(self.out.name, self.saved()[0]).read_bytes()), found)
+        self.assertEqual(image_engine.decode_png(sent)[:3], (288, 256, 4))
+
+    def test_a_streamed_picture_carries_them_too(self):
+        status, _h, events = self.gw.stream(prompt="a lighthouse", size="256x256", seed=3, steps=2)
+        self.assertEqual(status, 200)
+        done = [data for name, data in events if name == "image_generation.completed"][0]
+        self.assertEqual(media_meta.read_png(base64.b64decode(done["data"][0]["b64_json"]))["seed"], 3)
+
+    def test_nobody_has_to_have_them(self):
+        with mock.patch.dict(os.environ, {"COLI_MEDIA_META": "0"}):
+            status, _h, raw = self.gw.generate(prompt="a red fox", size="256x256", seed=7, steps=2)
+        self.assertEqual(status, 200, raw)
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        self.assertIsNone(media_meta.read_png(sent))
+        self.assertEqual(Path(self.out.name, self.saved()[0]).read_bytes(), sent)
 
     def test_two_pictures_of_one_prompt_and_seed_never_overwrite(self):
         for _ in range(2):

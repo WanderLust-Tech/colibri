@@ -367,6 +367,12 @@ coli serve --model ~/models/ace-step-1.5      # POST /v1/audio/music
 the server's log says `[music] saved <path>`), so a song cannot be lost to a browser tab that was put to sleep, or closed,
 while it was made. A failed save is logged and the song is still sent. `COLI_MUSIC_SAVE=0` turns this off.
 
+The WAV also says how it was made: a `LIST`/`INFO` chunk after the samples, whose title (`INAM`) is the prompt, so a player
+shows something, and whose comment (`ICMT`) is a JSON record with the prompt, lyrics, language, length, steps, shift, seed,
+tempo, key, time signature, task and model. It never holds the clips a cover or repaint started from. The saved file and the
+copy sent are the same bytes, and the dashboard's "Open the settings of a saved picture or song" button reads it back into the
+controls. `COLI_MEDIA_META=0` leaves the files plain.
+
 `coli run "prompt"` on a music model does the same as `coli music`; `coli chat` and `coli tune` refuse it with a
 pointer (there is no conversation and no decode loop to tune); `--ctx` does not apply. `coli music` prints the song's
 path as its last line of stdout, so a script can read it; progress goes to the terminal's line (stderr when piped).

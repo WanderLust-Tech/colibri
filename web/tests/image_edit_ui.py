@@ -120,7 +120,7 @@ def open_page(browser, server):
 
 
 def attach(page, *names):
-    page.locator(".composer input[type=file]").set_input_files([
+    page.locator(".composer input[type=file][accept='image/*']").set_input_files([
         {"name": name, "mimeType": "image/png", "buffer": PHOTO} for name in names])
 
 
@@ -139,7 +139,7 @@ try:
         # -- a model that cannot edit: no attach button, no "Auto" size ---------------------------------
         page = open_page(browser, without_edits)
         assert page.get_by_role("button", name="Attach a picture to edit").count() == 0
-        assert page.locator(".composer input[type=file]").count() == 0
+        assert page.locator(".composer input[type=file][accept='image/*']").count() == 0
         assert page.get_by_label("Image size").locator("option[value=auto]").count() == 0
         assert not page.errors, page.errors
         page.close()

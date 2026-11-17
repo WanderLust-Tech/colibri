@@ -265,7 +265,8 @@ def run(browser, gateway, slow_gateway):
     saved = download.value
     assert saved.suggested_filename == "colibri-calm-piano-with-soft-strings-7.wav", saved.suggested_filename
     data = Path(saved.path()).read_bytes()
-    assert data[:4] == b"RIFF" and data[8:12] == b"WAVE" and len(data) == 44 + 2 * 8000 * 4, (data[:12], len(data))
+    pcm, _rate, _channels = music_engine.decode_wav(data)          # the file also carries its settings (media_ui.py reads them)
+    assert data[:4] == b"RIFF" and data[8:12] == b"WAVE" and len(pcm) == 2 * 8000 * 4, (data[:12], len(pcm))
 
     # ---- a new seed makes another song under it, with the same caption, length and steps
     page.get_by_role("button", name="New seed").first.click()

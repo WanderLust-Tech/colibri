@@ -38,7 +38,7 @@ claims about ComfyUI are theirs and were not re-read.
 
 | Item | State |
 |---|---|
-| 1 Settings inside saved media | open |
+| 1 Settings inside saved media | done 2026-11-16 (PNG iTXt, WAV LIST/INFO; the dashboard reads them back through a button; `coli run` and `coli music`, which write their own files, do not tag them) |
 | 2 Jobs that survive the page | open |
 | 3 A Library tab | open |
 | 4 Smarter memory (4a cost-aware eviction, 4b pressure watchdog, 4c demote instead of stop) | open |
@@ -67,7 +67,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
 
 ## A. Saved media and jobs (the biggest gap)
 
-- [ ] **1. Settings inside saved media (S to write, M for the dashboard).** ComfyUI writes the prompt and the graph into
+- [x] **1. Settings inside saved media (S to write, M for the dashboard).** ComfyUI writes the prompt and the graph into
   the PNG's text chunks, so a picture can be reloaded into the page. Ours keeps every render in `~/colibri-images` but the
   file knows nothing about how it was made, and a render can take an hour. Idea: one text chunk with prompt, negative
   prompt, seed, steps, size, model id and preset; tags in the music files; in the dashboard, dropping a file refills the

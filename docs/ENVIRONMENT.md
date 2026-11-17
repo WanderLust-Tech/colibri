@@ -687,6 +687,7 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_IMAGE_SAVE` | `1` | `0` stops the gateway keeping finished pictures. |
 | `COLI_MUSIC_DIR` | `~/colibri-music` | Where the gateway keeps a copy of every finished song. |
 | `COLI_MUSIC_SAVE` | `1` | `0` (or `false`, `no`, `off`) stops the gateway keeping finished songs. |
+| `COLI_MEDIA_META` | `1` | `0` (or `false`, `no`, `off`) stops the gateway writing the prompt, seed and other settings inside the pictures and songs it makes (a PNG text chunk, a WAV comment); they come out plain. |
 | `COLI_PRESETS` | `presets.json` in the setup folder | The presets file `coli router` reads: named presets, a model with settings baked in ([presets.md](presets.md), `coli preset`). Same as `coli router --presets`. |
 | `COLI_SERVICE` | `service.json` in the setup folder | The settings file of `coli service` and `coli tray` (port, keep-alive, whether the network may reach it...; [tray.md](tray.md)). |
 | `COLI_REQUEST_LOG` | unset (no log) | A file that gets one JSON line per request, from the router and the gateway behind it ([request-log.md](request-log.md)). Same as `--request-log`. |

@@ -45,7 +45,9 @@ What a key holder cannot do through the API: read files on the machine (a local 
 unless the server was started with `COLI_IMAGE_ROOT`, and then only under that folder, `..` refused), run commands, or
 read another client's conversation (the server keeps no transcript; the request log holds what happened, not what was
 said, unless you start it with bodies on). Finished pictures are kept as files in `~/colibri-images` on the server
-machine (`c/image_engine.py`); the API does not serve that folder.
+machine (`c/image_engine.py`); the API does not serve that folder. The pictures and songs carry the settings that made them
+(prompt, seed, model, a song's lyrics) inside the file, so a file you share shares its prompt; `COLI_MEDIA_META=0` leaves them
+plain.
 
 Without a key: `/health` answers with a bare "ok" and no routing detail, the dashboard's static files are served (they
 contain no secret), and everything under `/v1/` is refused with 401.

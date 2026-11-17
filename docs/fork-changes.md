@@ -307,6 +307,9 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Security headers** (`c/web_headers.py`): `nosniff` and `Referrer-Policy` on every response, a content policy and `X-Frame-Options`
   on the dashboard's files, and a 403 for a browser request to `/v1/...` that is `Sec-Fetch-Site: cross-site` from an origin that is
   not allowed. [THREAT_MODEL.md](THREAT_MODEL.md).
+- **Settings inside saved media** (`c/media_meta.py`): every picture's PNG and song's WAV carries a JSON record (prompt, size, steps, seed,
+  model, a song's lyrics and language) that the dashboard's "Open the settings…" button reads back into the controls
+  ([qwen-image.md](qwen-image.md#where-the-images-go), [acestep.md](acestep.md)). `COLI_MEDIA_META=0` leaves the files plain.
 - **A failed start on the card is retried on the CPU** and remembered for 30 minutes ([router.md](router.md#a-model-that-will-not-start-on-the-card)),
   unless the card was chosen (a pin, `--gpu on`).
 

@@ -24,7 +24,7 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar} from "lucide-react"
+  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar, FileInput} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -41,6 +41,7 @@ import {
 } from "@/lib/images"
 import { branchAt, editFrom, isPlainTurn, resendFrom, REWRITES, type Rewrite } from "@/lib/chat"
 import { DEFAULT_MUSIC_LIMITS } from "@/lib/music"
+import { readSettings, refillFrom } from "@/lib/mediaMeta"
 import { useMusic } from "@/lib/useMusic"
 import { activeRequests, settingsPages, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
 import Brio from "./Brio"
@@ -146,6 +147,7 @@ export default function App() {
   const [pictures, setPictures] = useState<EditPicture[]>([])
   const [sizeAuto, setSizeAuto] = useState(true)
   const editRef = useRef<HTMLInputElement>(null)
+  const settingsRef = useRef<HTMLInputElement>(null)
   /* The files an edit was made from, by the turn that shows its result: Again and
      Try again need them, and nothing a reload could bring back holds them. */
   const editFiles = useRef(new Map<string, File[]>())
@@ -526,6 +528,33 @@ export default function App() {
     await runImage(item.id, request, files ? { files, auto: false } : undefined)
   }
 
+  /* A saved picture or song knows how it was made (the server writes the settings into the file): opening one puts the
+     model, prompt and controls back as they were, so the same render can be made again or varied. Dropping the file is
+     taken by attaching it, so this is its own button. */
+  const openSettingsFile = async (file: File | undefined) => {
+    if (!file) return
+    const settings = await readSettings(file)
+    if (!settings) { setError("media.noSettings"); return }
+    const plan = refillFrom(settings, imageModels, musicModels)
+    if ("error" in plan) { setError(t(plan.error, { kind: t(settings.kind === "image" ? "media.kindImage" : "media.kindSong") })); return }
+    setError("")
+    setModel(plan.model)
+    setDraft(plan.prompt)
+    if (settings.kind === "image") {
+      setSeedText(plan.seed ?? "")
+      if (plan.steps !== undefined) setImageSteps(plan.steps)
+      if (plan.size) { setImageSize(plan.size); setCustomSize(!presetOf(plan.size)); setSizeAuto(false) }
+    } else {
+      music.setSeedText(plan.seed ?? "")
+      if (plan.steps !== undefined) music.setSteps(plan.steps)
+      if (plan.duration !== undefined) music.setDuration(plan.duration)
+      if (plan.language !== undefined) music.setLanguage(plan.language)
+      music.setLyrics(plan.lyrics ?? "")
+      if (plan.lyrics) music.openLyrics()
+    }
+    draftRef.current?.focus()
+  }
+
   const downloadImage = (image: GeneratedImage) => {
     if (!image.url) return
     const url = image.url.startsWith("data:") ? URL.createObjectURL(dataUrlBlob(image.url)) : image.url
@@ -798,6 +827,12 @@ export default function App() {
                 onClick={() => fileRef.current?.click()}><ImagePlus /></button>
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
               <button type="button" className="slot-chip" onClick={() => openSettings("model")}><Database />{t("topbar.slot", { n: cacheSlot + 1 })}</button>
+              </>}
+              {(imageMode || music.mode) && <>
+                <input ref={settingsRef} type="file" accept="image/png,audio/wav,audio/x-wav,audio/wave,.png,.wav" hidden
+                  onChange={e => { void openSettingsFile(e.target.files?.[0]); e.target.value = "" }} />
+                <button type="button" className="settings-chip" aria-label={t("media.open")} title={t("media.open")}
+                  onClick={() => settingsRef.current?.click()}><FileInput /></button>
               </>}
               {loading ? <button type="button" className="send-button" aria-label={music.mode || imageMode ? t("image.cancel") : t("chat.stop")} onClick={() => abortRef.current?.abort()}><CircleStop /></button> : <button type="submit" className="send-button" aria-label={music.mode ? t("music.generate") : imageMode ? t("image.generate") : t("chat.send")} disabled={!canSend}><ArrowUp /></button>}
             </div>

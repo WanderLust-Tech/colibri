@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from acestep_fixture import RATE, STUB, make_fake_checkpoint, stub_env  # noqa: E402
 
 import music_engine  # noqa: E402
+import media_meta  # noqa: E402
 from openai_server import APIServer  # noqa: E402
 
 MODEL_ID = "ace-step-1.5-colibri"
@@ -352,6 +354,31 @@ class SavedSongsTest(unittest.TestCase):
         self.assertEqual(len(names), 1, names)
         self.assertTrue(names[0].endswith("-a-lullaby-s3.wav"), names)
         self.assertEqual(Path(self.out.name, names[0]).read_bytes(), base64.b64decode(completed[0]["data"][0]["b64_json"]))
+
+    def test_the_file_and_the_copy_sent_carry_the_settings_that_made_them(self):
+        status, _h, raw = self.gw.music(prompt="Calm piano, soft strings!", lyrics="la la", language="en",
+                                        duration=1, steps=1, seed=7)
+        self.assertEqual(status, 200, raw[:200])
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        found = media_meta.read_wav(sent)
+        self.assertEqual((found["app"], found["kind"], found["model"]), ("colibri", "music", MODEL_ID))
+        self.assertEqual((found["prompt"], found["lyrics"], found["language"], found["seed"], found["steps"]),
+                         ("Calm piano, soft strings!", "la la", "en", 7, 1))
+        self.assertEqual(media_meta.read_wav(Path(self.out.name, self.saved()[0]).read_bytes()), found)
+        self.assertEqual(music_engine.decode_wav(sent)[1:], (RATE, music_engine.CHANNELS))
+
+    def test_a_wav_download_carries_them_too(self):
+        status, _h, sent = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7, response_format="wav")
+        self.assertEqual(status, 200)
+        self.assertEqual(media_meta.read_wav(sent)["seed"], 7)
+
+    def test_nobody_has_to_have_them(self):
+        with mock.patch.dict(os.environ, {"COLI_MEDIA_META": "0"}):
+            status, _h, raw = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7)
+        self.assertEqual(status, 200, raw[:200])
+        sent = base64.b64decode(json.loads(raw)["data"][0]["b64_json"])
+        self.assertIsNone(media_meta.read_wav(sent))
+        self.assertEqual(Path(self.out.name, self.saved()[0]).read_bytes(), sent)
 
     def test_two_songs_of_one_caption_and_seed_never_overwrite(self):
         for _ in range(2):

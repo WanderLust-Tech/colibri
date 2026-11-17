@@ -255,6 +255,7 @@ export function useMusic(env: MusicEnvironment) {
     setRepaintFrom, setRepaintTo, setRepaintMode, setRepaintStrength, setCoverStrength, setCoverNoise,
     chooseClip, clearClip,
     toggleLyrics: () => setLyricsOpen((open) => !open),
+    openLyrics: () => setLyricsOpen(true),
     cancel: () => env.abortRef.current?.abort(),
     send, again, retry, download, copySeed,
   }

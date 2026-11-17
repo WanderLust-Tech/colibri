@@ -25,6 +25,7 @@ import v4_dsml                      # vendored DeepSeek V4 DSML reference primit
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
+import media_meta                   # the settings written inside a finished picture or song
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
 import features                     # what /health tells a client this server can do
 import request_log                  # COLI_REQUEST_LOG: one JSON line per request
@@ -8002,9 +8003,12 @@ class APIHandler(BaseHTTPRequestHandler):
         A picture can take an hour, and everything after the engine's last step (the encode, the socket,
         the browser) can still lose it: a tab the browser has put to sleep stops reading, and the finished
         picture then exists nowhere. So it is saved before it is sent, under the name `coli run` would give
-        it (<date>-<time>-<prompt>-s<seed>.png, never overwriting). A failure to save is logged and does
-        not fail the request: the picture is still sent."""
+        it (<date>-<time>-<prompt>-s<seed>.png, never overwriting). The file, and the copy sent, carry the
+        settings that made it (media_meta). A failure to save is logged and does not fail the request: the
+        picture is still sent."""
         png = image_engine.encode_png(result["width"], result["height"], result["rgba"], 4)
+        if media_meta.enabled():
+            png = media_meta.png_with(png, media_meta.image_record(request, result, self.server.model_id))
         directory = getattr(self.server, "save_images_to", None)
         if directory:
             try:
@@ -8309,6 +8313,8 @@ class APIHandler(BaseHTTPRequestHandler):
         `coli music` gives it (<date>-<time>-<caption>-s<seed>.wav, never overwriting). A failure to save is
         logged and does not fail the request: the song is still sent."""
         wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
+        if media_meta.enabled():
+            wav = media_meta.wav_with(wav, media_meta.music_record(request, result, self.server.model_id))
         directory = getattr(self.server, "save_songs_to", None)
         if directory:
             try:
