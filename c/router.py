@@ -45,6 +45,7 @@ import features
 import gpu as gpu_mod
 import model_settings as settings_mod
 import presets as presets_mod
+import web_headers
 import log_tail
 import request_log
 
@@ -1027,6 +1028,17 @@ class RouterHandler(BaseHTTPRequestHandler):
         if not self._authed():
             raise ApiError(401, "Invalid or missing API key.", "invalid_api_key", None, "authentication_error")
 
+    def end_headers(self):
+        for name, value in web_headers.BASELINE:
+            self.send_header(name, value)
+        super().end_headers()
+
+    def _check_fetch_site(self):
+        """A second check behind the origin allow-list: a page on another site is refused before anything runs."""
+        if web_headers.cross_site_refused(urlsplit(self.path).path, self.headers.get("Sec-Fetch-Site"),
+                                          self.headers.get("Origin"), self.server.cors_origins):
+            raise ApiError(403, "Cross-site requests are not allowed. Add the page's origin with --cors-origin.", "forbidden")
+
     def _cors(self):
         origin = self.headers.get("Origin")
         origins = self.server.cors_origins
@@ -1121,6 +1133,7 @@ class RouterHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._check_host()
+            self._check_fetch_site()
             split = urlsplit(self.path)
             path, query = split.path, parse_qs(split.query)
             if path == "/health":
@@ -1168,6 +1181,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         seen = {}                                   # what the request log says about it
         try:
             self._check_host()
+            self._check_fetch_site()
             self._require_auth()
             path = urlsplit(self.path).path
             if path == "/v1/models/switch":
@@ -1346,6 +1360,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 lower = name.lower()
                 if lower in DROP_RESPONSE or lower.startswith("access-control-"):
                     continue
+                if lower in web_headers.BASELINE_NAMES:
+                    continue                      # this router sends its own, once
                 if lower == "content-length" or lower not in HOP_BY_HOP:
                     self.send_header(name, value)
             self.send_header("x-colibri-model", worker.entry["id"])

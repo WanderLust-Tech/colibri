@@ -3589,6 +3589,38 @@ class StaticServingTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 404)
 
 
+    def get(self, path, headers=None):
+        request = Request(self.base + path, headers=headers or {})
+        try:
+            return urlopen(request, timeout=2)
+        except HTTPError as error:
+            self.addCleanup(error.close)
+            return error
+
+    def test_the_dashboard_comes_with_a_content_policy(self):
+        with self.get("/") as response:
+            self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
+            self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+            self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+            self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+
+    def test_an_answer_of_the_api_is_not_sniffed_and_has_no_page_policy(self):
+        with self.get("/health") as response:
+            self.assertEqual(response.headers.get_all("X-Content-Type-Options"), ["nosniff"])
+            self.assertIsNone(response.headers["Content-Security-Policy"])
+
+    def test_a_page_on_another_site_cannot_use_the_api(self):
+        evil = {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}
+        self.assertEqual(self.get("/v1/models", evil).code, 403)
+        self.assertEqual(self.get("/v1/models", {"Sec-Fetch-Site": "cross-site"}).code, 403)    # no Origin: a no-cors request
+        allowed = {"Sec-Fetch-Site": "cross-site", "Origin": "http://localhost:5173"}
+        self.assertEqual(self.get("/v1/models", allowed).status, 200)
+        self.assertEqual(self.get("/v1/models", {"Sec-Fetch-Site": "same-origin"}).status, 200)
+        self.assertEqual(self.get("/v1/models").status, 200)                                     # curl, an SDK
+        self.assertEqual(self.get("/", {"Sec-Fetch-Site": "cross-site"}).status, 200)           # a link from another site opens the dashboard
+
+
 class SchedulerHTTPTest(unittest.TestCase):
     def setUp(self):
         self.engine = BlockingEngine()

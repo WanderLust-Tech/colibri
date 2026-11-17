@@ -28,6 +28,7 @@ import music_engine                 # the acestep serve protocol, WAV and reques
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
 import features                     # what /health tells a client this server can do
 import request_log                  # COLI_REQUEST_LOG: one JSON line per request
+import web_headers                  # nosniff and the dashboard's content policy; a second check on cross-site requests
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
 from family_registry import default_model_id as registry_default_model_id
@@ -7009,6 +7010,17 @@ class APIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def end_headers(self):
+        for name, value in web_headers.BASELINE:
+            self.send_header(name, value)
+        super().end_headers()
+
+    def _check_fetch_site(self):
+        """A second check behind the origin allow-list: a page on another site is refused before anything runs."""
+        if web_headers.cross_site_refused(urlsplit(self.path).path, self.headers.get("Sec-Fetch-Site"),
+                                          self.headers.get("Origin"), self.server.cors_origins):
+            raise APIError(403, "Cross-site requests are not allowed. Add the page's origin with --cors-origin.", None, "forbidden")
+
     def send_cors_headers(self):
         origin = self.headers.get("Origin")
         if not origin or ("*" not in self.server.cors_origins and origin not in self.server.cors_origins):
@@ -7282,6 +7294,8 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for name, value in web_headers.DOCUMENT:
+            self.send_header(name, value)
         self.send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
@@ -7291,6 +7305,7 @@ class APIHandler(BaseHTTPRequestHandler):
         request_id = "req_" + uuid.uuid4().hex
         try:
             self._check_host()
+            self._check_fetch_site()
             path = urlsplit(self.path).path
             if path == "/metrics":
                 self.require_auth()
@@ -7411,6 +7426,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self._rid = request_id
         try:
             self._check_host()
+            self._check_fetch_site()
             self.require_auth()
             path = urlsplit(self.path).path
             blobs = None

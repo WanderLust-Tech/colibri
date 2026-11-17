@@ -339,6 +339,28 @@ class GuardsTest(unittest.TestCase):
         self.assertIn("router", body)
         self.assertEqual(rig.call("GET", "/experts")[3]["rows"], 0)
 
+    def test_every_answer_is_not_sniffed_exactly_once(self):
+        """The router's own and a model's relayed answer both carry nosniff, and one copy of it."""
+        rig = Rig(self, [entry("text-a")])
+        for method, path, body in (("GET", "/health", None), ("GET", "/v1/models", None),
+                                   ("POST", "/v1/chat/completions", {"model": "text-a"})):
+            connection = http.client.HTTPConnection("127.0.0.1", rig.port, timeout=60)
+            connection.request(method, path, body=json.dumps(body) if body else None,
+                               headers={"Content-Type": "application/json"} if body else {})
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.getheaders().count(("X-Content-Type-Options", "nosniff")), 1, path)
+            connection.close()
+
+    def test_a_page_on_another_site_cannot_use_the_router(self):
+        rig = Rig(self, [entry("text-a")])
+        evil = {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}
+        self.assertEqual(rig.call("GET", "/v1/models", headers=evil)[0], 403)
+        self.assertEqual(rig.call("POST", "/v1/chat/completions", {"model": "text-a"}, headers=evil)[0], 403)
+        self.assertEqual(rig.call("GET", "/v1/models", headers=dict(evil, Origin="http://127.0.0.1:1"))[0], 200)    # an allowed origin
+        self.assertEqual(rig.call("GET", "/v1/models", headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
+        self.assertEqual(rig.call("GET", "/v1/models")[0], 200)
+
     def test_health_lists_what_this_router_has(self):
         """The block a client reads to hide a control this server lacks. This rig has no presets file, no request log and no
         settings file, so those three are off; the loaded model's own list (a single server's) must not replace the router's."""

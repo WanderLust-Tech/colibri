@@ -58,6 +58,13 @@ contain no secret), and everything under `/v1/` is refused with 401.
 - **A web page in your browser cannot use the server.** The `Host` header must be loopback or one you allowed
   (`--allowed-host`), which stops DNS rebinding. Browser origins are an allow-list (`--cors-origin`); a model switch
   from a foreign origin is refused with 403 and needs a JSON content type, which forces a CORS preflight.
+- **Static headers and a second cross-site check.** Every response carries `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: no-referrer`; the dashboard's own files also carry a content policy (scripts only from the server's own files,
+  no plug-ins, no framing by another page) and `X-Frame-Options: DENY` (`c/web_headers.py`). A browser request to `/v1/...`
+  whose `Sec-Fetch-Site` is `cross-site` and whose origin is not on the `--cors-origin` list is refused with 403 before anything
+  runs: a simple cross-site request is carried out by the server before the browser decides its answer may not be read, which
+  matters most on a loopback server without a key. curl, the SDKs and the editor extension send no `Sec-Fetch-Site` and are not
+  affected. This is defence in depth: the dashboard does not build markup from model output, and the key is what protects the API.
 - **The dashboard keeps the key in memory only.** A link `http://host:8000/#key=...` puts it in the address-bar
   fragment, which a browser never sends to a server; the page reads it once and removes it from the address bar. It is
   not written to local storage (older releases did; the page deletes that copy).

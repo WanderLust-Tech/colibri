@@ -80,6 +80,8 @@ def run(browser, rig):
     page.set_default_timeout(20000)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    # the content policy the router sends with the dashboard must not block anything the dashboard does
+    page.on("console", lambda message: errors.append("policy: " + message.text) if "Content Security Policy" in message.text else None)
     switches = []
     page.on("request", lambda request: switches.append(request.url) if request.url.endswith("/v1/models/switch") else None)
     page.goto(rig.url, wait_until="networkidle")
