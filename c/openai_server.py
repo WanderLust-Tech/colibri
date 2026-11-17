@@ -26,6 +26,7 @@ import v41_dsml                     # ...and V4.1's, whose tag names differ by a
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import media_meta                   # the settings written inside a finished picture or song
+import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
 import features                     # what /health tells a client this server can do
 import request_log                  # COLI_REQUEST_LOG: one JSON line per request
@@ -35,7 +36,7 @@ from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id
 from family_registry import default_model_id as registry_default_model_id
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 HERE = Path(__file__).resolve().parent
@@ -7380,10 +7381,28 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.installed_models(request_id)
             elif path.startswith("/v1/models/") and unquote(path[11:]) == self.server.model_id:
                 self.send_json(200, self.server.model_entry(), request_id)
+            elif path == "/v1/library":
+                self.send_json(200, self.library_listing(urlsplit(self.path).query), request_id)
+            elif path.startswith("/v1/library/"):
+                self.library_file(unquote(path[len("/v1/library/"):]))
             else:
                 raise APIError(404, "Not found.", None, "not_found")
         except APIError as error:
             self.send_json(error.status, error_object(error), request_id, error.headers)
+
+    def library_listing(self, query):
+        try:
+            kind, limit, offset = library.page_arguments(parse_qs(query))
+            return library.listing(kind, limit, offset)
+        except library.LibraryError as error:
+            raise APIError(error.status, error.message, error.param, error.code) from None
+
+    def library_file(self, rest):
+        kind, _, name = rest.partition("/")
+        try:
+            library.serve(self, kind, name, self.send_cors_headers)
+        except library.LibraryError as error:
+            raise APIError(error.status, error.message, error.param, error.code) from None
 
     def do_OPTIONS(self):
         try:                                   # (#SEC-7) apply the Host guard uniformly, incl. CORS preflight
@@ -8013,6 +8032,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if directory:
             try:
                 path = image_engine.save_png(png, request["prompt"], result["seed"], directory)
+                result["file"] = os.path.basename(path)             # the library lists it under this name
                 sys.stderr.write(f"[image] saved {path}\n")
             except OSError as error:
                 sys.stderr.write(f"[image] {request_id}: could not save the picture to {directory}: {error}\n")
@@ -8028,7 +8048,8 @@ class APIHandler(BaseHTTPRequestHandler):
                           "revised_prompt": None}],
                 "colibri": {"width": result["width"], "height": result["height"],
                             "seed": result["seed"], "steps": result["steps"],
-                            "timings": result["timings"]}}
+                            "timings": result["timings"],
+                            **({"file": result["file"]} if result.get("file") else {})}}
 
     def _image_stream(self, engine, request, request_id, created, queue_headers,
                       partial_images):
@@ -8319,6 +8340,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if directory:
             try:
                 path = music_engine.save_wav(wav, request["caption"], result["seed"], directory)
+                result["file"] = os.path.basename(path)
                 sys.stderr.write(f"[music] saved {path}\n")
             except OSError as error:
                 sys.stderr.write(f"[music] {request_id}: could not save the song to {directory}: {error}\n")
@@ -8349,7 +8371,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
-                "colibri": {key: result.get(key) for key in keys}}
+                "colibri": {**{key: result.get(key) for key in keys},
+                            **({"file": result["file"]} if result.get("file") else {})}}
 
     def _music_stream(self, engine, request, request_id, created, queue_headers):
         """SSE: progress events, then completed, then [DONE]. Committed on the engine's first frame,

@@ -683,10 +683,11 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_MODELS_ROOT` | unset | Extra folders `coli router` and the dashboard's model switcher scan for models, besides the setup's and `~/colibri-models`; separated by `;` on Windows, `:` elsewhere. |
 | `COLI_ALLOW_INSECURE_BIND` | unset | `1` lets the server or router listen beyond localhost with no `COLI_API_KEY`. Refused otherwise. |
 | `COLI_SETUP_HOME` | `%LOCALAPPDATA%\colibri` (Windows), `~/Library/Application Support/colibri` (macOS), `$XDG_DATA_HOME/colibri` | Where `coli setup` keeps its state, the router's memory notes (`router.json`) and the presets file (`presets.json`). |
-| `COLI_IMAGE_DIR` | `~/colibri-images` | Where the gateway keeps a copy of every finished picture. |
+| `COLI_IMAGE_DIR` | `~/colibri-images` | Where the gateway keeps a copy of every finished picture, and where the Library (`GET /v1/library`) reads them from: a router reads it too, so give it and the models it starts the same value. |
 | `COLI_IMAGE_SAVE` | `1` | `0` stops the gateway keeping finished pictures. |
-| `COLI_MUSIC_DIR` | `~/colibri-music` | Where the gateway keeps a copy of every finished song. |
+| `COLI_MUSIC_DIR` | `~/colibri-music` | Where the gateway keeps a copy of every finished song, and where the Library reads them from (as `COLI_IMAGE_DIR`). |
 | `COLI_MUSIC_SAVE` | `1` | `0` (or `false`, `no`, `off`) stops the gateway keeping finished songs. |
+| `COLI_JOBS` | `jobs.jsonl` in the setup folder | Where `coli router` keeps the records of its background jobs ([api](api.md#background-jobs)). |
 | `COLI_MEDIA_META` | `1` | `0` (or `false`, `no`, `off`) stops the gateway writing the prompt, seed and other settings inside the pictures and songs it makes (a PNG text chunk, a WAV comment); they come out plain. |
 | `COLI_PRESETS` | `presets.json` in the setup folder | The presets file `coli router` reads: named presets, a model with settings baked in ([presets.md](presets.md), `coli preset`). Same as `coli router --presets`. |
 | `COLI_SERVICE` | `service.json` in the setup folder | The settings file of `coli service` and `coli tray` (port, keep-alive, whether the network may reach it...; [tray.md](tray.md)). |

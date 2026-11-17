@@ -39,8 +39,8 @@ claims about ComfyUI are theirs and were not re-read.
 | Item | State |
 |---|---|
 | 1 Settings inside saved media | done 2026-11-16 (PNG iTXt, WAV LIST/INFO; the dashboard reads them back through a button; `coli run` and `coli music`, which write their own files, do not tag them) |
-| 2 Jobs that survive the page | open |
-| 3 A Library tab | open |
+| 2 Jobs that survive the page | done 2026-11-16 (router jobs, `Prefer: respond-async`; dashboard switch and Jobs panel; not done: the extension, events instead of polling) |
+| 3 A Library tab | done 2026-11-16 (`/v1/library`, Settings → Library; not done: server-made thumbnails, a URL instead of base64 in the response, delete) |
 | 4 Smarter memory (4a cost-aware eviction, 4b pressure watchdog, 4c demote instead of stop) | open |
 | 5 Failure ladder for a worker that will not load | done 2026-11-16 |
 | 6 Gateway feature list | done 2026-11-16 (server and dashboard; the extension still reads a 404) |
@@ -73,7 +73,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   prompt, seed, steps, size, model id and preset; tags in the music files; in the dashboard, dropping a file refills the
   form. *Where in ComfyUI:* `nodes.py` (SaveImage), `comfy_extras/nodes_images.py`. *Nearest here:* `save_png` in
   `c/image_engine.py`.
-- [ ] **2. Jobs that survive the page (L; the list/cancel part is S to M).** Image and music generation is one streaming
+- [x] **2. Jobs that survive the page (L; the list/cancel part is S to M).** Image and music generation is one streaming
   request, so closing the tab, a sleeping browser or an extension reload cancels it. ComfyUI answers a submit with a job id
   at once, runs the job apart from the connection, and lets any client re-attach: the first thing a re-attached client
   gets is a snapshot of where the job is. Idea: a `background: true` request flag returning an id; job records kept on
@@ -86,7 +86,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   (`PromptQueue`), `comfy_execution/jobs.py` (`classify_job_for_cancel`, `JobStatus`). *Nearest here:* `Gate.waiting` in
   `c/router.py` (invisible to clients), `X-Request-Id`, `GET /v1/requests`. Gives a Stop button for a queued request, a
   visible queue position, cancel from another tab.
-- [ ] **3. A Library tab (M).** Nothing serves or lists the saved pictures. Idea: `GET /v1/images/files` and a view route
+- [x] **3. A Library tab (M).** Nothing serves or lists the saved pictures. Idea: `GET /v1/images/files` and a view route
   with a resize parameter for thumbnails, path-traversal guards, `nosniff`, and a day-long cache for images; width, height
   and duration recorded per output. Also lets a response carry a URL instead of base64 for large pictures and songs.
   *Where:* `server.py` (`/view`, `/view_metadata`), `middleware/cache_middleware.py`,

@@ -107,6 +107,14 @@ the 503 of the second try, and nothing is remembered. The 30 minutes are `CARD_F
 Qwen-Image's decoder already falls back on its own: its Vulkan VAE decode works in bands and returns to the CPU when the device
 is lost or refuses its weights (`c/qwenimage_vae_vk.h`), so a picture that gets as far as decoding is not lost to that.
 
+## Background jobs
+
+`Prefer: respond-async` on a picture or song request makes it a job: the router answers `202` with an id and makes the render apart from the
+connection, so a closed tab no longer cancels an hour of work ([api](api.md#background-jobs)). One job runs at a time, in the same low-priority
+lane as any other render, so a chat that arrives goes ahead of the jobs that are waiting (never of the one that is running). The router holds its
+own connection to the model for the whole job; cancelling closes it, which is how the model learns to stop. The records are in `jobs.jsonl`
+beside the router's other state (`COLI_JOBS`), and a job that was in flight when the router stopped is read back as failed.
+
 ## Keep-alive, per request
 
 `--keep-alive` is the default. A request can say how long its model stays loaded after it, as in Ollama:

@@ -310,6 +310,14 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Settings inside saved media** (`c/media_meta.py`): every picture's PNG and song's WAV carries a JSON record (prompt, size, steps, seed,
   model, a song's lyrics and language) that the dashboard's "Open the settings…" button reads back into the controls
   ([qwen-image.md](qwen-image.md#where-the-images-go), [acestep.md](acestep.md)). `COLI_MEDIA_META=0` leaves the files plain.
+- **Background jobs and the Library** (`c/jobs.py`, `c/library.py`; [api.md](api.md#background-jobs), [router.md](router.md#background-jobs)):
+  `Prefer: respond-async` on a picture or song request makes the router answer 202 with a job and make the render apart from the connection,
+  so a closed tab no longer cancels an hour of work. `GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/cancel` (one call in every state);
+  one job at a time in the low-priority lane; records in `jobs.jsonl` (a job in flight at a restart comes back failed, saying so); a client
+  id (`X-Colibri-Job-Id`) makes a resend the same job. `GET /v1/library` and `/v1/library/{kind}/{name}` (both servers) list and serve the
+  kept files, with the size and settings read from each file's header, byte ranges and a day of caching. Dashboard: a "Keep going if I
+  leave" switch in the picture and music composers, and Settings → Library with a Jobs part. Not done: thumbnails made on the server, a
+  URL in the response instead of base64, delete, the extension.
 - **A failed start on the card is retried on the CPU** and remembered for 30 minutes ([router.md](router.md#a-model-that-will-not-start-on-the-card)),
   unless the card was chosen (a pin, `--gpu on`).
 

@@ -20,7 +20,8 @@ SPEC = C_DIR.parent / "docs" / "api-reference" / "openapi.json"
 # Routes a server answers that are not part of the API: the dashboard's own files and the browser's preflight.
 NOT_API = {"/"}
 # Spec paths that stand for a family of routes the source matches by prefix (`/v1/models/<id>`), not by an exact string.
-PATTERNS = {"/v1/models/{model}": ("GET", "/v1/models/")}
+PATTERNS = {"/v1/models/{model}": ("GET", "/v1/models/"), "/v1/library/{kind}/{name}": ("GET", "/v1/library/"),
+            "/v1/jobs/{job}": ("GET", "/v1/jobs/")}
 
 
 def constants(source):
@@ -44,6 +45,8 @@ def routes_in(source, method):
     for group in re.findall(r'\bpath\s+in\s+\(([^)]*)\)', body):
         for literal, name in re.findall(r'"(/[^"]*)"|([A-Z_]+)', group):
             found.add(literal or names.get(name))
+    for prefix in re.findall(r'path\.startswith\("(/v1/[^"]*/)"\)', body):      # a family of routes: /v1/library/<kind>/<name>
+        found.add(prefix)
     found.discard(None)
     return found
 

@@ -350,6 +350,82 @@ how many pictures an edit started from) or `lyrics`, `language`, `duration`, `sh
 song). Fields the request did not set are left out. The bytes are the same in the response (`b64_json`, the WAV download) and in
 the saved file. A server started with `COLI_MEDIA_META=0` writes neither.
 
+## The kept pictures and songs (library)
+
+The server keeps every finished picture in `~/colibri-images` and every song in `~/colibri-music` (`COLI_IMAGE_DIR`,
+`COLI_MUSIC_DIR`; [qwen-image](qwen-image.md#where-the-images-go), [acestep](acestep.md)). Two routes, on `coli serve` and `coli router`
+alike, list and serve those two folders and nothing else; both need the key like everything under `/v1/`.
+
+`GET /v1/library` lists them, newest first, with `kind` (`images` or `music`), `limit` (1 to 200, default 50) and `offset`:
+
+```
+{"object": "list", "total": 112, "has_more": true, "data": [
+  {"kind": "images", "name": "20261116-153012-a-red-fox-s42.png", "url": "/v1/library/images/20261116-153012-a-red-fox-s42.png",
+   "bytes": 1204331, "modified": 1795000000, "width": 768, "height": 512,
+   "settings": {"app": "colibri", "kind": "image", "model": "qwen-image-2.1-colibri", "prompt": "a red fox", "seed": 42, "steps": 8, ...}},
+  {"kind": "music", "name": "...-s7.wav", "url": "...", "bytes": 5760044, "modified": 1794990000, "duration": 30.0,
+   "sample_rate": 48000, "channels": 2, "settings": {...}}]}
+```
+
+The size, the length and `settings` are read from the file's own header ([settings inside pictures and songs](#settings-inside-pictures-and-songs)),
+never from its pixels or samples, so a long list is cheap. A file with no record (a picture from somewhere else) is listed without
+`settings`. `GET /v1/library/{kind}/{name}` is the file, with `Cache-Control: private, max-age=86400` (a kept file is never
+overwritten) and byte ranges, so a player can seek. A page cannot put the key on an `<img src>`, so it fetches the file with the
+`Authorization` header and shows the bytes from a blob.
+
+Only a plain file of the right kind directly inside the folder is served. A name with `..`, a separator or a drive letter, one
+that is a link out of the folder, or one that is not there is the same 404. The answer to a picture or song request also says
+which file it kept: `colibri.file` in the JSON (absent when the server keeps nothing).
+
+## Background jobs
+
+A picture can take an hour, and asked for the usual way it is one request: closing the tab, a browser that put the page to sleep or an
+editor that reloaded cancels it. Add `Prefer: respond-async` to `POST /v1/images/generations`, `POST /v1/images/edits` or
+`POST /v1/audio/music` on a `coli router` and the router answers at once with `202 Accepted`, a `Location` header and the job, then
+makes the picture apart from the connection:
+
+```
+POST /v1/images/generations        Prefer: respond-async        X-Colibri-Job-Id: fox-1   (optional)
+{"model": "qwen-image-2.1-colibri", "prompt": "a red fox", "size": "768x512", "steps": 8, "seed": 42}
+
+202 Accepted     Location: /v1/jobs/fox-1     Preference-Applied: respond-async
+{"id": "fox-1", "object": "job", "kind": "image", "model": "qwen-image-2.1-colibri", "status": "queued", "position": 1,
+ "created": 1795000000, "started": null, "finished": null, "endpoint": "/v1/images/generations",
+ "request": {"prompt": "a red fox", "size": "768x512", "steps": 8, "seed": 42}}
+```
+
+Everything about the request is checked before the 202 (an unknown model is the usual 404, not a failed job); a chat is a 400, since it is
+answered while the connection is open. The request body is otherwise the same as ever. `stream`, `partial_images` and `response_format`
+are ignored: the job follows the engine's progress itself and its result is a kept file.
+
+| Route | |
+|---|---|
+| `GET /v1/jobs` | The jobs, newest first: `status` (`queued`, `running`, `succeeded`, `failed`, `cancelled`), `limit` (1 to 200, default 50), `offset`. |
+| `GET /v1/jobs/{job}` | One job. 404 for an id nobody has (or older than the 200 kept). |
+| `POST /v1/jobs/cancel` | `{"id": ...}`. |
+
+A job is **queued** (with its `position`, 1 is next), **running** (with `progress`: `stage`, `step`, `steps`, `elapsed`, when the engine reports
+it) and then **succeeded** (with `result`: `file`, `url` for `GET /v1/library/...`, and the size, seed, steps or length), **failed** (with
+`error`: `code`, `message`) or **cancelled**. A page that was closed asks `GET /v1/jobs/{job}` again whenever it likes; nothing needs the
+connection that made the request.
+
+- **One at a time.** A picture or song takes the whole machine, so jobs run one after another, in order, behind any chat that is already
+  waiting (they go in the router's low-priority lane, [router](router.md#priority)). Waiting jobs cost nothing but a record; 32 may wait at once,
+  then a new one is a 429.
+- **Cancel is one call in every state** and never an error for a job that is past help. A waiting job is removed and never runs. A running one has
+  its connection to the model closed, and the model stops computing at once (as when a client that was waiting leaves). A finished job, or an
+  id nobody knows, answers `{"cancelled": false, "status": "succeeded"}` (or `null`).
+- **Resubmitting is safe.** Name the job yourself with `X-Colibri-Job-Id` (1 to 64 letters, digits, `_`, `-`); the same id again answers the
+  job already there and starts nothing, so a retry after a dropped answer does not make a second render.
+- **The list survives a restart.** Every change of state is appended to `jobs.jsonl` beside the router's other state (`COLI_JOBS` moves it;
+  the 200 newest are kept). A job that was waiting or running when the router stopped is not coming back, because its model went with it: it is
+  read back as `failed` with the code `router_restarted`.
+- **The result is a file.** The model keeps every finished picture and song ([library](#the-kept-pictures-and-songs-library)); a job points at it.
+  A model that was told to keep nothing (`COLI_IMAGE_SAVE=0`) still leaves a background job its file, because nobody holds the connection to take
+  the picture from.
+- With a [request log](request-log.md), the end of a job is a line of its own (`job`, the status, the seconds), since the request that asked for it
+  only got the 202.
+
 ## Which features this server has
 
 `GET /health` with the API key carries a `features` block, so a client (the dashboard, the editor extension) can hide a control
@@ -360,7 +436,7 @@ the key `/health` still says only `{"status": "ok"}`.
 ```
 "features": {"api": 1, "router": true, "installed_models": true, "model_switch": "load", "model_unload": true,
              "model_settings": true, "presets": true, "request_log": false, "server_log": true, "priority": true,
-             "json_mode": true, "cached_tokens": true}
+             "library": true, "jobs": true, "json_mode": true, "cached_tokens": true}
 ```
 
 | Name | Meaning |
@@ -375,6 +451,8 @@ the key `/health` still says only `{"status": "ok"}`.
 | `request_log` | `GET /v1/requests`: a router started with a request log ([request log](request-log.md)). |
 | `server_log` | `GET /v1/logs`: the router's own output and its models' ([router](router.md)). |
 | `priority` | The `X-Colibri-Priority` header, and pictures and songs waiting behind a chat ([router](router.md#priority)). |
+| `jobs` | `Prefer: respond-async` on pictures and songs, `GET /v1/jobs`, `GET /v1/jobs/{job}`, `POST /v1/jobs/cancel`: a router only ([background jobs](#background-jobs)). |
+| `library` | `GET /v1/library` and `GET /v1/library/{kind}/{name}`: the kept pictures and songs ([library](#the-kept-pictures-and-songs-library)). |
 | `json_mode` | `response_format` of `json_object` or `json_schema` ([JSON mode](json-mode.md)). |
 | `cached_tokens` | `usage.prompt_tokens_details.cached_tokens`: how much of the prompt was already in the cache. |
 

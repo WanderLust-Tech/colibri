@@ -1408,6 +1408,518 @@
         }
       }
     },
+    "/v1/library": {
+      "get": {
+        "tags": [
+          "Images"
+        ],
+        "summary": "List the kept pictures and songs",
+        "description": "Every finished picture the server kept (`~/colibri-images`, `COLI_IMAGE_DIR`) and every song (`~/colibri-music`, `COLI_MUSIC_DIR`), newest first. Each entry says how big the file is and, read from the file's own header, its size (`width`, `height`) or length (`duration`), and the `settings` the server wrote into it (prompt, seed, model...) when it has them. `url` serves the file. Files are never overwritten, so an entry does not change. Both `coli serve` and `coli router` answer this; see `docs/api.md`.",
+        "operationId": "listLibrary",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Only `images` or only `music` (default: both).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "images",
+                "music"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "At most this many (1 to 200; default 50).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Skip this many of the newest (default 0).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "How many files match, over all pages."
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "images",
+                              "music"
+                            ]
+                          },
+                          "name": {
+                            "type": "string",
+                            "example": "20261116-153012-a-red-fox-s42.png"
+                          },
+                          "url": {
+                            "type": "string",
+                            "example": "/v1/library/images/20261116-153012-a-red-fox-s42.png"
+                          },
+                          "bytes": {
+                            "type": "integer"
+                          },
+                          "modified": {
+                            "type": "integer",
+                            "description": "Unix seconds."
+                          },
+                          "width": {
+                            "type": "integer"
+                          },
+                          "height": {
+                            "type": "integer"
+                          },
+                          "duration": {
+                            "type": "number",
+                            "description": "Seconds of audio."
+                          },
+                          "sample_rate": {
+                            "type": "integer"
+                          },
+                          "channels": {
+                            "type": "integer"
+                          },
+                          "settings": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "description": "The record in the file: `app`, `version`, `kind`, `model`, `prompt`, `seed`, `steps`, ... (docs/api.md, Settings inside pictures and songs)."
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "url",
+                          "bytes",
+                          "modified"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is not a number in range, or `kind` is neither `images` nor `music`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/library/{kind}/{name}": {
+      "get": {
+        "tags": [
+          "Images"
+        ],
+        "summary": "Fetch a kept picture or song",
+        "description": "The file itself, with `Cache-Control: private, max-age=86400` (a kept file is never overwritten). A `Range: bytes=a-b` header is answered with 206 so a player can seek. Only a plain file of the right kind directly inside the kept folder is served; any other name is 404, `..` and separators included. Needs the key like everything under `/v1/`, so a page fetches it with the `Authorization` header and shows the bytes from a blob.",
+        "operationId": "getLibraryFile",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "images",
+                "music"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The `name` of a listing entry.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The byte range asked for."
+          },
+          "401": {
+            "description": "Missing or wrong key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not a kept file.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The range lies past the end of the file."
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List background jobs",
+        "description": "The pictures and songs asked for with `Prefer: respond-async` on `POST /v1/images/generations`, `POST /v1/images/edits` or `POST /v1/audio/music` (those answer `202` with a job and carry on without the connection), newest first. A job is `queued`, `running`, `succeeded`, `failed` or `cancelled`; one at a time runs. The records are kept on disk (the 200 newest), so the list survives a restart; a job that was waiting or running when the router stopped comes back `failed` with the code `router_restarted`. See `docs/api.md`. Only `coli router` has this route.",
+        "operationId": "listJobs",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only jobs in this state.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "At most this many (1 to 200; default 50).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Skip this many of the newest (default 0).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Job"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is not a known status or a number in range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This server is not a router.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job}": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Read one background job",
+        "description": "Where a job is: `queued` (with its `position`, 1 is next), `running` (with `progress` when the engine reports it: `stage`, `step`, `steps`, `elapsed`) or finished. A `succeeded` job has a `result` naming the kept file (`GET /v1/library/{kind}/{name}` serves it); a `failed` one has an `error`. Any client can ask, whenever it likes, so a page that was closed can find its render again.",
+        "operationId": "getJob",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "description": "The `id` of the job.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job (never made, or older than the 200 kept).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/cancel": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Cancel a background job",
+        "description": "The same call in every state, and never an error for a job that is past help: a waiting job is removed and never runs; a running one has its connection to the model closed, which makes the model stop computing (`status` `cancelling` until the job is read back as `cancelled`); a finished job, or an id nobody knows, answers `cancelled: false` with the status it is in (or `null`).",
+        "operationId": "cancelJob",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string",
+                      "example": "job.cancel"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "nullable": true,
+                      "enum": [
+                        "cancelled",
+                        "cancelling",
+                        "succeeded",
+                        "failed",
+                        null
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No `id`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/logs": {
       "get": {
         "tags": [
@@ -1752,6 +2264,132 @@
           "seq": { "type": "integer" },
           "turns": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
         }
+      },
+      "Job": {
+        "type": "object",
+        "description": "A picture or song being made apart from the connection that asked for it (`docs/api.md`, Background jobs).",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`job_...`, or the `X-Colibri-Job-Id` the request named."
+          },
+          "object": {
+            "type": "string",
+            "example": "job"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "image",
+              "music"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "endpoint": {
+            "type": "string",
+            "example": "/v1/images/generations"
+          },
+          "created": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "started": {
+            "type": "integer",
+            "nullable": true
+          },
+          "finished": {
+            "type": "integer",
+            "nullable": true
+          },
+          "position": {
+            "type": "integer",
+            "description": "While `queued`: 1 is next."
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "What was asked for: the prompt (cut at 300 characters) and the size, steps, seed, length."
+          },
+          "progress": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "While `running`, when the engine reports it: `stage`, `step`, `steps`, `elapsed`."
+          },
+          "result": {
+            "type": "object",
+            "description": "When `succeeded` (and for a `cancelled` job that finished anyway).",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "images",
+                  "music"
+                ]
+              },
+              "file": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "example": "/v1/library/images/20261116-153012-a-red-fox-s42.png"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              },
+              "seed": {
+                "type": "integer"
+              },
+              "steps": {
+                "type": "integer"
+              },
+              "duration": {
+                "type": "number"
+              },
+              "timings": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "error": {
+            "type": "object",
+            "description": "When `failed`.",
+            "properties": {
+              "code": {
+                "type": "string",
+                "nullable": true,
+                "example": "engine_error"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "kind",
+          "model",
+          "status",
+          "created",
+          "request"
+        ]
       },
       "Error": {
         "type": "object",

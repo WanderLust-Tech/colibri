@@ -17,6 +17,7 @@ from pathlib import Path
 C_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(C_DIR))
 
+import jobs  # noqa: E402
 import router  # noqa: E402
 
 FAKE = str(Path(__file__).resolve().parent / "router_fake_worker.py")
@@ -34,7 +35,7 @@ class Rig:
 
     def __init__(self, test, entries, *, total=None, keep_alive=600.0, max_loaded=3, api_key=None, parallel=False,
                  max_queue=8, queue_timeout=10.0, env=None, measure=None, state_path=None, allowed_hosts=(), gpu=None,
-                 settings=None):
+                 settings=None, job_log=None):
         self.test = test
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
@@ -56,8 +57,12 @@ class Rig:
                                 memory=self.free if total else (lambda: None), measure=measure or (lambda pid, job: 0),
                                 grace=0.5, queue_timeout=queue_timeout, gpu=gpu, settings=settings)
         self.gate = router.Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel)
+        self.jobs_path = job_log or os.path.join(self.tmp.name, "jobs.jsonl")
+        self.jobs = jobs.JobManager(jobs.JobStore(self.jobs_path))
+        test.addCleanup(self.jobs.close)
         self.server = router.RouterServer(("127.0.0.1", 0), self.pool, self.catalog, self.gate, api_key,
-                                          ("http://127.0.0.1:1",), allowed_hosts, queue_timeout, settings=settings)
+                                          ("http://127.0.0.1:1",), allowed_hosts, queue_timeout, settings=settings,
+                                          jobs=self.jobs)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

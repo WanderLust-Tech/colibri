@@ -380,6 +380,14 @@ class SavedSongsTest(unittest.TestCase):
         self.assertIsNone(media_meta.read_wav(sent))
         self.assertEqual(Path(self.out.name, self.saved()[0]).read_bytes(), sent)
 
+    def test_the_answer_names_the_file_it_kept_so_a_library_can_find_it(self):
+        status, _h, raw = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7)
+        self.assertEqual(status, 200, raw[:200])
+        self.assertEqual(json.loads(raw)["colibri"]["file"], self.saved()[0])
+        self.gw.server.save_songs_to = None
+        status, _h, raw = self.gw.music(prompt="calm piano", duration=1, steps=1, seed=7)
+        self.assertNotIn("file", json.loads(raw)["colibri"])
+
     def test_two_songs_of_one_caption_and_seed_never_overwrite(self):
         for _ in range(2):
             status, _h, raw = self.gw.music(prompt="a lullaby", duration=1, steps=1, seed=3)

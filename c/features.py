@@ -14,7 +14,7 @@ reused for something else; `api` is the version of this list and goes up only wh
 API_LEVEL = 1
 
 
-def describe(*, router=False, presets=False, request_log=False, model_settings=False):
+def describe(*, router=False, presets=False, request_log=False, model_settings=False, jobs=False):
     """The block for one server. The arguments say what a router was started with; `coli serve` has none of them."""
     return {
         "api": API_LEVEL,
@@ -35,6 +35,11 @@ def describe(*, router=False, presets=False, request_log=False, model_settings=F
         "server_log": bool(router),
         # X-Colibri-Priority, and pictures and songs waiting behind a chat.
         "priority": bool(router),
+        # GET /v1/library and /v1/library/{kind}/{name}: the kept pictures and songs, listed and served.
+        "library": True,
+        # POST with `Prefer: respond-async` (pictures and songs) answers 202 with a job; GET /v1/jobs, GET /v1/jobs/{id},
+        # POST /v1/jobs/cancel. A render goes on when the page that asked for it is closed.
+        "jobs": bool(router and jobs),
         # `response_format` json_object and json_schema.
         "json_mode": True,
         # usage.prompt_tokens_details.cached_tokens: how much of the prompt was already in the cache.

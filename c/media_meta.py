@@ -157,3 +157,71 @@ def read_wav(wav):
                 inner += 8 + length + (length & 1)
         position += 8 + size + (size & 1)
     return None
+
+
+# ---------------------------------------------------------------- files on disk
+# What a library listing needs from a file without reading all of it: a PNG's size and record sit before the pixels,
+# a WAV's format sits at the front and its record after the samples, so only chunk headers are read.
+_MAX_RECORD = 1 << 20
+
+
+def inspect_png(path):
+    """{"width", "height", "settings"} of a PNG file; the keys it cannot find are left out. Never raises on a bad file."""
+    out = {}
+    try:
+        with open(path, "rb") as handle:
+            if handle.read(len(PNG_MAGIC)) != PNG_MAGIC:
+                return out
+            while True:
+                head = handle.read(8)
+                if len(head) < 8:
+                    break
+                size, kind = struct.unpack(">I", head[:4])[0], head[4:]
+                if kind == b"IHDR" and size >= 8:
+                    out["width"], out["height"] = struct.unpack(">II", handle.read(8))
+                    handle.seek(size - 8 + 4, 1)
+                elif kind == b"iTXt" and size <= _MAX_RECORD:
+                    body = handle.read(size)
+                    handle.seek(4, 1)
+                    wrapped = PNG_MAGIC + _chunk(b"iTXt", body)
+                    found = read_png(wrapped)
+                    if found:
+                        out["settings"] = found
+                elif kind in (b"IDAT", b"IEND"):
+                    break
+                else:
+                    handle.seek(size + 4, 1)
+    except (OSError, struct.error):
+        pass
+    return out
+
+
+def inspect_wav(path):
+    """{"duration", "sample_rate", "channels", "settings"} of a WAV file; the keys it cannot find are left out."""
+    out = {}
+    try:
+        total = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            head = handle.read(12)
+            if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                return out
+            rate = channels = bits = data_size = None
+            position = 12
+            while position + 8 <= total:
+                handle.seek(position)
+                kind, size = struct.unpack("<4sI", handle.read(8))
+                if kind == b"fmt " and size >= 16:
+                    _tag, channels, rate, _bytes, _align, bits = struct.unpack("<HHIIHH", handle.read(16))
+                elif kind == b"data":
+                    data_size = size
+                elif kind == b"LIST" and 4 <= size <= _MAX_RECORD * 2:
+                    found = read_wav(b"RIFF\0\0\0\0WAVE" + kind + struct.pack("<I", size) + handle.read(size))
+                    if found:
+                        out["settings"] = found
+                position += 8 + size + (size & 1)
+            if rate and channels and bits and data_size is not None:
+                out["sample_rate"], out["channels"] = rate, channels
+                out["duration"] = round(data_size / (rate * channels * (bits // 8)), 2)
+    except (OSError, struct.error, ZeroDivisionError):
+        pass
+    return out

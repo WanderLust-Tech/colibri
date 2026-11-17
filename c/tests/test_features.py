@@ -25,15 +25,15 @@ class FeaturesTest(unittest.TestCase):
         self.assertEqual(bare["model_switch"], "load")
         for name in ("model_unload", "server_log", "priority"):
             self.assertIs(bare[name], True, name)
-        for name in ("model_settings", "presets", "request_log"):
+        for name in ("model_settings", "presets", "request_log", "jobs"):
             self.assertIs(bare[name], False, name)
-        full = features.describe(router=True, presets=True, request_log=True, model_settings=True)
-        for name in ("model_settings", "presets", "request_log"):
+        full = features.describe(router=True, presets=True, request_log=True, model_settings=True, jobs=True)
+        for name in ("model_settings", "presets", "request_log", "jobs"):
             self.assertIs(full[name], True, name)
 
     def test_only_a_router_can_turn_a_router_file_feature_on(self):
-        found = features.describe(presets=True, request_log=True, model_settings=True)
-        for name in ("model_settings", "presets", "request_log"):
+        found = features.describe(presets=True, request_log=True, model_settings=True, jobs=True)
+        for name in ("model_settings", "presets", "request_log", "jobs"):
             self.assertIs(found[name], False, name)
 
     def test_every_name_is_written_up_in_the_api_docs(self):

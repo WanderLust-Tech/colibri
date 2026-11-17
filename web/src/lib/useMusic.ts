@@ -24,6 +24,8 @@ export interface MusicEnvironment {
   updateMessages: (next: (current: ChatMessage[]) => ChatMessage[]) => void
   setError: (key: string) => void
   setConnected: (connected: boolean) => void
+  /* Make songs as background jobs (`Prefer: respond-async`): the server goes on if the page is closed. */
+  background: boolean
   newMessage: (role: ChatMessage["role"], content: string) => ChatMessage
 }
 
@@ -149,7 +151,7 @@ export function useMusic(env: MusicEnvironment) {
     const controller = new AbortController()
     env.abortRef.current = controller
     const started = performance.now()
-    setRun({ targetId, started: Date.now(), progress: null })
+    setRun({ targetId, started: Date.now(), progress: null, ...(env.background ? { background: true } : {}) })
     const update = (change: Partial<MusicRun>) => setRun((current) => current && current.targetId === targetId ? { ...current, ...change } : current)
     const files = clipsOf.current.get(targetId)
     try {
@@ -163,6 +165,8 @@ export function useMusic(env: MusicEnvironment) {
         signal: controller.signal,
         onProgress: (progress) => update({ progress }),
         onPlainRequest: () => update({ plain: true }),
+        background: env.background,
+        onJob: (job) => update({ queue: job.status === "queued" ? job.position : undefined }),
       })
       const seconds = (performance.now() - started) / 1000
       env.updateMessages((current) => current.map((item) => item.id === targetId

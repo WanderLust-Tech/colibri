@@ -19,7 +19,7 @@ export function serverHas(health: HealthResponse | null, name: string): boolean 
    (A router started without a request log or a presets file keeps its pages: they explain how to turn them on.) */
 export function settingsPages(health: HealthResponse | null): string[] {
   const router = serverHas(health, "router")
-  return ["general", "model", ...(router ? ["presets", "requests"] : []), ...(serverHas(health, "server_log") ? ["log"] : []), "connection", "system"]
+  return ["general", "model", ...(router ? ["presets", "requests"] : []), ...(health?.features?.library === true ? ["library"] : []), ...(serverHas(health, "server_log") ? ["log"] : []), "connection", "system"]
 }
 
 /* Only an explicit true: a server that predates the field answers a trailing

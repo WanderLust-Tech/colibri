@@ -55,6 +55,16 @@ describe("runtime capability normalization", () => {
     expect(settingsPages({ status: "ok", features: { router: false, server_log: false } })).toEqual(["general", "model", "connection", "system"])
   })
 
+  it("offers the Library only where the server says it has one: an older server would answer 404", () => {
+    expect(settingsPages({ status: "ok", features: { router: true, server_log: true, library: true } }))
+      .toEqual(["general", "model", "presets", "requests", "library", "log", "connection", "system"])
+    expect(settingsPages({ status: "ok", features: { router: false, server_log: false, library: true } }))
+      .toEqual(["general", "model", "library", "connection", "system"])
+    expect(settingsPages({ status: "ok", features: { router: true, library: false } })).not.toContain("library")
+    expect(settingsPages({ status: "ok" })).not.toContain("library")
+    expect(settingsPages(null)).not.toContain("library")
+  })
+
   it("only offers Continue when the server says it continues a trailing assistant turn", () => {
     expect(supportsContinuation({ status: "ok", continue_assistant: true })).toBe(true)
     expect(supportsContinuation({ status: "ok", continue_assistant: false })).toBe(false)

@@ -163,6 +163,37 @@ A file from somewhere else, or made by a server started with `COLI_MEDIA_META=0`
 and changes nothing. The file is read in the browser; nothing is uploaded. The settings travel with the file, so sharing it
 shares the prompt; `COLI_MEDIA_META=0` on the server leaves them out.
 
+## Keep a render going when you close the page
+
+A picture can take an hour, and by default it is one request: close the tab, let the laptop sleep, and it is lost. On a `coli router`
+the composer of a picture or music model has a cloud button, "Keep going if I leave". With it on, the router makes the picture or song
+apart from your page: the card says "This keeps going if you close the page", shows how far it is (or "Waiting for its turn: number 2
+in line" behind another render), and Stop cancels it. Close the page whenever you like; the finished file is kept on the server and
+the render is in **Settings → Library**. The switch is remembered, and is offered only where the server says it has jobs.
+
+What you give up: no half-finished previews while it works (the job follows progress, not pictures), and renders run one at a time, in
+order, behind any chat that is already waiting. A server that is not a router, or that predates jobs, shows no button and makes it the
+ordinary way.
+
+## The Library: everything the server kept
+
+**Settings → Library** (any server that has it) shows the pictures and songs in the server's kept folders, newest first, with the prompt,
+the size or length, the seed and the time. Pictures load as they scroll into view; a song loads when you press Play (a song is megabytes).
+"All", "Pictures" and "Songs" filter it, and "Show more" reads the next page. Each card has:
+
+- **Make again**: puts that file's model, prompt, size or length, steps and seed back in the composer and takes you to the chat, the same as
+  opening a file with the button beside the send button ([above](#make-a-saved-picture-or-song-again)), without the file picking. A file with
+  no settings in it (a picture from somewhere else) has no such button.
+- **Download**.
+
+Above the files, on a router, the **Jobs** part lists the renders that are waiting or running, each with how far it got, and the ones that
+failed with why. The cross on a row cancels it: a waiting job never runs, a running one is interrupted and the engine stops computing. It
+asks the router every couple of seconds while the page is in front, so a render you started from another tab, or before you closed the
+page, is there with its progress. When one finishes, its picture appears in the grid.
+
+The Library reads the folders the server writes to (`COLI_IMAGE_DIR`, `COLI_MUSIC_DIR`); it cannot show a file a server was told not to
+keep. It has no delete button: remove files from the folders. The browser, not the server, scales the pictures down for the grid.
+
 ## Pages that are only there with a router
 
 Settings shows Presets, Requests and Log only when the server is a `coli router`: against a plain `coli serve` they would only say

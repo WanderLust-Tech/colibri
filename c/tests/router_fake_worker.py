@@ -5,6 +5,9 @@
 Environment: FAKE_LOG (a file that gets a line when a request starts, ends, or is cut off),
 FAKE_LOAD_DELAY (seconds before it listens), FAKE_FAIL (exit at once, saying why).
 A request body may carry `sleep` (seconds the work takes) and `stream` (answer in three chunks).
+A picture or song request with `job_demo` in its body (or any, with FAKE_ENGINE=1; FAKE_STEP_SLEEP seconds a step) behaves like the real engines: `steps` progress events (`sleep` apart),
+then a finished picture or song kept in COLI_IMAGE_DIR / COLI_MUSIC_DIR (FAKE_KEEP=0: not kept), or an error event if the body
+says `fail`. A client that goes away mid-way is noted as `cut`, as the real worker's cancel is.
 """
 import argparse
 import json
@@ -15,7 +18,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 args = None
+LF = chr(10)
+CRLF = bytes([13, 10])
 log_lock = threading.Lock()
 
 
@@ -67,6 +74,69 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"seq": 7, "turns": [], "from": args.id})
         self.reply(404, {"error": {"message": "Not found."}})
 
+    def chunk(self, payload):
+        self.wfile.write(b"%x" % len(payload) + CRLF + payload + CRLF)
+        self.wfile.flush()
+
+    def event(self, name, data):
+        self.chunk(("event: " + name + LF + "data: " + json.dumps(data) + LF + LF).encode())
+
+    def finish_stream(self):
+        self.chunk(b"data: [DONE]" + LF.encode() + LF.encode())
+        self.wfile.write(b"0" + CRLF + CRLF)
+        self.wfile.flush()
+
+    def job_demo(self, body):
+        import base64
+        import image_engine
+        import music_engine
+        music = self.path == "/v1/audio/music"
+        steps, seed = int(body.get("steps", 3)), int(body.get("seed", 1))
+        pause = float(body.get("sleep", os.environ.get("FAKE_STEP_SLEEP", 0)))
+        prompt = body.get("prompt") or body.get("caption") or "x"
+        stream = bool(body.get("stream"))
+        events = "music_generation" if music else "image_generation"
+        try:
+            if stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+            for step in range(1, steps + 1):
+                if stream:
+                    self.event(events + ".progress", {"stage": "denoise", "step": step, "steps": steps, "elapsed": step * pause})
+                time.sleep(pause)
+            if body.get("fail"):
+                error = {"error": {"message": str(body["fail"]), "type": "server_error", "param": None, "code": "engine_error"}}
+                if stream:
+                    self.event("error", error)
+                    self.finish_stream()
+                    return
+                return self.reply(500, error)
+            if music:
+                data = music_engine.encode_wav(bytes(400), 8000, 2)
+                info = {"seed": seed, "steps": steps, "duration": 0.05, "sample_rate": 8000}
+            else:
+                width, height = (int(n) for n in str(body.get("size", "8x6")).split("x"))
+                data = image_engine.encode_png(8, 6, bytes(8 * 6 * 4), 4)
+                info = {"width": width, "height": height, "seed": seed, "steps": steps}
+            if os.environ.get("FAKE_KEEP", "1") != "0":
+                if music:
+                    info["file"] = os.path.basename(music_engine.save_wav(data, prompt, seed, music_engine.music_dir()))
+                else:
+                    info["file"] = os.path.basename(image_engine.save_png(data, prompt, seed, image_engine.image_dir()))
+            done = {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(data).decode()}], "colibri": info}
+            if stream:
+                self.event(events + ".completed", done)
+                self.finish_stream()
+            else:
+                self.reply(200, done)
+        except OSError:
+            note("cut " + args.id)
+            return
+        note("end " + args.id)
+
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
@@ -87,6 +157,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   "type": "invalid_request_error", "param": "model",
                                                   "code": "model_not_found"}})
         note(f"start {args.id}")
+        if (body.get("job_demo") or os.environ.get("FAKE_ENGINE")) and self.path in ("/v1/images/generations", "/v1/audio/music"):
+            return self.job_demo(body)
         origin = self.headers.get("Origin"), self.headers.get("Authorization"), self.headers.get("X-Test")
         try:
             if body.get("stream"):

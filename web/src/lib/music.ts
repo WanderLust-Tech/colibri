@@ -8,6 +8,9 @@ export interface MusicRun {
   progress: MusicProgress | null
   /* No stream: one plain request, so no stage will ever be reported. */
   plain?: boolean
+  /* Made as a background job, and its place in line while it waits (1 is next). */
+  background?: boolean
+  queue?: number
 }
 
 /* The contract's defaults (music_engine.DEFAULT_INFO), for a server that states less than

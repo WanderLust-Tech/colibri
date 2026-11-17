@@ -24,7 +24,7 @@ export function MusicProgressCard({ request, run, onCancel }: { request: Generat
   const { t } = useLocale()
   const progress = run.progress
   const fraction = musicProgressFraction(progress)
-  const stage = !progress ? t(run.plain ? "music.stage.working" : "music.stage.queued")
+  const stage = !progress ? (run.queue ? t("job.position", { n: run.queue }) : t(run.plain ? "music.stage.working" : "music.stage.queued"))
     : progress.stage === "denoise" ? t("music.stage.denoise", { step: Math.min(progress.steps, progress.step + 1), steps: progress.steps })
     : progress.stage === "encode" || progress.stage === "text" || progress.stage === "condition" || progress.stage === "decode" ? t(`music.stage.${progress.stage}`)
     : t("music.stage.working")
@@ -39,6 +39,7 @@ export function MusicProgressCard({ request, run, onCancel }: { request: Generat
       aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress ? Math.round(fraction * 100) : undefined}>
       <span style={{ width: `${(fraction * 100).toFixed(1)}%` }} />
     </div>
+    {run.background && <p className="job-note">{t("job.keepsGoing")}</p>}
   </div>
 }
 

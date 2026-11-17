@@ -48,6 +48,8 @@ import presets as presets_mod
 import web_headers
 import log_tail
 import request_log
+import library
+import jobs
 
 DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its last request
 DEFAULT_MAX_LOADED = 3
@@ -275,6 +277,33 @@ def default_state_path():
         return os.path.join(setup_flow.setup_home(), "router.json")
     except Exception:
         return os.path.join(os.path.expanduser("~"), ".colibri-router.json")
+
+
+def default_jobs_path():
+    """Where the job records live: COLI_JOBS, else jobs.jsonl beside the router's other state."""
+    explicit = os.environ.get("COLI_JOBS")
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    return os.path.join(os.path.dirname(default_state_path()), "jobs.jsonl")
+
+
+def job_logger(logger):
+    """What to do when a job ends: a line in the request log (if there is one), so Requests shows the render that the request
+    asking for it only accepted."""
+    def finished(snapshot):
+        if logger is None:
+            return
+        started = snapshot.get("started") or snapshot["created"]
+        failed = snapshot["status"] == "failed"
+        record = {"source": "router", "method": "POST", "path": snapshot.get("endpoint") or "", "job": snapshot["id"],
+                  "model": snapshot.get("model"), "status": {"succeeded": 200, "cancelled": 499}.get(snapshot["status"], 500),
+                  "seconds": max(0, (snapshot.get("finished") or started) - started)}
+        if failed and snapshot.get("error"):
+            record["error"] = snapshot["error"].get("code") or snapshot["error"].get("message", "")[:200]
+        elif snapshot["status"] == "cancelled":
+            record["error"] = "cancelled"
+        logger.write({k: v for k, v in record.items() if v not in (None, "")})
+    return finished
 
 
 # ------------------------------------------------------------------------------ catalog
@@ -821,13 +850,15 @@ class Gate:
             position -= 1
         self.waiting.insert(position, (ticket, key, priority))
 
-    def acquire(self, key, priority=0):
+    def acquire(self, key, priority=0, cancelled=None, patient=False):
+        """Wait for a turn. A background job passes `cancelled` (polled while it waits; raises jobs.Cancelled) and `patient`
+        (no timeout: a job may wait behind an hour of rendering, which a chat's five minutes would not allow)."""
         if self.parallel:
             with self.cv:
                 self.active[key] += 1
             return
         ticket = object()
-        deadline = time.monotonic() + self.timeout
+        deadline = float("inf") if patient else time.monotonic() + self.timeout
         with self.cv:
             if self._may_run(ticket, key):            # nobody else computing, nobody ahead of us for another model
                 self.active[key] += 1
@@ -838,11 +869,13 @@ class Gate:
             self._enqueue(ticket, key, priority)
             try:
                 while not self._may_run(ticket, key):
+                    if cancelled is not None and cancelled():
+                        raise jobs.Cancelled()
                     left = deadline - time.monotonic()
                     if left <= 0:
                         raise ApiError(429, "Timed out waiting for the inference engine.", "queue_timeout", None,
                                        "rate_limit_error", {"Retry-After": "1"})
-                    self.cv.wait(left)
+                    self.cv.wait(min(left, 0.25) if cancelled is not None else left)
                 self.active[key] += 1
             finally:
                 self.waiting.remove((ticket, key, priority))
@@ -1024,14 +1057,219 @@ def with_model(content_type, raw, model_id):
     return Body(content_type, raw).for_worker(model_id)
 
 
+# ------------------------------------------------------------------------------- background jobs
+BACKGROUND_PATHS = {"/v1/images/generations": "image", "/v1/images/edits": "image", "/v1/audio/music": "music"}
+LIBRARY_KIND = {"image": "images", "music": "music"}
+SUMMARY_KEYS = ("prompt", "size", "width", "height", "steps", "seed", "duration", "language", "task")
+PROGRESS_KEYS = ("stage", "step", "steps", "elapsed")
+
+
+def wants_async(headers):
+    """Does the request say `Prefer: respond-async` (RFC 7240)?"""
+    for value in headers.get_all("Prefer") or ():
+        if "respond-async" in [token.split("=")[0].strip().lower() for token in value.split(",")]:
+            return True
+    return False
+
+
+def request_summary(body):
+    """What a job list shows of a request: the prompt (cut) and the few numbers that say what was asked for."""
+    found = {}
+    for key in SUMMARY_KEYS + ("caption",):
+        if body.multipart:
+            value = _multipart_value(body.raw, key)
+        else:
+            value = body.json.get(key) if body.json is not None else None
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool) and value != "":
+            found[key] = value
+    caption = found.pop("caption", None)
+    if "prompt" not in found and caption is not None:
+        found["prompt"] = caption
+    if isinstance(found.get("prompt"), str) and len(found["prompt"]) > 300:
+        found["prompt"] = found["prompt"][:300] + "..."
+    return found
+
+
+def streaming_body(path, body, raw):
+    """`raw` (what the worker would have been sent) changed to ask for server-sent events, so the job can follow progress: no
+    `response_format` (a song as a WAV file cannot be streamed, and the result is a kept file anyway) and no partial pictures
+    (nobody is watching them; an image engine skips them when told zero)."""
+    changes = {"stream": True}
+    if path != "/v1/audio/music":
+        changes["partial_images"] = 0
+    if body.multipart:
+        for key in ("stream", "partial_images", "response_format"):
+            raw = _multipart_without(raw, key, body.content_type)
+        return _multipart_with(raw, body.content_type,
+                               {key: ("true" if value is True else value) for key, value in changes.items()})
+    if body.json is None:
+        return raw
+    changed = {k: v for k, v in json.loads(raw).items() if k != "response_format"}
+    changed.update(changes)
+    return json.dumps(changed, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def sse_events(response):
+    """(event, data) for each server-sent event in a response, as it arrives. Comments (keep-alives) are skipped."""
+    buffer = b""
+    while True:
+        chunk = response.read1(65536)
+        if not chunk:
+            return
+        buffer += chunk.replace(b"\r\n", b"\n")
+        while b"\n\n" in buffer:
+            block, buffer = buffer.split(b"\n\n", 1)
+            name, data = None, []
+            for line in block.decode("utf-8", "replace").split("\n"):
+                if line.startswith("event:"):
+                    name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].lstrip())
+            if data:
+                yield name, "\n".join(data)
+
+
+def error_of(status, raw):
+    """(message, code) of an error body in the workers' shape."""
+    try:
+        error = json.loads(raw).get("error") or {}
+        return error.get("message") or f"The model answered {status}.", error.get("code")
+    except (ValueError, AttributeError):
+        return f"The model answered {status}.", None
+
+
+def kept_result(kind, payload, summary):
+    """The job's result: the file the library lists. The worker says which it kept; one that kept nothing
+    (COLI_IMAGE_SAVE=0) leaves the picture only in the answer, and a background job has nobody holding the connection to
+    take it from there, so it is kept here."""
+    import base64
+    info = payload.get("colibri") or {}
+    library_kind = LIBRARY_KIND[kind]
+    name = info.get("file")
+    if not name:
+        try:
+            data = base64.b64decode(payload["data"][0]["b64_json"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise jobs.JobError(502, "The model finished but sent no result.", "no_result") from None
+        seed, prompt = info.get("seed", 0), summary.get("prompt", "")
+        try:
+            if kind == "image":
+                import image_engine
+                name = os.path.basename(image_engine.save_png(data, prompt, seed, library.folder(library_kind)))
+            else:
+                import music_engine
+                name = os.path.basename(music_engine.save_wav(data, prompt, seed, library.folder(library_kind)))
+        except OSError as error:
+            raise jobs.JobError(500, f"The result could not be kept: {error}", "save_failed") from None
+    result = {"kind": library_kind, "file": name, "url": f"/v1/library/{library_kind}/{name}"}
+    for key in ("width", "height", "seed", "steps", "duration", "sample_rate", "timings"):
+        if info.get(key) is not None:
+            result[key] = info[key]
+    return result
+
+
+def run_job_request(server, work, ctx):
+    """Do one background request: wait for the model's turn, make it ready, send the request and follow the answer to the end.
+    Raises jobs.Cancelled when cancelled and jobs.JobError for what went wrong; returns the job's result."""
+    entry, path = work["entry"], work["path"]
+    gate, pool = server.gate, server.pool
+    priority = request_priority(path, None)
+    while True:                          # a full queue is waited out, not failed: this job is already accepted
+        try:
+            gate.acquire(entry["key"], priority, cancelled=ctx.cancelled.is_set, patient=True)
+            break
+        except ApiError as error:
+            if error.code != "queue_full":
+                raise jobs.JobError(error.status, error.message, error.code) from None
+            if ctx.cancelled.wait(1.0):
+                raise jobs.Cancelled()
+    try:
+        try:
+            worker = pool.acquire(entry)
+        except ApiError as error:
+            raise jobs.JobError(error.status, error.message, error.code) from None
+        try:
+            if ctx.cancelled.is_set():
+                raise jobs.Cancelled()
+            if work["keep"] is not UNSET:
+                worker.keep_alive = work["keep"]
+            return follow_worker(worker, work, ctx)
+        finally:
+            pool.release(worker)
+    finally:
+        gate.release(entry["key"])
+
+
+def follow_worker(worker, work, ctx):
+    kind = work["kind"]
+    connection = http.client.HTTPConnection("127.0.0.1", worker.port, timeout=None)
+
+    held = {}                             # http.client lets go of its socket once an answer says it will close: keep our own
+
+    def abort():                          # the worker notices a client that left and stops computing
+        sock = held.get("sock")
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+    ctx.on_abort(abort)
+    try:
+        headers = {"Content-Type": work["content_type"], "Content-Length": str(len(work["raw"])),
+                   "Host": f"127.0.0.1:{worker.port}"}
+        if work.get("trace"):
+            headers["x-colibri-trace"] = work["trace"]
+        try:
+            connection.connect()
+            held["sock"] = connection.sock
+            if ctx.cancelled.is_set():
+                raise jobs.Cancelled()
+            connection.request("POST", work["path"], body=work["raw"], headers=headers)
+            response = connection.getresponse()
+            if response.status != 200:
+                message, code = error_of(response.status, response.read())
+                raise jobs.JobError(response.status, message, code)
+            payload = None
+            if "text/event-stream" in (response.getheader("Content-Type") or ""):
+                for name, data in sse_events(response):
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except ValueError:
+                        continue
+                    if name and name.endswith(".progress"):
+                        ctx.progress({k: event.get(k) for k in PROGRESS_KEYS if event.get(k) is not None})
+                    elif name and name.endswith(".completed"):
+                        payload = event
+                    elif name == "error":
+                        error = (event.get("error") or {}) if isinstance(event, dict) else {}
+                        raise jobs.JobError(500, error.get("message") or "The model failed.", error.get("code"))
+            else:
+                payload = json.loads(response.read())
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            if ctx.cancelled.is_set():
+                raise jobs.Cancelled() from None
+            raise jobs.JobError(502, f"`{worker.entry['id']}` did not answer: {error}", "worker_unavailable") from None
+        if ctx.cancelled.is_set():
+            raise jobs.Cancelled()
+        if payload is None:
+            raise jobs.JobError(502, f"`{worker.entry['id']}` closed the connection before it finished.", "worker_closed")
+        return kept_result(kind, payload, work["summary"])
+    finally:
+        connection.close()
+
+
 class RouterServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
     def __init__(self, address, pool, catalog, gate, api_key=None, cors_origins=(), allowed_hosts=(),
-                 queue_timeout=300.0, presets=None, request_log=None, settings=None):
+                 queue_timeout=300.0, presets=None, request_log=None, settings=None, jobs=None):
         super().__init__(address, RouterHandler)
         self.pool, self.catalog, self.gate = pool, catalog, gate
+        self.jobs = jobs                       # jobs.JobManager: pictures and songs that go on without the connection
         self.presets = presets                 # presets.Presets, or None for a router without any
         self.request_log = request_log         # request_log.RequestLog, or None
         self.settings = settings               # model_settings.ModelSettings, or None
@@ -1221,6 +1459,14 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.requests_list(query))
             if path == "/v1/logs":
                 return self.send_json(200, self.logs_list(query))
+            if path == "/v1/jobs":
+                return self.send_json(200, self.jobs_list(query))
+            if path.startswith("/v1/jobs/"):
+                return self.send_json(200, self.job_get(unquote(path[len("/v1/jobs/"):])))
+            if path == "/v1/library":
+                return self.send_json(200, self.library_listing(query))
+            if path.startswith("/v1/library/"):
+                return self.library_file(unquote(path[len("/v1/library/"):]))
             if path.startswith("/v1/models/"):
                 return self.send_json(200, self.model_object(unquote(path[len("/v1/models/"):])))
             raise ApiError(404, "Not found.", "not_found")
@@ -1248,6 +1494,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.preset_save()
             if path == "/v1/presets/delete":
                 return self.preset_delete()
+            if path == "/v1/jobs/cancel":
+                return self.job_cancel()
             if path not in COMPUTE_PATHS:
                 raise ApiError(404, "Not found.", "not_found")
             raw = self.read_body(path)
@@ -1265,6 +1513,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 keep = self.preset_keep_alive(preset)
             if self.server.request_log is not None:
                 self._trace = uuid.uuid4().hex[:16]    # the worker writes it too, so the two lines can be joined
+            if wants_async(self.headers):
+                return self.job_submit(path, entry, body, preset, keep, seen)
             self.serve_model(entry, path, body.for_worker(entry["id"], preset, path), keep)
         except ApiError as error:
             self.fail(error)
@@ -1456,7 +1706,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         # the router's own list, after the loaded model's health was merged in: that one is a single server's
         payload["features"] = features.describe(router=True, presets=self.server.presets is not None,
                                                 request_log=self.server.request_log is not None,
-                                                model_settings=self.server.settings is not None)
+                                                model_settings=self.server.settings is not None,
+                                                jobs=self.server.jobs is not None)
         payload["router"] = {
             "loaded": [self.worker_view(w) for w in pool.snapshot()],
             "max_loaded": pool.max_loaded,
@@ -1468,6 +1719,71 @@ class RouterHandler(BaseHTTPRequestHandler):
         if pool.gpu is not None:
             payload["router"]["gpu"] = pool.gpu.public()
         return payload
+
+    # ---- background jobs
+    def job_submit(self, path, entry, body, preset, keep, seen):
+        """`Prefer: respond-async`: accept the request as a job, answer 202 with it at once, and go on without the connection."""
+        manager, server = self.server.jobs, self.server
+        if path not in BACKGROUND_PATHS:
+            raise ApiError(400, "`Prefer: respond-async` is for pictures and songs (/v1/images/generations, /v1/images/edits, "
+                                "/v1/audio/music); a chat is answered while the connection is open.", "invalid_value")
+        if manager is None:
+            raise ApiError(501, "This router was started without background jobs.", "jobs_unavailable", None, "server_error")
+        kind = BACKGROUND_PATHS[path]
+        raw = streaming_body(path, body, body.for_worker(entry["id"], preset, path))
+        work = {"entry": entry, "path": path, "kind": kind, "raw": raw, "content_type": body.content_type or "application/json",
+                "keep": keep, "trace": getattr(self, "_trace", None), "summary": request_summary(body)}
+        try:
+            snapshot, created = manager.submit(kind, entry["id"], path, work["summary"],
+                                               lambda ctx: run_job_request(server, work, ctx),
+                                               (self.headers.get(jobs.ID_HEADER) or "").strip() or None)
+        except jobs.JobError as error:
+            raise ApiError(error.status, error.message, error.code, error.param,
+                           "rate_limit_error" if error.status == 429 else "invalid_request_error",
+                           {"Retry-After": "30"} if error.status == 429 else None) from None
+        seen["job"] = snapshot["id"]
+        self.send_json(202, snapshot, {"Location": f"/v1/jobs/{snapshot['id']}", "Preference-Applied": "respond-async"})
+
+    def jobs_list(self, query):
+        if self.server.jobs is None:
+            raise ApiError(404, "Not found.", "not_found")
+        try:
+            return self.server.jobs.listing(*jobs.page_arguments(query))
+        except jobs.JobError as error:
+            raise ApiError(error.status, error.message, error.code, error.param) from None
+
+    def job_get(self, job_id):
+        found = self.server.jobs.get(job_id) if self.server.jobs is not None else None
+        if found is None:
+            raise ApiError(404, f"No job `{job_id}`.", "job_not_found", "id")
+        return found
+
+    def job_cancel(self):
+        """Stop a job: a waiting one is removed, a running one is interrupted. Finished or unknown is `cancelled: false`."""
+        if self.server.jobs is None:
+            raise ApiError(404, "Not found.", "not_found")
+        raw = self.read_body("/v1/jobs/cancel")
+        try:
+            wanted = json.loads(raw).get("id")
+        except (ValueError, AttributeError):
+            wanted = None
+        if not isinstance(wanted, str) or not wanted:
+            raise ApiError(400, "Send a JSON body with the job `id`.", "missing_required_parameter", "id")
+        cancelled, status = self.server.jobs.cancel(wanted)
+        self.send_json(200, {"id": wanted, "object": "job.cancel", "cancelled": cancelled, "status": status})
+
+    def library_listing(self, query):
+        try:
+            return library.listing(*library.page_arguments(query))
+        except library.LibraryError as error:
+            raise ApiError(error.status, error.message, error.code, error.param) from None
+
+    def library_file(self, rest):
+        kind, _, name = rest.partition("/")
+        try:
+            library.serve(self, kind, name, self._cors)
+        except library.LibraryError as error:
+            raise ApiError(error.status, error.message, error.code, error.param) from None
 
     def worker_view(self, worker):
         left = None
@@ -1800,7 +2116,7 @@ def worker_kv_slots(entry, wanted):
 def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), keep_alive=DEFAULT_KEEP_ALIVE,
           max_loaded=DEFAULT_MAX_LOADED, max_queue=8, queue_timeout=300.0, parallel_models=False,
           cors_origins=None, allowed_hosts=(), worker_args=(), preload=(), engine_ready=None, kv_slots=1,
-          presets_path=None, request_log_path=None, gpu=None, gpu_reserve_gb=gpu_mod.DEFAULT_RESERVE_GB,
+          presets_path=None, request_log_path=None, jobs_path=None, gpu=None, gpu_reserve_gb=gpu_mod.DEFAULT_RESERVE_GB,
           gpu_min_gb=gpu_mod.DEFAULT_MIN_GB, settings_path=None):
     """Run the router until it is shut down."""
     import openai_server
@@ -1834,9 +2150,10 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
     if request_log_path:
         os.environ["COLI_REQUEST_LOG"] = request_log_path          # the workers inherit it and write their own lines
     logger = request_log.from_env()
+    job_manager = jobs.JobManager(jobs.JobStore(jobs_path or default_jobs_path()), on_finish=job_logger(logger))
     server = RouterServer((host, port), pool, catalog, gate, api_key,
                           openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout,
-                          presets=presets, request_log=logger, settings=settings)
+                          presets=presets, request_log=logger, settings=settings, jobs=job_manager)
     entries = catalog.entries(refresh=True)
     usable = [e for e in entries if e["reason"] is None]
     print(f"[router] {len(usable)} model(s) available: " + ", ".join(e["id"] for e in usable), file=sys.stderr)
@@ -1899,5 +2216,6 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
     finally:
         signal.signal(signal.SIGTERM, previous)
         server.server_close()
+        job_manager.close()
         pool.close()
     return None

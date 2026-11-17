@@ -24,7 +24,7 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar, FileInput} from "lucide-react"
+  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar, FileInput, CloudUpload} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -41,7 +41,7 @@ import {
 } from "@/lib/images"
 import { branchAt, editFrom, isPlainTurn, resendFrom, REWRITES, type Rewrite } from "@/lib/chat"
 import { DEFAULT_MUSIC_LIMITS } from "@/lib/music"
-import { readSettings, refillFrom } from "@/lib/mediaMeta"
+import { readSettings, refillFrom, type MediaSettings } from "@/lib/mediaMeta"
 import { useMusic } from "@/lib/useMusic"
 import { activeRequests, settingsPages, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
 import Brio from "./Brio"
@@ -59,6 +59,7 @@ import { explainError } from "@/lib/explainError"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
+import LibraryPanel from "@/components/LibraryPanel"
 import LogPanel from "@/components/LogPanel"
 import RequestsPanel from "@/components/RequestsPanel"
 import { Compare } from "@/components/Compare"
@@ -123,6 +124,9 @@ export default function App() {
   const [connected, setConnected] = useState(false)
   const [view, setView] = useState<View>("chat")
   const [settingsPage, setSettingsPage] = useState("general")
+  /* Pictures and songs as background jobs: the router goes on with them if this page is closed. Offered only where the server says it can. */
+  const [background, setBackground] = useState(() => stored(localStorage, "colibri.background", "") === "1")
+  const canBackground = health?.features?.jobs === true
   const pages = settingsPages(health)                                   // a plain `coli serve` has no Presets, Requests or Log
   const activePage = pages.includes(settingsPage) ? settingsPage : "general"
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -178,13 +182,16 @@ export default function App() {
 
   const music = useMusic({
     baseUrl, apiKey, model, limits: musicModels[model], draft, setDraft, loading, setLoading, abortRef,
-    updateMessages, setError, setConnected, newMessage: message,
+    updateMessages, setError, setConnected, newMessage: message, background: background && canBackground,
   })
 
   // EFFECT #1
   useEffect(() => {
     persistPublicSettings(localStorage, baseUrl, model)
   }, [baseUrl, model])
+  useEffect(() => {
+    try { localStorage.setItem("colibri.background", background ? "1" : "") } catch { /* restricted storage mode */ }
+  }, [background])
   useEffect(() => {
     try { localStorage.setItem("colibri.imageSize", sizeKey(imageSize)); localStorage.setItem("colibri.imageSteps", String(imageSteps)) } catch { /* restricted storage mode */ }
   }, [imageSize, imageSteps])
@@ -452,12 +459,13 @@ export default function App() {
      previews live in imageRun, outside the transcript; the finished picture is
      written onto the turn. Cancel is the same abortRef as the chat's Stop. */
   const runImage = async (targetId: string, request: GeneratedImage, input?: { files: File[]; auto: boolean }) => {
+    const inBackground = background && canBackground
     setError("")
     setLoading(true)
     const controller = new AbortController()
     abortRef.current = controller
     const started = performance.now()
-    setImageRun({ targetId, started: Date.now(), progress: null, preview: null })
+    setImageRun({ targetId, started: Date.now(), progress: null, preview: null, ...(inBackground ? { background: true } : {}) })
     const update = (change: Partial<ImageRun>) => setImageRun((run) => run && run.targetId === targetId ? { ...run, ...change } : run)
     try {
       const image = await generateImage({
@@ -468,6 +476,8 @@ export default function App() {
         onProgress: (progress) => update({ progress }),
         onPartial: (preview) => update({ preview }),
         onPlainRequest: () => update({ plain: true }),
+        background: inBackground,
+        onJob: (job) => update({ queue: job.status === "queued" ? job.position : undefined }),
       })
       const seconds = (performance.now() - started) / 1000
       updateMessages((current) => current.map((item) => item.id === targetId
@@ -535,6 +545,11 @@ export default function App() {
     if (!file) return
     const settings = await readSettings(file)
     if (!settings) { setError("media.noSettings"); return }
+    applySettings(settings)
+  }
+
+  /* The settings of a file, or of a card in the Library, put back in the composer. */
+  const applySettings = (settings: MediaSettings) => {
     const plan = refillFrom(settings, imageModels, musicModels)
     if ("error" in plan) { setError(t(plan.error, { kind: t(settings.kind === "image" ? "media.kindImage" : "media.kindSong") })); return }
     setError("")
@@ -746,6 +761,8 @@ export default function App() {
           </section>}
           {activePage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
+          {activePage === "library" && <section className="settings-card wide"><LibraryPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} jobsAvailable={canBackground}
+            onMakeAgain={(settings) => { applySettings(settings); setView("chat") }} /></section>}
           {activePage === "connection" && <section className="settings-card">{connectionControls}</section>}
           {activePage === "model" && <section className="settings-card">
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />
@@ -833,6 +850,8 @@ export default function App() {
                   onChange={e => { void openSettingsFile(e.target.files?.[0]); e.target.value = "" }} />
                 <button type="button" className="settings-chip" aria-label={t("media.open")} title={t("media.open")}
                   onClick={() => settingsRef.current?.click()}><FileInput /></button>
+                {canBackground && <button type="button" className="settings-chip" aria-pressed={background} aria-label={t("job.background")} title={t("job.backgroundHelp")}
+                  onClick={() => setBackground((value) => !value)}><CloudUpload /></button>}
               </>}
               {loading ? <button type="button" className="send-button" aria-label={music.mode || imageMode ? t("image.cancel") : t("chat.stop")} onClick={() => abortRef.current?.abort()}><CircleStop /></button> : <button type="submit" className="send-button" aria-label={music.mode ? t("music.generate") : imageMode ? t("image.generate") : t("chat.send")} disabled={!canSend}><ArrowUp /></button>}
             </div>

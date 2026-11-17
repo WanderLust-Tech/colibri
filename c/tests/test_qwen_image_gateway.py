@@ -465,6 +465,14 @@ class SavedImagesTest(unittest.TestCase):
         self.assertIsNone(media_meta.read_png(sent))
         self.assertEqual(Path(self.out.name, self.saved()[0]).read_bytes(), sent)
 
+    def test_the_answer_names_the_file_it_kept_so_a_library_can_find_it(self):
+        status, _h, raw = self.gw.generate(prompt="a red fox", size="256x256", seed=7, steps=2)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["colibri"]["file"], self.saved()[0])
+        self.gw.server.save_images_to = None
+        status, _h, raw = self.gw.generate(prompt="a red fox", size="256x256", seed=7, steps=2)
+        self.assertNotIn("file", json.loads(raw)["colibri"])                       # nothing kept, nothing to point at
+
     def test_two_pictures_of_one_prompt_and_seed_never_overwrite(self):
         for _ in range(2):
             status, _h, raw = self.gw.generate(prompt="a lighthouse", size="256x256", seed=3, steps=2)

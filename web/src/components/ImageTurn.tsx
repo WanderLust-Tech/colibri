@@ -18,6 +18,9 @@ export interface ImageRun {
   preview: string | null
   /* No stream: one plain request, so no stage will ever be reported. */
   plain?: boolean
+  /* Made as a background job: the server goes on if this page is closed. `queue` is its place in line while it waits (1 is next). */
+  background?: boolean
+  queue?: number
 }
 
 /* The room a picture takes, sized from the request before a single pixel
@@ -45,7 +48,7 @@ export function ImageProgressCard({ request, run, onCancel }: { request: Generat
   const { t } = useLocale()
   const progress = run.progress
   const fraction = progressFraction(progress)
-  const stage = !progress ? t(run.plain ? "image.stage.working" : "image.stage.queued")
+  const stage = !progress ? (run.queue ? t("job.position", { n: run.queue }) : t(run.plain ? "image.stage.working" : "image.stage.queued"))
     : progress.stage === "denoise" ? t("image.stage.denoise", { step: Math.min(progress.steps, progress.step + 1), steps: progress.steps })
     : progress.stage === "encode" || progress.stage === "decode" ? t(`image.stage.${progress.stage}`)
     : t("image.stage.working")
@@ -62,6 +65,7 @@ export function ImageProgressCard({ request, run, onCancel }: { request: Generat
       aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress ? Math.round(fraction * 100) : undefined}>
       <span style={{ width: `${(fraction * 100).toFixed(1)}%` }} />
     </div>
+    {run.background && <p className="job-note">{t("job.keepsGoing")}</p>}
   </div>
 }
 

@@ -1,3 +1,4 @@
+import { PREFER_ASYNC, runBackground, type Job } from "./jobs"
 import type { LogLine, LogRead } from "./logTail"
 import type { ReplyStats } from "./replyStats"
 
@@ -798,6 +799,11 @@ export interface GenerateImageOptions {
   /* Streaming was not available and the picture is being made by one plain
      request: nothing more will arrive until it is done. */
   onPlainRequest?: () => void
+  /* Make it in the background (`Prefer: respond-async`): the router goes on with the picture if this page is closed, and the page
+     follows the job. A server that does not know jobs makes it the ordinary way. `onJob` hears each state of the job (queued with
+     its position, running, finished); Stop cancels the job. */
+  background?: boolean
+  onJob?: (job: Job) => void
 }
 
 /* The stream did not work as a stream (no body, or a close before the first
@@ -920,16 +926,41 @@ async function requestImage(options: GenerateImageOptions): Promise<ImageGenerat
   return (await response.json()) as ImageGenerationResponse
 }
 
+/* The same request with the header that asks for a job. */
+function asJob(init: RequestInit): RequestInit {
+  return { ...init, headers: { ...(init.headers as Record<string, string>), ...PREFER_ASYNC } }
+}
+
 /* Streams when it can, so the page can show the stage and the previews; falls
-   back to one plain request when streaming is not available. */
+   back to one plain request when streaming is not available. In the background
+   there is no stream to read: the page asks the job how far it is. */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImage> {
   let answer: ImageGenerationResponse
-  try {
-    answer = await streamImage(options)
-  } catch (cause) {
-    if (!(cause instanceof StreamUnavailable) || options.signal.aborted) throw cause
-    options.onPlainRequest?.()
-    answer = await requestImage(options)
+  if (options.background) {
+    const outcome = await runBackground({
+      baseUrl: options.baseUrl, apiKey: options.apiKey, signal: options.signal,
+      send: () => fetch(endpoint(options.baseUrl, imagePath(options)), asJob(imageRequest(options, false))),
+      failed: imageError,
+      onJob: options.onJob,
+      onUpdate: (job) => { options.onJob?.(job); if (job.progress) options.onProgress?.(job.progress as unknown as ImageProgress) },
+    })
+    if ("plain" in outcome) {
+      answer = (await outcome.plain.json()) as ImageGenerationResponse
+    } else {
+      const kept = outcome.job.result!
+      answer = {
+        created: outcome.job.created, data: [{ url: outcome.url }],
+        colibri: { width: kept.width ?? options.width ?? 0, height: kept.height ?? options.height ?? 0, seed: kept.seed ?? options.seed, steps: kept.steps ?? options.steps, ...(kept.timings ? { timings: kept.timings as ImageTimings } : {}) },
+      }
+    }
+  } else {
+    try {
+      answer = await streamImage(options)
+    } catch (cause) {
+      if (!(cause instanceof StreamUnavailable) || options.signal.aborted) throw cause
+      options.onPlainRequest?.()
+      answer = await requestImage(options)
+    }
   }
   const picture = answer.data?.[0]
   const url = picture?.b64_json ? `data:image/png;base64,${picture.b64_json}` : picture?.url
@@ -1044,6 +1075,9 @@ export interface GenerateMusicOptions {
   /* Streaming was not available and the song is being made by one plain request:
      nothing more will arrive until it is done. */
   onPlainRequest?: () => void
+  /* In the background, as for a picture (GenerateImageOptions.background). */
+  background?: boolean
+  onJob?: (job: Job) => void
 }
 
 const MUSIC_EVENT = {
@@ -1159,18 +1193,39 @@ export function wavUrl(b64: string) {
 }
 
 /* Streams when it can, so the page can show the stage; falls back to one plain request
-   when streaming is not available. */
+   when streaming is not available. In the background the page follows a job instead. */
 export async function generateMusic(options: GenerateMusicOptions): Promise<GeneratedMusic> {
   let answer: MusicGenerationResponse
-  try {
-    answer = await streamMusic(options)
-  } catch (cause) {
-    if (!(cause instanceof StreamUnavailable) || options.signal.aborted) throw cause
-    options.onPlainRequest?.()
-    answer = await requestMusic(options)
+  let keptUrl: string | undefined
+  if (options.background) {
+    const outcome = await runBackground({
+      baseUrl: options.baseUrl, apiKey: options.apiKey, signal: options.signal,
+      send: () => fetch(endpoint(options.baseUrl, "audio/music"), asJob(musicRequest(options, false))),
+      failed: imageError,
+      onJob: options.onJob,
+      onUpdate: (job) => { options.onJob?.(job); if (job.progress) options.onProgress?.(job.progress as unknown as MusicProgress) },
+    })
+    if ("plain" in outcome) {
+      answer = (await outcome.plain.json()) as MusicGenerationResponse
+    } else {
+      const kept = outcome.job.result!
+      keptUrl = outcome.url
+      answer = {
+        created: outcome.job.created, data: [{ format: "wav" }],
+        colibri: { ...(kept.duration !== undefined ? { duration: kept.duration } : {}), ...(kept.seed !== undefined ? { seed: kept.seed } : {}), ...(kept.steps !== undefined ? { steps: kept.steps } : {}), ...(kept.timings ? { timings: kept.timings as MusicTimings } : {}) },
+      }
+    }
+  } else {
+    try {
+      answer = await streamMusic(options)
+    } catch (cause) {
+      if (!(cause instanceof StreamUnavailable) || options.signal.aborted) throw cause
+      options.onPlainRequest?.()
+      answer = await requestMusic(options)
+    }
   }
   const song = answer.data?.[0]
-  if (!song?.b64_json) throw new Error("The server answered without a song.")
+  if (!keptUrl && !song?.b64_json) throw new Error("The server answered without a song.")
   const info = answer.colibri
   return {
     prompt: options.prompt,
@@ -1184,7 +1239,7 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
     ...(options.reference ? { reference: { name: options.reference.name } } : {}),
     ...(options.task === "repaint" && options.repaint ? { repaint: options.repaint } : {}),
     ...(options.task === "cover" && options.cover ? { cover: options.cover } : {}),
-    url: wavUrl(song.b64_json),
+    url: keptUrl ?? wavUrl(song!.b64_json!),
     ...(info?.timings ? { timings: info.timings } : {}),
     ...(info?.truncated ? { truncated: true } : {}),
   }
