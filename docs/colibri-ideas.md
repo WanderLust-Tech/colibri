@@ -148,7 +148,9 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   would say it from the first request.
 - [x] **H3. Keep `context_length` for models that have not run since the engines announced it (S). Partly done 2026-11-16:** `details.context_length` in `/v1/models/installed` is the folder's own limit from config.json, shown on the Model page before a first load; the card's `context_length` (what the server serves) is still only known after a load. Today the card appears
   after the model's first load.
-- [ ] **H4. Qwen-Image on Vulkan (M).** `make qwenimage VK=1` builds; unmeasured. ACE-Step has no Vulkan path.
+- [x] **H4. Qwen-Image on Vulkan (M). Measured 2026-11-17** (qwen-image.md): on the RTX 5090 a 512x512, 8-step picture takes 10 s against the
+  CPU's 95 s, and is the CPU's picture (SSIM 0.999999, no pixel off by more than 1 of 255). Not measured: 1024x1024, and a card with less room.
+  ACE-Step has no Vulkan path.
 - [x] **H6. Report reused tokens in `usage` (S).** Done on `feat/cached-tokens`: the engine puts the reused count on the end of its
   `DONE ... STAT` line (qwen36, gemma4 and deepseek_v4 do; the others leave it off), and the gateway returns it as
   `usage.prompt_tokens_details.cached_tokens` (also on the streamed usage chunk) and as `cached_tokens` in the request log. A field

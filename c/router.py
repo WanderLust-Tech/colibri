@@ -48,6 +48,7 @@ import presets as presets_mod
 import web_headers
 import log_tail
 import request_log
+import client_tags
 import library
 import jobs
 
@@ -62,6 +63,7 @@ PRESSURE_MIN_IDLE = 20.0            # seconds a model must have been idle to be 
 PRESSURE_COOLDOWN = 15.0            # seconds to wait after a stop for the memory to show up as free before stopping another
 PEAK_SAMPLE_S = 5.0                 # how often a busy worker's memory is read, to learn the most it grows to
 CARD_MIN_IDLE = 60.0                # seconds a model must have been idle before it is stopped to give the card to another
+DEMOTE_TIMEOUT_S = 300.0            # how long a worker has to give the card back (it reads its dense weights back into RAM first)
 CARD_SETTLE_S = 10.0                # how long to wait for the card to show its memory free again after a stop
 RELOAD_BYTES_PER_S = 150e6          # what a model never timed is assumed to load at (a slow disk): only used to compare
 STOP_GRACE = 25.0                   # seconds a worker gets to save its state before it is killed
@@ -542,6 +544,18 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def post_json(port, path, body, timeout=5):
+    payload = json.dumps(body).encode()
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("POST", path, body=payload, headers={"Host": f"127.0.0.1:{port}", "Content-Type": "application/json"})
+        response = connection.getresponse()
+        data = response.read()
+        return response.status, json.loads(data) if data else None
+    finally:
+        connection.close()
+
+
 def fetch_json(port, path, timeout=5):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -570,7 +584,8 @@ class Worker:
         self.resident = 0
         self.model_entry, self.jev = None, None
         self.gpu = None                         # the gpu.Decision it was started with
-        self.card = False                       # started with the graphics card on (COLI_VULKAN=1)
+        self.card = False                       # on the graphics card now (started with COLI_VULKAN=1, and not given back since)
+        self.demoted = False                    # it gave the card back and runs on the CPU
         self.error = None
         self.log = collections.deque(maxlen=40)
         self.settled = threading.Event()        # set when starting or stopping has finished
@@ -672,7 +687,7 @@ class Pool:
                  grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None,
                  fallback_memory=CARD_FALLBACK_S, pressure_floor=None, pressure_min_idle=PRESSURE_MIN_IDLE,
                  pressure_cooldown=PRESSURE_COOLDOWN, peak_sample=PEAK_SAMPLE_S, watch_pressure=True,
-                 card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S):
+                 card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S, card_demote=True):
         self.catalog = catalog
         self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
         self.settings = settings                         # model_settings.ModelSettings, or None
@@ -689,6 +704,7 @@ class Pool:
         # Memory pressure between requests: free memory under `pressure_floor` bytes stops an idle model (None: never, as before).
         self.pressure_floor, self.pressure_min_idle, self.pressure_cooldown = pressure_floor, pressure_min_idle, pressure_cooldown
         self.card_evict, self.card_min_idle, self.card_settle = card_evict, card_min_idle, card_settle
+        self.card_demote = card_demote                # give the card back and keep the model running, where its engine can
         self.watch_pressure = watch_pressure              # the reaper's loop calls relieve(); a test that calls it itself turns this off
         self.pressure = {"stops": 0, "last": None}
         self._relief_until = 0.0
@@ -743,11 +759,11 @@ class Pool:
                 worker.inflight += 1
                 worker.last_used = time.monotonic()
                 return "use", worker
-            if worker.state in ("starting", "stopping"):
+            if worker.state in ("starting", "stopping", "demoting"):
                 return "wait", worker
             del self.workers[key]                        # failed, or died while ready
         others = list(self.workers.values())
-        counted = [w for w in others if w.state in ("starting", "ready", "stopping")]
+        counted = [w for w in others if w.state in ("starting", "ready", "stopping", "demoting")]
         room = self.max_loaded <= 0 or len(counted) < self.max_loaded
         if room and self.fits(entry, free):
             return "load", self._register(entry)
@@ -952,12 +968,64 @@ class Pool:
                 if not holders:
                     return
                 victim = self.pick_victim(holders)
-                victim.state = "stopping"
+                victim.state = "demoting" if self.card_demote else "stopping"
                 victim.settled.clear()
-            self._stop(victim, f"it holds the graphics card, which `{entry['id']}` needs, and has been idle for {now - victim.last_used:.0f} s")
+            why = f"it holds the graphics card, which `{entry['id']}` needs, and has been idle for {now - victim.last_used:.0f} s"
+            if self.card_demote:
+                outcome = self.demote(victim, why)
+                if outcome == "busy":
+                    return                                         # it is in use again: the new model goes to the CPU this time
+                if outcome != "done":
+                    with self.cv:
+                        victim.state = "stopping"
+                    self._stop(victim, why)
+            else:
+                self._stop(victim, why)
             end = time.monotonic() + self.card_settle
             while time.monotonic() < end and policy.decide(entry, pinned).mode == "cpu":
                 time.sleep(0.25)                                   # the driver gives the memory back when the process has gone
+
+    def demote(self, worker, why):
+        """Take the graphics card from an idle worker and leave it running on the CPU (POST /v1/demote to its gateway, which asks
+        the engine; the engine tears the card down and reads back what only the card held). Called with the worker in the
+        "demoting" state, which keeps requests off it, and leaves it "ready" (done, and it counts as a CPU model now) or in
+        whatever the caller makes it. Returns "done", "busy" (a request got there first: nothing changed, and the worker is ready
+        again) or "failed" (it could not, an older worker or an engine without the means: nothing changed, the caller stops it)."""
+        began = time.monotonic()
+        outcome, reason = "failed", None
+        try:
+            status, answer = post_json(worker.port, "/v1/demote", {}, timeout=DEMOTE_TIMEOUT_S)
+            if status == 200 and isinstance(answer, dict) and answer.get("demoted") is True:
+                outcome = "done"
+            elif status == 200 and isinstance(answer, dict):
+                reason = answer.get("reason")
+                if reason and "request is running" in reason:
+                    outcome = "busy"
+            else:
+                reason = f"HTTP {status}"
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            reason = str(error) or error.__class__.__name__
+        if outcome == "done":
+            seen = self.measure(worker.proc.pid, worker.job) if worker.alive() else None
+            with self.cv:
+                worker.card = False
+                worker.demoted = True
+                worker.gpu = gpu_mod.Decision("cpu", "it gave the graphics card back: " + why, env={"COLI_VULKAN": "0"})
+                if seen:
+                    worker.resident = seen
+                worker.state = "ready"
+                worker.settled.set()
+                self.cv.notify_all()
+            log(f"`{worker.entry['id']}` gave the graphics card back in {time.monotonic() - began:.1f} s and runs on the CPU "
+                f"({worker.resident / 2**30:.1f} GB resident); {why}")
+        elif outcome == "busy":
+            with self.cv:
+                worker.state = "ready"
+                worker.settled.set()
+                self.cv.notify_all()
+        else:
+            log(f"`{worker.entry['id']}` could not give the graphics card back ({reason}); it will be stopped instead")
+        return outcome
 
     def release(self, worker):
         with self.cv:
@@ -1616,7 +1684,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*" if "*" in origins else origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version, "
-                         "X-TypeSafe-SDK, X-TypeSafe-Runtime, X-TypeSafe-Retry-Count")
+                         "X-TypeSafe-SDK, X-TypeSafe-Runtime, X-TypeSafe-Retry-Count, X-Colibri-Tags")
         self.send_header("Access-Control-Expose-Headers", "x-request-id, x-typesafe-request-id, "
                          "x-colibri-queue-wait-ms, x-colibri-elapsed-ms, x-colibri-engine-ms, Retry-After")
         self.send_header("Access-Control-Max-Age", "600")
@@ -1781,6 +1849,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             if self.server.request_log is not None and self.server.request_log.bodies and body.json is not None:
                 seen["request"] = request_log.shorten(body.json)
             keep = body.keep_alive                  # read before anything loads: a bad value must not cost a load
+            tags = self.tags_header()               # likewise
+            if tags:
+                seen["tags"] = tags
             preset = self.preset_named(body.model)
             if preset is not None:
                 seen["preset"] = preset.name
@@ -1811,6 +1882,13 @@ class RouterHandler(BaseHTTPRequestHandler):
                     record["error"] = self._error
                 log.write({k: v for k, v in record.items() if v is not None})
             self._status = self._error = None
+
+    def tags_header(self):
+        """The tags the request carries (client_tags.py), None for none. A header that does not fit is a 400 that says what to change."""
+        try:
+            return client_tags.parse(self.headers.get(client_tags.HEADER))
+        except client_tags.TagError as error:
+            raise ApiError(400, str(error), "invalid_tags", client_tags.HEADER) from None
 
     def preset_named(self, name):
         """The preset a request's `model` names, or None. A real model's name is never taken from it."""
@@ -2014,7 +2092,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         try:
             snapshot, created = manager.submit(kind, entry["id"], path, work["summary"],
                                                lambda ctx: run_job_request(server, work, ctx),
-                                               (self.headers.get(jobs.ID_HEADER) or "").strip() or None)
+                                               (self.headers.get(jobs.ID_HEADER) or "").strip() or None, tags=seen.get("tags"))
         except jobs.JobError as error:
             raise ApiError(error.status, error.message, error.code, error.param,
                            "rate_limit_error" if error.status == 429 else "invalid_request_error",
@@ -2026,9 +2104,12 @@ class RouterHandler(BaseHTTPRequestHandler):
         if self.server.jobs is None:
             raise ApiError(404, "Not found.", "not_found")
         try:
-            return self.server.jobs.listing(*jobs.page_arguments(query))
+            status, limit, offset = jobs.page_arguments(query)
+            return self.server.jobs.listing(status, limit, offset, client_tags.wanted(query.get("tag")))
         except jobs.JobError as error:
             raise ApiError(error.status, error.message, error.code, error.param) from None
+        except client_tags.TagError as error:
+            raise ApiError(400, str(error), "invalid_value", "tag") from None
 
     def job_get(self, job_id):
         found = self.server.jobs.get(job_id) if self.server.jobs is not None else None
@@ -2070,7 +2151,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         return {"id": worker.entry["id"], "key": worker.key, "state": worker.state, "port": worker.port,
                 "resident_bytes": worker.resident, "inflight": worker.inflight, "expires_in": left,
                 "keep_alive": worker.keep_alive, "gpu": worker.gpu.public() if worker.gpu is not None else None,
-                "reload_seconds": round(self.server.pool.reload_seconds(worker), 1)}
+                "demoted": worker.demoted, "reload_seconds": round(self.server.pool.reload_seconds(worker), 1)}
 
     def models_list(self):
         """Every model that can be asked for, so a client can find them. A loaded one says what its engine
@@ -2172,8 +2253,12 @@ class RouterHandler(BaseHTTPRequestHandler):
             limit = max(1, min(500, int((query.get("limit") or ["50"])[0])))
         except ValueError:
             raise ApiError(400, "`limit` must be a number.", "invalid_request_error", "limit")
+        try:
+            tags = client_tags.wanted(query.get("tag"))
+        except client_tags.TagError as error:
+            raise ApiError(400, str(error), "invalid_value", "tag") from None
         return {"object": "list", "enabled": True, "path": log.path, "bodies": log.bodies,
-                "data": request_log.recent(log.path, limit)}
+                "data": request_log.recent(log.path, limit, tags)}
 
     def logs_list(self, query):
         """GET /v1/logs?since=N&limit=N&source=ID: the lines the router and its workers printed after number N, oldest
@@ -2427,7 +2512,8 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
     pool = Pool(catalog, keep_alive=keep_alive, max_loaded=max_loaded, worker_command=command,
                 state=State(default_state_path()), queue_timeout=queue_timeout,
                 make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings,
-                pressure_floor=pressure_floor(), card_evict=os.environ.get("COLI_CARD_EVICT", "1").strip().lower() not in ("0", "false", "no", "off"))
+                pressure_floor=pressure_floor(), card_evict=os.environ.get("COLI_CARD_EVICT", "1").strip().lower() not in ("0", "false", "no", "off"),
+                card_demote=os.environ.get("COLI_CARD_DEMOTE", "1").strip().lower() not in ("0", "false", "no", "off"))
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
     presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
     if request_log_path:

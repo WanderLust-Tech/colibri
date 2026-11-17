@@ -30,8 +30,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { dashboardTags, newChatTag } from "@/lib/tags"
 import {
-  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, streamChat,
+  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, setClientTags, streamChat,
   type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type PresetInfo, type StreamChatResult,
 } from "@/lib/api"
 import { controlDefaults } from "@/lib/presets"
@@ -135,6 +136,9 @@ export default function App() {
   const [theme, setTheme] = useState(() => stored(localStorage, "colibri.theme", "dark"))
   const [copied, setCopied] = useState<string | null>(null)
   const draftRef = useRef<HTMLTextAreaElement>(null)
+  /* What this conversation is called to the router's request log and jobs (X-Colibri-Tags): one tag per conversation. */
+  const chatTag = useRef(newChatTag())
+  useEffect(() => { setClientTags(dashboardTags(chatTag.current)) }, [])
   const fileRef = useRef<HTMLInputElement>(null)
   /* Pictures wait here until the turn is sent, then travel on the message. */
   const [pending, setPending] = useState<string[]>([])
@@ -585,7 +589,7 @@ export default function App() {
   const submit = () => { if (music.mode) void music.send(); else if (imageMode) void sendImage(); else void send() }
 
   const openSettings = (page = "general") => { setSettingsPage(page); setView("settings") }
-  const clearChat = () => { updateMessages([]); setLastRun(null); setTokPerSec(null); setTtft(null); setTokenCount(0); setTotalTokens({ prompt: 0, completion: 0 }); setError("") }
+  const clearChat = () => { chatTag.current = newChatTag(); setClientTags(dashboardTags(chatTag.current)); updateMessages([]); setLastRun(null); setTokPerSec(null); setTtft(null); setTokenCount(0); setTotalTokens({ prompt: 0, completion: 0 }); setError("") }
   const newChat = () => {
     if (loading) return
     if (messages.length) setArchives(items => [{ id: message("system", "").id, slot: cacheSlot, messages: [...messages] }, ...items])

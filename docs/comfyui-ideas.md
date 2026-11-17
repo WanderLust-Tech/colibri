@@ -41,13 +41,13 @@ claims about ComfyUI are theirs and were not re-read.
 | 1 Settings inside saved media | done 2026-11-16 (PNG iTXt, WAV LIST/INFO; the dashboard reads them back through a button; `coli run` and `coli music`, which write their own files, do not tag them) |
 | 2 Jobs that survive the page | done 2026-11-16 (router jobs, `Prefer: respond-async`; dashboard switch and Jobs panel; not done: the extension, events instead of polling) |
 | 3 A Library tab | done 2026-11-16 (`/v1/library`, Settings → Library; not done: server-made thumbnails, a URL instead of base64 in the response, delete) |
-| 4 Smarter memory | 4a, 4b, 4d and the router half of 4c done 2026-11-16 (eviction by cost, a pressure watch, learned peaks, stopping an idle model that holds the card); open: demoting a running model off the card (engine), 4e |
+| 4 Smarter memory | 4a, 4b, 4d and the router half of 4c done 2026-11-16 (eviction by cost, a pressure watch, learned peaks, stopping an idle model that holds the card); 4c's engine half done 2026-11-17 (an idle model gives the card back and keeps running: qwen36 only); 4e measured 2026-11-17 and not worth doing |
 | 5 Failure ladder for a worker that will not load | done 2026-11-16 |
 | 6 Gateway feature list | done 2026-11-16 (server and dashboard; the extension still reads a 404) |
 | 7 Keep the API spec honest | done 2026-11-16 |
 | 8 Security headers on the dashboard | done 2026-11-16 |
 | 9 Model catalogue | done 2026-11-16 (known-models list, `coli model verify`, `coli model info`, details on the dashboard card) |
-| 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM baselines and echoed metadata open |
+| 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM scoring and echoed client tags done 2026-11-17; per-user preferences and one-shot validation left alone |
 
 Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), then 2 and 3 as one project, then memory
 (4a, 4b) once there is a measurement of what the reaper gets wrong today.
@@ -105,7 +105,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   ladder: caches and KV slots first, then demote, then stop idle workers. On Windows, judge RAM pressure by swap use or
   very low available memory, not by "available" alone. *Where:* `comfy/system_memory.py`, `comfy/pinned_memory.py`,
   the post-node loop in `execution.py`. *Nearest here:* `reap()` in `c/router.py`.
-- [ ] **4c. Demote an idle model off the card instead of stopping it (S in the router, M in the engine).** Ask the idle
+- [x] **4c. Demote an idle model off the card instead of stopping it (S in the router, M in the engine). Done 2026-11-17** ([gpu-offload.md](gpu-offload.md#giving-the-card-back); qwen36 only, taking 2.3 s for Qwen3-Coder and returning its 17 GB of the card; the model then runs at the CPU's speed until stopped). Ask the idle
   worker to drop its card memory and keep running on the CPU; count that memory as reclaimable when the router decides card
   or CPU. A reload from the USB disk costs minutes, and this would also fix the case where Qwen3-Coder on the card sends
   the next model to the CPU. *Where:* `model_management.free_memory`, `ModelPatcher.partially_unload`. *Nearest here:*
@@ -113,9 +113,15 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
 - [x] **4d. Learn each job's peak memory (M).** Store the peak working set per model and size class, make room before a
   render, and size KV slots or batches from free memory. `c/image_engine.py` says its working buffers are "not included
   (being measured)". *Where:* `comfy/model_base.py` (`memory_required`), `comfy/samplers.py`.
-- [ ] **4e. Working-set trim for idle workers (S, measure first).** After a short idle time, ask Windows to move a worker's
+- [x] **4e. Working-set trim for idle workers (S, measure first). Measured 2026-11-17: no.** After a short idle time, ask Windows to move a worker's
   read-only mapped weight pages to the standby list, so RAM looks free but pages return quickly. The expert caches and KV
-  are ordinary memory and would go to the pagefile, so measure before trusting it.
+  are ordinary memory and would go to the pagefile, so measure before trusting it. *Measured* on Qwen3-Coder on the CPU (`EmptyWorkingSet`
+  on the engine, idle): the working set went from 3.3 GB to 0.0 GB, the private bytes stayed 3.35 GB, and the system's available memory, which is
+  what the router reads, moved by +0.2 GB at once and by +0.04 GB over the next minute, so no model would have fitted that did not before.
+  The next request took 21.2 s against 21.0 s: with nothing else taking memory the pages came straight back, so the cost of a trim that
+  frees nothing was not seen either. The worker's memory is almost all private, not mapped file (3.35 GB private against a 3.34 GB working
+  set), so what a trim moves is modified private pages, which Windows keeps until it writes them out, not standby pages it can hand over. Not
+  worth building.
 - [ ] **Not recommended: GPU prefill with streamed weights (L).** Stream layers through the card for long prompts and keep
   decode on the CPU. It only pays where the arithmetic per byte is high (prefill); for one token at a time the bus is no
   faster than reading RAM. Related to the open "experts next step" in G2.
@@ -153,12 +159,14 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   - **Done 2026-11-16:** a priority lane, so a short chat goes ahead of queued music and image jobs (ComfyUI never
     interrupts a running job either; neither does this). Pictures and songs are low, the rest normal, and the header
     `X-Colibri-Priority: low|normal|high` overrides it; see "Priority" in `docs/router.md`. *Where:* `number` / `front` in `post_prompt`. *Nearest here:* a first-in-first-out gate.
-  - An image-quality check by structural similarity against saved baselines (ComfyUI uses 0.95), which would settle open
-    item H4 (Qwen-Image on Vulkan, unmeasured). *Where:* `tests/compare/test_quality.py`.
+  - **Done 2026-11-17:** an image-quality check by structural similarity (`c/image_quality.py`, ComfyUI's 0.95 as the usual line), which
+  settled H4: Qwen-Image on the card is the CPU's picture (SSIM 0.999999). No baseline pictures are checked in; a change that wants one makes
+  it with a fixed prompt and seed ([qwen-image.md](qwen-image.md#checking-a-picture-against-a-baseline)).
   - **Done 2026-11-16:** a live log tail for load failures and slow loads: `GET /v1/logs` (the last 2000 router and worker lines, in memory, needs the key), the dashboard's Settings → Log, and the extension's "Colibri: Show Router Log" (0.10.0). *Where:*
     `api_server/services/terminal_service.py`.
-  - A small, size-capped client object echoed on every event and written to the request log, so the Requests tab and the
-    extension can group by chat. Weak without item 2.
+  - **Done 2026-11-17:** a small, size-capped client object (`X-Colibri-Tags`), written to the request log and kept on background jobs, listed
+  by with `?tag=name:value`; the dashboard tags each chat and its Requests tab lists by a tag ([api.md](api.md#client-tags)). Not done: the
+  extension sending tags, and tags on the events of a streamed answer (the jobs carry them, which is where a page re-attaches).
   - Per-user dashboard preferences kept on the server. Modest; skip if one browser is used.
   - Validation that reports every problem at once with stable type codes. The OpenAI error shape limits the gain.
 

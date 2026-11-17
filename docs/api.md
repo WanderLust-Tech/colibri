@@ -451,6 +451,7 @@ the key `/health` still says only `{"status": "ok"}`.
 | `request_log` | `GET /v1/requests`: a router started with a request log ([request log](request-log.md)). |
 | `server_log` | `GET /v1/logs`: the router's own output and its models' ([router](router.md)). |
 | `priority` | The `X-Colibri-Priority` header, and pictures and songs waiting behind a chat ([router](router.md#priority)). |
+| `tags` | The `X-Colibri-Tags` header, and `?tag=name:value` on `GET /v1/requests` and `GET /v1/jobs`: a router only ([client tags](#client-tags)). |
 | `jobs` | `Prefer: respond-async` on pictures and songs, `GET /v1/jobs`, `GET /v1/jobs/{job}`, `POST /v1/jobs/cancel`: a router only ([background jobs](#background-jobs)). |
 | `library` | `GET /v1/library` and `GET /v1/library/{kind}/{name}`: the kept pictures and songs ([library](#the-kept-pictures-and-songs-library)). |
 | `json_mode` | `response_format` of `json_object` or `json_schema` ([JSON mode](json-mode.md)). |
@@ -458,6 +459,33 @@ the key `/health` still says only `{"status": "ok"}`.
 
 What the loaded model can do (pictures, music, speech, tools, its context window) is not here: it changes with the model, so
 it is in `capabilities` and on the model card of `GET /v1/models`.
+
+## Client tags
+
+`X-Colibri-Tags` puts a few labels of the client's own on a request, so what it did can be found again by chat or by app:
+
+```
+X-Colibri-Tags: {"app": "dashboard", "chat": "c-7f3a"}
+```
+
+A JSON object of at most 8 names (a letter, then letters, digits, `_`, `.` or `-`, up to 32), each value a string of up to 120 characters
+with no control characters, a number or true/false; the whole header up to 1024 bytes. A router (`coli router`) writes them on the request's
+line in the [request log](request-log.md), keeps them on a [background job](#background-jobs) (`tags` in the job, also once it has finished)
+and lists by them: `GET /v1/requests?tag=chat:c-7f3a` and `GET /v1/jobs?tag=chat:c-7f3a`, where more than one `tag` must all match (compared
+as text; only the first colon splits). The model never sees them. A header that does not fit is a `400` with code `invalid_tags` that says
+what to change, before anything loads; a `tag` filter that is not `name:value` is a `400` too. The dashboard sends `app` and a `chat` per
+conversation, and its Requests tab shows them and lists a chat's requests when its tag is clicked.
+
+## Giving the graphics card back (`/v1/demote`)
+
+`POST /v1/demote` (a model server, `coli serve`: the router sends it to a worker, a client does not need it) asks an idle
+model that runs on the graphics card to give the card back and carry on on the CPU. It answers `200` with
+`{"demoted": true, "reason": null}`, or `{"demoted": false, "reason": "..."}` and nothing changed: a request is running or
+waiting (it never waits for one), the model is not on the card, or its engine cannot (only `qwen36`, the Qwen3 and Qwen3.5/3.6
+models, can today). It takes seconds: the engine reads back into RAM the dense weights only the card held. It cannot be
+undone: the model stays on the CPU until it is stopped, and the next start looks at the card again. The router does this by
+itself when a model about to start would otherwise go to the CPU because an idle one holds the card ([router](router.md));
+the engine's half is the `DEMOTE` frame ([serve protocol](serve_protocol.md)).
 
 ## Prometheus metrics
 

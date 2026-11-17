@@ -235,6 +235,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .requests-table tr:last-child td { border-bottom: 0; }
 .requests-table td small { color: var(--muted-foreground); }
 .requests-table tr.failed td { color: #d98a8a; }
+.requests-table td.request-tags { white-space: normal; }
+.request-tag { display: inline-block; margin: 0 4px 2px 0; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 11px; cursor: pointer; }
+.request-tag:hover { color: var(--foreground); border-color: var(--primary); }
+.link-button { background: none; border: 0; padding: 0; color: var(--primary); font: inherit; cursor: pointer; text-decoration: underline; }
 @media (max-width: 760px) { .preset-default-row { grid-template-columns: 1fr 1fr auto; } .preset-form input, .preset-form textarea, .preset-form select { font-size: 16px; } }
 
 .reply-stats { font-size: 11px; line-height: 1.5; color: var(--muted-foreground); margin-top: -4px; font-variant-numeric: tabular-nums; }

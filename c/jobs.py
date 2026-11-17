@@ -21,6 +21,8 @@ import threading
 import time
 import uuid
 
+import client_tags
+
 FINAL = ("succeeded", "failed", "cancelled")
 STATUSES = ("queued", "running") + FINAL
 KEEP_JOBS = 200                      # records kept in memory and, after a restart, on disk
@@ -172,7 +174,7 @@ class JobManager:
         self.thread.start()
 
     # ---- asking
-    def submit(self, kind, model, path, request, run, job_id=None):
+    def submit(self, kind, model, path, request, run, job_id=None, tags=None):
         """Queue a job. Returns (snapshot, created): a job id already held answers with that job and created False, so a
         client that sent the same request twice (a retry after a dropped answer) does not make two renders."""
         if job_id is not None and not ID.match(job_id):
@@ -188,6 +190,8 @@ class JobManager:
             job_id = job_id or "job_" + uuid.uuid4().hex[:20]
             record = {"id": job_id, "kind": kind, "model": model, "path": path, "status": "queued", "created": self.clock(),
                       "started": None, "finished": None, "request": request, "progress": None, "result": None, "error": None}
+            if tags:
+                record["tags"] = dict(tags)
             self.jobs[job_id] = record
             self.work[job_id] = {"run": run, "context": Context(self, job_id)}
             self.queue.append(job_id)
@@ -201,9 +205,10 @@ class JobManager:
             record = self.jobs.get(job_id)
             return self._snapshot(record) if record else None
 
-    def listing(self, status=None, limit=50, offset=0):
+    def listing(self, status=None, limit=50, offset=0, tags=None):
         with self.cv:
-            rows = [r for r in reversed(self.jobs.values()) if status is None or r["status"] == status]
+            rows = [r for r in reversed(self.jobs.values())
+                    if (status is None or r["status"] == status) and client_tags.matches(r.get("tags"), tags)]
             page = rows[offset:offset + limit]
             return {"object": "list", "total": len(rows), "has_more": offset + len(page) < len(rows),
                     "data": [self._snapshot(r) for r in page]}
@@ -319,6 +324,8 @@ class JobManager:
                "status": record["status"], "created": int(record.get("created") or 0),
                "started": int(started) if started else None, "finished": int(finished) if finished else None,
                "endpoint": record.get("path"), "request": record.get("request") or {}}
+        if record.get("tags"):
+            out["tags"] = dict(record["tags"])
         if record["status"] == "queued":
             out["position"] = list(self.queue).index(record["id"]) + 1 if record["id"] in self.queue else None
         if record["status"] == "running" and record.get("progress"):

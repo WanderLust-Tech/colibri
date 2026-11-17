@@ -35,11 +35,12 @@ export default function RequestsPanel({ baseUrl, apiKey, connected }: RequestsPa
   const [view, setView] = useState<RequestLogView | null>(null)
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  const [tag, setTag] = useState("")             // "name:value": list only what carries it
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
     try {
-      setView(await listRequests(baseUrl, apiKey, 100, signal))
+      setView(await listRequests(baseUrl, apiKey, 100, signal, tag || undefined))
       setError("")
     } catch (cause) {
       if (signal?.aborted) return
@@ -47,7 +48,7 @@ export default function RequestsPanel({ baseUrl, apiKey, connected }: RequestsPa
     } finally {
       if (!signal?.aborted) setLoading(false)
     }
-  }, [baseUrl, apiKey])
+  }, [baseUrl, apiKey, tag])
 
   useEffect(() => {
     if (!connected) return
@@ -67,13 +68,19 @@ export default function RequestsPanel({ baseUrl, apiKey, connected }: RequestsPa
       <Button type="button" variant="secondary" onClick={() => void refresh()} disabled={loading}>
         {loading ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {t("requests.refresh")}
       </Button>
-      {view?.enabled && view.requests.length === 0 && <p className="field-help">{t("requests.empty")}</p>}
+      {tag && (
+        <p className="field-help">
+          {t("requests.filtered", { tag })}{" "}
+          <button type="button" className="link-button" onClick={() => setTag("")}>{t("requests.clearFilter")}</button>
+        </p>
+      )}
+      {view?.enabled && view.requests.length === 0 && <p className="field-help">{t(tag ? "requests.emptyFiltered" : "requests.empty")}</p>}
       {view?.enabled && view.requests.length > 0 && (
         <div className="requests-scroll">
           <table className="requests-table">
             <thead><tr>
               <th>{t("requests.time")}</th><th>{t("requests.what")}</th><th>{t("requests.model")}</th>
-              <th>{t("requests.status")}</th><th>{t("requests.seconds")}</th><th>{t("requests.tokens")}</th>
+              <th>{t("requests.status")}</th><th>{t("requests.seconds")}</th><th>{t("requests.tokens")}</th><th>{t("requests.tags")}</th>
             </tr></thead>
             <tbody>
               {view.requests.map((request, index) => (
@@ -84,6 +91,12 @@ export default function RequestsPanel({ baseUrl, apiKey, connected }: RequestsPa
                   <td title={request.error ?? request.finish ?? ""}>{request.status}{request.error ? ` ${request.error}` : ""}</td>
                   <td>{request.seconds.toFixed(request.seconds < 10 ? 2 : 1)}</td>
                   <td>{tokens(request)}</td>
+                  <td className="request-tags">
+                    {Object.entries(request.tags ?? {}).map(([name, value]) => {
+                      const text = `${name}:${String(value)}`
+                      return <button key={name} type="button" className="request-tag" title={t("requests.tagHint", { tag: text })} onClick={() => setTag(text)}>{text}</button>
+                    })}
+                  </td>
                 </tr>
               ))}
             </tbody>

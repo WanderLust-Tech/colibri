@@ -319,7 +319,12 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   freed over the measured time to load again (kept in `router.json`, shown as `reload_seconds`), so a model off the slow drive stays; the
   reaper reads free memory each second and stops one idle model under a floor, then waits; the router remembers the peak memory of a model
   while it answers and plans with that; and with `--gpu auto` an idle model that holds the card is stopped when the next one would
-  otherwise go to the CPU (`COLI_CARD_EVICT=0` for off). Not done: demoting a running model off the card (engine work).
+  otherwise go to the CPU (`COLI_CARD_EVICT=0` for off). From 2026-11-17 it asks that model to give the card back and keep running
+  instead of stopping it ([gpu-offload.md](gpu-offload.md#giving-the-card-back): `POST /v1/demote`, a `DEMOTE` frame, qwen36 only;
+  `COLI_CARD_DEMOTE=0` for off).
+- **Client tags, a picture quality check** (2026-11-17): `X-Colibri-Tags` on a request, kept on its request log line and its job and
+  listed by with `?tag=name:value` ([api.md](api.md#client-tags)); the dashboard tags each chat. `c/image_quality.py` scores two pictures by
+  SSIM ([qwen-image.md](qwen-image.md#checking-a-picture-against-a-baseline)); it settled that Qwen-Image on the card reproduces the CPU's picture.
 - **Background jobs and the Library** (`c/jobs.py`, `c/library.py`; [api.md](api.md#background-jobs), [router.md](router.md#background-jobs)):
   `Prefer: respond-async` on a picture or song request makes the router answer 202 with a job and make the render apart from the connection,
   so a closed tab no longer cancels an hour of work. `GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/cancel` (one call in every state);

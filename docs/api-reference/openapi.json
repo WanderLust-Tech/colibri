@@ -1360,7 +1360,7 @@
           "Router"
         ],
         "summary": "The request log",
-        "description": "The last requests the router answered, newest first: when, what, which model, how long, how many tokens. `enabled` is false when the router was started without a request log. See `docs/request-log.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "description": "The last requests the router answered, newest first: when, what, which model, how long, how many tokens, and the `tags` the client put on it (`X-Colibri-Tags`). `enabled` is false when the router was started without a request log. See `docs/request-log.md`. Only `coli router` has this route; a server that serves one model answers 404.",
         "operationId": "listRequests",
         "security": [
           {
@@ -1371,6 +1371,18 @@
           }
         ],
         "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "description": "Only what carries this tag (`X-Colibri-Tags`, `docs/api.md`, Client tags), as `name:value`; repeat it to need several, all of which must match. Compared as text; only the first colon splits.",
+            "schema": {
+              "type": "array",
+              "items": { "type": "string", "example": "chat:c-7f3a" }
+            },
+            "style": "form",
+            "explode": true
+          },
           {
             "name": "limit",
             "in": "query",
@@ -1685,6 +1697,18 @@
         ],
         "parameters": [
           {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "description": "Only what carries this tag (`X-Colibri-Tags`, `docs/api.md`, Client tags), as `name:value`; repeat it to need several, all of which must match. Compared as text; only the first colon splits.",
+            "schema": {
+              "type": "array",
+              "items": { "type": "string", "example": "chat:c-7f3a" }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
             "name": "status",
             "in": "query",
             "required": false,
@@ -1932,6 +1956,67 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/demote": {
+      "post": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "Give the graphics card back and keep running on the CPU",
+        "description": "A model server only (`coli serve`; the router sends it to a worker). Asks an idle model that runs on the graphics card to drop everything it had there, read back into RAM the dense weights only the card held, and carry on on the CPU. Never waits for a request: with one running or waiting the answer is `demoted: false`. Takes seconds. Not undone: the model stays on the CPU until it is stopped. Only the `qwen36` engine can today; any other answers `demoted: false`.",
+        "operationId": "demoteModel",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Whether the card was given back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "demoted"
+                  ],
+                  "properties": {
+                    "demoted": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Why not, when `demoted` is false. Nothing was changed."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }
@@ -2302,6 +2387,11 @@
           },
           "model": {
             "type": "string"
+          },
+          "tags": {
+            "type": "object",
+            "description": "The `X-Colibri-Tags` the request carried, when it had any.",
+            "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }] }
           },
           "status": {
             "type": "string",

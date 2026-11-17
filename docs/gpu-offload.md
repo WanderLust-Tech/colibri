@@ -80,9 +80,9 @@ coli router --gpu auto --gpu-reserve-gb 6 --gpu-min-gb 3
 The reserve is also handed to the engines (`COLI_VK_TIER_RESERVE_GB` for the expert tier, `G4_VK_RESERVE_GB` for Gemma), so what they
 place on the card leaves it free: a Qwen3-Coder started with 14 GB free and a reserve of 6 holds about 6 GB of experts, not 15.
 
-What it does **not** do: it does not move a model that is loaded (a model keeps its choice until it unloads, and the next load
-looks again), it does not make room by unloading a model that is holding the card (`coli stop NAME` does that), and it cannot see a
-card without `nvidia-smi` (an AMD or Intel card: `auto` then leaves the environment alone and says so in the router's log).
+What it does **not** do: it does not move a model that is loaded to the card (a model keeps its choice until it unloads, and the next
+load looks again), and it cannot see a card without `nvidia-smi` (an AMD or Intel card: `auto` then leaves the environment alone and
+says so in the router's log). What it does about a model that holds the card is [below](#giving-the-card-back).
 
 `RUNS ON` and `running` report the router's decision. An engine that is not a `VK=1` build ignores `COLI_VULKAN`, so a model can say `GPU`
 and still run on the CPU (ACE-Step does: it has no Vulkan path; the live `qwenimage.exe` is a CPU build). The engine's own log line
@@ -97,6 +97,37 @@ policy out.
 
 **Where to set it.** The restart script (`restart-colibri.ps1`) and the `env` setting of `service.json` (what the tray starts with) both
 carry it: `COLI_GPU=auto` in place of a fixed `COLI_VULKAN=1`, which would put every model on the card whatever the card holds.
+
+## Giving the card back
+
+With `--gpu auto`, when a model about to start would go to the CPU only because an idle one holds the card, the router first asks that
+one to **give the card back and keep running on the CPU** (`POST /v1/demote` to its gateway, a `DEMOTE` frame to the engine; see
+[router.md](router.md)). Only the `qwen36` engine can (the Qwen3, Qwen3.5 and Qwen3.6 models, Qwen3-Coder among them). In order: the
+dense chain brings its state down and goes off, the expert tier is torn down, the dense matrices that only the card held (1.15 GB for
+Qwen3-Coder) are read back into RAM, and the device is destroyed, which is what hands the memory back to the driver. The engine is then the
+CPU build for good: it does not go back to the card until it is stopped and started again. Any other engine, or an engine that says no, is
+stopped as before.
+
+Measured on this machine (2026-11-17), Qwen3-Coder with the tier on the card:
+
+| | Card used (`nvidia-smi`) | Answer |
+|---|---|---|
+| before | 20.7 GB (the desktop alone holds 3.5) | 54 tokens in 3.0 s, prompt included |
+| `POST /v1/demote` | back to 3.5 GB, answered in 2.3 s | |
+| after | 3.5 GB | the same 54 tokens, word for word, in 23.4 s (cold expert cache) |
+
+The CPU speed after the demotion is the CPU's: a fresh start of the same engine without the card answered a 68-token reply in 22.6 s
+(three runs of the same prompt, 30.9 s then 22.6 s twice), and the demoted one answered the same prompt in 25.3 s both times it was asked. So
+the gain is not speed, it is that the model is still loaded: a restart reads 19 GB again (15 s here, with the files in the system cache; minutes
+from a USB drive) and loses the conversation cache. Through the router, with 12 GB kept back so that the card looked full once the Coder was on it: the Coder
+idle for 76 s, a request for Gemma E2B made the router demote it in 2.2 s and start Gemma on the card (6.0 GB used, 26.2 free); the Coder
+then answered a request on the CPU in 8.6 s. A short greeting came out differently on the card ("Hello there, nice to meet you!") and
+after the demotion ("Hello there everyone!"), as a card and a CPU can at temperature 0 (the sums are added in a different order).
+
+`COLI_CARD_DEMOTE=0` makes the router stop such a model instead; `COLI_CARD_EVICT=0` turns off making room altogether. `/health` shows
+`demoted` and a `gpu` that says why the model is on the CPU. A model asked for while the router demotes it waits the few seconds and then
+runs on the CPU. Not done: putting a demoted model back on the card when the card is free again (it needs the engine to take its tier and
+chain up a second time, which it does only at start).
 
 ## Building it
 
@@ -137,7 +168,8 @@ and run the `gcc` lines. Running `make` itself from the Claude Code Bash tool fa
   engine has no expert tier; the shared one in `vk_tier.c` is what Qwen uses and is the way to add it.
 * **A layer of Gemma in one submission** (the "chain" Qwen has): each dense matrix is a separate synchronous call (about 200 a token),
   which is why decode gains less than the prompt does.
-* **Unloading what holds the card** when a model needs it: the router's memory planning ([router.md](router.md)) looks at RAM only.
+* **Putting a demoted model back on the card** ([above](#giving-the-card-back)), and demoting an engine other than `qwen36` (Gemma 4's
+  dense path is on the card for 2.4 to 4.4 GB; the same teardown would give it back, and has not been written).
 
 ## Repeating the measurements
 

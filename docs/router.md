@@ -142,9 +142,16 @@ fit" uses that, not the smaller figure from just after the load.
 **An idle model that holds the graphics card.** With `--gpu auto`, a model that would go to the CPU only because the card's memory is
 taken now makes the router stop an idle model that holds the card first, if it has been idle for a minute (so two models that both want
 the card do not trade it back and forth) and is not pinned to either side. It waits for the card to show its memory free, then starts
-the new model on it. The model stopped starts again when it is next asked for. `COLI_CARD_EVICT=0` turns this off. This is the router half
-of moving a model off the card: telling a running engine to drop its card memory and carry on from the CPU would keep it loaded, and needs
-work in the engines, which is not done.
+the new model on it.
+
+It tries to keep the model that holds the card loaded: it asks the idle worker to give the card back (`POST /v1/demote`, `DEMOTE` to the
+engine), which makes the engine drop everything it had on the card, read back into RAM the dense weights only the card held, and carry on on
+the CPU. That takes a few seconds and the model keeps its conversation cache; a restart would read it all from the drive again, minutes
+from a slow one. Only the `qwen36` engine (the Qwen3, Qwen3.5 and Qwen3.6 models, Qwen3-Coder among them) can. For any other, or when it
+answers that it cannot, the model is stopped as before and starts again when it is next asked for. A demoted model stays on the CPU until
+it is stopped (the idle timer, `coli model`, or a restart): in a short test of Qwen3-Coder here it answered at about 3 tokens a second, the
+same as one started on the CPU, against about 18 on the card. `/health` marks it (`demoted`, and `gpu` says why it is on the CPU).
+`COLI_CARD_DEMOTE=0` makes the router stop such a model instead; `COLI_CARD_EVICT=0` turns the whole thing off.
 
 ## Background jobs
 

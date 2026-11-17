@@ -41,6 +41,7 @@ and the gateway behind it writes its own for the same request, with the tokens o
 | `prompt_tokens`, `completion_tokens`, `finish` | Gateway only, for requests that generate text: tokens in and out, `stop` or `length`. A transcription of a long file adds its pieces. |
 | `cached_tokens` | Gateway only: how many of the `prompt_tokens` the engine did not read again (the start of the prompt matched the last one). Left out when the engine does not report it. |
 | `bytes_in` | Router only: the size of the request body. |
+| `tags` | Router only: the `X-Colibri-Tags` the client sent, when it sent any (a few short labels such as `app` and `chat`; [api](api.md#client-tags)). `GET /v1/requests?tag=chat:c-7f3a` lists by them. |
 | `client` | The address the request came from (the router's, for a worker). |
 
 Only requests that compute are logged (chat, completions, messages, systemone, images, music, transcriptions), not

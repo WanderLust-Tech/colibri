@@ -138,6 +138,18 @@ function headers(apiKey: string) {
   }
 }
 
+/* Labels the page puts on what it asks a model for (X-Colibri-Tags, docs/api.md "Client tags"), so the router's request log and its
+   jobs can be listed by chat. Set by the app when a chat starts; only requests that compute carry them. */
+let clientTags: Record<string, string> | null = null
+export function setClientTags(tags: Record<string, string> | null) { clientTags = tags && Object.keys(tags).length ? { ...tags } : null }
+export const TAGS_HEADER = "X-Colibri-Tags"
+function tagHeaders(): Record<string, string> {
+  return clientTags ? { [TAGS_HEADER]: JSON.stringify(clientTags) } : {}
+}
+function computeHeaders(apiKey: string) {
+  return { ...headers(apiKey), ...tagHeaders() }
+}
+
 async function responseError(response: Response) {
   const fallback = `${response.status} ${response.statusText}`
   try {
@@ -459,6 +471,8 @@ export interface LoggedRequest {
   finish?: string
   error?: string
   engine_seconds?: number
+  /* What the client labelled it with (X-Colibri-Tags): app, chat... */
+  tags?: Record<string, string | number | boolean>
 }
 
 export interface RequestLogView {
@@ -469,8 +483,9 @@ export interface RequestLogView {
 }
 
 /* The router's request log, newest first. A server that has no such route (a plain `coli serve`) is "not enabled". */
-export async function listRequests(baseUrl: string, apiKey: string, limit = 100, signal?: AbortSignal): Promise<RequestLogView> {
-  const response = await fetch(`${endpoint(baseUrl, "requests")}?limit=${limit}`, { headers: headers(apiKey), signal })
+export async function listRequests(baseUrl: string, apiKey: string, limit = 100, signal?: AbortSignal, tag?: string): Promise<RequestLogView> {
+  const filter = tag ? `&tag=${encodeURIComponent(tag)}` : ""
+  const response = await fetch(`${endpoint(baseUrl, "requests")}?limit=${limit}${filter}`, { headers: headers(apiKey), signal })
   if (response.status === 404) return { enabled: false, path: null, requests: [] }
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { enabled?: boolean; path?: string | null; data?: LoggedRequest[] }
@@ -606,7 +621,7 @@ export interface StreamChatOptions {
 export async function streamChat(options: StreamChatOptions): Promise<StreamChatResult> {
   const response = await fetch(endpoint(options.baseUrl, "chat/completions"), {
     method: "POST",
-    headers: headers(options.apiKey),
+    headers: computeHeaders(options.apiKey),
     signal: options.signal,
     body: JSON.stringify({
       model: options.model,
@@ -845,10 +860,10 @@ function imageRequest(options: GenerateImageOptions, stream: boolean): RequestIn
     const form = new FormData()
     for (const [name, value] of Object.entries(fields)) form.append(name, String(value))
     for (const file of options.images) form.append("image", file, file.name)
-    const auth: Record<string, string> = options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}
+    const auth: Record<string, string> = { ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}), ...tagHeaders() }
     return { method: "POST", headers: auth, signal: options.signal, body: form }
   }
-  return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
+  return { method: "POST", headers: computeHeaders(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
 }
 
 async function imageError(response: Response) {
@@ -1128,10 +1143,10 @@ function musicRequest(options: GenerateMusicOptions, stream: boolean): RequestIn
     for (const [name, value] of Object.entries(fields)) form.append(name, String(value))
     if (options.source) form.append("src_audio", options.source, options.source.name)
     if (options.reference) form.append("reference_audio", options.reference, options.reference.name)
-    const auth: Record<string, string> = options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}
+    const auth: Record<string, string> = { ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}), ...tagHeaders() }
     return { method: "POST", headers: auth, signal: options.signal, body: form }
   }
-  return { method: "POST", headers: headers(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
+  return { method: "POST", headers: computeHeaders(options.apiKey), signal: options.signal, body: JSON.stringify(fields) }
 }
 
 async function streamMusic(options: GenerateMusicOptions): Promise<MusicGenerationResponse> {

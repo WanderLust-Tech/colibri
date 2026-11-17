@@ -57,6 +57,10 @@ decides natively says `decide=1` alone (qwen36 with Clef's head). `decide_record
 asks for the record in its raw form, the caller's own values (docs/systemone.md,
 "Decision engines").
 
+`demote=1`: the engine runs on the graphics card and can give it back between requests and go on on the CPU, so the
+router does not have to stop it when another model needs the card (`DEMOTE`, below; qwen36). An engine that does not say it
+is never sent the frame.
+
 An engine that cannot load its model says why on this channel, instead of
 `READY`, and exits:
 
@@ -119,6 +123,11 @@ DECIDE <id> <slot> <bytes>\n<payload>\n
   `ERROR <id> DECIDE_FAILED <reason>` for its own failure. The record and the
   answer are specified in [docs/systemone.md, Decision engines](systemone.md#decision-engines);
   `c/decide_serve.h` parses one and writes the other.
+- `DEMOTE <id>` (only to an engine that announced `demote=1`, and only with no request in it: the gateway holds every slot)
+  makes the engine give the graphics card back and go on on the CPU: the dense chain brings its state down and goes off, the
+  expert tier is torn down, the dense matrices only the card held are read back into RAM, and the device is destroyed, which
+  is what returns the memory to the driver. The answer is one line, `DEMOTED <id> 1 ok` or `DEMOTED <id> 0 <reason>` (nothing
+  was changed). It is not undone: the engine is the CPU build until it is stopped.
 - EOF on stdin = graceful shutdown: in-flight requests finish first.
 
 Prefill is serial; decode is continuously batched — every active slot contributes
@@ -172,6 +181,7 @@ turn: `HWINFO`, `PERF`, `ENTROPY`, `GPUS`, `TIERS`, `EMAP`, `HITS` (formats belo
 | `TIERS` | `TIERS <vram> <ram> <disk> <vram_gb> <ram_gb>` | expert count per tier + resident bytes |
 | `HWINFO` | `HWINFO <cores> <ram_total> <ram_avail> <ngpu> <vram_total> <cpu>\|<gpu>` | host snapshot (GBs are floats) |
 | `CAPS` | `CAPS key=value ...` | handshake only, between `READY` and `STAT`: what the engine loaded (`vision=0\|1`) |
+| `DEMOTED` | `DEMOTED <id> <1\|0> <words>` | the answer to `DEMOTE`: `1 ok`, or `0` and why it did not |
 | `LOAD_FAIL` | `LOAD_FAIL kind=<kind> <detail>` | handshake only, instead of `READY`: why the model did not load (`nomem`, `io`, `format`, `unsupported`); the engine exits after it |
 | `EMAP` | `EMAP <rows> <cols> <hex>` | one byte per expert, row-major over `rows×cols` (sparse layers +MTP × experts): `byte = (tier<<6) \| heat` — 2-bit tier (0 disk / 1 RAM / 2 VRAM), 6-bit log₂-bucketed usage heat |
 | `HITS` | `HITS <rows> <cols> <hex>` | 1 bit per expert, experts routed since the previous `HITS` |

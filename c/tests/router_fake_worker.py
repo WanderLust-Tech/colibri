@@ -2,7 +2,8 @@
 
   python router_fake_worker.py --id text-a-colibri --port 9001 --modality text
 
-Environment: FAKE_LOG (a file that gets a line when a request starts, ends, or is cut off),
+Environment: FAKE_DEMOTE (ok, busy or no: answers POST /v1/demote like a gateway whose engine can give the card back; unset: 404 like an older one),
+FAKE_LOG (a file that gets a line when a request starts, ends, or is cut off),
 FAKE_LOAD_DELAY (seconds before it listens), FAKE_FAIL (exit at once, saying why).
 A request body may carry `sleep` (seconds the work takes) and `stream` (answer in three chunks).
 A picture or song request with `job_demo` in its body (or any, with FAKE_ENGINE=1; FAKE_STEP_SLEEP seconds a step) behaves like the real engines: `steps` progress events (`sleep` apart),
@@ -141,6 +142,11 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
         kind = self.headers.get("Content-Type", "")
+        if self.path == "/v1/demote" and os.environ.get("FAKE_DEMOTE"):
+            mode = os.environ["FAKE_DEMOTE"]                      # ok, busy, or no: what the engine answers to "give the card back"
+            note("demote " + args.id)
+            reasons = {"busy": "a request is running or waiting", "no": "this engine cannot give the card back"}
+            return self.reply(200, {"demoted": mode == "ok", "reason": None if mode == "ok" else reasons.get(mode, mode)})
         if "multipart" in kind:
             body = {"model": args.id}
             seen = raw.count(b"Content-Disposition")

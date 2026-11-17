@@ -13,6 +13,8 @@ import os
 import threading
 import time
 
+import client_tags
+
 DEFAULT_MAX_BYTES = 50 << 20
 STRING_LIMIT = 500
 
@@ -91,10 +93,11 @@ def tail(path, count, window=1 << 20):
     return records
 
 
-def recent(path, limit=50):
+def recent(path, limit=50, tags=None):
     """The last `limit` requests of a log the router wrote, newest first, one object each: the router's line with what the
-    worker's line (same `trace`) adds, the tokens and why it finished. Request text is never included."""
-    records = tail(path, max(1, limit) * 2 + 20)
+    worker's line (same `trace`) adds, the tokens and why it finished. Request text is never included. `tags` (a dict) keeps
+    only the requests that carry all of them (client_tags.py); it looks further back for them, up to the log's read window."""
+    records = tail(path, max(1, limit) * 2 + 20 if not tags else max(1, limit) * 20 + 200)
     workers = {r["trace"]: r for r in records if r.get("source") == "gateway" and r.get("trace")}
     fronted = {r["trace"] for r in records if r.get("source") == "router" and r.get("trace")}
     out = []
@@ -109,6 +112,8 @@ def recent(path, limit=50):
                     item[key] = worker[key]
             if "seconds" in worker:
                 item["engine_seconds"] = worker["seconds"]
+        if tags and not client_tags.matches(item.get("tags"), tags):
+            continue
         out.append(item)
     out.reverse()
     return out[:limit]

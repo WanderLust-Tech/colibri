@@ -5120,6 +5120,8 @@ static int serve_read_req(ServeReq *q){
     }
     /* 4: the request it names ends (serve_mux; a lone serve reads them mid-turn) */
     if(!strcmp(cmd,"CANCEL")||!strcmp(cmd,"STOP")){ snprintf(q->id,sizeof(q->id),"%s",id); return 4; }
+    /* 5: give the graphics card back (q36_serve_demote); the gateway sends it only to an engine that said demote=1 */
+    if(!strcmp(cmd,"DEMOTE")){ snprintf(q->id,sizeof(q->id),"%s",id); return 5; }
     if(strcmp(cmd,"SUBMIT")) return 0;
     int slot, plen, max_tok; float temp, top_p;
     if(sscanf(line,"%*s %*s %d %d %d %f %f",&slot,&plen,&max_tok,&temp,&top_p)!=5 ||
@@ -6010,6 +6012,50 @@ static int q36_mux_pick(Model *m, Q36MuxReq *r, const int *eos_ids, int n_eos, i
     *tk_out = tk; return 1;
 }
 
+/* ---- giving the graphics card back (DEMOTE) -----------------------------------------------------------------------------
+ * The router wants the card for another model and this one is idle: instead of stopping it (a reload from a slow drive takes
+ * minutes) it keeps running on the CPU. In order: the dense chain brings its state down and goes off, the expert tier is torn
+ * down (its slots leave the device; the CPU path reads those experts from RAM or disk as it does without a card), the dense
+ * matrices the device held alone are read back into host RAM, and the device itself is destroyed, which is what gives the
+ * driver its memory back. From then on the engine is the CPU build. Only between requests: the gateway sends the frame with
+ * every slot free. */
+#ifdef COLI_VULKAN
+static void q36_dho_back(QW *w, size_t *bytes, int *n) {
+    if (!w->vk_gone) return;
+    q36_dho_reload(w);
+    *bytes += q36_dho_host_bytes(w); (*n)++;
+}
+static int q36_can_demote(void) { return g_vk_ready; }
+/* NULL when the card has been given back, else the reason it was not (nothing was changed, or only what could not be undone
+ * was left, and the reason says so). */
+static const char *q36_demote(Model *m) {
+    if (!g_vk_ready) return "it is not on the card";
+    double t0 = now_s();
+    if (g_vk_chain || m->vkchain) q36c_leave(m);
+    g_vk_chain = 0;
+    vk_tier_turn(m, "demote");
+    vkt_shutdown();
+    m->vk_hist = 0;
+    size_t bytes = 0; int n = 0;
+    q36_dho_each(m, q36_dho_back, &bytes, &n);
+    vkc_shutdown_all();
+    coli_vk_shutdown();
+    g_vk_ready = 0; g_vk_dense = 0;
+    fprintf(stderr, "[VK] qwen36: gave the graphics card back in %.1f s; %d dense matrices (%.2f GB) read back into RAM, "
+                    "the CPU runs from here on\n", now_s() - t0, n, bytes / 1073741824.0);
+    return NULL;
+}
+#else
+static int q36_can_demote(void) { return 0; }
+static const char *q36_demote(Model *m) { (void)m; return "this build has no graphics card support"; }
+#endif
+static void q36_serve_demote(Model *m, const char *id){
+    const char *why = q36_demote(m);
+    if(why) printf("DEMOTED %s 0 %s\n", id, why);
+    else printf("DEMOTED %s 1 ok\n", id);
+    fflush(stdout);
+}
+
 static void serve_mux(Model *m){
     int n = g_q36_mux_slots, V = m->c.vocab, input_eof = 0;
     Q36MuxReq *rq = calloc((size_t)n, sizeof *rq);
@@ -6028,6 +6074,9 @@ static void serve_mux(Model *m){
             if (r < 0) input_eof = 1;
             else if (r == 4) {
                 for (int i = 0; i < n; i++) if (rq[i].active && !strcmp(rq[i].q.id, q.id)) rq[i].cancel = 1;
+            } else if (r == 5) {
+                if (active) { printf("DEMOTED %s 0 a request is running\n", q.id); fflush(stdout); }
+                else q36_serve_demote(m, q.id);
             } else if (r == 2 || r == 3) {
                 int bad = q.slot < 0 || q.slot >= n;
                 if (bad || rq[q.slot].active) {
@@ -6096,7 +6145,8 @@ static void serve_loop(Model *m){
      * modalita' serve prima della prima richiesta (docs/serve_protocol.md) */
     /* Clef answers DECIDE too, and still chats: decide=1 without chat=0. Its
      * records come in the raw form (decide_record=raw, decide_serve.h). */
-    printf("CAPS vision=%d grammar=1 ctx=%d%s\n",m->vis_ready?1:0,qwen36_max_ctx(),g_clef?" decide=1 decide_record=raw":"");
+    printf("CAPS vision=%d grammar=1 ctx=%d%s%s\n",m->vis_ready?1:0,qwen36_max_ctx(),g_clef?" decide=1 decide_record=raw":"",
+           q36_can_demote()?" demote=1":"");
     printf("STAT 0 0.00 0.0 %.2f\n",rss_gb());
     fflush(stdout);
     emap_emit(m);          /* dopo READY e STAT: il boot reader legge STAT dopo il sentinel */
@@ -6104,7 +6154,7 @@ static void serve_loop(Model *m){
     if(g_q36_mux_slots>1){ serve_mux(m); return; }
     for(;;){
         ServeReq q={0}; int r;
-        do r=serve_read_req(&q); while(r==0||r==4);
+        do r=serve_read_req(&q); while(r==0||r==4);   /* (5, a DEMOTE, is handled below) */
         if(r<0) return;
         /* Resend the grid after EVERY turn, not only after READY: at boot the
          * expert cache is empty by definition, and that cold snapshot stayed
@@ -6113,6 +6163,7 @@ static void serve_loop(Model *m){
          * "routed now" flash worked while the residency colour never moved.
          * inkling.c, kimi_k3.c, qwen38.c, deepseek_v41.c and colibri.c
          * already do this. */
+        if(r==5){ q36_serve_demote(m,q.id); emap_emit(m); continue; }
         if(r==2){ serve_one(m,&q); cn_free(q.cn); q36_vision_detach(m); free(q.payload); free(q.grammar); emap_emit(m); }
         if(r==3){ clef_serve_one(m,&q); free(q.payload); }
     }

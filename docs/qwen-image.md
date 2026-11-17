@@ -415,9 +415,26 @@ layers at once, each matrix quantized straight from its bf16 rows
 (`COLI_IMG_LOAD_THREADS` sets how many; each holds one matrix's bf16 bytes, up to
 about 140 MB, while it quantizes). On a 1024x1024 step the 780M spends half the
 time in the attention (the image tokens over each other, 4096 of them), the other
-half in the matrices. A discrete card has not been measured on this path yet; the
+half in the matrices. The
 matrices-one-by-one path took a 512x512 step in 4.5 s on an RTX 5060 Ti 16 GB
 (#1910), the attention still on the CPU.
+
+**A discrete card with the chain, measured (an RTX 5090 beside a Ryzen with 64 GB, 2026-11-17).** A 512x512 picture, 8 steps, seed 42,
+through `coli serve`: on the card 10 s once loaded (26 s to start the server, the transformer and the text encoder), on the CPU 95 s. The
+card's picture is the CPU's: the structural similarity of the two is 0.999999 and no pixel differs by more than 1 of 255. The CPU ran the
+f32 path in both of its runs here (`COLI_IMG_ACT8=0` gave a byte-identical picture, so the int8-activation path was not taken on this
+machine), which is the reference the device is meant to reproduce. Not measured: 1024x1024 (the VAE's bands, the attention over 4096
+tokens) and a card with less room than the 7 GB transformer.
+
+### Checking a picture against a baseline
+
+`python c/image_quality.py NEW.png BASELINE.png --min 0.95` scores two pictures by structural similarity (SSIM) and exits 1 under the
+line. 1.0 is the same picture; the same seed on the same engine gives 1.0, the card against the CPU gave 0.999999, a different picture
+gives far less. It is scikit-image's default score for a grey picture (a 7x7 uniform window, K1 0.01, K2 0.03, a range of 255; it agrees
+with an independent numpy version to 1e-15), taken on the luminance of a colour picture (`--per-channel` scores red, green and blue and
+keeps the lowest). Pure Python, about a second for 1024x1024; 0.95 is the line ComfyUI's own image tests use. To guard a change, keep a
+picture made from a fixed prompt and seed (`size`, `steps` and `seed` in the request) as the baseline and compare the new one with it:
+the check is only as good as the baseline, so make it on the engine and the settings the change is meant to leave alone.
 
 Every stage of the engine is checked against the diffusers pipeline: on the
 real checkpoint in f32 the text encoder, all eight denoising steps and the VAE

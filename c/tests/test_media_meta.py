@@ -98,7 +98,8 @@ class WavTest(unittest.TestCase):
         import openai_server
         mono = music_engine.encode_wav(struct.pack("<4h", 1, 2, 3, 4), 16000, 1)
         out = media_meta.wav_with(mono, FIELDS)
-        self.assertEqual(openai_server.decode_wav_mono16k(out, "x"), openai_server.decode_wav_mono16k(mono, "x"))
+        # a list of samples, or an array of them when numpy is installed: compare as lists
+        self.assertEqual(list(openai_server.decode_wav_mono16k(out, "x")), list(openai_server.decode_wav_mono16k(mono, "x")))
 
     def test_a_player_gets_a_title_and_a_software_name(self):
         out = media_meta.wav_with(WAV, FIELDS)

@@ -294,6 +294,23 @@ class GenerationScheduler:
             candidates.discard(earlier_slot)
         return min(candidates, default=None)
 
+    @contextlib.contextmanager
+    def exclusive(self):
+        """Every slot at once, when none has a request running and none is waited for: yields True and holds them, so nothing is
+        admitted meanwhile. Otherwise yields False at once and holds nothing (a caller that wants the engine idle does not wait)."""
+        with self.condition:
+            got = not self.closed and not self.queue and len(self.free_slots) == self.capacity
+            held = set(self.free_slots) if got else set()
+            if got:
+                self.free_slots.clear()
+        try:
+            yield got
+        finally:
+            if held:
+                with self.condition:
+                    self.free_slots |= held
+                    self.condition.notify_all()
+
     def idle_slots(self):
         """The slots with no request running."""
         with self.condition:
@@ -5653,6 +5670,10 @@ class Engine:
         # means it has nothing else: the generating endpoints answer 400.
         self.decides = self.caps.get("decide") == "1"
         self.chats = self.caps.get("chat") != "0"
+        # demote=1: the engine runs on the graphics card and can give it back between requests and go on on the CPU (DEMOTE).
+        self.can_demote = self.caps.get("demote") == "1"
+        self._demote_reply = None
+        self._demote_done = threading.Event()
         # decide_record=raw: the engine renders the request the way its own reference
         # does (Clef), so the record carries the caller's values, not the gateway's
         # defaults (systemone_decision_record). None: the default form.
@@ -5665,6 +5686,27 @@ class Engine:
         self.dispatcher = threading.Thread(target=self._dispatch_stdout,
                                            name="colibri-stdout", daemon=True)
         self.dispatcher.start()
+
+    def demote(self, timeout=600):
+        """Ask the idle engine to give the graphics card back and carry on on the CPU: one DEMOTE frame, one DEMOTED frame back.
+        (done, text). Call with every slot held (GenerationScheduler.exclusive): the engine reads the frame between requests, and
+        a request already in it would answer first. An engine that did not say demote=1 is not sent the frame."""
+        if not self.can_demote:
+            return False, "this engine is not on the graphics card, or cannot give it back"
+        self._demote_reply = None
+        self._demote_done.clear()
+        try:
+            with self.write_lock:
+                _write_all(self.process.stdin, b"DEMOTE demote\n", "DEMOTE")
+                self.process.stdin.flush()
+        except Exception as error:
+            return False, f"the engine could not be asked ({error})"
+        if not self._demote_done.wait(timeout) or self._demote_reply is None:
+            return False, "the engine did not answer"
+        done, text = self._demote_reply
+        if done:
+            self.can_demote = False                      # nothing left on the card to give
+        return done, text
 
     @staticmethod
     def _stats(fields):
@@ -5941,6 +5983,10 @@ class Engine:
                                    "vram_total_gb": float(fields[5]),
                                    "cpu": parts[0].strip() if len(parts)>0 else "",
                                    "gpu": parts[1].strip() if len(parts)>1 else ""}
+                elif kind == "DEMOTED" and len(fields) >= 3:
+                    # DEMOTED <id> <1|0> <words>: the answer to DEMOTE
+                    self._demote_reply = (fields[2] == "1", " ".join(fields[3:]))
+                    self._demote_done.set()
                 elif kind == "EMAP" and len(fields) == 4:
                     self.emap = {"rows": int(fields[1]), "cols": int(fields[2]), "map": fields[3]}
                 elif kind == "HITS" and len(fields) == 4:
@@ -7030,7 +7076,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*" if "*" in self.server.cors_origins else origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version, "
-                         "X-TypeSafe-SDK, X-TypeSafe-Runtime, X-TypeSafe-Retry-Count")
+                         "X-TypeSafe-SDK, X-TypeSafe-Runtime, X-TypeSafe-Retry-Count, X-Colibri-Tags")
         self.send_header("Access-Control-Expose-Headers",
                          "x-request-id, x-typesafe-request-id, x-colibri-queue-wait-ms, "
                          "x-colibri-elapsed-ms, x-colibri-engine-ms, Retry-After")
@@ -7221,6 +7267,20 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_json(200, {"object": "list", "switch": ctx.enabled, "reason": ctx.reason,
                              "data": [model_switch.public(entry) for entry in entries]},
                        request_id)
+
+    def demote_card(self, body, request_id):
+        """POST /v1/demote: give the graphics card back and go on on the CPU, when the engine is idle (the router does this to a
+        model that holds the card another one needs, instead of stopping it). 200 {"demoted": true|false, "reason": ...}; never
+        waits for a request: with one running or queued the answer is false at once."""
+        engine = self.server.engine
+        if not hasattr(engine, "demote"):
+            raise APIError(404, "This engine has no graphics card to give back.", None, "not_found")
+        with self.server.scheduler.exclusive() as idle:
+            if not idle:
+                result = (False, "a request is running or waiting")
+            else:
+                result = engine.demote()
+        self.send_json(200, {"demoted": result[0], "reason": None if result[0] else result[1]}, request_id)
 
     def switch_model(self, body, request_id):
         ctx = self.server.switch
@@ -7472,7 +7532,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._logged_request = body if isinstance(body, dict) else None
             # A client written for Jev sends "jev-latest": on that route the
             # served model answers whatever name was asked for.
-            if path not in ("/v1/systemone", "/v1/models/switch"):
+            if path not in ("/v1/systemone", "/v1/models/switch", "/v1/demote"):
                 self.check_model(body)
             if is_image_engine(self.server.engine) and path in TEXT_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is an image generation model and "
@@ -7505,6 +7565,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.anthropic_messages(body, request_id)
             elif path == "/v1/models/switch":
                 self.switch_model(body, request_id)
+            elif path == "/v1/demote":
+                self.demote_card(body, request_id)
             else:
                 raise APIError(404, "Not found.", None, "not_found")
         except APIError as error:

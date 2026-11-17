@@ -35,6 +35,8 @@ def describe(*, router=False, presets=False, request_log=False, model_settings=F
         "server_log": bool(router),
         # X-Colibri-Priority, and pictures and songs waiting behind a chat.
         "priority": bool(router),
+        # X-Colibri-Tags on a request, kept on its request log line and on its job, and `?tag=name:value` to list by them.
+        "tags": bool(router),
         # GET /v1/library and /v1/library/{kind}/{name}: the kept pictures and songs, listed and served.
         "library": True,
         # POST with `Prefer: respond-async` (pictures and songs) answers 202 with a job; GET /v1/jobs, GET /v1/jobs/{id},

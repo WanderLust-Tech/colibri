@@ -598,6 +598,16 @@ static void q36c_sync_host(Model *m) {
     for (int d = 0; d < 2; d++)
         if (!q36c_sync_one(m, q36c_of(m, d))) { q36c_recover(m, m->kv_len); return; }
 }
+/* Leave the device on purpose, with nothing lost (q36_demote): the DeltaNet state comes down to the host first (the KV rows are
+ * the host's already), then the chain is off for good. A device that is lost is q36c_recover's case; this one still answers. */
+static void q36c_leave(Model *m) {
+    q36c_sync_host(m);
+    g_vk_chain = 0;
+    for (int d = 0; d < 2; d++) {
+        Q36Chain *x = q36c_of(m, d);
+        if (x) { x->failed = 1; x->dn_where = Q36C_HOST; x->host_zero = 0; x->snap_valid = 0; }
+    }
+}
 /* The host wrote its DeltaNet state (zero: reset_recurrent's zeros). */
 static void q36c_host_wrote(Model *m, int zero) {
     for (int d = 0; d < 2; d++) {
