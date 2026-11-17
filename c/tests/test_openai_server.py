@@ -2971,6 +2971,18 @@ class HTTPTest(unittest.TestCase):
         self.assertIn("queued", scheduler)
         self.assertEqual(health["kv_slots"], 2)
 
+    def test_health_lists_what_this_server_has(self):
+        """`coli serve` serves one model: no router features, a switch that restarts. Unauthed probes see none of it."""
+        with self.request("/health") as response:
+            found = json.load(response)["features"]
+        self.assertIs(found["router"], False)
+        self.assertEqual(found["model_switch"], "restart")
+        for name in ("presets", "request_log", "server_log", "priority", "model_settings", "model_unload"):
+            self.assertIs(found[name], False, name)
+        self.assertIs(found["json_mode"], True)
+        with urlopen(self.base + "/health", timeout=2) as response:
+            self.assertNotIn("features", json.load(response))
+
     def test_health_reports_the_continuation_switch(self):
         """The web UI shows Continue only when this is true: with the switch off a
         trailing assistant turn is answered fresh, which a Continue button would

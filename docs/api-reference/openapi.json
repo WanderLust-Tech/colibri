@@ -14,6 +14,9 @@
   "tags": [
     { "name": "Inference", "description": "Generate text through OpenAI- or Anthropic-compatible request shapes." },
     { "name": "Music", "description": "Make music with an ACE-Step model: from a description, as a cover of a clip, as a repaint of a span of one, or in the style of a reference clip." },
+    { "name": "Images", "description": "Draw and edit pictures with a Qwen-Image model." },
+    { "name": "Speech", "description": "Turn a recording into text with a Gemma 4 model that has an audio tower." },
+    { "name": "Router", "description": "What only `coli router` has: model settings, presets, the request log and the server log." },
     { "name": "Models", "description": "Inspect the model loaded by the persistent server." },
     { "name": "Operations", "description": "Inspect liveness, queue state, hardware, routing, and per-turn telemetry." }
   ],
@@ -323,6 +326,1188 @@
           }
         }
       }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Prometheus metrics",
+        "description": "Scheduler counters in the Prometheus text format. Needs the API key when one is set. See `docs/api.md`, Prometheus metrics.",
+        "operationId": "getMetrics",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metrics",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/images/generations": {
+      "post": {
+        "tags": [
+          "Images"
+        ],
+        "summary": "Draw a picture",
+        "description": "Text to image (Qwen-Image; `GET /v1/models` lists `capabilities: [\"image_generation\"]` and the size rules). The answer is a PNG as base64, or with `stream: true` an SSE of `image_generation.progress`, `image_generation.partial_image` and `image_generation.completed` events. Closing the connection cancels the picture. `n` must be 1 and `response_format` can only be `b64_json`; the engine draws one picture at a time, so a full queue answers 503. A gateway also keeps the picture in `~/colibri-images`. See `docs/qwen-image.md`.",
+        "operationId": "createImage",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prompt"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "string",
+                    "example": "1024x576",
+                    "description": "`WxH`; or send `width` and `height`."
+                  },
+                  "width": {
+                    "type": "integer"
+                  },
+                  "height": {
+                    "type": "integer"
+                  },
+                  "steps": {
+                    "type": "integer"
+                  },
+                  "seed": {
+                    "type": "integer"
+                  },
+                  "n": {
+                    "type": "integer",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "b64_json"
+                    ]
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  },
+                  "partial_images": {
+                    "type": "integer",
+                    "description": "How many small previews to send while streaming; 0 sends none."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The picture",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "b64_json": {
+                            "type": "string",
+                            "description": "The PNG, base64."
+                          },
+                          "revised_prompt": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "colibri": {
+                      "type": "object",
+                      "properties": {
+                        "width": {
+                          "type": "integer"
+                        },
+                        "height": {
+                          "type": "integer"
+                        },
+                        "seed": {
+                          "type": "integer",
+                          "description": "The seed used; drawn by the server when the request gave none."
+                        },
+                        "steps": {
+                          "type": "integer"
+                        },
+                        "timings": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/QueueFull"
+          }
+        }
+      }
+    },
+    "/v1/images/edits": {
+      "post": {
+        "tags": [
+          "Images"
+        ],
+        "summary": "Change a picture",
+        "description": "The request of `POST /v1/images/generations` plus one to four pictures to edit, answered (and streamed) the same way. Send what OpenAI's SDKs send, multipart/form-data with the files in `image` (or `image[]`), or JSON with `image` or `images` as base64, a `data:` URL or objects carrying `image_url`. `size` may be left out or `auto`: the engine then follows the last picture. A picture is at most 2048 pixels a side and 4 megapixels, a request at most 32 MiB. Refused with 400, naming the field: no picture, more than four, a `mask`, a URL or a `file_id` (the server fetches nothing and keeps no files). See `docs/qwen-image.md`.",
+        "operationId": "editImage",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prompt"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "image": {},
+                  "images": {
+                    "type": "array",
+                    "items": {}
+                  },
+                  "size": {
+                    "type": "string",
+                    "description": "`WxH`, `auto`, or left out."
+                  },
+                  "steps": {
+                    "type": "integer"
+                  },
+                  "seed": {
+                    "type": "integer"
+                  },
+                  "ref_resolution": {
+                    "type": "integer",
+                    "description": "The side the pictures are worked at; the range is in `GET /v1/models`."
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prompt",
+                  "image"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "size": {
+                    "type": "string"
+                  },
+                  "steps": {
+                    "type": "integer"
+                  },
+                  "seed": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The picture, in the shape of `POST /v1/images/generations`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/QueueFull"
+          }
+        }
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "tags": [
+          "Speech"
+        ],
+        "summary": "Turn speech into text",
+        "description": "For a model with an audio tower (Gemma 4 E2B or E4B): a WAV or MP3 (and with ffmpeg on the server FLAC, Ogg, M4A and more) of up to 25 MB and 15 minutes becomes text, in the shape Whisper-style clients send. A longer file is cut where it is quietest and the pieces are joined. `srt`, `vtt` and word timestamps are refused. Any other model answers 400 `unsupported_endpoint` with the reason. See `docs/api.md`, Speech to text.",
+        "operationId": "createTranscription",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "An ISO-639-1 code."
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "A hint: names, terms."
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "text",
+                      "verbose_json"
+                    ]
+                  },
+                  "temperature": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "description": "The recording, base64."
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The text. `json` gives `{text}`, `verbose_json` adds `duration` and `segments`, `text` gives plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "segments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/systemone": {
+      "post": {
+        "tags": [
+          "Inference"
+        ],
+        "summary": "Answer closed questions with a probability per option",
+        "description": "System One mode: a state and typed questions (`noul`, `choice`, `score`) in, and for every question a probability per option and a `confidence` out, in the request and reply shapes of TypeSafe's Jev. A language model scores the options instead of writing; a decision model (Laya, GLiNER2.5-Decide, Clef) answers natively. See `docs/systemone.md`.",
+        "operationId": "createSystemOne",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "A state and the questions, as in `docs/systemone.md`."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One entry per question, with the probability of each option.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Valid JSON, but not a question this model can answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/unload": {
+      "post": {
+        "tags": [
+          "Models"
+        ],
+        "summary": "Unload a model",
+        "description": "Stops a loaded model and frees its memory. One that is answering is told to go as soon as it has finished (202), so a request is never cut off. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "unloadModel",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "key"
+                ],
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "description": "A `key` (or `id`) from `GET /v1/models/installed`."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done, or it was not loaded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "unloaded",
+                        "not loaded"
+                      ]
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "It is answering and goes when it has finished.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "unloading when idle"
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/models/settings": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Read the settings of every model",
+        "description": "Every installed model with whether it is on or off and where it is pinned to run, and the router's GPU policy. See `docs/model-settings.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "listModelSettings",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "key": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "gpu": {
+                            "type": "string",
+                            "enum": [
+                              "auto",
+                              "vulkan",
+                              "cpu"
+                            ],
+                            "description": "Where the model is pinned to run."
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "idle",
+                              "starting",
+                              "ready",
+                              "stopping"
+                            ]
+                          },
+                          "running": {
+                            "type": "object",
+                            "description": "Where it runs now and why, when it is loaded."
+                          }
+                        }
+                      }
+                    },
+                    "gpu_policy": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "`mode`, `reserve_gb`, `min_gb` and the free and total video memory."
+                    },
+                    "file": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Turn a model off or on, or pin where it runs",
+        "description": "Writes the model settings file; takes effect at once. Turning a model off unloads it, or when it has finished what it is answering (`unload` says which). Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "setModelSettings",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "key"
+                ],
+                "description": "Send `enabled` and/or `gpu`.",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "description": "A `key` (or `id`) from `GET /v1/models/installed`."
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "gpu": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "vulkan",
+                      "cpu"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "gpu": {
+                      "type": "string"
+                    },
+                    "unload": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/presets": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List the presets",
+        "description": "Every preset in the presets file, whether it can be used and why not, and the entries of the file that were skipped. See `docs/presets.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "listPresets",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "defaults": {
+                            "type": "object"
+                          },
+                          "system": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "keep_alive": {},
+                          "available": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "resolved": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "problems": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Create or replace a preset",
+        "description": "The body is the preset as the file holds it, plus its `name`. Takes effect at once. 409 when the name is an installed model's own, 404 when its model is not installed. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "savePreset",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "model"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "defaults": {
+                    "type": "object"
+                  },
+                  "system": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "keep_alive": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "created",
+                        "replaced"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "The name is an installed model's own.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/presets/delete": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Remove a preset",
+        "description": "Takes the preset out of the file. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "deletePreset",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "deleted"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/requests": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "The request log",
+        "description": "The last requests the router answered, newest first: when, what, which model, how long, how many tokens. `enabled` is false when the router was started without a request log. See `docs/request-log.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "listRequests",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "How many to return, newest first (1 to 500; default 50).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "bodies": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Read the router's log",
+        "description": "The last 2000 lines the router and the models it started printed (a model loading, a start that failed, the GPU giving way to the CPU), oldest first, kept in memory only. Every line has a `seq` that only grows: ask again with `since` set to the `next` of the last answer to get only what came after. `first` is the `seq` of the oldest line still held; a `first` above `since + 1` means lines were dropped. See `docs/router.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "readLogs",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only lines after this number (default 0: everything held).",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "At most this many (1 to 2000; default 500).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "description": "Only lines from `router` or from this model id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "seq": {
+                            "type": "integer"
+                          },
+                          "time": {
+                            "type": "number",
+                            "description": "Seconds since 1970."
+                          },
+                          "source": {
+                            "type": "string",
+                            "description": "`router`, or the id of the model that printed it."
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "next": {
+                      "type": "integer"
+                    },
+                    "first": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -527,7 +1712,26 @@
           "scheduler": { "type": "object", "additionalProperties": true },
           "kv_slots": { "type": "integer" },
           "tiers": { "type": "object", "additionalProperties": true },
-          "hwinfo": { "type": "object", "additionalProperties": true }
+          "hwinfo": { "type": "object", "additionalProperties": true },
+          "features": {
+            "type": "object",
+            "description": "What this server can do (authenticated requests only; an older server has no such block). `api` is the version of the list; `router` is true for `coli router`; `model_switch` is `load` or `restart`; the rest are booleans. See `docs/api.md`, Which features this server has.",
+            "properties": {
+              "api": { "type": "integer" },
+              "router": { "type": "boolean" },
+              "installed_models": { "type": "boolean" },
+              "model_switch": { "type": "string", "enum": ["load", "restart"] },
+              "model_unload": { "type": "boolean" },
+              "model_settings": { "type": "boolean" },
+              "presets": { "type": "boolean" },
+              "request_log": { "type": "boolean" },
+              "server_log": { "type": "boolean" },
+              "priority": { "type": "boolean" },
+              "json_mode": { "type": "boolean" },
+              "cached_tokens": { "type": "boolean" }
+            },
+            "additionalProperties": true
+          }
         }
       },
       "Experts": {

@@ -81,6 +81,9 @@ export interface HealthResponse {
   /* Whether a message list ending on an assistant turn is continued rather than
      answered fresh (COLI_CONTINUE_ASSISTANT). Absent on older servers. */
   continue_assistant?: boolean
+  /* What the server can do (GET /health with the key): `router` is true for `coli router`, `server_log` is the Log page's
+     route, and so on; see docs/api.md. Absent on a server that predates it: ask, and read a 404 as "not here". */
+  features?: Record<string, boolean | number | string>
 }
 
 export interface ProfileTurn {

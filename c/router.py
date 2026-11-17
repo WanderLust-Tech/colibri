@@ -41,6 +41,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import features
 import gpu as gpu_mod
 import model_settings as settings_mod
 import presets as presets_mod
@@ -1382,6 +1383,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         payload.setdefault("scheduler", {"active": 0, "queued": 0, "capacity": 1, "max_queue": gate.max_queue,
                                          "admitted": 0, "completed": 0, "failed": 0, "rejected": 0,
                                          "timed_out": 0, "cancelled": 0})
+        # the router's own list, after the loaded model's health was merged in: that one is a single server's
+        payload["features"] = features.describe(router=True, presets=self.server.presets is not None,
+                                                request_log=self.server.request_log is not None,
+                                                model_settings=self.server.settings is not None)
         payload["router"] = {
             "loaded": [self.worker_view(w) for w in pool.snapshot()],
             "max_loaded": pool.max_loaded,

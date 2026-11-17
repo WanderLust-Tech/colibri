@@ -150,6 +150,12 @@ The gateway now reports how much of the prompt the engine did not read again, in
 
 This is what the reply line and the extension's `cache:` log line are built on.
 
+## Pages that are only there with a router
+
+Settings shows Presets, Requests and Log only when the server is a `coli router`: against a plain `coli serve` they would only say
+there is nothing to show. A router started without a request log or a presets file keeps those pages, and they say how to turn
+them on. A server that predates the feature list keeps every page.
+
 ## See why a model is slow to load, or failed to start
 
 **What it is.** The router prints what it and its models do (a model loading, a start that failed, the GPU giving way

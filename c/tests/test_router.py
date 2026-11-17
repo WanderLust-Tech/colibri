@@ -339,6 +339,20 @@ class GuardsTest(unittest.TestCase):
         self.assertIn("router", body)
         self.assertEqual(rig.call("GET", "/experts")[3]["rows"], 0)
 
+    def test_health_lists_what_this_router_has(self):
+        """The block a client reads to hide a control this server lacks. This rig has no presets file, no request log and no
+        settings file, so those three are off; the loaded model's own list (a single server's) must not replace the router's."""
+        rig = Rig(self, [entry("text-a")], api_key="sekrit")
+        rig.call("POST", "/v1/chat/completions", {"model": "text-a"}, headers={"Authorization": "Bearer sekrit"})
+        found = rig.call("GET", "/health", headers={"Authorization": "Bearer sekrit"})[3]["features"]
+        self.assertIs(found["router"], True)
+        self.assertEqual(found["model_switch"], "load")
+        self.assertIs(found["server_log"], True)
+        self.assertIs(found["priority"], True)
+        for name in ("presets", "request_log", "model_settings"):
+            self.assertIs(found[name], False, name)
+        self.assertNotIn("features", rig.call("GET", "/health")[3])
+
     def test_an_unknown_host_header_is_refused(self):
         rig = Rig(self, [entry("text-a")])
         self.assertEqual(rig.call("GET", "/v1/models", host="evil.example:8000")[0], 403)

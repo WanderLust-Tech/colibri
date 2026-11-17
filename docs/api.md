@@ -341,6 +341,37 @@ request keeps priority across all slots. A full waiting queue does not reject
 a request that can immediately take an unreserved free slot; the queue limit
 bounds waiting requests, independently of active capacity.
 
+## Which features this server has
+
+`GET /health` with the API key carries a `features` block, so a client (the dashboard, the editor extension) can hide a control
+the server lacks instead of finding out from a 404. The client and the server are installed apart, so either can be the newer
+one: a server that predates the block has no `features` at all, and a client then asks and treats a 404 as "not here". Without
+the key `/health` still says only `{"status": "ok"}`.
+
+```
+"features": {"api": 1, "router": true, "installed_models": true, "model_switch": "load", "model_unload": true,
+             "model_settings": true, "presets": true, "request_log": false, "server_log": true, "priority": true,
+             "json_mode": true, "cached_tokens": true}
+```
+
+| Name | Meaning |
+|---|---|
+| `api` | The version of this list. It goes up only when a name changes its meaning; new names are added without it. |
+| `router` | True for `coli router` (several models on one port), false for `coli serve`. |
+| `installed_models` | `GET /v1/models/installed` answers. |
+| `model_switch` | `POST /v1/models/switch`: `load` starts the model beside the others (a router), `restart` replaces the one served. |
+| `model_unload` | `POST /v1/models/unload`: a router only. |
+| `model_settings` | `GET` and `POST /v1/models/settings`: a router started with a settings file. |
+| `presets` | `GET` and `POST /v1/presets`: a router started with a presets file ([presets](presets.md)). |
+| `request_log` | `GET /v1/requests`: a router started with a request log ([request log](request-log.md)). |
+| `server_log` | `GET /v1/logs`: the router's own output and its models' ([router](router.md)). |
+| `priority` | The `X-Colibri-Priority` header, and pictures and songs waiting behind a chat ([router](router.md#priority)). |
+| `json_mode` | `response_format` of `json_object` or `json_schema` ([JSON mode](json-mode.md)). |
+| `cached_tokens` | `usage.prompt_tokens_details.cached_tokens`: how much of the prompt was already in the cache. |
+
+What the loaded model can do (pictures, music, speech, tools, its context window) is not here: it changes with the model, so
+it is in `capabilities` and on the model card of `GET /v1/models`.
+
 ## Prometheus metrics
 
 `GET /metrics` returns Prometheus text exposition (version 0.0.4). When an

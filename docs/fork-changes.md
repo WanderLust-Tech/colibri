@@ -293,6 +293,18 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - 36 unit tests for the parts that do not need VS Code (`npm run test:unit`). The menu and status bar were checked against the live
   router's API, not clicked through in VS Code.
 
+### 2.18 Router lanes, the log, the API spec and the feature list (2026-11-16; ideas from reading ComfyUI, nothing copied)
+
+- **A chat goes ahead of waiting pictures and songs** (`X-Colibri-Priority`; [router.md](router.md#priority)). A running request is never interrupted.
+- **`GET /v1/logs`**, the dashboard's Settings → Log and the extension's "Colibri: Show Router Log" (0.10.0): the last 2000 lines the
+  router and its models printed, in memory only.
+- **The OpenAPI spec lists every route** (`docs/api-reference/openapi.json`; it had 11 paths and the servers answer 22) and
+  `c/tests/test_api_spec.py` fails when a route in `openai_server.py` or `router.py` is missing from it, when the spec keeps a route that is gone, or
+  when no page under `docs/` mentions a route.
+- **`features` in the authenticated `/health`** (`c/features.py`, [api.md](api.md#which-features-this-server-has)): what this server can do,
+  so the dashboard hides Presets, Requests and Log against a plain `coli serve`. A server without the block keeps every page.
+  The extension still asks and reads a 404 as "not here"; new features should go in the list.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision

@@ -42,7 +42,7 @@ import {
 import { branchAt, editFrom, isPlainTurn, resendFrom, REWRITES, type Rewrite } from "@/lib/chat"
 import { DEFAULT_MUSIC_LIMITS } from "@/lib/music"
 import { useMusic } from "@/lib/useMusic"
-import { activeRequests, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
+import { activeRequests, settingsPages, supportsCacheSlots, supportsContinuation } from "@/lib/runtime"
 import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
 import { Brand } from "./components/Brand"
@@ -122,6 +122,8 @@ export default function App() {
   const [connected, setConnected] = useState(false)
   const [view, setView] = useState<View>("chat")
   const [settingsPage, setSettingsPage] = useState("general")
+  const pages = settingsPages(health)                                   // a plain `coli serve` has no Presets, Requests or Log
+  const activePage = pages.includes(settingsPage) ? settingsPage : "general"
   const [historyOpen, setHistoryOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [archives, setArchives] = useState<Array<{ id: string; slot: number; messages: ChatMessage[] }>>([])
@@ -704,23 +706,23 @@ export default function App() {
       {view === "settings" ? <section className="settings-page">
         <header className="page-heading"><span>COLIBRI</span><h1>{t("ui.settings")}</h1><p>{t("ui.settingsIntro")}</p></header>
         <nav className="settings-tabs" aria-label={t("ui.settings")}>
-          {["general", "model", "presets", "requests", "log", "connection", "system"].map(id => <button key={id} aria-current={settingsPage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
+          {pages.map(id => <button key={id} aria-current={activePage === id ? "page" : undefined} onClick={() => setSettingsPage(id)}>{t(`ui.${id}`)}</button>)}
         </nav>
         {errorBanner}
         <div className="settings-content">
-          {settingsPage === "general" && <section className="settings-card"><h2>{t("ui.appearance")}</h2><div className="theme-choices">{["dark", "light"].map(value => <button key={value} className={`theme-choice ${value}`} aria-pressed={theme === value} onClick={() => setTheme(value)}><span /><b>{t(`ui.${value}`)}</b></button>)}</div><label className="language-field"><Globe />{t("ui.language")}<select value={locale} onChange={e => setLocale(e.target.value)}>{locales.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}</select></label><p className="settings-help">{t("chat.inputHint")}</p></section>}
-          {settingsPage === "presets" && <section className="settings-card">
+          {activePage === "general" && <section className="settings-card"><h2>{t("ui.appearance")}</h2><div className="theme-choices">{["dark", "light"].map(value => <button key={value} className={`theme-choice ${value}`} aria-pressed={theme === value} onClick={() => setTheme(value)}><span /><b>{t(`ui.${value}`)}</b></button>)}</div><label className="language-field"><Globe />{t("ui.language")}<select value={locale} onChange={e => setLocale(e.target.value)}>{locales.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}</select></label><p className="settings-help">{t("chat.inputHint")}</p></section>}
+          {activePage === "presets" && <section className="settings-card">
             <PresetsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} onChanged={() => void connect()}
               onUse={(name) => { startFromPreset(name); setModel(name); setView("chat") }} />
           </section>}
-          {settingsPage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
-          {settingsPage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
-          {settingsPage === "connection" && <section className="settings-card">{connectionControls}</section>}
-          {settingsPage === "model" && <section className="settings-card">
+          {activePage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
+          {activePage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
+          {activePage === "connection" && <section className="settings-card">{connectionControls}</section>}
+          {activePage === "model" && <section className="settings-card">
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />
             {inferenceControls}
           </section>}
-          {settingsPage === "system" && <section className="settings-card">{runtimeControls}{metrics}</section>}
+          {activePage === "system" && <section className="settings-card">{runtimeControls}{metrics}</section>}
         </div>
       </section> : view === "brain" ? <BrainWorkspace baseUrl={baseUrl} apiKey={apiKey} connected={connected} />
       : view === "compare" ? <Compare baseUrl={baseUrl} apiKey={apiKey} connected={connected} models={chatModelInfos} settings={{ temperature, maxTokens, thinking }} />

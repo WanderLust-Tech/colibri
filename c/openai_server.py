@@ -26,6 +26,7 @@ import v41_dsml                     # ...and V4.1's, whose tag names differ by a
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
+import features                     # what /health tells a client this server can do
 import request_log                  # COLI_REQUEST_LOG: one JSON line per request
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
@@ -7319,6 +7320,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     hwinfo = getattr(self.server.engine, "hwinfo", None) if self.server.engine else None
                     if hwinfo: payload["hwinfo"] = hwinfo
                     payload["capabilities"] = self.server.capabilities()
+                    payload["features"] = features.describe()
                     if is_image_engine(self.server.engine):
                         payload["image"] = dict(getattr(self.server.engine, "info", None) or {})
                     if is_music_engine(self.server.engine):

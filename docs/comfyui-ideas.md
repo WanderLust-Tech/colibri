@@ -43,8 +43,8 @@ claims about ComfyUI are theirs and were not re-read.
 | 3 A Library tab | open |
 | 4 Smarter memory (4a cost-aware eviction, 4b pressure watchdog, 4c demote instead of stop) | open |
 | 5 Failure ladder for a worker that will not load | open |
-| 6 Gateway feature list | open |
-| 7 Keep the API spec honest | open |
+| 6 Gateway feature list | done 2026-11-16 (server and dashboard; the extension still reads a 404) |
+| 7 Keep the API spec honest | done 2026-11-16 |
 | 8 Security headers on the dashboard | open |
 | 9 Model catalogue (offline entries, verify, header info) | open |
 | 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM baselines and echoed metadata open |
@@ -127,12 +127,12 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   while; skip an attempt the estimate says cannot fit. Also worth checking whether Qwen-Image's decode has a tiled
   fallback for an out-of-memory. *Where:* `comfy/sd.py` (`VAE.decode`), the out-of-memory branch in `execution.py`.
   *Nearest here:* a 503 `model_load_failed`.
-- [ ] **6. Gateway feature list (S).** An authenticated `features` block (presets, request log, cached tokens, JSON mode,
+- [x] **6. Gateway feature list (S). Done 2026-11-16:** `features` in the authenticated `/health` (`c/features.py`; see "Which features this server has" in `docs/api.md`); the dashboard hides Presets, Requests and Log against a `coli serve`. The extension keeps asking and reading a 404. An authenticated `features` block (presets, request log, cached tokens, JSON mode,
   router, background jobs once they exist, upload limit) so the extension and the dashboard hide controls an older server
   does not have. The vsix and the server are deployed separately, so a new extension can meet an old server. ComfyUI sends
   flags both ways and drops a mistyped value with a warning. *Where:* `comfy_api/feature_flags.py`, `server.py`
   (`/features`). *Nearest here:* `context_length` on a model card, `/health`.
-- [ ] **7. Keep the API spec honest (S).** A test that pulls the routes out of `c/openai_server.py` and `c/router.py` and
+- [x] **7. Keep the API spec honest (S). Done 2026-11-16:** `c/tests/test_api_spec.py`; the spec went from 11 to 22 paths, and `Health` lists `features`. A test that pulls the routes out of `c/openai_server.py` and `c/router.py` and
   fails when `docs/api-reference/openapi.json` or `docs/api.md` is missing one; then fill in the missing paths. The
   extension and dashboard depend on exactly those routes. ComfyUI lints its spec in CI and has a test that fails when a
   route has no smoke test. *Where:* `tests-unit/assets_test/test_api_surface.py`, `openapi.yaml`, `.spectral.yaml`.
