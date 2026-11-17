@@ -53,6 +53,7 @@ DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its las
 DEFAULT_MAX_LOADED = 3
 FIT_HEADROOM = 0.8                  # a model must fit in this share of the free memory (Ollama's rule)
 STOP_GRACE = 25.0                   # seconds a worker gets to save its state before it is killed
+CARD_FALLBACK_S = 1800.0            # after a start on the graphics card failed, the model starts on the CPU for this long
 LOOPBACK = {"127.0.0.1", "localhost", "::1", ""}
 
 # What a worker is asked to compute, and the biggest body each may carry. The workers enforce
@@ -378,6 +379,7 @@ class Worker:
         self.resident = 0
         self.model_entry, self.jev = None, None
         self.gpu = None                         # the gpu.Decision it was started with
+        self.card = False                       # started with the graphics card on (COLI_VULKAN=1)
         self.error = None
         self.log = collections.deque(maxlen=40)
         self.settled = threading.Event()        # set when starting or stopping has finished
@@ -476,11 +478,14 @@ class Pool:
 
     def __init__(self, catalog, *, keep_alive=DEFAULT_KEEP_ALIVE, max_loaded=DEFAULT_MAX_LOADED,
                  worker_command=None, worker_env=None, state=None, memory=None, measure=None,
-                 grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None):
+                 grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None,
+                 fallback_memory=CARD_FALLBACK_S):
         self.catalog = catalog
         self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
         self.settings = settings                         # model_settings.ModelSettings, or None
         self.decisions = {}                              # key -> the gpu.Decision of its last start
+        self.fallbacks = {}                              # key -> (until, why): a start on the card failed, so it runs on the CPU
+        self.fallback_memory = fallback_memory
         self.keep_alive, self.max_loaded = keep_alive, max_loaded
         self.worker_command = worker_command
         self.worker_env = worker_env
@@ -592,29 +597,61 @@ class Pool:
                 continue
             return self._load(worker)                    # action == "load"
 
+    def card_required(self, entry):
+        """True when someone chose the card for this model (a pin, or --gpu on): a failure there is reported, not worked around."""
+        if self.settings is not None and self.settings.gpu(entry) == "vulkan":
+            return True
+        return self.gpu is not None and self.gpu.mode == "on"
+
     def _load(self, worker):
         entry = worker.entry
         log(f"loading `{entry['id']}`")
         began = time.monotonic()
-        try:
-            command, env = self._command(entry)
-            worker.gpu = self.decisions.get(entry["key"])
-            worker.spawn(command, env, self.make_job)
-            worker.wait_ready()
-        except BaseException as error:
-            api = error if isinstance(error, ApiError) else ApiError(
-                503, f"`{entry['id']}` did not start: {error}", "model_load_failed", None, "server_error")
-            worker.error, worker.state = api, "failed"
-            worker.terminate(2.0)
-            worker.close_job()
-            with self.cv:
-                if self.workers.get(worker.key) is worker:
-                    del self.workers[worker.key]
-                self.last_error[worker.key] = api.message
-                worker.settled.set()
-                self.cv.notify_all()
-            log(api.message)
-            raise api
+        card_failure = None                              # why the first try, on the card, failed; set when the CPU is being tried
+        while True:
+            worker.card = False
+            try:
+                command, env = self._command(entry, card_failure)
+                worker.gpu = self.decisions.get(entry["key"])
+                worker.card = env.get("COLI_VULKAN") == "1"
+                worker.spawn(command, env, self.make_job)
+                worker.wait_ready()
+                break
+            except BaseException as error:
+                api = error if isinstance(error, ApiError) else ApiError(
+                    503, f"`{entry['id']}` did not start: {error}", "model_load_failed", None, "server_error")
+                if (card_failure is None and worker.card and isinstance(error, Exception) and not self.closed
+                        and not self.card_required(entry)):
+                    # One more try, on the CPU. If that works, the next starts stay there for a while: a card that fails
+                    # to load a model (a driver, a device that was lost, memory another program took) is not worth a
+                    # wait every time. If it fails too, the model is the problem and the card is not blamed.
+                    card_failure = api.message
+                    log(f"`{entry['id']}` did not start on the graphics card; trying the CPU")
+                    worker.terminate(2.0)
+                    worker.close_job()
+                    worker.log.clear()
+                    continue
+                self._load_failed(worker, entry, api)
+                raise api
+        if card_failure is not None:
+            self.fallbacks[worker.key] = (time.monotonic() + self.fallback_memory, card_failure)
+            log(f"`{entry['id']}` runs on the CPU; the next starts stay there for {self.fallback_memory / 60:.0f} min")
+        self._loaded(worker, entry, began)
+        return worker
+
+    def _load_failed(self, worker, entry, api):
+        worker.error, worker.state = api, "failed"
+        worker.terminate(2.0)
+        worker.close_job()
+        with self.cv:
+            if self.workers.get(worker.key) is worker:
+                del self.workers[worker.key]
+            self.last_error[worker.key] = api.message
+            worker.settled.set()
+            self.cv.notify_all()
+        log(api.message)
+
+    def _loaded(self, worker, entry, began):
         worker.resident = self.measure(worker.proc.pid, worker.job)
         self.state.record(worker.key, entry["id"], worker.resident, worker.model_entry, worker.jev)
         with self.cv:
@@ -626,9 +663,9 @@ class Pool:
             self.cv.notify_all()
         log(f"`{entry['id']}` ready in {time.monotonic() - began:.0f} s, "
             f"{worker.resident / 2**30:.1f} GB resident, port {worker.port}")
-        return worker
 
-    def _command(self, entry):
+    def _command(self, entry, card_failure=None):
+        """The command and environment for a worker. `card_failure` is why a start on the card just failed: this one is on the CPU."""
         port = free_port()
         if self.worker_command is not None:
             command = list(self.worker_command(entry, port))
@@ -647,6 +684,19 @@ class Pool:
         if self.gpu is not None or (self.settings is not None and self.settings.gpu(entry)):
             policy = self.gpu or gpu_mod.GpuPolicy()
             decision = policy.decide(entry, self.settings.gpu(entry) if self.settings is not None else None)
+            env.update(decision.env)
+            self.decisions[entry["key"]] = decision
+            log(f"`{entry['id']}` will run {decision.summary()}")
+        reason = card_failure
+        if reason is None:
+            remembered = self.fallbacks.get(entry["key"])
+            if remembered is not None:
+                if time.monotonic() >= remembered[0] or self.card_required(entry):
+                    del self.fallbacks[entry["key"]]           # the time is up, or the card was chosen since
+                else:
+                    reason = remembered[1]
+        if reason is not None and env.get("COLI_VULKAN") == "1":
+            decision = gpu_mod.Decision("cpu", "the card failed to start it: " + reason[-160:], env={"COLI_VULKAN": "0"})
             env.update(decision.env)
             self.decisions[entry["key"]] = decision
             log(f"`{entry['id']}` will run {decision.summary()}")
@@ -707,6 +757,10 @@ class Pool:
             for worker in list(self.workers.values()):
                 if worker.state == "ready" and not worker.alive():
                     log(f"`{worker.entry['id']}` exited on its own")
+                    if worker.card and not self.card_required(worker.entry):
+                        self.fallbacks[worker.key] = (now + self.fallback_memory,
+                                                      f"it exited on its own (code {worker.proc.returncode}) while on the card")
+                        log(f"`{worker.entry['id']}` will start on the CPU for the next {self.fallback_memory / 60:.0f} min")
                     del self.workers[worker.key]
                     worker.state = "gone"
                     worker.settled.set()

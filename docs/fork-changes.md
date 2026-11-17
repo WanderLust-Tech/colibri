@@ -304,6 +304,11 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **`features` in the authenticated `/health`** (`c/features.py`, [api.md](api.md#which-features-this-server-has)): what this server can do,
   so the dashboard hides Presets, Requests and Log against a plain `coli serve`. A server without the block keeps every page.
   The extension still asks and reads a 404 as "not here"; new features should go in the list.
+- **Security headers** (`c/web_headers.py`): `nosniff` and `Referrer-Policy` on every response, a content policy and `X-Frame-Options`
+  on the dashboard's files, and a 403 for a browser request to `/v1/...` that is `Sec-Fetch-Site: cross-site` from an origin that is
+  not allowed. [THREAT_MODEL.md](THREAT_MODEL.md).
+- **A failed start on the card is retried on the CPU** and remembered for 30 minutes ([router.md](router.md#a-model-that-will-not-start-on-the-card)),
+  unless the card was chosen (a pin, `--gpu on`).
 
 ## 3. Planned and open
 

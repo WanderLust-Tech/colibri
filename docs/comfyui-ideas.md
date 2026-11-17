@@ -42,10 +42,10 @@ claims about ComfyUI are theirs and were not re-read.
 | 2 Jobs that survive the page | open |
 | 3 A Library tab | open |
 | 4 Smarter memory (4a cost-aware eviction, 4b pressure watchdog, 4c demote instead of stop) | open |
-| 5 Failure ladder for a worker that will not load | open |
+| 5 Failure ladder for a worker that will not load | done 2026-11-16 |
 | 6 Gateway feature list | done 2026-11-16 (server and dashboard; the extension still reads a 404) |
 | 7 Keep the API spec honest | done 2026-11-16 |
-| 8 Security headers on the dashboard | open |
+| 8 Security headers on the dashboard | done 2026-11-16 |
 | 9 Model catalogue (offline entries, verify, header info) | open |
 | 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM baselines and echoed metadata open |
 
@@ -123,7 +123,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
 
 ## C. Robustness and the surface
 
-- [ ] **5. Failure ladder (S).** If a Vulkan worker fails to load or dies, relaunch once on the CPU and remember that for a
+- [x] **5. Failure ladder (S). Done 2026-11-16:** a failed start on the card is tried once on the CPU and remembered for 30 minutes ("A model that will not start on the card" in `docs/router.md`). Checked the side question: Qwen-Image's Vulkan VAE decode already works in bands and falls back to the CPU. If a Vulkan worker fails to load or dies, relaunch once on the CPU and remember that for a
   while; skip an attempt the estimate says cannot fit. Also worth checking whether Qwen-Image's decode has a tiled
   fallback for an out-of-memory. *Where:* `comfy/sd.py` (`VAE.decode`), the out-of-memory branch in `execution.py`.
   *Nearest here:* a 503 `model_load_failed`.
@@ -137,7 +137,7 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   extension and dashboard depend on exactly those routes. ComfyUI lints its spec in CI and has a test that fails when a
   route has no smoke test. *Where:* `tests-unit/assets_test/test_api_surface.py`, `openapi.yaml`, `.spectral.yaml`.
   *Nearest here:* `c/tests/test_api_matrix_docs.py` (family tables only).
-- [ ] **8. Security headers on the dashboard (S).** `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+- [x] **8. Security headers on the dashboard (S). Done 2026-11-16:** `c/web_headers.py`, "Static headers" in `docs/THREAT_MODEL.md`. `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
   `frame-ancestors`, `Referrer-Policy`; and refuse `Sec-Fetch-Site: cross-site` on `/v1` as a second check behind the
   origin allow-list. Defence in depth only: `web/src/components/Markdown.tsx` does not use `innerHTML`. Add a "static
   headers" line to `docs/THREAT_MODEL.md`. *Where:* `server.py` (`create_block_external_middleware`,

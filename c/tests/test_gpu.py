@@ -34,8 +34,8 @@ class CapturingRig(Rig):
         super().__init__(*args, **kw)
         original = self.pool._command
 
-        def command(item):
-            result = original(item)
+        def command(item, *rest):
+            result = original(item, *rest)
             self.started.append((item["id"], {k: v for k, v in result[1].items()
                                               if k in ("COLI_VULKAN", "COLI_VK_TIER_RESERVE_GB", "G4_VK_RESERVE_GB")}))
             return result
@@ -197,6 +197,94 @@ class SettingsFileTest(unittest.TestCase):
                 model_settings.read(path)
         with self.assertRaises(model_settings.SettingsError):
             model_settings.update(self.path(), "m", gpu="gpu")
+
+
+KEY = entry("text-a")["key"]
+ON_CARD_FAILS = {"text-a-colibri": {"FAKE_FAIL_ON_CARD": "the device was lost"}}
+
+
+class CardFallbackTest(unittest.TestCase):
+    """A model that fails to start on the card is started again on the CPU, and stays there for a while."""
+
+    def rig(self, mode="auto", env=ON_CARD_FAILS, **kw):
+        return CapturingRig(self, [entry("text-a")], gpu=policy(mode, FreeCard(20.0)), env=env, **kw)
+
+    @staticmethod
+    def cards(rig):
+        return [env.get("COLI_VULKAN") for _id, env in rig.started]
+
+    def test_a_failed_start_on_the_card_is_tried_again_on_the_cpu(self):
+        rig = self.rig()
+        self.assertEqual(rig.chat("text-a-colibri")[0], 200)
+        self.assertEqual(self.cards(rig), ["1", "0"])
+        self.assertIn(KEY, rig.pool.fallbacks)
+
+    def test_the_model_says_where_it_runs_and_why(self):
+        rig = self.rig(api_key="k")
+        auth = {"Authorization": "Bearer k"}
+        rig.call("POST", "/v1/chat/completions", {"model": "text-a-colibri", "messages": []}, headers=auth)
+        view = rig.call("GET", "/health", headers=auth)[3]["router"]["loaded"][0]["gpu"]
+        self.assertEqual(view["mode"], "cpu")
+        self.assertIn("the card failed to start it", view["why"])
+        self.assertIn("the device was lost", view["why"])
+
+    def test_the_next_starts_go_straight_to_the_cpu(self):
+        rig = self.rig()
+        rig.chat("text-a-colibri")
+        rig.call("POST", "/v1/models/unload", {"model": "text-a"})
+        rig.chat("text-a-colibri")
+        self.assertEqual(self.cards(rig), ["1", "0", "0"])
+
+    def test_after_a_while_the_card_is_tried_again(self):
+        rig = self.rig()
+        rig.pool.fallback_memory = 0.4
+        rig.chat("text-a-colibri")
+        rig.call("POST", "/v1/models/unload", {"model": "text-a"})
+        time.sleep(0.6)
+        rig.chat("text-a-colibri")
+        self.assertEqual(self.cards(rig), ["1", "0", "1", "0"])           # tried the card, failed again, and fell back again
+
+    def test_a_card_that_works_again_is_used(self):
+        rig = self.rig(env={})
+        rig.pool.fallbacks[KEY] = (time.monotonic() - 1, "an old failure")
+        rig.chat("text-a-colibri")
+        self.assertEqual(self.cards(rig), ["1"])
+        self.assertEqual(rig.pool.fallbacks, {})
+
+    def test_a_model_that_fails_on_the_cpu_too_is_not_blamed_on_the_card(self):
+        rig = self.rig(env={"text-a-colibri": {"FAKE_FAIL": "out of cheese"}})
+        status, _, _, body = rig.chat("text-a-colibri")
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"]["code"], "model_load_failed")
+        self.assertEqual(self.cards(rig), ["1", "0"])
+        self.assertEqual(rig.pool.fallbacks, {})
+
+    def test_a_model_pinned_to_the_card_is_not_moved(self):
+        path = os.path.join(tempfile.mkdtemp(), "model-settings.json")
+        model_settings.update(path, "text-a-colibri", gpu="vulkan")
+        rig = self.rig(settings=model_settings.ModelSettings(path))
+        self.assertEqual(rig.chat("text-a-colibri")[0], 503)
+        self.assertEqual(self.cards(rig), ["1"])
+
+    def test_gpu_on_is_not_worked_around_either(self):
+        rig = self.rig("on")
+        self.assertEqual(rig.chat("text-a-colibri")[0], 503)
+        self.assertEqual(self.cards(rig), ["1"])
+
+    def test_a_model_that_never_asked_for_the_card_is_not_retried(self):
+        rig = self.rig("off")
+        self.assertEqual(rig.chat("text-a-colibri")[0], 200)
+        self.assertEqual(self.cards(rig), ["0"])
+
+    def test_a_worker_that_dies_on_the_card_is_restarted_on_the_cpu(self):
+        rig = self.rig(env={})
+        rig.chat("text-a-colibri")
+        rig.pool.workers[KEY].proc.kill()
+        rig.pool.workers[KEY].proc.wait(5)
+        rig.pool.reap()
+        self.assertIn("exited on its own", rig.pool.fallbacks[KEY][1])
+        rig.chat("text-a-colibri")
+        self.assertEqual(self.cards(rig), ["1", "0"])
 
 
 class RouterGpuTest(unittest.TestCase):

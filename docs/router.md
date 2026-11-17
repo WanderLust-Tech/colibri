@@ -90,6 +90,23 @@ request that keeps being overtaken still gives up after `--queue-timeout`, so a 
 render into a `429`; and the priority only orders what is *waiting*, so a chat still waits for the render that is
 *running* (stop it with a client disconnect, or see `coli stop`).
 
+## A model that will not start on the card
+
+When the router has a model start on the graphics card (`--gpu auto`, or `on`, or a pin) and the start fails (the process
+exits before it answers: a driver that gives up, a device that was lost, memory another program took), the router starts it
+**once more on the CPU** instead of answering 503, and logs both. If that works, the next starts of the same model go straight
+to the CPU for **30 minutes** (a card that failed once will most likely fail again, and each failed start is a wait), after which
+the card is tried again. The model's `gpu` in `GET /health` and `GET /v1/models/settings` then says
+`"mode": "cpu"` with `"why": "the card failed to start it: ..."`, and the Log page has the lines. A model that **exits on its own while it
+runs on the card** is treated the same way for its next start.
+
+It is not done where someone chose the card: a model pinned to `vulkan` (`coli model gpu NAME vulkan`) or a router started with
+`--gpu on` reports the failure as before. And a model that fails on the CPU as well is not blamed on the card: the answer is
+the 503 of the second try, and nothing is remembered. The 30 minutes are `CARD_FALLBACK_S` in `c/router.py`.
+
+Qwen-Image's decoder already falls back on its own: its Vulkan VAE decode works in bands and returns to the CPU when the device
+is lost or refuses its weights (`c/qwenimage_vae_vk.h`), so a picture that gets as far as decoding is not lost to that.
+
 ## Keep-alive, per request
 
 `--keep-alive` is the default. A request can say how long its model stays loaded after it, as in Ollama:

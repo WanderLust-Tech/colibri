@@ -124,6 +124,9 @@ def main():
     if os.environ.get("FAKE_FAIL"):
         print("fake worker: " + os.environ["FAKE_FAIL"], file=sys.stderr, flush=True)
         sys.exit(3)
+    if os.environ.get("FAKE_FAIL_ON_CARD") and os.environ.get("COLI_VULKAN") == "1":
+        print("fake worker: " + os.environ["FAKE_FAIL_ON_CARD"] + " (on the card)", file=sys.stderr, flush=True)
+        sys.exit(3)
     time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
