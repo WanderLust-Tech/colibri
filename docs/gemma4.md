@@ -299,7 +299,50 @@ noisy), the same questions at temperature 0, the same words back on the card as 
 | 26B-A4B, a picture and 20 tokens | 34.4 s | 23.0 s | 1.5 x |
 
 Decode gains little on the 26B-A4B because the experts, which are most of the work, still run on the CPU, and each of about
-200 dense matrices a token is a synchronous call. The dense 31B (30 GB of int8) would not fit beside anything else on the card.
+200 dense matrices a token is a synchronous call (the decode chain below removes that second cost). The dense 31B (30 GB of
+int8) would not fit beside anything else on the card.
+
+### The decode chain (`gemma4_chain.h`)
+
+With the card on, one decode row (the common case: one conversation generating) runs its layers as one command buffer instead
+of about 200 synchronous matrix calls: input norm, q/k/v, the per-head q/k norms and RoPE, the value norm, the new key and value
+row into a cache that lives on the card, attention (scores unscaled, as the model has them; a sliding layer over its window, a
+full layer over everything, heads of 256 and 512), the output projection, the dense MLP with its GELU gate, the per-layer
+embedding block of the E models and the layer scalar, with the residual stream staying on the card from the embedding to the
+head; the final norm, the product with the tied embedding and the logit soft cap are in the same submission, and only the
+logits (1 MB) and the new key and value rows come back. A mixture-of-experts layer (the 26B-A4B) crosses to the host once:
+the residual after attention comes down, the dense MLP runs on the card while the host does the router and the routed experts
+(the CPU's own code and cache), and the experts' normalized sum goes up for the next frame.
+
+Measured on an RTX 5090 (`G4_TEST` greedy decode, the cost of a token from two run lengths; a desktop running, so a few
+milliseconds of noise; the same continuation in every mode):
+
+| ms a token | CPU | card, per matrix | card, chain |
+|---|---|---|---|
+| E2B | 46 | 28 to 34 | **5.4** |
+| E4B | 97 | 40 | **3.8** |
+| 26B-A4B (84 of 128 experts cached a layer) | 110 | 64 to 80 | **51** |
+
+Through the gateway the E2B writes 35 tokens in 0.6 s on the chain and 2.2 s on the CPU. The 26B-A4B gains a fifth to a quarter
+(its two per-matrix runs differ by 16 ms with the experts' cache warm or not, so the margin is wide): what is left of its time is
+mostly the routed experts on the CPU, which is where the next gain is (an expert tier, see "What is not there").
+
+What it holds. The host's caches stay canonical (every step copies its new rows back), so prefix reuse, a rewind and the CPU
+path see what they always saw; the card keeps a mirror for the conversation it last served (a sliding layer's ring is exactly
+`window` rows, a full layer's as long as the context) and brings it up to date from the host when another conversation, a
+prompt chunk or a rewind has moved on. A prompt (more than one row), several conversations decoding together, and a row inside a
+picture take the per-matrix path as before. The test suite on tiny models of all three kinds (`tests/test_gemma4_chain.py`)
+holds that the continuation is the CPU's, that every chained step's residual is within float rounding of the CPU's, and that a
+device lost in the middle of a step leaves the answer unchanged (the CPU carries on from the host's caches). Through the gateway,
+two conversations on two slots, one of 2,400 tokens (past the 512-row window and several prompt chunks), interleaved turn by
+turn, answered word for word as each does alone on the CPU; so did a three-turn conversation on the 26B-A4B (that one alone).
+
+`COLI_VK_CHAIN=0` keeps the per-matrix path; `COLI_VK_CHAIN_CHECK=1` runs every chained step on the CPU path as well and
+reports the worst residual difference at exit (for a new model, or after a change: about 1e-5 to 7e-5 relative on the models
+above). The chain is on by default for a discrete card; it was not measured on an integrated one, so it is off there unless
+`COLI_VK_CHAIN=1`. The mirrors need device memory beyond the weights (108 MiB for the E2B, 296 for the E4B and 720 for the
+26B-A4B at an 8192-token window; about 3 GB for the 26B-A4B at 65536); with `G4_VK_RESERVE_GB` set and less free than that
+plus the reserve, the chain declines and the per-matrix path runs.
 
 It is not bit-identical: the card adds in its own order, so the logits are close to the CPU's, not equal, and a row alone
 and the same row among several conversations may differ in the last bits. The 179 engine tests pass on the CPU path; with
@@ -310,9 +353,10 @@ reason.
 ## What is not there
 
 - **Video with sound, and video without ffmpeg.** The sound of a video is not read, and a video file needs an ffmpeg on the server (frames you send yourself do not).
-- **A GPU path for more than the dense matrices.** The experts stay on the CPU, and a graphics card runs the dense matrices only
-  (see [Vulkan](#vulkan-for-the-dense-matrices) below). The on-device chains the larger families have (a layer in one
-  submission) are a project of their own, and are why the decode gain below is modest.
+- **A GPU path for the experts.** The routed experts of the 26B-A4B stay on the CPU, and a graphics card runs the dense matrices
+  only (see [Vulkan](#vulkan-for-the-dense-matrices) above), a decode row's layers in one submission
+  ([the chain](#the-decode-chain-gemma4_chainh)). The experts are most of what is left of the 26B-A4B's time a token. The dense
+  models (E2B, E4B, 31B) have none and run entirely on the card.
 - **A layer-segment adapter** (`docs/segment-runtime.md`): the family is exempt from that gate until it has one.
 - **The 31B** ran on 2026-11-10 (converted from the download in 279 s to a 31.4 GB container; loaded in 17 s, 29.2 GB resident,
   served on its own port at low priority). "What is the capital of France?" answered "The capital of France is Paris." in

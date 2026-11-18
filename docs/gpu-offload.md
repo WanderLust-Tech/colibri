@@ -166,8 +166,9 @@ and run the `gcc` lines. Running `make` itself from the Claude Code Bash tool fa
   weights (7 GB for the transformer) and the 6.95 GB text encoder together are about what the card has to spare while a render runs.
 * **Gemma 4 experts on the card** (the 26B-A4B's 12.9 GB of experts): the dense half is on the card, the experts are not. The Gemma
   engine has no expert tier; the shared one in `vk_tier.c` is what Qwen uses and is the way to add it.
-* **A layer of Gemma in one submission** (the "chain" Qwen has): each dense matrix is a separate synchronous call (about 200 a token),
-  which is why decode gains less than the prompt does.
+* **A prompt chunk of Gemma on the chain.** A decode row's layers run in one submission ([gemma4.md](gemma4.md#the-decode-chain-gemma4_chainh):
+  E2B 46 to 5.4 ms a token, E4B 97 to 3.8); a prompt chunk, several conversations decoding together and a row inside a picture
+  still make a synchronous call for each of the ~200 dense matrices, which is why a prompt gains less than decode now does.
 * **Putting a demoted model back on the card** ([above](#giving-the-card-back)), and demoting an engine other than `qwen36` (Gemma 4's
   dense path is on the card for 2.4 to 4.4 GB; the same teardown would give it back, and has not been written).
 

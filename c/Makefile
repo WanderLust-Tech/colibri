@@ -739,6 +739,8 @@ VK_SPV   += shaders/chain_kvs.spv
 VK_SPV   += shaders/chain_enc.spv
 # the attention core on the matrix units for prompt chunks (optional at run time)
 VK_SPV   += shaders/chain_attn_flash.spv
+# head dims up to 512 (Gemma 4's full-attention layers; optional: without it chain_attn stops at 256)
+VK_SPV   += shaders/chain_attn512.spv
 # a diffusion step's attention, every query row over every key row (made on first use;
 # qwenimage_chain.h)
 VK_SPV   += shaders/chain_attn_full.spv shaders/chain_attn_coop.spv
@@ -1347,7 +1349,7 @@ ifneq ($(EXE),)
 .PHONY: gemma4
 gemma4: gemma4$(EXE)
 endif
-gemma4$(EXE): gemma4.c gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h $(VK_OBJ) $(VK_SPV) .build-config
+gemma4$(EXE): gemma4.c gemma4_chain.h gemma4_tok.h expert_ffn.h st.h json.h kv_prefix.h serve_codec.h serve_budget.h serve_poll.h compat.h omp_tune.h $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) gemma4.c $(VK_OBJ) -o gemma4$(EXE) $(LDFLAGS)
 
 # The reader of WAV and MP3 files (acestep_audio.h, minimp3): ACE-Step's audio input, and the gateway's MP3 reader for Gemma 4

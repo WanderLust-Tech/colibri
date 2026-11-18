@@ -59,9 +59,9 @@ static const char *const pk_name[PK_N] = {"GEMV int8", "GEMV other", "tiled GEMM
                                           "mla", "mla weights", "dsa", "kda", "mhc", "attnres"};
 /* the MLA, KDA, mHC and AttnRes pipelines: optional (an engine without such layers
  * needs none of them, and a missing one turns off only its own ops) */
-enum { PM_MLA, PM_HGEMV, PM_DSA, PM_KDA, PM_MHC, PM_ARES, PM_N };
+enum { PM_MLA, PM_HGEMV, PM_DSA, PM_KDA, PM_MHC, PM_ARES, PM_A512, PM_N };
 static const char *const mla_file[PM_N] = {"chain_mla.spv", "chain_hgemv.spv", "chain_dsa.spv", "chain_kda.spv",
-                                           "chain_mhc.spv", "chain_ares.spv"};
+                                           "chain_mhc.spv", "chain_ares.spv", "chain_attn512.spv"};
 #define VKC_KDA_MAX 8
 
 /* ---- memory: blocks per kind, buffers bound at offsets inside them -------------- */
@@ -149,6 +149,7 @@ void vkc_shutdown_all(void) {   /* both devices' contexts, the second first (at 
     g_kd = was;
 }
 int vkc_lost(void) { return KC.lost; }
+int vkc_attn_wide(void) { return KC.mpipe[PM_A512] != VK_NULL_HANDLE; }
 
 static void lose(const char *what, VkResult r) {
     if (!KC.lost) fprintf(stderr, "[VK] chain: %s failed (%d): the device is lost\n", what, (int)r);
@@ -971,8 +972,22 @@ int vkc_attn_w(VkcBuf *q, VkcBuf *kc, VkcBuf *vc, VkcBuf *o, VkcBuf *gate, VkcBu
     KC.kind = PK_ATTN;
     VkcAttnW w = *p;   /* the shader's push constants: VkcAttn's fields, then these */
     if (w.vd <= 0) w.vd = w.a.hd;
-    if (w.a.hd > 256 || w.vd > 256 || w.a.H % w.a.KVH || w.win < 0 || w.ring < 0 || (w.sink && !snk)) return 0;
+    int wide = w.a.hd > 256 || w.vd > 256;   /* head dim 257..512: chain_attn512 (Gemma 4's full-attention layers), plain causal rows only */
+    if (w.a.hd > 512 || w.vd > 512 || (wide && !KC.mpipe[PM_A512]) || w.a.H % w.a.KVH || w.win < 0 || w.ring < 0 || (w.sink && !snk)) return 0;
     VkcBind bd[7] = {B(q, 0), B(kc, 0), B(vc, 0), B(o, 1), B(gate, 0), B(sel, 0), B(snk, 0)};
+    if (wide) {   /* one workgroup per (head, row), the cache read as chain_attn reads it; no blocked or flash form */
+        int S = w.a.S, rr = attn_slice_rows(S, w.a.pos_base, (double)w.a.H * (w.a.hd > w.vd ? w.a.hd : w.vd), 1), ok = 1;
+        for (int r0 = 0; ok && r0 < S; r0 += rr) {
+            VkcAttnW x = w;
+            int n = S - r0 < rr ? S - r0 : rr;
+            x.a.S = n; x.a.pos_base = w.a.pos_base + r0;
+            x.a.q_off += r0 * w.a.q_row; x.a.g_off += r0 * w.a.g_row; x.a.o_off += r0 * w.a.o_row;
+            if (w.a.sel_row > 0) x.a.sel_off += r0 * w.a.sel_row;
+            if (r0 && !attn_slice_next()) return 0;
+            ok = record(KC.mpipe[PM_A512], bd, 7, &x, sizeof x, (uint32_t)x.a.H, (uint32_t)x.a.S, 1);
+        }
+        return ok;
+    }
     int G = w.a.H / w.a.KVH, blk = vkc_attn_block_rows(), fl = vkc_attn_flash_rows();
     /* a prompt chunk's plain causal attention on the matrix units (chain_attn_flash),
      * 16 / G rows a workgroup; else the blocked shader, else chain_attn */

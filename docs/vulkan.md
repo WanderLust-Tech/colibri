@@ -1899,6 +1899,24 @@ and the tests prove the tokens on the tiny fixture, on Lavapipe and on the 780M:
 [VK] kimi_k3: dense chain off (an integrated GPU with the expert tier: not measured; COLI_VK_CHAIN=0 off, 1 on, 2 prompts only)
 ```
 
+### Gemma 4 on the chain (`gemma4_chain.h`)
+
+Gemma 4's decode step (one row) as a chain: input norm, q/k/v (a layer whose values are its keys copies k first; a layer that
+shares another's keys and values has none), per-head q/k norms and RoPE from a host table, the value norm without a weight, the
+new key and value row into the device cache, attention, o_proj, the post-attention norm and add, the dense MLP with its GELU-tanh
+gate, the post-feed-forward norm and add, the per-layer-embedding block, the layer scalar, and the final norm, the tied head and
+the logit soft cap in the same frame. Two things the chain did not have: head dims up to 512 (the full layers' `global_head_dim`;
+`chain_attn512.comp`, optional: without its `.spv` the engine declines and runs per matrix) and two element-wise ops, `GEGLU`
+(`gelu_tanh(a) * b`) and `SOFTCAP` (`fc * tanh(a / fc)`), both in `chain_ew.comp` and in `tests/test_vk_chain.c`. A sliding layer's
+device cache is a ring of exactly `window` rows (all a row reads); the host's caches stay canonical, with a mirror per layer valid
+for `[v_lo, v_hi)` and the conversation it follows, so a prompt chunk, a rewind or another conversation only moves the mark and
+the next chained step uploads what its window needs. A mixture-of-experts layer ends its frame with the residual coming down,
+runs the dense MLP while the host does the router and experts (`moe_routed`), and continues in a new frame. A device lost in the
+middle of a step leaves the host's caches describing whole steps: the same step runs on the CPU and every later one
+(`COLI_VK_CHAIN_FAULT=n` fakes it). No partial chains, no second device, no KV split past the device's budget: the mirrors are
+sized to the context and the chain declines when they do not fit. Not the bits of the CPU's: the residual agrees to about 1e-5
+(`COLI_VK_CHAIN_CHECK=1`), and the continuation of the tiny models and the real E2B, E4B and 26B-A4B is the CPU's.
+
 ### Adding an engine to the chain
 
 The recipe qwen36_chain.h and qwen38_chain.h follow, for the engines still on the

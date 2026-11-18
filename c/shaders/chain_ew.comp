@@ -17,6 +17,9 @@
 //   7 SCALE     y[i] = a[i] * fc                                     (MiMo's value scale)
 //   8 GATE_ADD  y[i] = a[i] + e[e_off + i % D] * b[i]                (Qwen-Image's gated residual,
 //                                                                     a gate per column)
+//   9 GEGLU     y[i] = gelu_tanh(a[i]) * b[i]                        (Gemma 4's MLP activation, and its
+//                                                                     per-layer-embedding gate)
+//  10 SOFTCAP   y[i] = fc * tanh(a[i] / fc)                          (Gemma 4's final logit soft cap)
 // Offsets in floats: y_off, a_off, b_off, c_off, e_off.
 layout(local_size_x = 256) in;
 
@@ -71,5 +74,10 @@ void main() {
         y[p.y_off + i] = a[p.a_off + i] * p.fc;
     } else if (p.op == 8) {
         y[p.y_off + i] = a[p.a_off + i] + e[p.e_off + i % p.D] * b[p.b_off + i];
+    } else if (p.op == 9) {
+        float g = a[p.a_off + i];
+        y[p.y_off + i] = 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))) * b[p.b_off + i];
+    } else if (p.op == 10) {
+        y[p.y_off + i] = p.fc * tanh(a[p.a_off + i] / p.fc);
     }
 }

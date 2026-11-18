@@ -302,6 +302,8 @@ typedef struct {
     float **scores;                                   /* per thread */
     double t_attn, t_moe, t_head; long long forwards;
     int trace;
+    void *vkchain;                                    /* the Vulkan decode chain's state (gemma4_chain.h), made on the first decode step */
+    const float *g4_lg;                               /* the logits of the row the chain just ran (its head fused in), until the next forward_chunk */
 } Model;
 
 static int g_slots_hint = 1;                           /* KV_SLOTS, for sizing the expert cache */
@@ -1206,6 +1208,9 @@ static int next_rows(const Model *m, const ImgSpan *sp, int nsp, int pos, int le
  * q, pos0 and the pictures then unused). Leaves the residual stream in m->x.
  * sp: the pictures of the prompt; their rows are the tower's soft tokens, not embeddings, and a picture lies
  * wholly inside one chunk. */
+#ifdef COLI_VULKAN
+#include "gemma4_chain.h"
+#endif
 static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, const ImgSpan *sp, int nsp,
                           Seq *const *qs, const int *ps) {
     Cfg *c = &m->c;
@@ -1261,7 +1266,23 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         for (int i = 0; i < hs2; i++) { float a = p * m->inv_s[i]; cs_s[(size_t)s * hs2 + i] = cosf(a); sn_s[(size_t)s * hs2 + i] = sinf(a); }
         for (int i = 0; i < hg2; i++) { float a = p * m->inv_g[i]; cs_g[(size_t)s * hg2 + i] = cosf(a); sn_g[(size_t)s * hg2 + i] = sinf(a); }
     }
-    for (int l = 0; l < c->n_layers; l++) {
+    int chained = 0;
+    m->g4_lg = NULL;                         /* a new step: no row's logits are waiting */
+#ifdef COLI_VULKAN
+    /* one decode row: its layers on the device in one go (gemma4_chain.h); anything else, or a chain that declines, runs below */
+    float chk[8192]; int checking = 0;       /* COLI_VK_CHAIN_CHECK: the chain's residual, to compare with the CPU's run of the same step */
+    if (S == 1 && g_vk_chain && reach[0] == (ps ? ps[0] : pos0)) {
+        float xin[8192];
+        if (g_g4c_check && H <= 8192) memcpy(xin, m->x, (size_t)H * sizeof(float));
+        chained = g4c_forward(m, qs ? qs[0] : q, ps ? ps[0] : pos0, cs_s, sn_s, cs_g, sn_g);
+        if (chained && g_g4c_check && H <= 8192) {
+            memcpy(chk, m->x, (size_t)H * sizeof(float)); memcpy(m->x, xin, (size_t)H * sizeof(float));
+            chained = 0; checking = 1;
+        }
+    }
+    if (!chained && !checking) g4c_cpu_step(m, q, qs, ps, S, pos0);
+#endif
+    for (int l = 0; l < (chained ? 0 : c->n_layers); l++) {
         Layer *y = &m->L[l];
         int hd = y->hd, nkv = y->nkv, grp = nh / nkv;
         const float *cs = y->full ? cs_g : cs_s, *sn = y->full ? sn_g : sn_s;
@@ -1373,6 +1394,9 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         m->t_moe += now_s() - t0;
         trace(m, "layer", l, m->x + (size_t)(S - 1) * H, H);
     }
+#ifdef COLI_VULKAN
+    if (checking) g4c_compare(chk, m->x, H, ps ? ps[0] : pos0);
+#endif
     free(cs_s); free(sn_s); free(cs_g); free(sn_g); free(reach);
 }
 
@@ -1380,6 +1404,7 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
 static void head_row(Model *m, const float *xrow, float *out) {
     Cfg *c = &m->c; int H = c->hidden, V = c->vocab;
     double t0 = now_s();
+    if (m->g4_lg && xrow == m->x) { memcpy(out, m->g4_lg, (size_t)V * sizeof(float)); m->t_head += now_s() - t0; return; }   /* the chain's, soft cap included */
     float *hn = xmalloc((size_t)H * 4);
     rms_w(hn, xrow, m->final_norm, H, c->eps);
     trace(m, "final", -1, hn, H);
@@ -1398,6 +1423,7 @@ static void head_row(Model *m, const float *xrow, float *out) {
 static void head_rows(Model *m, const float *xr, int S, float **out) {
     Cfg *c = &m->c; int H = c->hidden, V = c->vocab;
     double t0 = now_s();
+    if (S == 1 && m->g4_lg && xr == m->x) { memcpy(out[0], m->g4_lg, (size_t)V * sizeof(float)); m->t_head += now_s() - t0; return; }
     float *hn = xmalloc((size_t)S * H * 4);
     for (int s = 0; s < S; s++) rms_w(hn + (size_t)s * H, xr + (size_t)s * H, m->final_norm, H, c->eps);
 #ifdef COLI_VULKAN
@@ -2058,6 +2084,13 @@ int main(int argc, char **argv) {
         if (r && *r) g_gvk_reserve = atof(r);
         atexit(coli_vk_shutdown);
         fprintf(stderr, "[gemma4] dense matrices on %s\n", g_gvk ? coli_vk_device_name() : "the CPU (G4_VK_DENSE=0)");
+        /* the decode chain (gemma4_chain.h): COLI_VK_CHAIN=0 off; on a discrete card it is on */
+        if (g_gvk) {
+            g_vk_chain = coli_vk_chain_decide("gemma4", 0, COLI_VK_CHAIN_UNMEASURED);
+            if (g_vk_chain && !vkc_init()) g_vk_chain = 0;
+            { const char *e = getenv("COLI_VK_CHAIN_CHECK"); g_g4c_check = g_vk_chain && e && *e == '1'; }
+            if (g_vk_chain) { atexit(vkc_shutdown_all); atexit(g4c_report); }   /* after coli_vk_shutdown's: they run before the device goes */
+        }
     }
 #endif
     double t0 = now_s();

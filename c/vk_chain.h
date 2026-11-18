@@ -58,6 +58,7 @@ typedef struct VkcBuf VkcBuf;
 int  vkc_init(void);          /* after coli_vk_init; 1 = the chain's pipelines are up */
 int  vkc_ready(void);
 int  vkc_lost(void);
+int  vkc_attn_wide(void);      /* 1: vkc_attn_w takes head dims up to 512 (chain_attn512.spv is there) */
 void vkc_shutdown(void);      /* before coli_vk_shutdown (register it with atexit after it) */
 /* The device the calls go to: 0 the primary, 1 COLI_VK_DEV2's (coli_vk_core_dev), each
  * with a context of its own that vkc_init opens and vkc_shutdown closes while it is
@@ -165,6 +166,8 @@ int  vkc_dnrec(int KD, VkcBuf *cv, VkcBuf *ab, VkcBuf *z, VkcBuf *st, VkcBuf *pr
 #define VKC_EW_HC_APPLY 6
 #define VKC_EW_SCALE    7
 #define VKC_EW_GATE_ADD 8
+#define VKC_EW_GEGLU    9    /* y = gelu_tanh(a) * b */
+#define VKC_EW_SOFTCAP  10   /* y = fc * tanh(a / fc) */
 typedef struct { int op, n, D, C, flags, e_row, y_off, a_off, b_off, c_off, e_off; float fc; } VkcEw;
 int  vkc_ew(VkcBuf *y, VkcBuf *a, VkcBuf *b, VkcBuf *c, VkcBuf *e, const VkcEw *p);
 /* chain_qsa.comp (mode 0: nb block keys from b0; mode 1: S rows' selections) */

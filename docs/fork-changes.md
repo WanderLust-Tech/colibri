@@ -37,8 +37,9 @@ the clone that serves port 8000):
 | `/v1/audio/transcriptions` (speech to text on the Gemma E models) | `feat/audio-transcriptions` | yes | yes | yes (2026-11-09); the JFK clip came back word for word on the E2B |
 | Named presets, request log, `coli settings` (C2, C4) | `feat/presets-settings` | yes (`05932e22`) | yes | yes (2026-11-09): live clone and router at `05932e22`, request log on at `~/colibri-requests.log` |
 | Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
-| Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is not installed |
+| Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is installed (the `Colibri tray` value under `HKCU\...\Run`, seen 2026-11-18) |
 | Gemma 4 dense matrices on the Vulkan device (G2) | `396a774f` | yes | yes | yes (2026-11-10): `gemma4.exe` is the `VK=1` build; the router decides per model whether it runs on the card (2.14) |
+| Gemma 4 decode chain (`gemma4_chain.h`): a decode row's layers in one submission, the head fused | `feat/gemma4-chain` | local `main` only, see 2.19 | no | no: the live `gemma4.exe` is still the 2026-11-14 build |
 | Gemma 4 video, and audio that is not WAV (G5) | `b6fae35c` | yes | yes | yes (2026-11-10): ffmpeg 9.0.2 installed with winget, `acestep_audio_tool.exe` built |
 | Card or CPU by free memory (`coli router --gpu auto`), models turned off and on, `service.json` `env` | `3b4bd293` | yes | yes | yes (2026-11-10): `COLI_GPU=auto` in the restart script and in `service.json` |
 | Dashboard: Runs on and Turn off/on per model | `7ae38131` | yes | yes | yes (2026-11-10): `web/dist` rebuilt in the live clone |
@@ -336,6 +337,22 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **A failed start on the card is retried on the CPU** and remembered for 30 minutes ([router.md](router.md#a-model-that-will-not-start-on-the-card)),
   unless the card was chosen (a pin, `--gpu on`).
 
+### 2.19 Gemma 4 on the chain (`feat/gemma4-chain`, 2026-11-18; local `main`, not pushed, not deployed)
+
+- **A decode row's layers as one command buffer** ([gemma4.md](gemma4.md#the-decode-chain-gemma4_chainh), [vulkan.md](vulkan.md#gemma-4-on-the-chain-gemma4_chainh)):
+  the dense models run entirely on the card from the embedding to the logits (E2B 46 ms a token on the CPU, 28 to 34 with each matrix
+  a call, **5.4** on the chain; E4B 97, 40, **3.8**); the 26B-A4B crosses to the host once a layer for its routed experts (64 to 80, **51**).
+  The same words as the CPU, checked on tiny models of all three kinds (`tests/test_gemma4_chain.py`), on the real E2B, E4B and 26B-A4B
+  (every step compared, residual within ~7e-5 of the CPU's) and through the gateway (two conversations interleaved on two slots, one of
+  2,400 tokens). A device lost mid-step hands the same step to the CPU (injected and tested).
+- **Two shaders' worth of new ops in the shared chain**, which the other engines do not use: `chain_attn512.comp` (heads up to 512; a
+  copy of `chain_attn.comp`, which is untouched) and `GEGLU` and `SOFTCAP` in `chain_ew.comp`; tests in `tests/test_vk_chain.c`, which
+  now builds on Windows (a `setenv` shim).
+- **Not done:** a prompt chunk and several conversations decoding together on the chain (the per-matrix path as before), the 26B-A4B's
+  experts on the card (what is left of its time), an integrated GPU (not measured: off there), partial chains and a KV split past the
+  device's budget (the mirrors are sized to the context, or the chain declines).
+- Switches: `COLI_VK_CHAIN=0` off, `COLI_VK_CHAIN_CHECK=1` compares every step with the CPU's.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -343,7 +360,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 1. ~~Deploy Gemma 4~~ done 2026-11-07 (see section 1).
 2. ~~Push local `main` to the fork~~ done; the fork has everything except the latest docs commits (push when you say).
 3. ~~GPU offload for Gemma 4~~ done 2026-11-10 (2.14, 2.15).
-4. **`coli tray --install`** (the Windows sign-in entry for the tray) is yours to run; it was blocked when I tried, so I did not work around it.
+4. ~~`coli tray --install`~~ done: the `Colibri tray` entry is in the sign-in list (seen 2026-11-18).
 5. **Try the 65536 window on Qwen3-Coder with a real long conversation** and watch memory; go back with `-Ctx 32768` if it is too much.
 
 ### 3.2 Gemma 4 follow-ups
@@ -367,7 +384,7 @@ Status as of today (the file itself has been brought into line with this):
 | B1-B3 `keep_alive`, `coli ps` / `coli stop`, Unload button | **done**, live |
 | C1 `coli launch` | **done**, merged and live: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
 | C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard live (`feat/web-presets`) |
-| C3 Windows tray or autostart (would replace the restart script) | **done**, live (2.13); started by hand, not yet installed to start at sign-in |
+| C3 Windows tray or autostart (would replace the restart script) | **done**, live (2.13), and it starts at sign-in |
 | C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |
 | C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, live (2.10) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |

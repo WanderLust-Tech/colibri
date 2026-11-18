@@ -62,6 +62,11 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#ifdef _WIN32
+/* MinGW has no setenv: an empty value removes the variable, which is what unsetenv does */
+#define setenv(k, v, o) _putenv_s((k), (v))
+#define unsetenv(k) _putenv_s((k), "")
+#endif
 #include "../backend_vulkan.h"
 #include "../vk_chain.h"
 #include "../vk_kvsplit.h"        /* the KV cache split between the device and the host */
@@ -509,7 +514,7 @@ static void test_ew(void) {
         {VKC_EW_ADD, 0, R * D, "add"}, {VKC_EW_COMBINE, 1 | 2 | 4, R * D, "combine"}, {VKC_EW_COMBINE, 2 | 8, R * D, "combine-noresid"},
         {VKC_EW_COMBINE, 1, R * D, "combine-routed"}, {VKC_EW_SWIGLU, 0, R * D, "swiglu"}, {VKC_EW_HC_LOW, 0, R * D, "hc-low"},
         {VKC_EW_HC_MIX, 0, R * D, "hc-mix"}, {VKC_EW_HC_INJ, 0, R * C, "hc-inj"}, {VKC_EW_HC_APPLY, 0, R * W, "hc-apply"},
-        {VKC_EW_SCALE, 0, R * D, "scale"}};
+        {VKC_EW_SCALE, 0, R * D, "scale"}, {VKC_EW_GEGLU, 0, R * D, "geglu"}, {VKC_EW_SOFTCAP, 0, R * D, "softcap"}};
     for (size_t k = 0; k < sizeof ops / sizeof *ops; k++) {
         int n = ops[k].n, op = ops[k].op, f = ops[k].flags;
         for (int i = 0; i < n; i++) {
@@ -526,6 +531,8 @@ static void test_ew(void) {
             case VKC_EW_HC_APPLY: { int rr = i / W, rem = i % W, s = rem / D, dd = rem % D;
                 ref[i] = c[i] + a[rr * C + s] * b[rr * D + dd]; break; }
             case VKC_EW_SCALE: ref[i] = a[i] * (float)C; break;
+            case VKC_EW_GEGLU: ref[i] = 0.5f * a[i] * (1.f + tanhf(0.7978845608028654f * (a[i] + 0.044715f * a[i] * a[i] * a[i]))) * b[i]; break;
+            case VKC_EW_SOFTCAP: ref[i] = (float)C * tanhf(a[i] / (float)C); break;
             }
         }
         if (op == VKC_EW_HC_APPLY) { vkc_begin(); vkc_write(yb, 0, c, nw * 4); vkc_submit(1); }
@@ -533,7 +540,7 @@ static void test_ew(void) {
         vkc_begin(); int ok = vkc_ew(yb, ab, bb, cb, eb, &p); vkc_submit(1);
         float *y = down(yb, 0, n);
         double err = relerr(y, ref, n, 1e-3);
-        CHECK(ok && err < 1e-6, "ew %s: err %.2e", ops[k].name, err);
+        CHECK(ok && err < (op >= VKC_EW_GEGLU ? 1e-5 : 1e-6), "ew %s: err %.2e", ops[k].name, err);
         free(y);
     }
     vkc_free(ab); vkc_free(bb); vkc_free(cb); vkc_free(eb); vkc_free(yb);
@@ -2632,6 +2639,10 @@ int main(int argc, char **argv) {
     test_attn_win(3, 40, 4, 2, 48, 32, 8, 10, 0, 1); test_attn_win(4, 6, 4, 2, 64, 48, 0, 0, 1, 1);
     test_attn_win(2, 300, 4, 2, 16, 16, 150, 0, 1, 1); test_attn_win(130, 3, 4, 2, 24, 40, 16, 0, 0, 0);
     test_attn_win(1, 500, 8, 4, 192, 128, 128, 128, 1, 1);
+    /* head dim 257..512 (chain_attn512: Gemma 4's full-attention layers, 512 a head, 2 KV heads of 16 query heads in the 26B) */
+    test_attn_win(1, 300, 16, 2, 512, 512, 0, 0, 0, 1); test_attn_win(1, 5, 16, 2, 512, 512, 0, 0, 0, 1);
+    test_attn_win(3, 40, 8, 1, 512, 512, 0, 0, 0, 0);   test_attn_win(1, 130, 8, 2, 320, 384, 64, 64, 1, 1);
+    test_attn_win(1, 700, 16, 8, 512, 512, 0, 0, 0, 1);
     /* prompt chunks through the blocked attention (chain_attnb.comp, from 16 rows): Qwen3.6's
      * and Qwen3.8's head groups (8 and 12 a KV head), one head a KV head, lists, the window,
      * the ring, position-major rows and the sink; then the same cases on chain_attn */
