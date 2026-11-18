@@ -1333,6 +1333,15 @@ endif
 qwenimage$(EXE): qwenimage.c $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) qwenimage.c $(VK_OBJ) -o qwenimage$(EXE) $(LDFLAGS)
 
+# Z-Image (Turbo) text-to-image (docs/zimage.md): the same kernels (qi_gemm.h) and the same line protocol as
+# qwenimage, a different network. Reads the diffusers checkpoint as it is.
+ifneq ($(EXE),)
+.PHONY: zimage
+zimage: zimage$(EXE)
+endif
+zimage$(EXE): zimage.c .build-config
+	$(CC) $(CFLAGS) zimage.c -o zimage$(EXE) $(LDFLAGS)
+
 # ACE-Step 1.5 text-to-music, built stage by stage (acestep.c says where it is). The engine is complete on its own
 # (acestep --model DIR --caption TEXT --out FILE.wav, or --serve); it is not in `install` until the gateway, `coli music`
 # and the registry know it.
@@ -2947,7 +2956,7 @@ check:
 	$(MAKE) portable
 	$(MAKE) test
 
-install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) acestep_audio_tool$(EXE) qwenimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
+install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) acestep_audio_tool$(EXE) qwenimage$(EXE) zimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
 	$(if $(filter 1,$(COLI_V4_SUPPORTED)),deepseek-v4,)
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)
@@ -2961,6 +2970,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	$(INSTALL) -m 755 qwen36$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen36$(EXE)
 	$(INSTALL) -m 755 qwen38$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen38$(EXE)
 	$(INSTALL) -m 755 qwenimage$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwenimage$(EXE)
+	$(INSTALL) -m 755 zimage$(EXE) $(DESTDIR)$(LIBEXECDIR)/zimage$(EXE)
 	$(INSTALL) -m 755 acestep$(EXE) $(DESTDIR)$(LIBEXECDIR)/acestep$(EXE)
 	$(INSTALL) -m 755 laya$(EXE) $(DESTDIR)$(LIBEXECDIR)/laya$(EXE)
 	$(INSTALL) -m 755 gliner_decide$(EXE) $(DESTDIR)$(LIBEXECDIR)/gliner_decide$(EXE)
