@@ -48,6 +48,7 @@ claims about ComfyUI are theirs and were not re-read.
 | 8 Security headers on the dashboard | done 2026-11-16 |
 | 9 Model catalogue | done 2026-11-16 (known-models list, `coli model verify`, `coli model info`, details on the dashboard card) |
 | 10 Smaller ideas | priority lane and log tail done 2026-11-16 (the router needs a restart for both); SSIM scoring and echoed client tags done 2026-11-17; per-user preferences and one-shot validation left alone |
+| D Model families to port | open: a list (D1 to D8), nothing started; Z-Image first |
 
 Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), then 2 and 3 as one project, then memory
 (4a, 4b) once there is a measurement of what the reaper gets wrong today.
@@ -169,6 +170,47 @@ Suggested order: a batch of the small ones that stand alone (1, 5, 6, 7, 8), the
   extension sending tags, and tags on the events of a streamed answer (the jobs carry them, which is where a page re-attaches).
   - Per-user dashboard preferences kept on the server. Modest; skip if one browser is used.
   - Validation that reports every problem at once with stable type codes. The OpenAI error shape limits the gain.
+
+## D. Model families to port (added 2026-11-18)
+
+ComfyUI runs weights, it does not own any: `comfy/supported_models.py` (commit `e9afbccc`) recognises about 100
+architecture families. Colibri has two of them as native engines, **Qwen-Image 2.1** and **ACE-Step 1.5**. Anything else
+is a new engine of the same kind as those (the diffusion model, a text encoder, a VAE, a sampler, then router and dashboard
+wiring), which is weeks of work each, not hours. Written from each model's own reference code (its paper, the official
+diffusers or transformers implementation), not from ComfyUI's, which is GPL-3.0 (see the licence note at the top).
+*Where to look in ComfyUI to see what a family needs (read only):* `comfy/ldm/<family>/`, `comfy/text_encoders/`,
+`comfy/latent_formats.py`.
+
+**Licences.** The model weights have their own licences, and several families are not open source in the usual sense.
+The licences below are from web summaries read on 2026-11-18 (secondary sources, which disagree in places), not from the
+model cards: **read the card and its licence file before starting a port.** What is on this machine, read from the files:
+Qwen-Image 2.1 is under the **Qwen Research License** (`LICENSE` in its model folder: "non-commercial" means research or
+evaluation only; commercial use needs a licence from Alibaba), ACE-Step 1.5 says MIT in its README. The Gemma 4 and
+Qwen3-Coder licences were not checked here.
+
+- [ ] **D1. Z-Image (image; first candidate).** Tongyi-MAI's single-stream diffusion transformer, about 6B parameters
+  (ComfyUI: the `lumina2` family, width 3840), a Qwen3-4B text encoder, the Flux latent format. Apache-2.0 according to
+  several sources. The closest relative of what we have, so the least new code: a transformer about the size of
+  Qwen-Image 2.1's (14.2 GB in bf16 there) and a text-only encoder much smaller than 2.1's Qwen3-VL (17.5 GB in bf16). New pieces: the Flux-format VAE decoder (16 channels; ours is the
+  Wan-style one), the transformer's blocks, and a Qwen3-4B text encoder (check how much of the qwen36 code it can reuse).
+  To find out first: weights size in int8, whether the distilled "turbo" model (a few steps) or the base model is the one to
+  ship, whether it edits pictures.
+- [ ] **D2. Wan 2.2 text-to-video.** Apache-2.0 according to sources; the line of open Wan weights reportedly ends at 2.2.
+  ComfyUI gives Qwen-Image 2.1 the Wan 2.1 latent format, so a part of our VAE work is a start, but a video VAE works on
+  many frames and the transformer and the umT5 text encoder are new. Video on the CPU or a shared card will be slow:
+  measure a step before committing.
+- [ ] **D3. Flux.** Flux.1 schnell is Apache-2.0; Flux.1 dev is non-commercial; Flux.2's terms are reported two ways. For
+  personal use the licence matters less, but read it before building.
+- [ ] **D4. Other image families:** Stable Diffusion 3.5 (community licence, free below a revenue limit), HiDream, Chroma,
+  Kandinsky 5, HunyuanImage 2.1. Not looked at; only if D1 goes well.
+- [ ] **D5. Other video families:** LTX-Video (community licence with a revenue tier), HunyuanVideo (Tencent's community
+  licence), CogVideoX, Mochi, Cosmos. After D2.
+- [ ] **D6. Music and audio:** YuE, Stable Audio, MiniMax Music. ACE-Step is already here; only if it turns out to have a gap.
+- [ ] **D7. 3D:** Hunyuan3D, Trellis2. A new kind of output (meshes) that the router, the library and the dashboard have no
+  place for yet.
+- [ ] **D8. Small vision tools:** SAM3 (segmentation), Depth Anything 3, RT-DETR (detection), SeedVR2 (upscaling). Not
+  looked at. They do what Gemma 4's vision cannot (masks, depth, boxes), so they may be worth more per hour than another
+  image model.
 
 ## Looked at and not useful
 
