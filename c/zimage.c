@@ -35,6 +35,12 @@
 #include "qwen38_nfc.h"
 #include "qi_gemm.h"
 #include "serve_poll.h"
+#ifdef COLI_VULKAN
+/* VK=1 and COLI_VULKAN=1: the DiT's matrices run on the GPU, all the image tokens of a product in one call. One command
+ * buffer: main thread only. */
+#include "backend_vulkan.h"
+static int g_vk_ready, g_vk_tried;
+#endif
 
 static double now_s(void){
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -87,6 +93,9 @@ static int g_act8 = 1;   /* COLI_IMG_ACT8=0 turns off the int8 activations of th
 typedef struct {
     QiMat m; void *own; float *own_sc; int act8;
     float *bias;    /* added to every output row, when the layer has one */
+    int gpu;        /* may run on the GPU (COLI_VULKAN): the DiT's matrices */
+    void *vk;       /* its device copy, made on first use */
+    int vk_off;     /* the upload failed: this one stays on the CPU */
 } Lin;
 
 static st_tensor *need_tensor(shards *S, const char *name, int64_t n0, int64_t n1){
@@ -157,6 +166,9 @@ static void lin_load(shards *S, const char *name, int N, int K, int bits, Lin *o
     }
 }
 static void lin_free(Lin *l){
+#ifdef COLI_VULKAN
+    if (l->vk) coli_vk_tensor_free((ColiVkTensor *)l->vk);
+#endif
     free(l->own); free(l->own_sc); free(l->bias); memset(l, 0, sizeof *l);
 }
 static size_t lin_bytes(const Lin *l){
@@ -169,12 +181,41 @@ static float *vec_load(shards *S, const char *name, int n){
     st_read_f32_cap(S, name, v, n, 1);
     return v;
 }
+/* Y[M][N] = X . W^T on the GPU, for every row of X in one call. Each storage format is one of the shader's as it is
+ * stored: QI_I8 is fmt 1 (int8 [N][K], one f32 scale per row), QI_BF16 fmt 11, QI_F32 fmt 10. The activations stay f32,
+ * so the result is the CPU's f32-activation product up to summation order (COLI_IMG_ACT8 is a CPU kernel). The bias is
+ * added here. 0 when the product stays on the CPU. */
+static int qi_vk_linear(float *y, const float *x, int M, const Lin *l){
+#ifdef COLI_VULKAN
+    if (!g_vk_ready || !coli_vk_dense() || !l->gpu || l->vk_off || l->m.ld || M < 1) return 0;
+#ifdef _OPENMP
+    if (omp_in_parallel()) return 0;
+#endif
+    int fmt = l->m.fmt == QI_I8 ? 1 : l->m.fmt == QI_BF16 ? 11 : l->m.fmt == QI_F32 ? 10 : -1;
+    if (fmt < 0) return 0;
+    Lin *dev = (Lin *)l;    /* the device copy is a cache inside a read-only matrix */
+    if (coli_vk_matmul((ColiVkTensor **)&dev->vk, y, x, l->m.w, fmt == 1 ? l->m.sc : NULL, fmt,
+                       M, l->m.K, l->m.N, 0)) {
+        if (l->bias) {
+            #pragma omp parallel for schedule(static)
+            for (int r = 0; r < M; r++) for (int i = 0; i < l->m.N; i++) y[(int64_t)r * l->m.N + i] += l->bias[i];
+        }
+        return 1;
+    }
+    if (!dev->vk) dev->vk_off = 1;
+#endif
+    (void)y; (void)x; (void)M; (void)l;
+    return 0;
+}
+
 /* ZIMAGE_PROF=1: where a step's time goes (linears, attention, the rest) */
 static int g_prof; static double g_t_lin, g_t_att;
 static inline void linear(float *y, const float *x, int M, const Lin *l){
     double t0 = g_prof ? now_s() : 0;
-    if (g_act8 && l->act8 && l->m.fmt == QI_I8) qi_gemm_act8(y, l->m.N, x, l->m.K, M, &l->m, l->bias);
-    else qi_gemm(y, x, M, &l->m, l->bias);
+    if (!qi_vk_linear(y, x, M, l)) {
+        if (g_act8 && l->act8 && l->m.fmt == QI_I8) qi_gemm_act8(y, l->m.N, x, l->m.K, M, &l->m, l->bias);
+        else qi_gemm(y, x, M, &l->m, l->bias);
+    }
     if (g_prof) g_t_lin += now_s() - t0;
 }
 
@@ -495,6 +536,7 @@ static void zblock_load(shards *S, const char *pre, int D, int mlp, int hd, int 
     lin_load(S, BN("feed_forward.w2.weight"), D, mlp, g_bits, &B->w2);
     lin_load(S, BN("feed_forward.w3.weight"), mlp, D, g_bits, &B->w3);
     B->q.act8 = B->k.act8 = B->v.act8 = B->o.act8 = B->w1.act8 = B->w2.act8 = B->w3.act8 = 1;
+    B->q.gpu = B->k.gpu = B->v.gpu = B->o.gpu = B->w1.gpu = B->w2.gpu = B->w3.gpu = 1;
     B->nq = vec_load_n(S, BN("attention.norm_q.weight"), hd);
     B->nk = vec_load_n(S, BN("attention.norm_k.weight"), hd);
     B->an1 = vec_load_n(S, BN("attention_norm1.weight"), D);
@@ -552,9 +594,16 @@ static void dit_load(Dit *d, const char *model){
         bytes += zblock_bytes(&d->NR[l]) + zblock_bytes(&d->CR[l]);
     }
     st_destroy(&S);
+    d->x_emb.gpu = d->cap_emb.gpu = d->t1.gpu = d->t2.gpu = d->fin_mod.gpu = d->fin_out.gpu = 1;
+    for (int l = 0; l < d->layers; l++) d->B[l].mod.gpu = 1;
+    for (int l = 0; l < d->nref; l++) d->NR[l].mod.gpu = 1;
     d->loaded = 1;
     fprintf(stderr, "[zimage] transformer: %d blocks + 2x%d refiner blocks, %.2f GB resident, %.1f s\n",
             d->layers, d->nref, bytes / 1e9, now_s() - t0);
+#ifdef COLI_VULKAN
+    /* after the DiT's weights, once: a missing device costs one line */
+    if (!g_vk_tried) { g_vk_tried = 1; g_vk_ready = coli_vk_init_env("zimage"); }
+#endif
 }
 
 /* The timestep embedding. `t` is the model's input, (1000 - scheduler timestep) as the pipeline passes it
@@ -1607,6 +1656,14 @@ static int run_oracle(const char *model, const char *refdir){
     return rc;
 }
 
+/* Once, at the end: how many products the GPU actually took, so a run that asked for Vulkan and quietly stayed on
+ * the CPU says so. */
+static void zi_vk_report(void){
+#ifdef COLI_VULKAN
+    if (g_vk_ready) fprintf(stderr, "[VK] zimage: %llu matmuls on the GPU\n", coli_vk_matmul_calls());
+#endif
+}
+
 static void usage(void){
     fprintf(stderr,
         "usage: zimage --model DIR --prompt TEXT [--width 768] [--height 768] [--steps 8] [--seed N] --out FILE.png\n"
@@ -1651,18 +1708,18 @@ int main(int argc, char **argv){
     g_act8 = 0;
 #endif
     g_prof = getenv("ZIMAGE_PROF") != NULL;
-    if (ref) return run_oracle(model, ref);
+    if (ref) { int rc = run_oracle(model, ref); zi_vk_report(); return rc; }
     if (!seed_set && !serve) seed = (uint64_t)time(NULL);
     static Engine e;
     engine_init(&e, model);
-    {
-        const char *te = getenv("COLI_IMG_TE");
-        e.te_resident = !(te && !strcmp(te, "stage")) ;
-    }
     if (serve) {
+        const char *te = getenv("COLI_IMG_TE");
+        e.te_resident = !(te && !strcmp(te, "stage"));
         te_load(&e.te, model);
         dit_load(&e.dit, model);
-        return serve_loop(&e, width, height, steps);
+        int rc = serve_loop(&e, width, height, steps);
+        zi_vk_report();
+        return rc;
     }
     char msg[512];
     if (check_size(width, height, steps, msg, sizeof msg)) { fprintf(stderr, "%s\n", msg); return 2; }
@@ -1674,5 +1731,6 @@ int main(int argc, char **argv){
     if (write_png(out, rgba, width, height)) { fprintf(stderr, "[zimage] cannot write %s\n", out); return 1; }
     fprintf(stderr, "[zimage] %s  %dx%d  %d steps  seed %llu  encode %.1f s  denoise %.1f s  decode %.1f s\n",
             out, width, height, steps, (unsigned long long)seed, tm[0], tm[1], tm[2]);
+    zi_vk_report();
     return 0;
 }

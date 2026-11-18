@@ -1339,8 +1339,8 @@ ifneq ($(EXE),)
 .PHONY: zimage
 zimage: zimage$(EXE)
 endif
-zimage$(EXE): zimage.c .build-config
-	$(CC) $(CFLAGS) zimage.c -o zimage$(EXE) $(LDFLAGS)
+zimage$(EXE): zimage.c $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) zimage.c $(VK_OBJ) -o zimage$(EXE) $(LDFLAGS)
 
 # ACE-Step 1.5 text-to-music, built stage by stage (acestep.c says where it is). The engine is complete on its own
 # (acestep --model DIR --caption TEXT --out FILE.wav, or --serve); it is not in `install` until the gateway, `coli music`
