@@ -1,0 +1,11 @@
+# Pinned dependencies for the Z-Image tiny oracle (tools/make_zimage_tiny.py, tools/zimage_ref.py): the versions the
+# reference was generated with. ZImagePipeline is in diffusers' releases (0.36 and later).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu; sys_platform != "darwin"
+torch==2.15.0; sys_platform == "darwin"
+safetensors==0.8.0
+transformers==5.23.0
+tokenizers==0.23.3
+numpy
+pillow
+diffusers==0.43.0

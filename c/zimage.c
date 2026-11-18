@@ -477,6 +477,7 @@ static float *te_forward(Te *te, const int *ids, int T){
 typedef struct { Lin q, k, v, o, w1, w2, w3, mod; float *nq, *nk, *an1, *an2, *fn1, *fn2; int has_mod; } ZBlock;
 typedef struct {
     int layers, nref, heads, hd, dim, mlp, in_ch, cap_dim, patch, axes[3];
+    int adaln;                  /* min(dim, 256): the timestep embedding's width, which the modulations read */
     float eps, theta, t_scale;
     Lin x_emb, cap_emb, t1, t2, fin_mod, fin_out;
     float *cap_norm, *x_pad, *cap_pad;
@@ -513,6 +514,7 @@ static void dit_config(Dit *d, const char *model){
     json_free(c); free(arena);
     d->hd = d->heads > 0 ? d->dim / d->heads : 0;
     d->mlp = (int)((int64_t)d->dim * 8 / 3);                /* int(dim / 3 * 8) */
+    d->adaln = d->dim < 256 ? d->dim : 256;
     if (!ok || d->layers <= 0 || d->layers > 1024 || d->nref < 0 || d->nref > 64 || d->heads <= 0 || d->heads > 1024 ||
         kvh != d->heads || d->dim <= 0 || d->dim > 65536 || d->dim % d->heads || d->hd % 2 ||
         d->axes[0] + d->axes[1] + d->axes[2] != d->hd || d->in_ch <= 0 || d->in_ch > 1024 ||
@@ -525,7 +527,7 @@ static void dit_config(Dit *d, const char *model){
 
 static float *vec_load_n(shards *S, const char *name, int n){ return vec_load(S, name, n); }
 
-static void zblock_load(shards *S, const char *pre, int D, int mlp, int hd, int mod, ZBlock *B){
+static void zblock_load(shards *S, const char *pre, int D, int mlp, int hd, int adaln, int mod, ZBlock *B){
     char n[256];
 #define BN(s) (snprintf(n, sizeof n, "%s.%s", pre, s), n)
     lin_load(S, BN("attention.to_q.weight"), D, D, g_bits, &B->q);
@@ -545,7 +547,7 @@ static void zblock_load(shards *S, const char *pre, int D, int mlp, int hd, int 
     B->fn2 = vec_load_n(S, BN("ffn_norm2.weight"), D);
     B->has_mod = mod;
     if (mod) {
-        lin_load(S, BN("adaLN_modulation.0.weight"), 4 * D, 256, 32, &B->mod);
+        lin_load(S, BN("adaLN_modulation.0.weight"), 4 * D, adaln, 32, &B->mod);
         B->mod.bias = vec_load_n(S, BN("adaLN_modulation.0.bias"), 4 * D);
     }
 #undef BN
@@ -569,9 +571,9 @@ static void dit_load(Dit *d, const char *model){
     d->cap_norm = vec_load_n(&S, "cap_embedder.0.weight", d->cap_dim);
     lin_load(&S, "t_embedder.mlp.0.weight", 1024, 256, 32, &d->t1);
     d->t1.bias = vec_load_n(&S, "t_embedder.mlp.0.bias", 1024);
-    lin_load(&S, "t_embedder.mlp.2.weight", 256, 1024, 32, &d->t2);
-    d->t2.bias = vec_load_n(&S, "t_embedder.mlp.2.bias", 256);
-    lin_load(&S, "all_final_layer.2-1.adaLN_modulation.1.weight", D, 256, 32, &d->fin_mod);
+    lin_load(&S, "t_embedder.mlp.2.weight", d->adaln, 1024, 32, &d->t2);
+    d->t2.bias = vec_load_n(&S, "t_embedder.mlp.2.bias", d->adaln);
+    lin_load(&S, "all_final_layer.2-1.adaLN_modulation.1.weight", D, d->adaln, 32, &d->fin_mod);
     d->fin_mod.bias = vec_load_n(&S, "all_final_layer.2-1.adaLN_modulation.1.bias", D);
     lin_load(&S, "all_final_layer.2-1.linear.weight", pd, D, 32, &d->fin_out);
     d->fin_out.bias = vec_load_n(&S, "all_final_layer.2-1.linear.bias", pd);
@@ -584,13 +586,13 @@ static void dit_load(Dit *d, const char *model){
     #pragma omp parallel for schedule(dynamic, 1) num_threads(qi_load_threads()) reduction(+:bytes)
     for (int l = 0; l < d->layers; l++) {
         char pre[64]; snprintf(pre, sizeof pre, "layers.%d", l);
-        zblock_load(&S, pre, D, d->mlp, d->hd, 1, &d->B[l]);
+        zblock_load(&S, pre, D, d->mlp, d->hd, d->adaln, 1, &d->B[l]);
         bytes += zblock_bytes(&d->B[l]);
     }
     for (int l = 0; l < d->nref; l++) {
         char pre[64];
-        snprintf(pre, sizeof pre, "noise_refiner.%d", l); zblock_load(&S, pre, D, d->mlp, d->hd, 1, &d->NR[l]);
-        snprintf(pre, sizeof pre, "context_refiner.%d", l); zblock_load(&S, pre, D, d->mlp, d->hd, 0, &d->CR[l]);
+        snprintf(pre, sizeof pre, "noise_refiner.%d", l); zblock_load(&S, pre, D, d->mlp, d->hd, d->adaln, 1, &d->NR[l]);
+        snprintf(pre, sizeof pre, "context_refiner.%d", l); zblock_load(&S, pre, D, d->mlp, d->hd, d->adaln, 0, &d->CR[l]);
         bytes += zblock_bytes(&d->NR[l]) + zblock_bytes(&d->CR[l]);
     }
     st_destroy(&S);
@@ -790,6 +792,10 @@ static void unpatchify(const Dit *d, const float *tok, const ZGrid *g, float *la
 /* Debug taps for the oracle: the tensors after the noise refiner, after the context refiner, and after chosen main layers. */
 typedef struct { float *after_noise_refiner, *after_context_refiner; float *after_layer[4]; int layer_at[4]; } DitTap;
 
+#ifdef COLI_VULKAN
+#include "zimage_chain.h"   /* COLI_VK_CHAIN: the 30 main blocks on the device */
+#endif
+
 /* One model evaluation: the noise prediction (the model's output before the pipeline negates it) for the latent
  * lat[16][gh][gw] at model time t_in (= 1000 - scheduler timestep), written to out[16][gh][gw]. */
 static void dit_forward(Dit *d, const Caption *cap, const ZGrid *g, const float *lat, float t_in, float *out, DitTap *tap){
@@ -818,7 +824,12 @@ static void dit_forward(Dit *d, const Caption *cap, const ZGrid *g, const float 
     memcpy(cs, g->cs, (size_t)Nx * d->hd / 2 * 4); memcpy(sn, g->sn, (size_t)Nx * d->hd / 2 * 4);
     memcpy(cs + (size_t)Nx * d->hd / 2, cap->cs, (size_t)Nc * d->hd / 2 * 4);
     memcpy(sn + (size_t)Nx * d->hd / 2, cap->sn, (size_t)Nc * d->hd / 2 * 4);
-    for (int l = 0; l < d->layers; l++) {
+    /* the 30 blocks: on the device as one chain when it takes them (not while an oracle wants the taps between blocks) */
+    int dev = 0;
+#ifdef COLI_VULKAN
+    if (!tap) dev = zic_layers(d, u, T, Nx, cs, sn, adaln);
+#endif
+    for (int l = 0; !dev && l < d->layers; l++) {
         zblock_mod(&d->B[l], adaln, mod);
         zblock(d, &d->B[l], u, T, mod, cs, sn, &w);
         if (tap)
@@ -827,7 +838,7 @@ static void dit_forward(Dit *d, const Caption *cap, const ZGrid *g, const float 
     }
 
     /* the final layer on the image rows: LayerNorm * (1 + scale), then the projection back to patch values */
-    for (int i = 0; i < 256; i++) s[i] = silu(adaln[i]);
+    for (int i = 0; i < d->adaln; i++) s[i] = silu(adaln[i]);
     float *scale = fmalloc(D);
     linear(scale, s, 1, &d->fin_mod);
     layernorm_mod(w.h, u, scale, g->N, D, 1e-6f);
@@ -937,7 +948,7 @@ static void vae_config(Vae *v, const char *model){
     int ok = bo && bo->t == J_ARR && bo->len == 4;
     for (int i = 0; ok && i < 4; i++) {
         double x = bo->kids[i]->t == J_NUM ? bo->kids[i]->num : -1;
-        ok = x > 0 && x <= 4096 && (int)x % 32 == 0;
+        ok = x > 0 && x <= 4096;
         if (ok) v->ch[3 - i] = (int)x;               /* the decoder walks the list backwards */
     }
     json_free(c); free(arena);
@@ -1581,7 +1592,7 @@ static int run_oracle(const char *model, const char *refdir){
     size_t nx = (size_t)grid.Nx * dit.dim;
     float *tap_noise = fmalloc(nx), *tap_ctx = fmalloc((size_t)capr.Nc * dit.dim);
     tap.after_noise_refiner = tap_noise; tap.after_context_refiner = tap_ctx;
-    static const int at[3] = { 0, 14, 29 };
+    const int at[3] = { 0, (dit.layers - 1) / 2, dit.layers - 1 };
     float *tap_l[3];
     for (int j = 0; j < 3; j++) { tap_l[j] = fmalloc(nx); tap.after_layer[j] = tap_l[j]; tap.layer_at[j] = at[j]; }
     t1 = now_s();
@@ -1593,9 +1604,9 @@ static int run_oracle(const char *model, const char *refdir){
         struct { const char *name; const float *got; size_t n; } stage[] = {
             { "dit_after_noise_refiner", tap_noise, (size_t)grid.N * dit.dim },
             { "dit_after_context_refiner", tap_ctx, (size_t)capr.Nc * dit.dim },
-            { "dit_after_layer0", tap_l[0], (size_t)grid.N * dit.dim },
-            { "dit_after_layer14", tap_l[1], (size_t)grid.N * dit.dim },
-            { "dit_after_layer29", tap_l[2], (size_t)grid.N * dit.dim },
+            { "dit_after_layer_first", tap_l[0], (size_t)grid.N * dit.dim },
+            { "dit_after_layer_mid", tap_l[1], (size_t)grid.N * dit.dim },
+            { "dit_after_layer_last", tap_l[2], (size_t)grid.N * dit.dim },
             { "dit_pred0", pred, nlat },
         };
         for (size_t k = 0; k < sizeof stage / sizeof stage[0]; k++) {
@@ -1604,6 +1615,15 @@ static int run_oracle(const char *model, const char *refdir){
             if (!(r < lim)) { fprintf(stderr, "[oracle] %s: rel %.3e is over %.1e\n", stage[k].name, r, lim); rc = 1; }
             free(want);
         }
+    }
+    if (st_find(&R, "dit_pred0")) {
+        /* the same evaluation without taps: on a device build it is the chain's (the taps keep it off the device chain) */
+        float *again = fmalloc(nlat), *want = ref_tensor(&R, "dit_pred0", NULL);
+        dit_forward(&dit, &capr, &grid, lat0, 1000.f - ts[0], again, NULL);
+        double r = cmp("dit_pred0 (no taps)", again, want, nlat);
+        double lim = g_bits == 32 ? 2e-4 : g_bits == 16 ? 3e-3 : 0.10;
+        if (!(r < lim)) { fprintf(stderr, "[oracle] dit_pred0 without taps: rel %.3e is over %.1e\n", r, lim); rc = 1; }
+        free(again); free(want);
     }
     {
         float *l1 = ref_tensor(&R, "latent_step0", NULL);
@@ -1661,6 +1681,7 @@ static int run_oracle(const char *model, const char *refdir){
 static void zi_vk_report(void){
 #ifdef COLI_VULKAN
     if (g_vk_ready) fprintf(stderr, "[VK] zimage: %llu matmuls on the GPU\n", coli_vk_matmul_calls());
+    zic_report();
 #endif
 }
 

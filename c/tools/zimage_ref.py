@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A reference run of Z-Image through diffusers on the CPU, saving what the C engine (zimage.c) must reproduce.
 
-    python tools/zimage_ref.py MODEL_DIR OUT_DIR [SIZE] [STEPS] [PROMPT]
+    python tools/zimage_ref.py MODEL_DIR OUT_DIR [SIZE|WxH] [STEPS] [PROMPT] [--float32-loop] [--no-fp32-dit]
 
 Needs torch (CPU is enough), diffusers >= 0.36 with ZImagePipeline, transformers, safetensors, numpy and Pillow,
 and the checkpoint (Tongyi-MAI/Z-Image-Turbo). It writes OUT_DIR/ref.safetensors, which `zimage --model MODEL_DIR
@@ -10,8 +10,9 @@ and the checkpoint (Tongyi-MAI/Z-Image-Turbo). It writes OUT_DIR/ref.safetensors
 Stages, each saved on its own so the engine's check can start every stage from the reference input:
   1. the prompt through the chat template and Qwen3-4B in float32: the second-to-last hidden state of the real tokens
   2. the denoising loop in bfloat16 from fixed noise: the latent after every step
-  3. one transformer evaluation in float32 at step 0, with taps after the noise refiner, the context refiner and
-     main layers 0, 14 and 29 (needs about 25 GB of RAM for the float32 weights; pass --no-fp32-dit to skip it)
+  3. one transformer evaluation in float32 at step 0, with taps after the noise refiner, the context refiner and the
+     first, middle and last main layers (the real model needs about 25 GB of RAM for it; --no-fp32-dit skips it)
+  (--float32-loop runs stage 2 in float32 as well: for a tiny model, where it costs nothing)
   4. the VAE decode of the final latent in float32
 The sizes are reduced to what a CPU can do in minutes: 384 x 384 and 8 steps take about six minutes."""
 import gc
@@ -26,7 +27,9 @@ SKIP_FP32 = "--no-fp32-dit" in sys.argv
 if len(args) < 2:
     sys.exit(__doc__)
 MODEL, OUT = args[0], args[1]
-SIZE = int(args[2]) if len(args) > 2 else 384
+SIZE_TEXT = args[2] if len(args) > 2 else "384"
+WIDTH, HEIGHT = (int(v) for v in (SIZE_TEXT.split("x") if "x" in SIZE_TEXT else (SIZE_TEXT, SIZE_TEXT)))
+LOOP_DTYPE_FP32 = "--float32-loop" in sys.argv
 STEPS = int(args[3]) if len(args) > 3 else 8
 PROMPT = args[4] if len(args) > 4 else "A small red lighthouse on a rocky cliff at dusk, calm sea, soft orange sky, photograph"
 SEED = 42
@@ -75,7 +78,8 @@ gc.collect()
 # ---- 2. the denoising loop, bfloat16 ----
 from diffusers import ZImagePipeline
 
-pipe = ZImagePipeline.from_pretrained(MODEL, text_encoder=None, tokenizer=None, vae=None, torch_dtype=torch.bfloat16)
+loop_dtype = torch.float32 if LOOP_DTYPE_FP32 else torch.bfloat16
+pipe = ZImagePipeline.from_pretrained(MODEL, text_encoder=None, tokenizer=None, vae=None, torch_dtype=loop_dtype)
 steps = {}
 
 
@@ -86,14 +90,14 @@ def on_step(p, i, t, kw):
 
 
 gen = torch.Generator().manual_seed(SEED)
-lat = pipe(prompt=None, prompt_embeds=[embeds.to(torch.bfloat16)], height=SIZE, width=SIZE, num_inference_steps=STEPS,
+lat = pipe(prompt=None, prompt_embeds=[embeds.to(loop_dtype)], height=HEIGHT, width=WIDTH, num_inference_steps=STEPS,
            guidance_scale=0.0, generator=gen, output_type="latent", callback_on_step_end=on_step,
            callback_on_step_end_tensor_inputs=["latents"]).images
 final = lat.float().numpy()
 keep("final_latent", final)
 for i, a in steps.items():
     keep(f"latent_step{i}", a)
-shape = (1, 16, 2 * (SIZE // 16), 2 * (SIZE // 16))
+shape = (1, 16, 2 * (HEIGHT // 16), 2 * (WIDTH // 16))
 keep("init_latent", torch.randn(shape, generator=torch.Generator().manual_seed(SEED), dtype=torch.float32).numpy())
 keep("sigmas", pipe.scheduler.sigmas.float().numpy())
 keep("timesteps", pipe.scheduler.timesteps.float().numpy())
@@ -117,13 +121,14 @@ if not SKIP_FP32:
 
     tr.noise_refiner[-1].register_forward_hook(tap("dit_after_noise_refiner"))
     tr.context_refiner[-1].register_forward_hook(tap("dit_after_context_refiner"))
-    for i in (0, 14, 29):
-        tr.layers[i].register_forward_hook(tap(f"dit_after_layer{i}"))
+    n_layers = len(tr.layers)
+    for name, i in (("first", 0), ("mid", (n_layers - 1) // 2), ("last", n_layers - 1)):
+        tr.layers[i].register_forward_hook(tap(f"dit_after_layer_{name}"))
     ts0 = float(tensors["timesteps"][0])
     with torch.no_grad():
         o = tr([torch.from_numpy(tensors["init_latent"][0]).unsqueeze(1)], torch.tensor([(1000.0 - ts0) / 1000.0]), [embeds], return_dict=False)[0]
     keep("dit_pred0", o[0].squeeze(1).float().numpy())
-    ntok = (SIZE // 16) ** 2
+    ntok = (HEIGHT // 16) * (WIDTH // 16)
     for k, v in taps.items():
         keep(k, v[:ntok] if "layer" in k else v)   # the image rows come first in the unified sequence
     del tr

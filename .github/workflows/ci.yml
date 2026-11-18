@@ -1517,6 +1517,50 @@ jobs:
           grep -q "vl-oracle\] all cases within tolerance" qwenimage-san.log
           grep -q "e2e-oracle\] all cases within tolerance" qwenimage-san.log
 
+  zimage-tiny-check:
+    name: Z-Image tiny oracle (text encoder, DiT, scheduler, VAE vs diffusers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c/tools/requirements-zimage-tiny.txt
+      - name: Install the pinned diffusers reference
+        run: pip install -r c/tools/requirements-zimage-tiny.txt
+      - name: Every stage against diffusers, from the reference input of that stage
+        run: |
+          cd c
+          # A tiny random pipeline in the real checkpoint's layout (a float32 DiT, a bf16 text encoder and VAE,
+          # a 64x96 picture of 24 image tokens padded to 32, a 49-token prompt padded to 64, a 64-wide timestep
+          # embedding instead of 256) and its float32 reference. With COLI_IMG_BITS=16 the engine computes on
+          # exactly those weights, so each stage must match to summation order; the engine exits non-zero on a
+          # mismatch.
+          python3 tools/make_zimage_tiny.py zimage_tiny
+          make zimage
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./zimage --model zimage_tiny --ref zimage_tiny/ref
+      - name: The shipping defaults (int8 weights) end to end, and the serve protocol
+        run: |
+          cd c
+          ./zimage --model zimage_tiny --ref zimage_tiny/ref
+          ./zimage --model zimage_tiny --prompt "a red fox in the snow" \
+                   --width 256 --height 256 --steps 2 --seed 1 --out tiny.png
+          python3 -c "import sys; sys.path.insert(0, '.'); import image_engine as e; w, h, c, px = e.decode_png(open('tiny.png', 'rb').read()); assert (w, h, c) == (256, 256, 4), (w, h, c)"
+          ZIMAGE_TINY=zimage_tiny python3 -m unittest -v tests.test_zimage_engine_serve
+      - name: The oracle and the serve tests again under ASan and UBSan
+        run: |
+          cd c
+          make -B zimage EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          export ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0 UBSAN_OPTIONS=print_stacktrace=1 OMP_NUM_THREADS=2
+          COLI_IMG_BITS=16 COLI_IMG_ACT8=0 ./zimage --model zimage_tiny --ref zimage_tiny/ref > zimage-san.log 2>&1 || true
+          ZIMAGE_TINY=zimage_tiny python3 -m unittest tests.test_zimage_engine_serve >> zimage-san.log 2>&1 || true
+          if grep -qE "ERROR: AddressSanitizer|runtime error:" zimage-san.log; then
+            cat zimage-san.log
+            exit 1
+          fi
+          grep -q "all stages within tolerance" zimage-san.log
+
   acestep-tiny-check:
     name: ACE-Step tiny oracle (VAE decoder, DiT, text encoder and the whole pipeline vs upstream's own handler)
     runs-on: ubuntu-latest
