@@ -245,6 +245,9 @@ size_t coli_vk_tensor_scale_count(int fmt, int I, int O, int gs);
  * are already E4M3-rounded by the caller, as the CPU kernel rounds x; down's output
  * comes back in f32 for the caller's own bf16 rounding. */
 #define COLI_VK_ACT_SWIGLU_V4 2
+/* Gemma 4's expert: gelu_pytorch_tanh(gate) * up, no clamps (the fused gate_up and expert_act shaders take it by their act;
+ * the grouped GEMM and GEMV routes, which fuse silu, are not taken with it: the per-expert route runs it). */
+#define COLI_VK_ACT_GEGLU 3
 typedef struct ColiVkExpert ColiVkExpert;
 int  coli_vk_xb_init(int D, int I, int act, float limit, float a, float b);   /* again: same D, I, new act */
 int  coli_vk_xb_ready(void);

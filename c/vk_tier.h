@@ -158,6 +158,7 @@ typedef struct { VktSrc kind; int gs; } VktFmt;     /* gs: group (block) size, 0
 #define VKT_ACT_SWIGLU 0
 #define VKT_ACT_SITU   1
 #define VKT_ACT_SWIGLU_V4 2
+#define VKT_ACT_GEGLU  3          /* gelu_pytorch_tanh(gate) * up (Gemma 4); the clamp fields are ignored */
 
 /* One expert as it sits in RAM: codes and scales of gate, up, down (float scales,
  * or ue8m0 bytes for VKT_SRC_MXFP4_E8M0; NULL for bf16/f32). Read during the call

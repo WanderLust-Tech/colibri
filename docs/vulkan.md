@@ -1917,6 +1917,23 @@ middle of a step leaves the host's caches describing whole steps: the same step 
 sized to the context and the chain declines when they do not fit. Not the bits of the CPU's: the residual agrees to about 1e-5
 (`COLI_VK_CHAIN_CHECK=1`), and the continuation of the tiny models and the real E2B, E4B and 26B-A4B is the CPU's.
 
+### Gemma 4 experts on the tier
+
+The 26B-A4B's routed experts go through the shared tier (`vk_tier.c`) like the other mixture-of-experts engines', wired in
+`gemma4.c` (`g4_vk_tier_start`, `moe_routed_vk`) by the recipe in `vk_tier.h`. What Gemma needed: GeGLU as an activation (`VKT_ACT_GEGLU`
+and `COLI_VK_ACT_GEGLU` = 3: `gelu_pytorch_tanh(gate) * up`, in `qmatmul_gate_up.comp` and `expert_act.comp`, tested against the CPU's
+formula in the self-test, `COLI_VK_TEST_MATMUL_ONLY=1`), and nothing else: its experts are already in the planar int4 blocks of 64
+(`VKT_SRC_I4U_PLANAR64`, the same as qwen36's) with float scales. The engine leaves the card what the dense matrices and the chain's KV
+mirrors need (`dense_bytes`), reads the expert history (`.coli_usage`; unseen experts count 1, so a card with room fills completely) and
+warm-starts from it on every core. A layer's step: the router and `pre_ff_ln2` on the host as before, `vkt_issue` for the experts the card
+holds, the CPU's kernel for the others, `vkt_join`, then every (row, rank) added in rank order. A step is one batch per layer; a prompt goes
+in blocks of 64 rows (the tier's GEMM route from 16 rows). The grouped GEMM and GEMV routes (`qmatmul_grp*.comp`, subgroups of 64) fuse
+silu and are not taken with GeGLU: a card with them (AMD) runs the per-expert route; adding GeGLU there is a push constant and an
+`if` in two shaders, and not done because it cannot be tried here. `COLI_VK_TIER_FAULT=n` (tests) makes the n-th joined batch fail,
+which hands that layer's experts to the CPU and stops the tier. Measured, RTX 5090: all 3,840 experts (11.96 GiB) resident after a warm start of
+5 to 7 s, a routed layer 0.57 ms (issue 0.05, the batch 0.5), 25 to 28 ms a token against 51 with the experts on the CPU
+([gemma4.md](gemma4.md#the-expert-tier-the-26b-a4bs-routed-experts-on-the-card)).
+
 ### Adding an engine to the chain
 
 The recipe qwen36_chain.h and qwen38_chain.h follow, for the engines still on the

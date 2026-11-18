@@ -325,7 +325,7 @@ milliseconds of noise; the same continuation in every mode):
 
 Through the gateway the E2B writes 35 tokens in 0.6 s on the chain and 2.2 s on the CPU. The 26B-A4B gains a fifth to a quarter
 (its two per-matrix runs differ by 16 ms with the experts' cache warm or not, so the margin is wide): what is left of its time is
-mostly the routed experts on the CPU, which is where the next gain is (an expert tier, see "What is not there").
+mostly the routed experts on the CPU, which is what the expert tier below takes (its last row of the table).
 
 What it holds. The host's caches stay canonical (every step copies its new rows back), so prefix reuse, a rewind and the CPU
 path see what they always saw; the card keeps a mirror for the conversation it last served (a sliding layer's ring is exactly
@@ -350,13 +350,58 @@ and the same row among several conversations may differ in the last bits. The 17
 (`BatchTest`, `DenseBatchTest`, `PleBatchTest`: two, seven, one-thread and small-cache cases). The CPU stays the default for that
 reason.
 
+### The expert tier (the 26B-A4B's routed experts on the card)
+
+The 26B-A4B's routed experts, 128 a layer in 30 layers, are 3.2 MiB each (the engine's own int4 planar blocks of 64 with a scale
+for each, 12 GiB in all), and the card holds them: the shared Vulkan expert tier (`vk_tier.c`, the one qwen36 and the other
+mixture-of-experts engines use; [Vulkan](vulkan.md#gemma-4-experts-on-the-tier)) reads them as they are, with Gemma's GeGLU
+(`gelu_pytorch_tanh(gate) * up`) as its activation. It starts with the card on (`COLI_VULKAN=1`, a discrete card; an integrated
+one keeps the experts with the CPU's cache): after the weights are read it leaves what the dense matrices and the chain's KV
+mirrors will need (3.4 GiB at an 8192-token window) and `COLI_VK_TIER_RESERVE_GB` (the router gives it 6) and fills the rest
+with experts, from the history of what the conversations routed to (`.coli_usage` beside the model, or `COLI_USAGE`; the hottest
+first, and what has not been seen follows, layer by layer), so a card with room holds all of them: 3,840 experts in 5 to 7 s from the
+container's files on this machine. Then it adapts as the other engines' do: an expert the CPU computed is promoted when there is
+room or when it is hotter than the coldest resident, and the history is saved after every turn. A layer's routed experts run as one
+batch on the card while the CPU computes the ones the card does not hold, then every rank of every row is added in rank order,
+the card's and the CPU's alike. The router on the host and the batch are two round trips a layer (the chain's frame, the
+batch, the chain's tail), which is what is left of the time: about 0.57 ms a routed layer (0.5 of it waiting for the batch).
+
+Measured on an RTX 5090 with every expert on the card (`G4_TEST` greedy decode, as above; the same continuation):
+
+| | CPU | card, chain, experts on the CPU | card, chain, experts on the card |
+|---|---|---|---|
+| 26B-A4B, ms a token | 110 | 51 | **25 to 28** (36 to 40 tokens a second) |
+| 26B-A4B, a 1,676-token prompt through the gateway | 30.6 s (55 tokens a second) | | **15.0 s** (112 tokens a second) |
+
+The logits of the tier's run are within 4e-5 of the CPU's on the real 26B-A4B and the greedy tokens are the CPU's; through a
+router (`--gpu on`, `--kv-slots 2`) two conversations interleaved turn by turn, one of 2,467 tokens (past the window), answered
+word for word as on the CPU in all seven turns, every routed expert on the card. A prompt goes to the tier in blocks of 64 rows.
+The tier's last line of a turn, `[VK] tier gemma4 turn: device N of N routed experts`, says how much ran on the card, and the
+dashboard's expert map marks the experts the card holds (its TIERS line counts them). `tests/test_gemma4_tier.py` holds, on the tiny model, that the tier
+takes every expert and the continuation is the CPU's; that a budget for a few leaves the rest with the CPU and the answer
+unchanged; that `COLI_VK_TIER=0` keeps the experts with the CPU; that an expert batch that fails in the middle of a step
+(`COLI_VK_TIER_FAULT=n` fakes it) is recomputed on the CPU, the tier stops and the answer is unchanged; and that the history is
+written and read back.
+
+What it costs and what it leaves. The card holds 12 GiB more: the 26B-A4B takes 15.3 GiB of it with the tier (3.2 without; read from
+the driver while it decoded), so a second model of the router finds about 12 GiB free on this card, not 24. Qwen3-Coder's tier sizes
+itself to what is free less the reserve, so it holds fewer experts; a model that finds less than the reserve and the minimum free
+goes to the CPU or the router stops an idle holder, as for any two models that both want the card. `COLI_VK_TIER_GB=4` (a model's
+settings can carry it) caps Gemma's tier, and the CPU keeps the rest of the experts in its cache as before. The card's free memory is read from the driver's
+budget, which on Windows does not subtract what other programs hold (the desktop's 4 GB here): when they leave less than the
+budget says, the tier's uploads that do not fit are refused and the CPU computes those experts. Still on the per-matrix path
+(and so slower than the chain): the router and a row among several conversations; a prompt chunk's rows go through the tier,
+but the matrices around them are the per-matrix calls they were. The grouped GEMM and GEMV routes (a card with subgroups of 64,
+AMD) fuse silu and are not taken with GeGLU; the per-expert route runs it.
+
 ## What is not there
 
 - **Video with sound, and video without ffmpeg.** The sound of a video is not read, and a video file needs an ffmpeg on the server (frames you send yourself do not).
-- **A GPU path for the experts.** The routed experts of the 26B-A4B stay on the CPU, and a graphics card runs the dense matrices
-  only (see [Vulkan](#vulkan-for-the-dense-matrices) above), a decode row's layers in one submission
-  ([the chain](#the-decode-chain-gemma4_chainh)). The experts are most of what is left of the 26B-A4B's time a token. The dense
-  models (E2B, E4B, 31B) have none and run entirely on the card.
+- **The router on the card.** The 26B-A4B's routed experts are on the card ([the tier](#the-expert-tier-the-26b-a4bs-routed-experts-on-the-card))
+  but its router (a 128-way softmax and a top 8) runs on the host, so a routed layer is two round trips. Taking it onto the card
+  (a top-k in the chain's frame and a batch that reads its expert numbers there) would make a layer one frame and take out the
+  host's round trips; the batch's own 0.4 ms of device time a layer (a card of 32 lanes runs the per-expert route) stays, so the
+  gain is a part of the 25 ms, not all of it. Not built. The dense models (E2B, E4B, 31B) have no experts and run entirely on the card.
 - **A layer-segment adapter** (`docs/segment-runtime.md`): the family is exempt from that gate until it has one.
 - **The 31B** ran on 2026-11-10 (converted from the download in 279 s to a 31.4 GB container; loaded in 17 s, 29.2 GB resident,
   served on its own port at low priority). "What is the capital of France?" answered "The capital of France is Paris." in

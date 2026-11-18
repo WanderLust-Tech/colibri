@@ -1323,6 +1323,12 @@ int vkt_issue_w(int layer, const float *x, int S, int K, const int *idx, const f
     return issue(layer, x, S, K, idx, w, taken);
 }
 
+/* COLI_VK_TIER_FAULT=n (tests): the n-th batch the engine joins counts as failed, as a lost device would make it */
+static int fault_join(void) {
+    static long at = -2, seen;
+    if (at == -2) { const char *e = getenv("COLI_VK_TIER_FAULT"); at = e && *e ? atol(e) : 0; }
+    return at > 0 && ++seen == at;
+}
 int vkt_join(const float **rows) {
     if (!T.inflight) return 0;
     if (T.big) {
@@ -1334,6 +1340,7 @@ int vkt_join(const float **rows) {
     T.cpu_ms += tc;
     int ok = !T.d0_inflight || coli_vk_xb_join(T.by, &dms);
     int ok1 = !T.d2_inflight || coli_vk_xb_join_dev(1, T.by + T.d2_rows0, &dms1);
+    if (fault_join()) ok = 0;
     T.d0_inflight = T.d2_inflight = 0;
     double tw = vkt_now_ms() - t0;
     T.wait_ms += tw;
@@ -1498,7 +1505,8 @@ int vkt_init(const VktConfig *cfg, uint32_t *const *heat) {
         return 0;
     }
     int act = T.c.act == VKT_ACT_SITU ? COLI_VK_ACT_SITU
-            : T.c.act == VKT_ACT_SWIGLU_V4 ? COLI_VK_ACT_SWIGLU_V4 : COLI_VK_ACT_SWIGLU;
+            : T.c.act == VKT_ACT_SWIGLU_V4 ? COLI_VK_ACT_SWIGLU_V4
+            : T.c.act == VKT_ACT_GEGLU ? COLI_VK_ACT_GEGLU : COLI_VK_ACT_SWIGLU;
     if (!coli_vk_xb_init(T.c.hidden, T.c.inter, act, T.c.act_limit, T.c.act_a, T.c.act_b)) {
         fprintf(stderr, "[VK] tier %s: no expert batch on this device (shaders?), the experts stay on the CPU\n", eng);
         return 0;
@@ -1723,6 +1731,8 @@ void vkt_report(const char *scope, unsigned long long ram_hits, unsigned long lo
     ColiVkXbStats xs; coli_vk_xb_stats(&xs);
     if (xs.cooperative_matmuls)
         fprintf(stderr, " | cooperative matmuls: %llu", xs.cooperative_matmuls);
+    if (xs.grouped_batches || xs.gemv_batches)
+        fprintf(stderr, " | grouped batches: %llu GEMM, %llu GEMV (of %llu)", xs.grouped_batches, xs.gemv_batches, xs.batches);
     fprintf(stderr, "\n");
 }
 

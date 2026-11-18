@@ -78,6 +78,18 @@ static ColiVkTensor *g4c_tensor(QMat *W) {
     return (ColiVkTensor *)W->vk;
 }
 
+/* The device memory the chain's KV mirrors take (g4c_setup's `need`, from the same rows), for the expert tier to leave room for. */
+static size_t g4c_mirror_bytes(const Model *m) {
+    const Cfg *c = &m->c; size_t need = 0;
+    for (int l = 0; l < c->n_layers; l++) {
+        const Layer *y = &m->L[l];
+        if (y->kv_src >= 0) continue;
+        size_t rows = y->full ? (size_t)m->max_t : (size_t)(c->window < m->ring ? c->window : m->ring);
+        need += rows * (size_t)y->nkv * y->hd * 2 * sizeof(float);
+    }
+    return need;
+}
+
 /* ---- setup ------------------------------------------------------------------------ */
 
 static G4Chain *g4c_setup(Model *m) {

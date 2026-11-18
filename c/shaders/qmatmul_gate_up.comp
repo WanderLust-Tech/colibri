@@ -18,6 +18,7 @@
 //   2  DeepSeek V4: gate and up rounded to bf16 first, then act 0's clamps and
 //      g * sigmoid(g) * u as its CPU computes it (act_v4 below); the route weight,
 //      bf16 and E4M3 rounding that follow run in expert_act_v4.comp
+//   3  GeGLU gelu_tanh(g) * u (Gemma 4: gelu_pytorch_tanh), no clamps
 #extension GL_KHR_shader_subgroup_arithmetic : require
 layout(local_size_x = 256) in;
 
@@ -75,6 +76,8 @@ float act_v4(float g, float u, float limit) {
 
 // Preserve small SiTU inputs; tanh(x) rounds to x below 2^-12 in f32.
 float situ_tanh(float x) { return abs(x) < 0.000244140625 ? x : tanh(x); }
+// act 3: gelu_pytorch_tanh, the CPU's 0.5 g (1 + tanh(sqrt(2/pi) (g + 0.044715 g^3)))
+float gelu_tanh(float g) { return 0.5 * g * (1.0 + situ_tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))); }
 
 void main() {
     int s   = int(gl_WorkGroupID.y);
@@ -186,6 +189,8 @@ void main() {
             h = p.a * situ_tanh(gt / p.a) * (1.0 / (1.0 + exp(-gt))) * (p.b * situ_tanh(ut / p.b));
         } else if (p.act == 2) {
             h = act_v4(gt, ut, p.limit);
+        } else if (p.act == 3) {
+            h = gelu_tanh(gt) * ut;
         } else {
             if (p.limit > 0.0) {
                 if (gt > p.limit) gt = p.limit;

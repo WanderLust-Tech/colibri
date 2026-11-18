@@ -58,6 +58,8 @@
 #include "constrain.h"
 #ifdef COLI_VULKAN
 #include "backend_vulkan.h"
+#include "vk_tier.h"
+#include "route_trace.h"       /* the tier's expert history (.coli_usage) */
 #endif
 
 #ifdef _WIN32
@@ -294,6 +296,7 @@ typedef struct {
     int cap; size_t blob_bytes;
     LCache *cache; uint64_t clock; uint32_t group; uint64_t hits, miss; double disk_s;
     uint8_t *ehit;                                    /* [layers*experts] routed this request */
+    int vk_hist;                                      /* the Vulkan expert tier is on: routes are counted into route_trace.h's history */
     int max_t, ring, chunk, slack;                    /* chunk: rows of prompt per step (<= CHUNK); slack: positions the sliding
                                                        * layers keep beyond window + chunk, so a conversation can be rewound; ring: all three */
     /* working memory for one chunk */
@@ -789,6 +792,78 @@ static XfExpert expert_view(const Model *m, const uint8_t *buf) {
     return (XfExpert){g4, u4, d4, gs, us, ds};
 }
 
+#ifdef COLI_VULKAN
+/* ---- the Vulkan routed-expert tier (vk_tier.c) ---------------------------------------------------------------
+ * With the tier on, a layer's routed experts that the card holds run there as one batch (vkt_issue) while the CPU computes the
+ * rest, each (row, rank) pair into a row of its own with the kernel the CPU path uses; then every rank of every row is added to
+ * e_out in rank order, the card's and the CPU's alike, so the order of the sum never depends on which experts were resident.
+ * Every expert the CPU computed hands its RAM bytes to the tier (vkt_note), which may promote it. */
+static double g_vkp_issue, g_vkp_cpu, g_vkp_join, g_vkp_sum; static long long g_vkp_layers;   /* where a routed layer's time goes */
+#define G4_VK_ROWS 64                              /* rows of a prompt step the tier takes in one batch (the tier does not stream) */
+static VktExpertSrc g4_vk_src(const XfExpert *x) { return (VktExpertSrc){x->g4, x->u4, x->d4, x->gs, x->us, x->ds}; }
+
+/* the pairs with want[i] set, computed on the CPU into ctb[i*H ..] */
+static void g4_vk_cpu(Model *m, int l, const float *xb, int rows, const int *ib, const uint8_t *want, float *ctb) {
+    Cfg *c = &m->c; int H = c->hidden, E = c->n_experts, K = c->topk, F = c->moe_inter, n = rows * K;
+    int *uniq = xmalloc((size_t)n * sizeof(int)); int nu = 0;
+    uint8_t *seen = calloc((size_t)E, 1);
+    for (int i = 0; i < n; i++) if (want[i] && !seen[ib[i]]) { seen[ib[i]] = 1; uniq[nu++] = ib[i]; }
+    free(seen);
+    if (nu) {
+        ESlot **slots = xmalloc((size_t)m->cap * sizeof(ESlot *));
+        int *pos_of = xmalloc((size_t)E * sizeof(int));
+        for (int g0 = 0; g0 < nu; g0 += m->cap) {
+            int ng = nu - g0 < m->cap ? nu - g0 : m->cap;
+            experts_ready(m, l, uniq + g0, ng, slots);
+            for (int e = 0; e < E; e++) pos_of[e] = -1;
+            for (int i = 0; i < ng; i++) { m->xe[i] = expert_view(m, slots[i]->buf); pos_of[uniq[g0 + i]] = i; }
+            for (int i = 0; i < n; i++) m->eptr[i] = want[i] && pos_of[ib[i]] >= 0 ? &m->xe[pos_of[ib[i]]] : NULL;
+            xf_moe_compute(ctb, xb, rows, K, H, F, ib, m->eptr, 0, m->scratch);
+            for (int i = 0; i < ng; i++) { VktExpertSrc vs = g4_vk_src(&m->xe[i]); vkt_note(l, uniq[g0 + i], &vs); }
+        }
+        free(slots); free(pos_of);
+    }
+    free(uniq);
+}
+
+/* e_out (zeroed) += the routed experts of the S rows routed in m->ridx / m->rval, e_in the rows' input */
+static void moe_routed_vk(Model *m, int l, int S) {
+    Cfg *c = &m->c; int H = c->hidden, K = c->topk;
+    int B = vkt_step_rows(S, G4_VK_ROWS);
+    size_t nmax = (size_t)B * K;
+    uint8_t *taken = xmalloc(nmax), *want = xmalloc(nmax);
+    const float **dev = xmalloc(nmax * sizeof(*dev));
+    float *ctb = xmalloc(nmax * (size_t)H * sizeof(float));
+    for (int s0 = 0; s0 < S; s0 += B) {
+        int rows = S - s0 < B ? S - s0 : B, n = rows * K;
+        const float *xb = m->e_in + (size_t)s0 * H;
+        const int *ib = m->ridx + (size_t)s0 * K; const float *vb = m->rval + (size_t)s0 * K;
+        double t0 = now_s();
+        int ndev = vkt_issue(l, xb, rows, K, ib, taken);
+        double t1 = now_s();
+        for (int i = 0; i < n; i++) want[i] = !taken[i];
+        g4_vk_cpu(m, l, xb, rows, ib, want, ctb);
+        double t2 = now_s();
+        if (ndev && !vkt_join(dev)) {                          /* the batch failed (the tier stops): those pairs here */
+            g4_vk_cpu(m, l, xb, rows, ib, taken, ctb);
+            memset(taken, 0, (size_t)n);
+        }
+        double t3 = now_s();
+        g_vkp_issue += t1 - t0; g_vkp_cpu += t2 - t1; g_vkp_join += t3 - t2; g_vkp_layers++;
+        for (int s = 0; s < rows; s++) {
+            float *os = m->e_out + (size_t)(s0 + s) * H;
+            for (int k = 0; k < K; k++) {
+                int i = s * K + k; float w = vb[i];
+                const float *hh = taken[i] ? dev[i] : ctb + (size_t)i * H;
+                for (int d = 0; d < H; d++) os[d] += w * hh[d];
+            }
+        }
+        g_vkp_sum += now_s() - t3;
+    }
+    free(taken); free(want); free(dev); free(ctb);
+}
+#endif
+
 /* the routed half of the feed-forward for S rows: e_out = sum_k w_k * expert_k(e_in) */
 static void moe_routed(Model *m, int l, const float *xres, int S) {
     Cfg *c = &m->c; Layer *y = &m->L[l];
@@ -810,9 +885,15 @@ static void moe_routed(Model *m, int l, const float *xres, int S) {
             idx[s * K + k] = b; val[s * K + k] = bv; tot += bv;
         }
         for (int k = 0; k < K; k++) { val[s * K + k] = val[s * K + k] / tot * y->router_pes[idx[s * K + k]]; m->ehit[(size_t)l * E + idx[s * K + k]] = 1; }
+#ifdef COLI_VULKAN
+        if (m->vk_hist) rt_count(l, idx + (size_t)s * K, K);   /* the tier's history: which experts a conversation uses */
+#endif
         rms_w(m->e_in + (size_t)s * H, xres + (size_t)s * H, y->pre_ff_ln2, H, c->eps);
     }
     memset(m->e_out, 0, (size_t)S * H * sizeof(float));
+#ifdef COLI_VULKAN
+    if (vkt_ready()) { moe_routed_vk(m, l, S); return; }   /* the card's experts as one batch, the CPU's beside it */
+#endif
     /* the distinct experts, taken cap at a time */
     int *uniq = xmalloc((size_t)S * K * sizeof(int)); int nu = 0;
     uint8_t *seen = calloc((size_t)E, 1);
@@ -1210,6 +1291,93 @@ static int next_rows(const Model *m, const ImgSpan *sp, int nsp, int pos, int le
  * wholly inside one chunk. */
 #ifdef COLI_VULKAN
 #include "gemma4_chain.h"
+
+/* ---- the expert tier's start ---------------------------------------------------------------------------------
+ * After the weights are loaded, before the first token. The tier takes the card's free memory less what the dense matrices and the
+ * chain's KV mirrors will need (they are placed on first use, after this), less COLI_VK_TIER_RESERVE_GB; COLI_VK_TIER_GB caps it.
+ * It fills from the expert history (.coli_usage beside the model, or COLI_USAGE) or, with none yet, evenly from layer 0 on, reading
+ * the experts from the container on every core; then it adapts: an expert the CPU computes is promoted when there is room or when
+ * it is hotter than the coldest resident. COLI_VK_TIER=0 turns the tier off. */
+static char g_g4_usage[2100];
+static int g_g4_dev = 0;                           /* the Vulkan device is up (main) */
+static size_t g4_qm_dev(const QMat *W) { return W->q ? (size_t)W->O * W->I + (size_t)W->O * 4 : 0; }
+static void g4_vk_turn(Model *m, const char *scope) {
+    if (!m->vk_hist) return;
+    vkt_report(scope, m->hits, m->miss);
+    rt_save(g_g4_usage, 1);
+}
+static Model *g_g4_model_for_exit = NULL;           /* the model whose history and report the exit hook writes */
+static void g4_vk_exit(void) {
+    if (g_g4_model_for_exit) g4_vk_turn(g_g4_model_for_exit, "run");
+    if (g_vkp_layers)
+        fprintf(stderr, "[VK] gemma4 routed layers: %lld, per layer %.3f ms: issue %.3f, experts on the CPU %.3f, join %.3f, sum %.3f\n",
+                g_vkp_layers, 1e3 * (g_vkp_issue + g_vkp_cpu + g_vkp_join + g_vkp_sum) / (double)g_vkp_layers,
+                1e3 * g_vkp_issue / (double)g_vkp_layers, 1e3 * g_vkp_cpu / (double)g_vkp_layers,
+                1e3 * g_vkp_join / (double)g_vkp_layers, 1e3 * g_vkp_sum / (double)g_vkp_layers);
+}
+static void g4_vk_tier_start(Model *m, const char *snap) {
+    Cfg *c = &m->c; int L = c->n_layers, E = c->n_experts;
+    if (!g_g4_dev || !c->moe || !vkt_wanted()) return;
+    if (coli_vk_device_shares_ram()) { fprintf(stderr, "[VK] tier gemma4: the device shares the CPU's RAM, the experts stay with the CPU's cache\n"); return; }
+    size_t dense = 0;
+    if (g_gvk) {                                       /* what is to be placed on the device after this call */
+        for (int l = 0; l < L; l++) {
+            const Layer *y = &m->L[l];
+            dense += g4_qm_dev(&y->q) + g4_qm_dev(&y->k) + g4_qm_dev(&y->v) + g4_qm_dev(&y->o) + g4_qm_dev(&y->gate) +
+                     g4_qm_dev(&y->up) + g4_qm_dev(&y->down) + g4_qm_dev(&y->ple_gate) + g4_qm_dev(&y->ple_proj);
+        }
+        dense += g4_qm_dev(&m->embed);
+        if (g_vk_chain) dense += g4c_mirror_bytes(m);
+        dense += dense / 16 + ((size_t)256 << 20);     /* the chain's buffers, the pool's rounding */
+    }
+    if (dense) fprintf(stderr, "[VK] tier gemma4: %.2f GiB of the card kept for the dense matrices%s and the chain's buffers\n", dense / 1073741824.0, g_vk_chain ? ", the KV mirrors" : "");
+    VktConfig vc = {.engine = "gemma4", .layers = L, .experts = E, .hidden = c->hidden, .inter = c->moe_inter, .topk = c->topk,
+                    .gate_up = {VKT_SRC_I4U_PLANAR64, 64}, .down = {VKT_SRC_I4U_PLANAR64, 64}, .act = VKT_ACT_GEGLU,
+                    .max_rows = G4_VK_ROWS * c->topk,
+                    .ram_reserve = m->blob_bytes * (size_t)m->cap * (size_t)L, .dense_bytes = dense};
+    rt_init("gemma4", L, E);
+    rt_drop_row(L);                                    /* every layer routes; no extra row */
+    const char *up = getenv("COLI_USAGE");
+    if (up && *up) snprintf(g_g4_usage, sizeof g_g4_usage, "%s", up);
+    else snprintf(g_g4_usage, sizeof g_g4_usage, "%s/.coli_usage", snap);
+    int64_t h = rt_load(g_g4_usage);
+    if (h > 0) fprintf(stderr, "[USAGE] expert history: %lld selections (%s)\n", (long long)h, g_g4_usage);
+    /* the warm start plans from experts with a count, hottest first: floor every count at 1, so what the history has not seen yet
+     * follows the seen ones (layer by layer) and a card with room for all of them holds all of them, history or none */
+    uint32_t *const *heat = rt_counts_all();
+    for (int l = 0; l < L; l++) { uint32_t *row = rt_counts(l); for (int e = 0; row && e < E; e++) if (!row[e]) row[e] = 1; }
+    /* the device's own atexit (main) is registered already: the tier goes first at exit, then the chain, then the device */
+    if (!vkt_init(&vc, heat)) { rt_destroy(); }
+    else {
+        m->vk_hist = 1;
+        g_g4_model_for_exit = m;
+        atexit(vkt_shutdown); atexit(g4_vk_exit);
+        int all = L * E;
+        int *pl = malloc((size_t)all * sizeof(int)), *pe = malloc((size_t)all * sizeof(int));
+        const char *warm = getenv("COLI_VK_TIER_WARM");   /* 0: no warm start, the tier fills as experts pass by */
+        int n = pl && pe && !(warm && *warm == '0') ? vkt_plan(pl, pe, all) : 0;
+        if (n > 0) {
+            double t0 = now_s();
+#pragma omp parallel
+            {
+                uint8_t *buf = malloc(m->blob_bytes);
+                if (!buf) die("out of memory for an expert");
+#pragma omp for schedule(dynamic, 4)
+                for (int i = 0; i < n; i++) {
+                    st_read_slice_raw_cap(&m->S, m->L[pl[i]].blob_name, (int64_t)pe[i] * (int64_t)m->blob_bytes,
+                                          (int64_t)m->blob_bytes, buf, (int64_t)m->blob_bytes, 0);
+                    XfExpert xe = expert_view(m, buf);
+                    VktExpertSrc src = g4_vk_src(&xe);
+                    vkt_put(pl[i], pe[i], &src);
+                }
+                free(buf);
+            }
+            vkt_put_done();
+            fprintf(stderr, "[VK] tier gemma4: warm start, %d experts %s in %.1fs\n", n, h > 0 ? "from the history" : "(no history yet)", now_s() - t0);
+        }
+        free(pl); free(pe);
+    }
+}
 #endif
 static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, const ImgSpan *sp, int nsp,
                           Seq *const *qs, const int *ps) {
@@ -1775,16 +1943,21 @@ static void serve_hwinfo(void) {
 }
 
 static void serve_tiers_emap(Model *m) {
-    Cfg *c = &m->c; int E = c->n_experts, filled = 0;
+    Cfg *c = &m->c; int E = c->n_experts, ram = 0, dev = 0, both = 0;
     if (!c->moe) return;
-    for (int l = 0; l < c->n_layers; l++) for (int i = 0; i < m->cap; i++) filled += m->cache[l].s[i].eid >= 0;
-    printf("TIERS 0 %d %d 0.00 %.2f\n", filled, c->n_layers * E - filled, filled * (double)m->blob_bytes / 1e9);
     char *hex = malloc((size_t)c->n_layers * E * 2 + 1); int w = 0;
     for (int l = 0; l < c->n_layers; l++) for (int e = 0; e < E; e++) {
-        int b = (m->cache[l].slot_of[e] >= 0 ? 1 : 0) << 6;
+        int inram = m->cache[l].slot_of[e] >= 0, tier = inram ? 1 : 0;
+#ifdef COLI_VULKAN
+        if (vkt_resident(l, e)) { tier = 2; dev++; both += inram; }      /* on the Vulkan device */
+#endif
+        ram += inram;
+        int b = tier << 6;
         hex[w++] = "0123456789abcdef"[b >> 4]; hex[w++] = "0123456789abcdef"[b & 15];
     }
     hex[w] = 0;
+    /* TIERS <on the card> <in RAM> <on disk only> <GB on the card> <GB in RAM>; an expert in both counts on the card */
+    printf("TIERS %d %d %d %.2f %.2f\n", dev, ram - both, c->n_layers * E - dev - (ram - both), dev * (double)m->blob_bytes / 1e9, (ram - both) * (double)m->blob_bytes / 1e9);
     printf("EMAP %d %d %s\n", c->n_layers, E, hex); fflush(stdout);
     free(hex);
 }
@@ -1809,6 +1982,9 @@ static void req_finish(Model *m, Req *r) {
            m->t_attn - r->attn0, m->t_head - r->head0, m->forwards - r->fwd0);
     fflush(stdout);
     serve_hits(m);
+#ifdef COLI_VULKAN
+    g4_vk_turn(m, "turn");
+#endif
     req_release(r);
 }
 
@@ -2083,6 +2259,7 @@ int main(int argc, char **argv) {
         const char *r = getenv("G4_VK_RESERVE_GB");
         if (r && *r) g_gvk_reserve = atof(r);
         atexit(coli_vk_shutdown);
+        g_g4_dev = 1;
         fprintf(stderr, "[gemma4] dense matrices on %s\n", g_gvk ? coli_vk_device_name() : "the CPU (G4_VK_DENSE=0)");
         /* the decode chain (gemma4_chain.h): COLI_VK_CHAIN=0 off; on a discrete card it is on */
         if (g_gvk) {
@@ -2096,6 +2273,9 @@ int main(int argc, char **argv) {
     double t0 = now_s();
     model_init(&m, snap, cap, ctx);
     fprintf(stderr, "[gemma4] weights loaded in %.1fs, RSS %.2f GB\n", now_s() - t0, rss_gb());
+#ifdef COLI_VULKAN
+    g4_vk_tier_start(&m, snap);
+#endif
     if (test) return run_test(&m);
     static G4Tok T;
     char tp[2048]; snprintf(tp, sizeof tp, "%s/tokenizer.json", snap);

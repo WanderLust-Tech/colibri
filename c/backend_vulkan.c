@@ -5884,6 +5884,7 @@ static double xref_dot(const float *x, const uint8_t *row, const float *sc, int 
 }
 static float xref_act(float g, float u, int act, float limit, float a, float b) {
     if (act == COLI_VK_ACT_SITU) return a * tanhf(g / a) * (1.0f / (1.0f + expf(-g))) * (b * tanhf(u / b));
+    if (act == COLI_VK_ACT_GEGLU) return 0.5f * g * (1.f + tanhf(0.7978845608028654f * (g + 0.044715f * g * g * g))) * u;
     if (limit > 0) { if (g > limit) g = limit; if (u > limit) u = limit; if (u < -limit) u = -limit; }
     return (g / (1.0f + expf(-g))) * u;
 }
@@ -5987,7 +5988,7 @@ static int run_xbatch(int fmt, int dfmt, int gs, int D, int I, int act, float li
         if (!bad && (!coli_vk_xb_issue(ex, &three, 1, xx) || !coli_vk_xb_join(yr, NULL))) bad = 1;
         else if (!bad) same &= !memcmp(y1, yr[1], (size_t)D * 4);
     }
-    const char *an = act == COLI_VK_ACT_SITU ? "situ" : limit > 0 ? "swiglu-limit" : "swiglu";
+    const char *an = act == COLI_VK_ACT_SITU ? "situ" : act == COLI_VK_ACT_GEGLU ? "geglu" : limit > 0 ? "swiglu-limit" : "swiglu";
     printf("xbatch fmt=%d/%d gs=%d D=%d I=%d %s, rows %d/%d/%d/%d/%d (GEMM from %d, %llu cooperative matmuls) | maxrel=%.3g | row bits independent of the batch: %s | device %.3f ms\n",
            fmt, dfmt, gs, D, I, an, rows[0], rows[1], rows[2], rows[3], rows[4], g_xb[0].gemm_rows,
            coop_done, maxrel, same ? "yes" : "NO", dms);
@@ -6222,6 +6223,7 @@ static int run_xbatch_all(void) {
     bad |= run_xbatch(10, 1, 64, 320, 160, COLI_VK_ACT_SWIGLU, 0.f);     /* fp32 gate/up, cooperative down */
     bad |= run_xbatch(4, 4, 64, 320, 160, COLI_VK_ACT_SWIGLU, 0.7f);     /* the clamped SwiGLU */
     bad |= run_xbatch(7, 7, 32, 320, 160, COLI_VK_ACT_SITU, 0.f);        /* SiTU-GLU on MXFP4 */
+    bad |= run_xbatch(4, 4, 64, 320, 160, COLI_VK_ACT_GEGLU, 0.f);       /* Gemma 4's GeGLU on int4 */
     xb_shutdown(&g_xb[0]);
     /* odd widths: D, I not multiples of the groups, offsets past odd row sizes */
     if (!coli_vk_xb_init(200, 72, COLI_VK_ACT_SWIGLU, 0.f, 0.f, 0.f)) return 1;

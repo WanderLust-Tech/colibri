@@ -8,6 +8,7 @@
 //   1  SiTU-GLU a*tanh(g/a)*sigmoid(g) * b*tanh(u/b)
 //   2  DeepSeek V4: gate and up rounded to bf16, then 0's clamps and g * sigmoid(g) * u
 //      in its CPU's form (act_v4, as in qmatmul_gate_up.comp)
+//   3  GeGLU gelu_tanh(g) * u (Gemma 4), no clamps
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer G { float gate[]; };
@@ -37,6 +38,7 @@ float act_v4(float g, float u, float limit) {
 // Below 2^-12 the cubic correction is below half an f32 ULP. Some drivers'
 // tanh lowering loses these values through cancellation around exp(0) == 1.
 float situ_tanh(float x) { return abs(x) < 0.000244140625 ? x : tanh(x); }
+float gelu_tanh(float g) { return 0.5 * g * (1.0 + situ_tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))); }
 
 void main() {
     int i = int(gl_GlobalInvocationID.x) + int(gl_GlobalInvocationID.y) * int(gl_NumWorkGroups.x) * 256;
@@ -46,6 +48,8 @@ void main() {
         h = p.a * situ_tanh(gt / p.a) * (1.0 / (1.0 + exp(-gt))) * (p.b * situ_tanh(ut / p.b));
     } else if (p.act == 2) {
         h = act_v4(gt, ut, p.limit);
+    } else if (p.act == 3) {
+        h = gelu_tanh(gt) * ut;
     } else {
         if (p.limit > 0.0) {
             if (gt > p.limit) gt = p.limit;

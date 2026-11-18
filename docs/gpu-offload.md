@@ -42,7 +42,7 @@ of ours loaded; the desktop and the user's programs held 5.5 GB at the time, and
 | Qwen3-Coder-30B-A3B | 17.3 GB | 15.2 GiB of experts, 1.15 GiB of dense matrices, chain buffers. The tier sizes itself to the free memory less `COLI_VK_TIER_RESERVE_GB`, so on a busy card it holds fewer experts |
 | Gemma 4 E2B | 2.4 GB | dense matrices only; the host copy stays in RAM |
 | Gemma 4 E4B | 4.4 GB | |
-| Gemma 4 26B-A4B | 2.5 GB | dense only; the experts stay on the CPU (cached in RAM, or read from disk) |
+| Gemma 4 26B-A4B | 15.3 GiB (3.2 GiB with `COLI_VK_TIER=0`) | the dense matrices, the KV mirrors and, with the expert tier, all 3,840 experts (12 GiB, read from the driver while it decoded); `COLI_VK_TIER_GB` caps the experts, and the CPU computes the ones the card does not hold |
 | Gemma 4 31B | about 30 GB (expected, not run on the card) | dense: all of it would have to fit beside the desktop's 5.5 GB, which a 32 GB card cannot do; with `G4_VK_RESERVE_GB` the matrices that do not fit stay on the CPU |
 
 With nothing of ours loaded the card showed 5.5 GB used (the desktop and a browser); Qwen3-Coder on the card took it to 22.9 GB, and

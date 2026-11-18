@@ -39,7 +39,8 @@ the clone that serves port 8000):
 | Dashboard: Presets and Requests tabs, presets in the model list | `feat/web-presets` | yes (`5b000777`) | yes | yes (2026-11-09): `npm run build` in the live clone, router restarted; the new routes answer on 8000 |
 | Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is installed (the `Colibri tray` value under `HKCU\...\Run`, seen 2026-11-18) |
 | Gemma 4 dense matrices on the Vulkan device (G2) | `396a774f` | yes | yes | yes (2026-11-10): `gemma4.exe` is the `VK=1` build; the router decides per model whether it runs on the card (2.14) |
-| Gemma 4 decode chain (`gemma4_chain.h`): a decode row's layers in one submission, the head fused | `feat/gemma4-chain` | local `main` only, see 2.19 | no | no: the live `gemma4.exe` is still the 2026-11-14 build |
+| Gemma 4 decode chain (`gemma4_chain.h`): a decode row's layers in one submission, the head fused | `feat/gemma4-chain` | yes (`877fa6bd`) | yes | yes (2026-11-18): live clone at `877fa6bd`, `gemma4.exe` rebuilt with `VK=1`, router restarted; E2B ~109 tok/s and E4B ~80 through it (2.19) |
+| Gemma 4 experts on the card (the shared expert tier, GeGLU in the device shaders) | `feat/gemma4-experts-gpu` | local `main` only, see 2.20 | no | no |
 | Gemma 4 video, and audio that is not WAV (G5) | `b6fae35c` | yes | yes | yes (2026-11-10): ffmpeg 9.0.2 installed with winget, `acestep_audio_tool.exe` built |
 | Card or CPU by free memory (`coli router --gpu auto`), models turned off and on, `service.json` `env` | `3b4bd293` | yes | yes | yes (2026-11-10): `COLI_GPU=auto` in the restart script and in `service.json` |
 | Dashboard: Runs on and Turn off/on per model | `7ae38131` | yes | yes | yes (2026-11-10): `web/dist` rebuilt in the live clone |
@@ -337,7 +338,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **A failed start on the card is retried on the CPU** and remembered for 30 minutes ([router.md](router.md#a-model-that-will-not-start-on-the-card)),
   unless the card was chosen (a pin, `--gpu on`).
 
-### 2.19 Gemma 4 on the chain (`feat/gemma4-chain`, 2026-11-18; local `main`, not pushed, not deployed)
+### 2.19 Gemma 4 on the chain (`feat/gemma4-chain`, 2026-11-18; merged, pushed (`877fa6bd`) and live the same day)
 
 - **A decode row's layers as one command buffer** ([gemma4.md](gemma4.md#the-decode-chain-gemma4_chainh), [vulkan.md](vulkan.md#gemma-4-on-the-chain-gemma4_chainh)):
   the dense models run entirely on the card from the embedding to the logits (E2B 46 ms a token on the CPU, 28 to 34 with each matrix
@@ -349,9 +350,32 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   copy of `chain_attn.comp`, which is untouched) and `GEGLU` and `SOFTCAP` in `chain_ew.comp`; tests in `tests/test_vk_chain.c`, which
   now builds on Windows (a `setenv` shim).
 - **Not done:** a prompt chunk and several conversations decoding together on the chain (the per-matrix path as before), the 26B-A4B's
-  experts on the card (what is left of its time), an integrated GPU (not measured: off there), partial chains and a KV split past the
+  experts on the card (done in 2.20), an integrated GPU (not measured: off there), partial chains and a KV split past the
   device's budget (the mirrors are sized to the context, or the chain declines).
 - Switches: `COLI_VK_CHAIN=0` off, `COLI_VK_CHAIN_CHECK=1` compares every step with the CPU's.
+
+### 2.20 Gemma 4's routed experts on the card (`feat/gemma4-experts-gpu`, 2026-11-18; local `main`, not pushed, not deployed)
+
+- **The 26B-A4B's experts through the shared tier** ([gemma4.md](gemma4.md#the-expert-tier-the-26b-a4bs-routed-experts-on-the-card),
+  [vulkan.md](vulkan.md#gemma-4-experts-on-the-tier)): all 3,840 (12 GiB) on an RTX 5090 after a 5 to 7 s warm start, a decoded token
+  **25 to 28 ms** against 51 with the chain and the experts on the CPU (110 on the CPU), a 1,676-token prompt 112 tokens a second against
+  55. The same words as the CPU: logits within 4e-5 on the real model, and two conversations interleaved on two slots (one of 2,467
+  tokens) through a router, all seven turns word for word. The card takes 15.3 GiB with the tier (3.2 without), which leaves about 12 GiB
+  for a second model on a 32 GB card.
+- **Changes outside Gemma's engine** (all small): GeGLU (`gelu_pytorch_tanh(gate) * up`) as act 3 of `qmatmul_gate_up.comp` and
+  `expert_act.comp`, `VKT_ACT_GEGLU` / `COLI_VK_ACT_GEGLU`, a case in the self-test; `COLI_VK_TIER_FAULT=n` (tests: fail the n-th batch);
+  "gemma4" in route_trace.h's table of history writers; the tier's line says how many grouped batches ran. The grouped GEMM and GEMV
+  shaders (AMD) were not changed: they fuse silu and are not taken with GeGLU.
+- **In the engine:** `g4_vk_tier_start` (the budget leaves the dense matrices and the chain's mirrors; the history is `.coli_usage`
+  beside the model, every expert floored at 1 so a card with room holds them all), `moe_routed_vk` (the card's batch beside the CPU's
+  for the rest, every rank added in order), the history saved after each turn, the EMAP and TIERS lines say which experts the card
+  holds. `COLI_VK_TIER=0` turns it off; `COLI_VK_TIER_GB` caps it.
+- **Tests:** `tests/test_gemma4_tier.py` (5: every expert on the card and the CPU's continuation, a budget for a few experts, off,
+  a batch that fails in a step, the history kept and read back). The 179 engine tests pass on the CPU; with the card on, the same
+  12 batch bit-equality tests fail as before (they need batched decode equal to single-row decode to the bit).
+- **Not done:** the router on the card (a routed layer is two round trips and costs 0.57 ms of the 0.8 ms a layer; the batch's own
+  device time is 0.4 of that), the grouped routes with GeGLU (AMD), streaming for big prompt steps (a prompt goes in blocks of 64 rows), an integrated
+  GPU (the tier is off there), a second device.
 
 ## 3. Planned and open
 
