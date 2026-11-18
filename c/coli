@@ -1450,13 +1450,14 @@ def info_image_model(a, family, row):
             extra = f" · {used:.1f}B used for prompts (vision tower and lm_head stay on disk)"
         row(label, f"{comp['class'] or key} · {comp['disk_bytes']/1e9:.1f} GB {dtypes} · "
                    f"{comp['params']/1e9:.2f}B params{extra}")
-    row("tokenizer", f"{TOKENIZER_FILE} " + ("✓" if inv["tokenizer"] else f"{C.yel}missing{C.r}"))
+    row("tokenizer", f"{family.tokenizer_file} " + ("✓" if inv["tokenizer"] else f"{C.yel}missing{C.r}"))
     row("scheduler", comps["scheduler"]["class"] or ("present" if comps["scheduler"]["present"] else "missing"))
     row("on disk", f"{inv['disk_bytes']/1e9:.1f} GB")
     row("output", f"PNG (RGBA) · saved to {image_dir()} (COLI_IMAGE_DIR)")
-    row("use", "coli chat (TUI, shows the image) · coli run \"prompt\" --out x.png · "
-               "coli run \"instruction\" --image photo.png (edit) · "
-               "coli serve (POST /v1/images/generations, /v1/images/edits)")
+    edits = family.id == "qwen_image"        # Z-Image draws from text only
+    row("use", "coli chat (TUI, shows the image) · coli run \"prompt\" --out x.png · " +
+               ("coli run \"instruction\" --image photo.png (edit) · " if edits else "") +
+               "coli serve (POST /v1/images/generations" + (", /v1/images/edits)" if edits else ")"))
     if inv["research_license"]:
         row("license", "Qwen Research License: non-commercial; never redistribute the weights")
     try:
@@ -2333,7 +2334,7 @@ class LocalImageBackend:
         # engine keeps the console's stderr, as the text chat does, because two
         # child pipes read at once can deadlock CPython's I/O there.
         sink = keep if sys.platform != "win32" else None
-        self.engine = ImageEngine(engine, model, env=env_for_engine(a, "qwen_image"),
+        self.engine = ImageEngine(engine, model, env=env_for_engine(a, resolve_model(model).descriptor.id),
                                   on_stderr=sink, on_log=keep)
         self.info = self.engine.info
 

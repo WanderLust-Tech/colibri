@@ -43,6 +43,7 @@ FILES = [
     "mimo", "mimo.exe",
     "gemma4", "gemma4.exe",
     "qwenimage", "qwenimage.exe",
+    "zimage", "zimage.exe",
     "acestep", "acestep.exe",
     "laya", "laya.exe",
     "gliner_decide", "gliner_decide.exe",

@@ -1576,7 +1576,9 @@ static int run_oracle(const char *model, const char *refdir){
         float *lr = ref_tensor(&R, nm, NULL);
         char what[48]; snprintf(what, sizeof what, "latent after step %d", i);
         double r = cmp(what, lat, lr, nlat);
-        if (i == steps - 1 && !(r < (g_bits == 8 ? 0.2 : 0.1))) { fprintf(stderr, "[oracle] final latent: rel %.3e is too far\n", r); rc = 1; }
+        /* the reference loop runs in bf16 and the two drift apart as the steps go (more with few steps): this only
+         * guards against a gross error; the strict check is the float32 evaluation above */
+        if (i == steps - 1 && !(r < 0.25)) { fprintf(stderr, "[oracle] final latent: rel %.3e is too far\n", r); rc = 1; }
         free(lr);
     }
     fprintf(stderr, "[oracle] %d steps %.1f s\n", steps, now_s() - t1);

@@ -150,6 +150,17 @@ CATALOG = (
         license_note="Qwen Research License: non-commercial use only",
         prebuilt_since="2.0.0", doc="docs/qwen-image.md"),
     CatalogModel(
+        id="z-image-turbo", family="zimage", name="Z-Image-Turbo",
+        repo="Tongyi-MAI/Z-Image-Turbo", disk_gb=32.9,
+        # docs/zimage.md: the weights held as int8 are 4.0 GB (text encoder) + 6.2 GB (transformer) + 0.2 GB (VAE decoder),
+        # 6.3 GB with the text encoder on demand; the pictures' working buffers come on top.
+        ram_min_gb=10, ram_good_gb=14, dense_gb=6.4, rank=1, size_class="small",
+        modality="image", summary="text to image, 8 steps (pictures, not chat); lighter than Qwen-Image",
+        license_note="Apache-2.0",
+        # the repository also holds its gallery (a PDF and pictures), which the engine does not read
+        exclude=("assets/*",),
+        prebuilt_since="2.2.0", doc="docs/zimage.md"),
+    CatalogModel(
         id="ace-step-1.5", family="ace_step", name="ACE-Step 1.5",
         repo="ACE-Step/Ace-Step1.5", disk_gb=6.4,
         # docs/acestep.md: every weight stays loaded (the DiT 4.8 GB, the text encoder 1.2, the VAE

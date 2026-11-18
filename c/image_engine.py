@@ -37,6 +37,8 @@ from pathlib import Path
 
 INDEX_FILE = "model_index.json"
 TOKENIZER_FILE = "processor/tokenizer.json"   # forward slash: fine on Windows too
+# Where a pipeline keeps its tokenizer: Qwen-Image's `processor/` (a Qwen3-VL processor), Z-Image's `tokenizer/`.
+TOKENIZER_FILES = (TOKENIZER_FILE, "tokenizer/tokenizer.json")
 COMPONENTS = ("text_encoder", "transformer", "vae", "processor", "scheduler")
 
 # What an engine that says less than the contract is assumed to mean. The
@@ -945,8 +947,11 @@ def inspect_image_model(model_dir):
         raise ValueError(f"{INDEX_FILE} is not a JSON object")
     components = {}
     for name in COMPONENTS:
-        directory = root / name
-        declared = index.get(name)
+        folder = name
+        if name == "processor" and "processor" not in index and not (root / "processor").is_dir() and (root / "tokenizer").is_dir():
+            folder = "tokenizer"         # Z-Image: a plain tokenizer, no processor
+        directory = root / folder
+        declared = index.get(folder)
         files = _component_files(directory)
         weights = [p for p in files if p.suffix == ".safetensors"]
         entry = {"name": name, "present": directory.is_dir(),
@@ -958,6 +963,9 @@ def inspect_image_model(model_dir):
         params = 0
         resident = 0
         skipped = 0
+        lm_prefixed = False
+        if name == "text_encoder":
+            lm_prefixed = any(tensor.startswith("model.language_model.") for shard in weights for tensor, *_ in _tensors(shard))
         for shard in weights:
             for tensor, dtype, shape, nbytes in _tensors(shard):
                 dtypes.add(dtype)
@@ -966,7 +974,9 @@ def inspect_image_model(model_dir):
                     elements *= dim
                 params += elements
                 if name == "text_encoder":
-                    if not tensor.startswith("model.language_model."):
+                    # Qwen3-VL keeps its language model under model.language_model.; a plain Qwen3 under model.
+                    prefix = "model.language_model." if lm_prefixed else "model."
+                    if not tensor.startswith(prefix):
                         skipped += elements
                         continue
                     resident += _quantized_bytes(shape, nbytes, dtype)
@@ -983,7 +993,7 @@ def inspect_image_model(model_dir):
         elif name == "vae":
             entry["precision"] = "/".join(d.lower() for d in sorted(dtypes)) or None
         components[name] = entry
-    tokenizer = root / TOKENIZER_FILE
+    tokenizer = next((root / f for f in TOKENIZER_FILES if (root / f).is_file()), root / TOKENIZER_FILE)
     license_text = ""
     try:
         license_text = (root / "LICENSE").read_text(encoding="utf-8", errors="replace")[:400]
@@ -1034,7 +1044,7 @@ def plan_image_model(model_dir, available_memory=None, available_disk=None):
     if available_memory and not modes["text_encoder_on_demand"]["fits"]:
         warnings.append("even with the text encoder on demand the weights do not fit in "
                         "the available RAM")
-    return {"version": 1, "kind": "image", "family_id": "qwen_image",
+    return {"version": 1, "kind": "image", "family_id": _family_id(inventory["class"]),
             "model": {"path": inventory["path"], "class": inventory["class"],
                       "disk_bytes": inventory["disk_bytes"],
                       "research_license": inventory["research_license"]},
@@ -1044,6 +1054,15 @@ def plan_image_model(model_dir, available_memory=None, available_disk=None):
             "disk": {"available_bytes": available_disk},
             "working_buffers": "not included (being measured)",
             "warnings": warnings}
+
+
+def _family_id(class_name):
+    """The registry family of a pipeline class (qwen_image, zimage); Qwen-Image's when it is not told apart."""
+    try:
+        from family_registry import family_for_index
+        return family_for_index({"_class_name": class_name}).id
+    except Exception:
+        return "qwen_image"
 
 
 def _gb(value):

@@ -1799,6 +1799,36 @@ FAMILIES = (
         tokenizer_file="processor/tokenizer.json",
     ),
     FamilyDescriptor(
+        id="zimage",
+        # A diffusers pipeline: read from model_index.json's _class_name (see resolve_model).
+        model_types=("zimagepipeline",),
+        display_name="Z-Image",
+        display_scale="",
+        engine_artifact="zimage",
+        engine_aliases=(),
+        engine_group="zimage",
+        internal_arch="zimage",
+        build_target="zimage",
+        process_names=("zimage",),
+        default_model_id="z-image-turbo-colibri",
+        cli_adapter="qwen_image",
+        gateway_adapter="qwen_image",
+        planner_id="qwen_image",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "an image model has no KV cache and no experts; coli plan sizes its "
+            "text encoder, DiT and VAE instead (image_engine.plan_image_model)"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="root",
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="image",
+        tokenizer_file="tokenizer/tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="ace_step",
         # ACE-Step 1.5 text-to-music. The checkpoint root carries the DiT's config.json, whose
         # model_type is "acestep"; the text encoder (Qwen3-Embedding-0.6B/), the turbo DiT
