@@ -20,6 +20,9 @@ coli model uninstall z-image-turbo   show what goes and how much space it frees,
 * `install` shows the download size, the licence note and what this machine makes of it (does it fit in RAM, is there room on the
   disk) and asks. Without a terminal, or with `--yes`, it does not ask, so a script has to say so. Qwen-Image-2.1 for example is
   under the Qwen Research License (non-commercial); Z-Image-Turbo is Apache-2.0.
+* The licence line is what the model's repository declares on Hugging Face (read 2026-11-19), shortened; a licence that is not
+  a standard one (the Qwen, GLM and Kimi licences) says so and points to the model page for its terms. It is information, not
+  legal advice; `install` asks you to accept it, and `--yes` accepts it for you.
 * The download is resumable and verified file by file (the same downloader as `coli setup`). Ctrl-C cancels it and keeps what was
   fetched; run the command again to continue. A failed one says why and also keeps its part.
 * One install runs at a time. A second says so.

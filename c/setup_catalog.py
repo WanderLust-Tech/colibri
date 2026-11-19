@@ -65,6 +65,7 @@ CATALOG = (
     CatalogModel(
         id="qwen36-35b", family="qwen36", name="Qwen3.6-35B-A3B",
         repo="Kreuzzelg/qwen36-35b-a3b-colibri-i4-gs64", disk_gb=23.1,
+        license_note="Apache-2.0",
         # docs/qwen36.md: peak RSS 17 GB with every expert cached (cap 256);
         # the minimum follows the same engine's measured 6.5 GB at 32 experts/layer.
         ram_min_gb=10, ram_good_gb=20, dense_gb=3.5, rank=3, size_class="small",
@@ -73,6 +74,7 @@ CATALOG = (
     CatalogModel(
         id="qwen3-coder-30b", family="qwen36", name="Qwen3-Coder-30B-A3B",
         repo="Justvugg/Qwen3-Coder-30B-A3B-colibri-int4", disk_gb=19.4,
+        license_note="Apache-2.0",
         # docs/qwen36.md: 6.5 GB resident at 32 experts/layer, 15.2 GB with all 128.
         ram_min_gb=8, ram_good_gb=18, dense_gb=3.6, rank=2, size_class="small",
         summary="coding model with tool calls, no thinking; int4-gs64 container",
@@ -80,24 +82,28 @@ CATALOG = (
     CatalogModel(
         id="deepseek-v4-flash-reap", family="deepseek_v4", name="DeepSeek V4 Flash REAP 150B",
         repo="puwaer/DeepSeek-V4-Flash-0731-reap-150b", disk_gb=84.7,
+        license_note="MIT",
         ram_min_gb=16, ram_good_gb=32, dense_gb=7.9, rank=4, size_class="large",
         summary="pruned DeepSeek V4 Flash (132 of 256 experts), official fp4/fp8 weights",
         doc="docs/deepseek-v4.md"),
     CatalogModel(
         id="deepseek-v4-flash", family="deepseek_v4", name="DeepSeek V4 Flash",
         repo="deepseek-ai/DeepSeek-V4-Flash-0731", disk_gb=166.9,
+        license_note="MIT",
         ram_min_gb=16, ram_good_gb=32, dense_gb=7.9, rank=5, size_class="large",
         summary="284B, official checkpoint, no conversion",
         doc="docs/deepseek-v4.md"),
     CatalogModel(
         id="qwen38-flash-next", family="qwen38", name="Qwen3.8-Flash-Next",
         repo="Qwen/Qwen3.8-Flash-Next-FP8", revision="bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+        license_note="Qwen community licence (qwen-community-1.0): read its terms on the model page",
         disk_gb=185.6, ram_min_gb=24, ram_good_gb=32, dense_gb=8.0, rank=5, size_class="large",
         summary="125B + 51B n-gram, official FP8 checkpoint (pinned revision)",
         doc="docs/qwen38.md"),
     CatalogModel(
         id="mimo-v2.6-flash", family="mimo", name="MiMo-V2.6 Flash",
         repo="XiaomiMiMo/MiMo-V2.6-Flash-MOPD", disk_gb=171.8,
+        license_note="MIT",
         # docs/mimo.md: 30.1 GB resident with 32 experts cached per layer, 49.8 GB with 64.
         ram_min_gb=32, ram_good_gb=52, dense_gb=24.0, rank=6, size_class="large",
         summary="309B with vision and tools, official checkpoint",
@@ -108,18 +114,21 @@ CATALOG = (
     CatalogModel(
         id="glm-5.2", family="glm", name="GLM-5.2",
         repo="mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp", disk_gb=429.3,
+        license_note="MIT",
         ram_min_gb=16, ram_good_gb=24, dense_gb=9.9, rank=8, size_class="large",
         summary="744B, the reference model; int4-gs64 with the int8 MTP head",
         doc="README.md#2-get-the-model"),
     CatalogModel(
         id="glm-5.3", family="glm", name="GLM-5.3",
         repo="Justvugg/GLM-5.3-colibri-int4-g64", disk_gb=419.3,
+        license_note="GLM-5.3 licence: read its terms on the model page",
         ram_min_gb=16, ram_good_gb=24, dense_gb=9.9, rank=8, size_class="large",
         summary="744B, int4-gs64, no MTP head (no speculative decoding)",
         doc="README.md#2-get-the-model"),
     CatalogModel(
         id="mimo-v2.6-pro", family="mimo", name="MiMo-V2.6 Pro",
         repo="XiaomiMiMo/MiMo-V2.6-Pro-MOPD", disk_gb=563.6,
+        license_note="MIT",
         ram_min_gb=54, ram_good_gb=64, dense_gb=32.4, rank=9, size_class="large",
         summary="1.02T with vision and tools, official checkpoint",
         exclude=("dflash/*", "audio_tokenizer/*", "model_mtp.safetensors"),
@@ -127,6 +136,7 @@ CATALOG = (
     CatalogModel(
         id="inkling", family="inkling", name="Inkling",
         repo="nbeerbower/Inkling-colibri-int4", disk_gb=514.1,
+        license_note="Apache-2.0",
         # README: ~120 GB of RAM as downloaded (bf16 dense, 49.4 GB resident);
         # the 25 GB path needs docs/inkling.md's dense conversion first.
         ram_min_gb=120, ram_good_gb=128, dense_gb=49.4, rank=9, size_class="large",
@@ -135,6 +145,7 @@ CATALOG = (
     CatalogModel(
         id="kimi-k3", family="kimi", name="Kimi K3",
         repo="moonshotai/Kimi-K3", disk_gb=1561.0,
+        license_note="Kimi K3 licence: read its terms on the model page",
         ram_min_gb=32, ram_good_gb=64, dense_gb=20.0, rank=10, size_class="large",
         summary="2.8T, original checkpoint with native MXFP4 experts",
         # The repo ships tiktoken.model only; the engines read tokenizer.json.

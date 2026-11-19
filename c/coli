@@ -3788,6 +3788,10 @@ def cmd_model(a):
     banner("model")
     if a.action in ("info","verify"):
         return _cmd_model_files(a)
+    if a.action in ("available","install","uninstall"):        # model_cli.py, docs/model-install.md
+        import model_cli
+        loopback=(getattr(a,"host",None) or "127.0.0.1") in ("127.0.0.1","localhost","::1")
+        return model_cli.run(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=900 if path.endswith("/uninstall") else 60),C,local_ok=loopback)
     import model_settings
     where=f"{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}"
     if a.action=="list":
@@ -4518,8 +4522,9 @@ def main():
     ppreset.add_argument("--description",default=None)
     ppreset.add_argument("--keep-alive",default=None,metavar="TIME",help="add: how long its model stays loaded (10m, -1 for never)")
     ppreset.add_argument("--file",default=None,metavar="FILE",help="the presets file (default: the setup folder's presets.json)")
-    pmodel=sub.add_parser("model",help="turn a model off or on, pin where it runs (CPU or graphics card), look inside one (info) or check its files (verify)")
-    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","info","verify"))
+    pmodel=sub.add_parser("model",help="turn a model off or on, pin where it runs (CPU or graphics card), look inside one (info) or check its files (verify), fetch one (install) or remove one (uninstall); available lists what can be fetched")
+    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","info","verify","available","install","uninstall"))
+    pmodel.add_argument("-y","--yes",action="store_true",help="install, uninstall: do not ask (the size, the licence and what goes are still printed)")
     pmodel.add_argument("--quick",action="store_true",help="verify: sizes only, no checksums (fast on a slow drive)")
     pmodel.add_argument("name",nargs="?",default=None,metavar="MODEL")
     pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu")
