@@ -220,6 +220,9 @@ switch that turns it off ([model-settings.md](model-settings.md#in-the-dashboard
 - `POST /v1/models/unload` with `key` or `model` stops a model and leaves the others and the server as
   they are: `200` `{"status": "unloaded"}` (or `"not loaded"`). A model that is answering a request is not
   cut off: it answers `202` `"unloading when idle"` and the model goes when the request has finished.
+- `GET /v1/models/catalog`, `POST /v1/models/install`, `POST /v1/models/uninstall` (and `GET /v1/models/installs`, `POST /v1/models/install/cancel`)
+  fetch a model from the catalog into a models folder and remove one, while the router runs: [model install](model-install.md). A model that is
+  loaded is never removed.
 - `GET /v1/logs?since=N&limit=N&source=ID` returns what the router and the models it started printed, oldest first: a
   model loading, a start that failed, the GPU giving way to the CPU. Each line has a number that only grows (`seq`), a
   `time`, a `source` (`router`, or the model's id) and the `text`. Send the `next` of the last answer as `since` and you get only

@@ -21,7 +21,8 @@ SPEC = C_DIR.parent / "docs" / "api-reference" / "openapi.json"
 NOT_API = {"/"}
 # Spec paths that stand for a family of routes the source matches by prefix (`/v1/models/<id>`), not by an exact string.
 PATTERNS = {"/v1/models/{model}": ("GET", "/v1/models/"), "/v1/library/{kind}/{name}": ("GET", "/v1/library/"),
-            "/v1/jobs/{job}": ("GET", "/v1/jobs/")}
+            "/v1/jobs/{job}": ("GET", "/v1/jobs/"),
+            "/v1/models/installs/{id}": ("GET", "/v1/models/installs/")}
 
 
 def constants(source):

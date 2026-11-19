@@ -51,6 +51,7 @@ import request_log
 import client_tags
 import library
 import jobs
+import model_installer
 
 DEFAULT_KEEP_ALIVE = 600.0          # seconds a model stays loaded after its last request
 DEFAULT_MAX_LOADED = 3
@@ -535,6 +536,27 @@ class Catalog:
             if entry["key"] == key:
                 return entry
         return None
+
+    def scan_roots(self):
+        """The folders whose children are models: the ones given to the router, else the default ones."""
+        if self._fixed is not None or self.roots is not None:
+            return list(self.roots or [])
+        import model_switch
+        return model_switch.candidate_roots(os.path.join(os.path.expanduser("~"), "colibri-models", "_"), os.environ,
+                                            model_switch.setup_models_root())
+
+    def install_roots(self):
+        """Where a model fetched through the router may go: a folder this catalog scans, so it is listed when it arrives.
+        A router started with no folder of its own still has ~/colibri-models, made on the first install."""
+        roots = self.scan_roots()
+        if not roots and self.roots is None and self._fixed is None:
+            roots = [os.path.join(os.path.expanduser("~"), "colibri-models")]
+        return roots
+
+    def invalidate(self):
+        """Forget the last scan: a model was fetched or removed, and the next listing must see it."""
+        with self.lock:
+            self._at = 0.0
 
 
 # ------------------------------------------------------------------------------- worker
@@ -1611,9 +1633,10 @@ class RouterServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
     def __init__(self, address, pool, catalog, gate, api_key=None, cors_origins=(), allowed_hosts=(),
-                 queue_timeout=300.0, presets=None, request_log=None, settings=None, jobs=None):
+                 queue_timeout=300.0, presets=None, request_log=None, settings=None, jobs=None, installer=None):
         super().__init__(address, RouterHandler)
         self.pool, self.catalog, self.gate = pool, catalog, gate
+        self.installer = installer             # model_installer.Installer: models fetched and removed through the API, or None
         self.jobs = jobs                       # jobs.JobManager: pictures and songs that go on without the connection
         self.presets = presets                 # presets.Presets, or None for a router without any
         self.request_log = request_log         # request_log.RequestLog, or None
@@ -1798,6 +1821,12 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.settings_list())
             if path == "/v1/models/installed":
                 return self.send_json(200, self.installed())
+            if path == "/v1/models/catalog":
+                return self.send_json(200, self.install_catalog())
+            if path == "/v1/models/installs":
+                return self.send_json(200, {"object": "list", "data": self.need_installer().job_list()})
+            if path.startswith("/v1/models/installs/"):
+                return self.send_json(200, self.install_job(unquote(path[len("/v1/models/installs/"):])))
             if path == "/v1/presets":
                 return self.send_json(200, self.presets_list())
             if path == "/v1/requests":
@@ -1835,6 +1864,12 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.unload()
             if path == "/v1/models/settings":
                 return self.settings_set()
+            if path == "/v1/models/install":
+                return self.install_start()
+            if path == "/v1/models/install/cancel":
+                return self.install_cancel()
+            if path == "/v1/models/uninstall":
+                return self.uninstall()
             if path == "/v1/presets":
                 return self.preset_save()
             if path == "/v1/presets/delete":
@@ -2062,7 +2097,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         payload["features"] = features.describe(router=True, presets=self.server.presets is not None,
                                                 request_log=self.server.request_log is not None,
                                                 model_settings=self.server.settings is not None,
-                                                jobs=self.server.jobs is not None)
+                                                jobs=self.server.jobs is not None,
+                                                model_install=self.server.installer is not None)
         payload["router"] = {
             "loaded": [self.worker_view(w) for w in pool.snapshot()],
             "max_loaded": pool.max_loaded,
@@ -2422,6 +2458,75 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.send_json(200, {"id": entry["id"], "key": entry["key"], "enabled": record.get("enabled", True),
                              "gpu": record.get("gpu", "auto"), **({"unload": outcome} if outcome else {})})
 
+    # ---- models fetched and removed through the API (model_installer.py, docs/model-install.md)
+    def need_installer(self):
+        if self.server.installer is None:
+            raise ApiError(404, "This router cannot install or remove models.", "not_found")
+        return self.server.installer
+
+    def install_catalog(self):
+        """GET /v1/models/catalog: the models that can be fetched, what this machine makes of each, which are here."""
+        installer = self.need_installer()
+        roots = installer.roots()
+        free = None
+        if roots:
+            import setup_hw
+            free = setup_hw.disk_free(installer.install_root() or roots[0])
+        return {"object": "list", "data": installer.catalog_rows(), "roots": roots,
+                "free_gb": round(free / 1e9, 1) if free is not None else None}
+
+    def install_job(self, model_id):
+        job = self.need_installer().job(model_id)
+        if job is None:
+            raise ApiError(404, "That model has no install on record.", "not_found", "id")
+        return job
+
+    def install_error(self, error):
+        return ApiError(error.status, error.message, error.code, error.param)
+
+    def install_start(self):
+        """Fetch a catalog model: body `id` and `confirm: true` (the caller has shown the size and the licence). Answers 202
+        with the job; GET /v1/models/installs/{id} follows it."""
+        installer = self.need_installer()
+        body = self.management_json("/v1/models/install")
+        model_id = body.get("id")
+        if not isinstance(model_id, str) or not model_id:
+            raise ApiError(400, "`id` must name a model of GET /v1/models/catalog.", "invalid_request_error", "id")
+        try:
+            job = installer.start(model_id, confirm=body.get("confirm"))
+        except model_installer.InstallError as error:
+            raise self.install_error(error)
+        self.send_json(202, job)
+
+    def install_cancel(self):
+        installer = self.need_installer()
+        body = self.management_json("/v1/models/install/cancel")
+        try:
+            job = installer.cancel_job(body.get("id") if isinstance(body.get("id"), str) else "")
+        except model_installer.InstallError as error:
+            raise self.install_error(error)
+        self.send_json(202, job)
+
+    def uninstall(self):
+        """Remove an installed model's files: body `model` (or `key`) and `confirm: true`. A model that is loaded is refused
+        (unload it first); so is anything outside the models folders. Presets that name the model are reported, and stay."""
+        installer = self.need_installer()
+        body, entry, param = self.management_request("/v1/models/uninstall")
+        worker = self.server.pool.get(entry["key"])
+        if worker is not None and worker.state in ("starting", "ready", "stopping"):
+            raise ApiError(409, f"`{entry['id']}` is loaded; unload it first (POST /v1/models/unload).", "model_loaded", param)
+        catalog = self.server.catalog
+        names = catalog.aliases(entry)
+        named = [p.name for p in (self.server.presets.all() if self.server.presets is not None else ())
+                 if (p.model or "").lower() in names]
+        item = {"path": entry.get("path"), "key": entry["key"], "name": entry.get("name"),
+                "unfinished": entry.get("unfinished"), "missing": entry.get("missing")}
+        try:
+            result = installer.uninstall(item, confirm=body.get("confirm"))
+        except model_installer.InstallError as error:
+            raise self.install_error(error)
+        self.send_json(200, {**result, "id": entry["id"], "key": entry["key"], "presets": named})
+
     def preset_save(self):
         """Create or replace a preset (the dashboard's Presets tab; `coli preset add` does the same to the file). The body is
         the preset as the file holds it, plus its `name`. Takes effect at once, like an edit of the file."""
@@ -2520,9 +2625,20 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
         os.environ["COLI_REQUEST_LOG"] = request_log_path          # the workers inherit it and write their own lines
     logger = request_log.from_env()
     job_manager = jobs.JobManager(jobs.JobStore(jobs_path or default_jobs_path()), on_finish=job_logger(logger))
+    def installed_models():
+        """What is installed, each with the state of its worker: what the installer matches the catalog against."""
+        out = []
+        for found in catalog.entries(refresh=True):
+            worker = pool.get(found["key"])
+            found["state"] = worker.state if worker is not None else "idle"
+            out.append(found)
+        return out
+
+    installer = model_installer.Installer(roots=catalog.install_roots, installed=installed_models, refresh=catalog.invalidate)
+    installer.sweep()                                    # a deletion that was cut short by a restart
     server = RouterServer((host, port), pool, catalog, gate, api_key,
                           openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout,
-                          presets=presets, request_log=logger, settings=settings, jobs=job_manager)
+                          presets=presets, request_log=logger, settings=settings, jobs=job_manager, installer=installer)
     entries = catalog.entries(refresh=True)
     usable = [e for e in entries if e["reason"] is None]
     print(f"[router] {len(usable)} model(s) available: " + ", ".join(e["id"] for e in usable), file=sys.stderr)

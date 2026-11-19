@@ -14,7 +14,7 @@ reused for something else; `api` is the version of this list and goes up only wh
 API_LEVEL = 1
 
 
-def describe(*, router=False, presets=False, request_log=False, model_settings=False, jobs=False):
+def describe(*, router=False, presets=False, request_log=False, model_settings=False, jobs=False, model_install=False):
     """The block for one server. The arguments say what a router was started with; `coli serve` has none of them."""
     return {
         "api": API_LEVEL,
@@ -27,6 +27,9 @@ def describe(*, router=False, presets=False, request_log=False, model_settings=F
         # POST /v1/models/unload, and per-model on/off and GPU pins (GET and POST /v1/models/settings).
         "model_unload": bool(router),
         "model_settings": bool(router and model_settings),
+        # GET /v1/models/catalog, POST /v1/models/install, /install/cancel and /uninstall, GET /v1/models/installs: models
+        # fetched and removed through the API.
+        "model_install": bool(router and model_install),
         # GET, POST /v1/presets: named model + defaults + system text.
         "presets": bool(router and presets),
         # GET /v1/requests: only when the router was started with a request log.

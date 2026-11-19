@@ -435,7 +435,7 @@ the key `/health` still says only `{"status": "ok"}`.
 
 ```
 "features": {"api": 1, "router": true, "installed_models": true, "model_switch": "load", "model_unload": true,
-             "model_settings": true, "presets": true, "request_log": false, "server_log": true, "priority": true,
+             "model_settings": true, "model_install": true, "presets": true, "request_log": false, "server_log": true, "priority": true,
              "library": true, "jobs": true, "json_mode": true, "cached_tokens": true}
 ```
 
@@ -447,6 +447,7 @@ the key `/health` still says only `{"status": "ok"}`.
 | `model_switch` | `POST /v1/models/switch`: `load` starts the model beside the others (a router), `restart` replaces the one served. |
 | `model_unload` | `POST /v1/models/unload`: a router only. |
 | `model_settings` | `GET` and `POST /v1/models/settings`: a router started with a settings file. |
+| `model_install` | `GET /v1/models/catalog`, `POST /v1/models/install`, `/install/cancel`, `/uninstall`, `GET /v1/models/installs`: models fetched and removed through the API ([model install](model-install.md)). |
 | `presets` | `GET` and `POST /v1/presets`: a router started with a presets file ([presets](presets.md)). |
 | `request_log` | `GET /v1/requests`: a router started with a request log ([request log](request-log.md)). |
 | `server_log` | `GET /v1/logs`: the router's own output and its models' ([router](router.md)). |

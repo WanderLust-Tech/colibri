@@ -911,6 +911,709 @@
         }
       }
     },
+    "/v1/models/catalog": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Models that can be installed",
+        "description": "The catalog: every model colibri can fetch, how big it is, what a machine like this one makes of it (`status`, `fits`, `reason`), its licence, whether it is here, and the install job if one is running. See `docs/model-install.md`. Only `coli router` has this route.",
+        "operationId": "listModelCatalog",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "text",
+                              "image",
+                              "audio"
+                            ]
+                          },
+                          "family": {
+                            "type": "string"
+                          },
+                          "repo": {
+                            "type": "string"
+                          },
+                          "download_gb": {
+                            "type": "number"
+                          },
+                          "ram_min_gb": {
+                            "type": "number"
+                          },
+                          "ram_good_gb": {
+                            "type": "number"
+                          },
+                          "summary": {
+                            "type": "string"
+                          },
+                          "license_note": {
+                            "type": "string",
+                            "description": "Empty when the catalog names no licence."
+                          },
+                          "doc": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "good",
+                              "tight",
+                              "needs-ram",
+                              "needs-disk",
+                              "unsupported"
+                            ]
+                          },
+                          "fits": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "installed": {
+                            "type": [
+                              "object",
+                              "null"
+                            ],
+                            "description": "`key`, `id`, `state` of the folder when it is here and whole."
+                          },
+                          "unfinished": {
+                            "type": "boolean",
+                            "description": "A download of it was started and is not finished."
+                          },
+                          "job": {
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "roots": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The models folders; a new model goes in the first with room."
+                    },
+                    "free_gb": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/models/install": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Install a model",
+        "description": "Starts fetching a catalog model into a models folder, as a background job (202). The caller must have shown the size and the licence: `confirm` has to be `true`. One install runs at a time; a cancelled or failed one keeps what it fetched and asking again continues it. Follow it with `GET /v1/models/installs/{id}`.",
+        "operationId": "installModel",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "confirm"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "An `id` from `GET /v1/models/catalog`."
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "The catalog id of the model being installed."
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "starting",
+                        "downloading",
+                        "finishing",
+                        "done",
+                        "failed",
+                        "cancelled"
+                      ]
+                    },
+                    "done": {
+                      "type": "integer",
+                      "description": "Bytes fetched so far."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "Bytes in the whole download."
+                    },
+                    "rate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Bytes a second, averaged over this run."
+                    },
+                    "eta_seconds": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "file": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The file being fetched."
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Why it failed or was cancelled."
+                    },
+                    "license_note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Already installed, another install is running (`install_busy`), no models folder has room (`insufficient_disk`), or another colibri process holds the folder (`model_busy`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/install/cancel": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Cancel an install",
+        "description": "Stops the install of a model. The part that was fetched is kept.",
+        "operationId": "cancelModelInstall",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "It is stopping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "The catalog id of the model being installed."
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "starting",
+                        "downloading",
+                        "finishing",
+                        "done",
+                        "failed",
+                        "cancelled"
+                      ]
+                    },
+                    "done": {
+                      "type": "integer",
+                      "description": "Bytes fetched so far."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "Bytes in the whole download."
+                    },
+                    "rate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Bytes a second, averaged over this run."
+                    },
+                    "eta_seconds": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "file": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The file being fetched."
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Why it failed or was cancelled."
+                    },
+                    "license_note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "That model is not being installed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/installs": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List the installs",
+        "description": "The installs of this router, newest first: running, finished and failed (the last 8).",
+        "operationId": "listModelInstalls",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "The catalog id of the model being installed."
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "starting",
+                              "downloading",
+                              "finishing",
+                              "done",
+                              "failed",
+                              "cancelled"
+                            ]
+                          },
+                          "done": {
+                            "type": "integer",
+                            "description": "Bytes fetched so far."
+                          },
+                          "total": {
+                            "type": "integer",
+                            "description": "Bytes in the whole download."
+                          },
+                          "rate": {
+                            "type": [
+                              "number",
+                              "null"
+                            ],
+                            "description": "Bytes a second, averaged over this run."
+                          },
+                          "eta_seconds": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "file": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The file being fetched."
+                          },
+                          "error": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Why it failed or was cancelled."
+                          },
+                          "license_note": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/models/installs/{id}": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Read one install",
+        "description": "The job of one model: its state, bytes done and total, speed and time left.",
+        "operationId": "getModelInstall",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The catalog `id`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "The catalog id of the model being installed."
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "starting",
+                        "downloading",
+                        "finishing",
+                        "done",
+                        "failed",
+                        "cancelled"
+                      ]
+                    },
+                    "done": {
+                      "type": "integer",
+                      "description": "Bytes fetched so far."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "Bytes in the whole download."
+                    },
+                    "rate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "description": "Bytes a second, averaged over this run."
+                    },
+                    "eta_seconds": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "file": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The file being fetched."
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Why it failed or was cancelled."
+                    },
+                    "license_note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "That model has no install on record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/uninstall": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Remove a model's files",
+        "description": "Deletes an installed model's folder, when it is a direct child of a models folder and no engine has it loaded (unload it first). `confirm` has to be `true`. The answer says how much was freed and which presets name the model (they stay, and say the model is not installed).",
+        "operationId": "uninstallModel",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "confirm"
+                ],
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "description": "A `key` (or `id`) from `GET /v1/models/installed`."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "What a client names the model, instead of `key`."
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "removed"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "freed_bytes": {
+                      "type": "integer"
+                    },
+                    "presets": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "The model is loaded (`model_loaded`), a download is writing it (`model_busy`), its files are in use (`model_in_use`), or it is not inside a models folder (`outside_models_folder`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/models/settings": {
       "get": {
         "tags": [
@@ -2336,6 +3039,7 @@
               "model_switch": { "type": "string", "enum": ["load", "restart"] },
               "model_unload": { "type": "boolean" },
               "model_settings": { "type": "boolean" },
+              "model_install": { "type": "boolean" },
               "presets": { "type": "boolean" },
               "request_log": { "type": "boolean" },
               "server_log": { "type": "boolean" },
