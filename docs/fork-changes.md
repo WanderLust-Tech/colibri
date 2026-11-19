@@ -354,7 +354,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   device's budget (the mirrors are sized to the context, or the chain declines).
 - Switches: `COLI_VK_CHAIN=0` off, `COLI_VK_CHAIN_CHECK=1` compares every step with the CPU's.
 
-### 2.20 Gemma 4's routed experts on the card (`feat/gemma4-experts-gpu`, 2026-11-18; local `main`, not pushed, not deployed)
+### 2.20 Gemma 4's routed experts on the card (`feat/gemma4-experts-gpu`, 2026-11-18; merged, pushed (`c54ed0e9`) and live the same day)
 
 - **The 26B-A4B's experts through the shared tier** ([gemma4.md](gemma4.md#the-expert-tier-the-26b-a4bs-routed-experts-on-the-card),
   [vulkan.md](vulkan.md#gemma-4-experts-on-the-tier)): all 3,840 (12 GiB) on an RTX 5090 after a 5 to 7 s warm start, a decoded token
@@ -376,6 +376,36 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Not done:** the router on the card (a routed layer is two round trips and costs 0.57 ms of the 0.8 ms a layer; the batch's own
   device time is 0.4 of that), the grouped routes with GeGLU (AMD), streaming for big prompt steps (a prompt goes in blocks of 64 rows), an integrated
   GPU (the tier is off there), a second device.
+
+### 2.21 Z-Image-Turbo (`feat/zimage`, 2026-11-18; merged, pushed (`6a506de9`) and live the same day)
+
+- **A second picture model**, `c/zimage` ([zimage.md](zimage.md)): Tongyi-MAI/Z-Image-Turbo (Apache-2.0, where Qwen-Image-2.1's weights
+  are non-commercial) read straight from the diffusers checkpoint: Qwen3-4B text encoder, the 30+2+2 block S3-DiT, the 16-channel
+  VAE decoder, 8 flow-matching steps with a fixed shift. Same line protocol and front ends as `qwenimage`, so `coli run`, `coli chat`,
+  the dashboard and `/v1/images/generations` work for it. No editing, no guidance.
+- **Checked** against fp32 diffusers stage by stage (bf16 weights match to about 1e-6; the int8 default keeps the step-0
+  prediction within 4%), on the real model and on a random tiny pipeline that CI builds (`zimage-tiny-check`).
+- **Measured** on the 14900KF and the 5090, 768x768, 8 steps: CPU 21.4 s a step, the 30 blocks as one Vulkan chain 1.4 s a step (13 s
+  for the steps, 6 s for the CPU's VAE decode); 8.6 GB of RAM with the text encoder staged. Through the live router: 49 s for the first
+  picture (it loads), 18 s after.
+
+### 2.22 Installing and removing models while it runs (`feat/model-installer`, 2026-11-19; local branch, not merged yet)
+
+- **`c/model_installer.py`**: fetch a catalog model as a background job (progress, cancel, resume, one at a time, a lock file between
+  processes) and remove an installed one (only a direct child of a models folder, never a link, never one a download is writing;
+  renamed out of the scan before the files go). Nothing happens without `confirm: true`, which the caller sends after showing the size
+  and the licence. [model-install.md](model-install.md)
+- **Router routes** `GET /v1/models/catalog`, `POST /v1/models/install`, `/install/cancel`, `/uninstall`, `GET /v1/models/installs[/{id}]`,
+  and `features.model_install`; a loaded model is refused. **`coli model available | install | uninstall`** (`c/model_cli.py`) goes
+  through the router when one answers and works on the local folders when none does; an empty answer (a null stdin) is not a yes.
+- **The catalog's licence lines** are what each repository declares on Hugging Face (read 2026-11-19).
+- **Dashboard** (Settings > Model): an *Install a model* list with size, licence and fit, a confirmation, a progress bar with Stop,
+  and Remove on each model. **VS Code extension 0.14.0** (outside the repository): the same two entries in the models menu.
+- **Tests:** `tests/test_model_installer.py` (25), `test_router_install.py` (12), `test_model_cli.py` (19), `web/src/lib/installs.test.ts`,
+  `web/tests/install_ui.py` (a real browser against a router and a fake hub), and a run of the extension's API client against a live
+  router. The install list of the Makefile needed the two new modules (`test_install_closure` caught it).
+- **Not done:** building the engine of a model that has none (that is `coli setup`), a download queue, several downloads at once, moving
+  a model, translations of the dashboard strings (English only; the others fall back).
 
 ## 3. Planned and open
 
