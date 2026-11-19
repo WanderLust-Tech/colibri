@@ -161,6 +161,7 @@ class Installer:
         self._catalog = catalog or setup_catalog.catalog
         self._memory = memory or (lambda: setup_hw.detect_memory().get("total"))
         self.lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self.jobs = {}                       # catalog id -> job dict
         self.order = []
         self.cancel = {}                     # catalog id -> threading.Event
@@ -231,6 +232,16 @@ class Installer:
 
     def start(self, model_id, confirm=False, background=True):
         """Begin fetching a catalog model. Returns the job. Raises InstallError."""
+        with self._start_lock:                 # the check for a running install and the registering of this one are one step
+            entry, model_dir = self._begin(model_id, confirm)
+        if background:
+            threading.Thread(target=self._run, args=(entry, model_dir), name=f"install-{entry.id}", daemon=True).start()
+        else:
+            self._run(entry, model_dir)
+        return self.job(entry.id)
+
+    def _begin(self, model_id, confirm):
+        """Everything that can refuse an install, then the job and the folder's lock. Returns (entry, folder)."""
         if confirm is not True:
             raise InstallError(400, "Send `confirm`: true once the size and the licence have been shown.",
                                "confirmation_required", "confirm")
@@ -271,11 +282,7 @@ class Installer:
             self.order.append(entry.id)
             del self.order[:-KEEP_JOBS]
             self.cancel[entry.id] = threading.Event()
-        if background:
-            threading.Thread(target=self._run, args=(entry, model_dir), name=f"install-{entry.id}", daemon=True).start()
-        else:
-            self._run(entry, model_dir)
-        return self.job(entry.id)
+        return entry, model_dir
 
     def cancel_job(self, model_id):
         with self.lock:

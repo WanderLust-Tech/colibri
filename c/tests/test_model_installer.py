@@ -133,6 +133,39 @@ class Install(InstallerCase):
             self.installer.start("tiny-image", confirm=True)
         self.assertEqual((caught.exception.status, caught.exception.code), (409, "install_busy"))
 
+    def test_two_requests_at_once_start_only_one(self):
+        # two different models asked for at the same moment: the router's handler threads race, and only one may win
+        self.entries.append(entry(id="other", name="Other"))
+        gate = threading.Event()
+        real = setup_download.download_repo
+
+        def held(repo, revision, model_dir, files, **kw):
+            gate.wait(10)                      # the winner stays "downloading" until the test lets it go
+            return real(repo, revision, model_dir, files, **kw)
+
+        outcomes = []
+
+        def ask(model_id):
+            try:
+                outcomes.append(self.installer.start(model_id, confirm=True)["state"])
+            except model_installer.InstallError as error:
+                outcomes.append(error.code)
+
+        with mock.patch.object(setup_download, "download_repo", held):
+            threads = [threading.Thread(target=ask, args=(m,)) for m in ("tiny-image", "other") * 3]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            gate.set()
+            for model_id in ("tiny-image", "other"):
+                job = self.installer.job(model_id)
+                if job:
+                    self.wait(model_id)
+        started = [o for o in outcomes if o in ("starting", "downloading", "finishing", "done")]
+        self.assertEqual(len(started), 1, outcomes)
+        self.assertEqual(sorted(set(o for o in outcomes if o not in started)), ["install_busy"])
+
     def test_progress_is_reported_while_it_downloads(self):
         seen = []
         real = setup_download.download_repo
