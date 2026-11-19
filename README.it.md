@@ -20,11 +20,11 @@ tiene quella parte in RAM e legge il resto, gli expert, dal disco quando il
 modello li chiede. C puro, un file per famiglia di modelli, nessuna GPU
 necessaria.
 
-Oggi girano quattordici motori. Undici sono per modelli linguistici: **GLM-5.2/5.3**,
+Oggi girano quindici motori. Undici sono per modelli linguistici: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (e Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (che esegue anche Qwen3-Coder e il denso Qwen3.8-27B),
-**Gemma-4** (il 26B-A4B a miscela di esperti) e **OLMoE**. Uno disegna immagini: **Qwen-Image-2.1**. Due prendono decisioni:
+**Gemma-4** (il 26B-A4B a miscela di esperti) e **OLMoE**. Due disegnano immagini: **Qwen-Image-2.1** e **Z-Image**. Due prendono decisioni:
 **Laya** e **GLiNER2.5-Decide**, con un terzo modello di decisione, **Clef**, sul
 motore Qwen3.6. [Quale scegliere per la mia macchina](#which-model-for-my-machine)
 
@@ -217,6 +217,7 @@ Hugging Face indica per ciascun repository.
 | **Qwen3.6-35B-A3B**: chat con thinking e tool | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (anche integrata) | 6.0 tok/s sulla CPU, 9.9 con Vulkan sulla GPU integrata (A); 30.0 con CUDA (C) |
 | Qwen3-Coder-30B-A3B: codice e chiamate ai tool, senza thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (anche integrata) | 8.5-9.6 tok/s con tutti gli expert in RAM, 5.1 con 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: da testo a immagine, licenza non commerciale | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | un'immagine 768x512 in 2 min 40 s (8 core Zen 4, CPU) |
+| **Z-Image-Turbo**: da testo a immagine, licenza Apache-2.0, il modello di immagini più leggero | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | un'immagine 768x768, 13 s di denoising su una RTX 5090 (1,4 s a passo), 171 s su CPU (i9 a 24 core) |
 | **ACE-Step 1.5**: da testo a musica, licenza MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s di musica in 16 s (i9 a 24 core, CPU) |
 
 **Modelli grandi, i cui expert vengono letti dal disco in streaming** (la
@@ -697,6 +698,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

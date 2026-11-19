@@ -15,7 +15,7 @@
 
 **小巧引擎，庞大模型。** colibri 在你现有的机器上运行超大规模的开放模型。一个拥有数千亿参数的专家混合（mixture-of-experts，MoE）模型，每个 token 只会用到自身的一小部分，因此 colibri 把这一部分放在内存中，其余部分，也就是各个专家，则在模型需要时从磁盘读取。纯 C 实现，每个模型家族一个文件，不需要 GPU。
 
-目前有十四个引擎可以运行。其中十一个用于语言模型：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（它也能运行 Qwen3-Coder 和稠密的 Qwen3.8-27B）、**Gemma-4**（26B-A4B 混合专家模型）以及 **OLMoE**。一个用于生成图片：**Qwen-Image-2.1**。两个用于回答决策问题：**Laya** 和 **GLiNER2.5-Decide**，第三个决策模型 **Clef** 运行在 Qwen3.6 引擎上。[我的机器适合哪一个](#which-model-for-my-machine)
+目前有十五个引擎可以运行。其中十一个用于语言模型：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（它也能运行 Qwen3-Coder 和稠密的 Qwen3.8-27B）、**Gemma-4**（26B-A4B 混合专家模型）以及 **OLMoE**。一个用于生成图片：**Qwen-Image-2.1**。两个用于回答决策问题：**Laya** 和 **GLiNER2.5-Decide**，第三个决策模型 **Clef** 运行在 Qwen3.6 引擎上。[我的机器适合哪一个](#which-model-for-my-machine)
 
 ```
 $ ./coli chat
@@ -147,6 +147,7 @@ Starting colibri
 | **Qwen3.6-35B-A3B**：聊天，支持思考和工具调用 | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA、Vulkan（含集成显卡） | CPU 上 6.0 tok/s，在集成显卡上用 Vulkan 9.9（A）；用 CUDA 30.0（C） |
 | Qwen3-Coder-30B-A3B：写代码和工具调用，不带思考 | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA、Vulkan（含集成显卡） | 全部专家都在内存中时 8.5-9.6 tok/s，每层 32 个时 5.1（A，CPU） |
 | **Qwen-Image-2.1**：文生图，非商业许可 | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 一张 768x512 的图片用时 2 分 40 秒（8 个 Zen 4 核心，CPU） |
+| **Z-Image-Turbo**：文生图，Apache-2.0 许可，更轻量的图像模型 | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 一张 768x768 的图片，在 RTX 5090 上去噪 13 秒（每步 1.4 秒），在 CPU（24 核 i9）上 171 秒 |
 | **ACE-Step 1.5**：文生音乐，MIT 许可 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音乐用时 16 秒（24 核 i9，CPU） |
 
 **大模型，专家从磁盘流式读取**（速度由磁盘决定：快速的 NVMe 硬盘帮助最大）
@@ -420,6 +421,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

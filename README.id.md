@@ -20,12 +20,12 @@ sehingga colibri menyimpan bagian itu di RAM dan membaca sisanya, yaitu para
 pakar, dari disk ketika model membutuhkannya. C murni, satu file per keluarga
 model, tanpa memerlukan GPU.
 
-Saat ini ada empat belas engine yang dapat dijalankan. Sebelas di antaranya untuk
+Saat ini ada lima belas engine yang dapat dijalankan. Sebelas di antaranya untuk
 model bahasa: **GLM-5.2/5.3**, **GLM-5.3-Flash**, **Inkling**, **Kimi K3**,
 **DeepSeek V4 Flash**, **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (dan Pro),
 **Qwen3.8-Flash-Next**, **Qwen3.6** (yang juga menjalankan Qwen3-Coder dan model
-dense Qwen3.8-27B), **Gemma-4** (26B-A4B, campuran pakar), serta **OLMoE**. Satu menghasilkan gambar:
-**Qwen-Image-2.1**. Dua digunakan untuk menjawab pertanyaan pengambilan keputusan:
+dense Qwen3.8-27B), **Gemma-4** (26B-A4B, campuran pakar), serta **OLMoE**. Dua menghasilkan gambar:
+**Qwen-Image-2.1** dan **Z-Image**. Dua digunakan untuk menjawab pertanyaan pengambilan keputusan:
 **Laya** dan **GLiNER2.5-Decide**, dengan model keputusan ketiga, **Clef**, pada
 engine Qwen3.6. [Mana yang cocok untuk mesin saya](#which-model-for-my-machine)
 
@@ -224,6 +224,7 @@ ukuran yang dicantumkan Hugging Face untuk setiap repository.
 | **Qwen3.6-35B-A3B**: chat dengan thinking dan tools | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (termasuk terintegrasi) | 6.0 tok/s pada CPU, 9.9 dengan Vulkan pada GPU terintegrasi (A); 30.0 dengan CUDA (C) |
 | Qwen3-Coder-30B-A3B: kode dan tool calls, tanpa thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (termasuk terintegrasi) | 8.5-9.6 tok/s dengan semua pakar di RAM, 5.1 dengan 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: teks ke gambar, lisensi nonkomersial | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | satu gambar 768x512 dalam 2 min 40 s (8 core Zen 4, CPU) |
+| **Z-Image-Turbo**: teks ke gambar, lisensi Apache-2.0, model gambar yang lebih ringan | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | satu gambar 768x768, denoising 13 s di RTX 5090 (1,4 s per langkah), 171 s di CPU (i9 24 core) |
 | **ACE-Step 1.5**: teks ke musik, lisensi MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 detik musik dalam 16 detik (i9 24 core, CPU) |
 
 **Model besar, yang pakarnya melakukan streaming dari disk** (disk menentukan
@@ -723,6 +724,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

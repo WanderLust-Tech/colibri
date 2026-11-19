@@ -15,7 +15,7 @@
 
 **小さなエンジン、巨大なモデル。** colibri は、とても大きなオープンモデルを、あなたがすでに持っているマシンで動かします。数千億パラメータの Mixture-of-Experts モデルは、1 トークンごとに自分自身のごく一部しか使いません。そこで colibri はその部分を RAM に置き、残りの部分、つまりエキスパートは、モデルが必要としたときにディスクから読み込みます。純粋な C で書かれ、モデルファミリーごとにファイルは 1 つ、GPU は不要です。
 
-現在動作するエンジンは 14 個です。そのうち 11 個は言語モデル用です：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（と Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（Qwen3-Coder と密モデルの Qwen3.8-27B も動かします）、**Gemma-4**（26B-A4B のエキスパート混合モデル）、そして **OLMoE**。1 個は画像を描きます：**Qwen-Image-2.1**。2 個は判定に答えます：**Laya** と **GLiNER2.5-Decide** で、さらに 3 つ目の判定モデル **Clef** が Qwen3.6 エンジンで動きます。[自分のマシンに合うのはどれか](#which-model-for-my-machine)
+現在動作するエンジンは 15 個です。そのうち 11 個は言語モデル用です：**GLM-5.2/5.3**、**GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、**DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（と Pro）、**Qwen3.8-Flash-Next**、**Qwen3.6**（Qwen3-Coder と密モデルの Qwen3.8-27B も動かします）、**Gemma-4**（26B-A4B のエキスパート混合モデル）、そして **OLMoE**。1 個は画像を描きます：**Qwen-Image-2.1**。2 個は判定に答えます：**Laya** と **GLiNER2.5-Decide** で、さらに 3 つ目の判定モデル **Clef** が Qwen3.6 エンジンで動きます。[自分のマシンに合うのはどれか](#which-model-for-my-machine)
 
 ```
 $ ./coli chat
@@ -147,6 +147,7 @@ Mixture-of-Experts モデルは、ディスク上では巨大でも、1 トー�
 | **Qwen3.6-35B-A3B**：思考モードとツールに対応したチャット | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA、Vulkan（内蔵 GPU も） | CPU で 6.0 tok/s、内蔵 GPU の Vulkan で 9.9（A）。CUDA で 30.0（C） |
 | Qwen3-Coder-30B-A3B：コードとツール呼び出し、思考モードなし | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA、Vulkan（内蔵 GPU も） | 全エキスパートを RAM に置いて 8.5-9.6 tok/s、レイヤーあたり 32 個で 5.1（A、CPU） |
 | **Qwen-Image-2.1**：テキストから画像、非商用ライセンス | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 768x512 の画像 1 枚に 2 分 40 秒（Zen 4 の 8 コア、CPU） |
+| **Z-Image-Turbo**：テキストから画像、Apache-2.0 ライセンス、より軽い画像モデル | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 768x768 の画像 1 枚、RTX 5090 でデノイズ 13 秒（1 ステップ 1.4 秒）、CPU（24 コアの i9）で 171 秒 |
 | **ACE-Step 1.5**：テキストから音楽、MIT ライセンス | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒の曲を 16 秒で（24 コアの i9、CPU） |
 
 **大きなモデル：エキスパートをディスクからストリーミングします**（速度を決めるのはディスクで、高速な NVMe ドライブが最も効果的です）
@@ -428,6 +429,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

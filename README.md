@@ -19,11 +19,11 @@ parameters uses only a small part of itself for each token, so colibri keeps
 that part in RAM and reads the rest, the experts, from the disk when the model
 asks for them. Pure C, one file per model family, no GPU required.
 
-Fifteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
+Sixteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B),
-**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. One draws pictures: **Qwen-Image-2.1**. One makes music: **ACE-Step 1.5**. Two answer decisions:
+**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 
@@ -205,6 +205,7 @@ downloads are the sizes Hugging Face lists for each repository.
 | **Qwen3.6-35B-A3B**: chat with thinking and tools | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA, Vulkan (integrated too) | 6.0 tok/s on the CPU, 9.9 with Vulkan on the integrated GPU (A); 30.0 with CUDA (C) |
 | Qwen3-Coder-30B-A3B: code and tool calls, no thinking | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA, Vulkan (integrated too) | 8.5-9.6 tok/s with every expert in RAM, 5.1 with 32 per layer (A, CPU) |
 | **Qwen-Image-2.1**: text to picture, non-commercial licence | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | one 768x512 picture in 2 min 40 s (8 Zen 4 cores, CPU) |
+| **Z-Image-Turbo**: text to picture, Apache-2.0 licence, the lighter picture model | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | one 768x768 picture in 13 s of denoising on an RTX 5090 (1.4 s a step), 171 s on the CPU (24-core i9) |
 | **ACE-Step 1.5**: text to music, MIT licence | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s of music in 16 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:
@@ -255,7 +256,7 @@ Each family has its page: [qwen36.md](docs/qwen36.md) (Qwen3.6, Qwen3-Coder,
 Qwen3.8-27B), [qwen38.md](docs/qwen38.md), [deepseek-v4.md](docs/deepseek-v4.md),
 [deepseek-v41.md](docs/deepseek-v41.md), [mimo.md](docs/mimo.md),
 [gemma4.md](docs/gemma4.md), [glm53-flash.md](docs/glm53-flash.md), [inkling.md](docs/inkling.md),
-[kimi_k3.md](docs/kimi_k3.md), [qwen-image.md](docs/qwen-image.md),
+[kimi_k3.md](docs/kimi_k3.md), [qwen-image.md](docs/qwen-image.md), [zimage.md](docs/zimage.md),
 [laya.md](docs/laya.md), [gliner_decide.md](docs/gliner_decide.md),
 [clef.md](docs/clef.md), and GLM-5.2 in the [Quick Start](docs/quickstart.md#3-get-the-model).
 Checkpoints with the same architecture as a supported one, such as
@@ -466,7 +467,8 @@ with the last 30 turns as a trend.
   and drawn inside the terminal by `coli chat`; the same model **edits** a
   picture you give it from an instruction (`coli run --image`, `/image` in
   `coli chat`, the web UI, `POST /v1/images/edits`)
-  ([qwen-image.md](docs/qwen-image.md));
+  ([qwen-image.md](docs/qwen-image.md)); **Z-Image** draws from text on the same route, with Apache-2.0 weights and half of
+  Qwen-Image's memory ([zimage.md](docs/zimage.md));
 - **decisions** on `POST /v1/systemone` ([above](#system-one-a-decision-with-a-probability));
 - **several conversations at once** on every text engine: `coli serve
   --kv-slots N` keeps up to 16, each with its own cache, and decodes their next
@@ -669,6 +671,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

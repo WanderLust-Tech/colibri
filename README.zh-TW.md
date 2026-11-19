@@ -18,11 +18,11 @@
 因此 colibri 把這一部分留在 RAM 中，其餘的部分，也就是專家，則在模型需要時才從硬碟讀取。
 純 C 實作，每個模型家族一個檔案，不需要 GPU。
 
-目前有十四個引擎可以執行。其中十一個用於語言模型：**GLM-5.2/5.3**、
+目前有十五個引擎可以執行。其中十一個用於語言模型：**GLM-5.2/5.3**、
 **GLM-5.3-Flash**、**Inkling**、**Kimi K3**、**DeepSeek V4 Flash**、
 **DeepSeek V4.1 Flash**、**MiMo-V2.6 Flash**（以及 Pro）、**Qwen3.8-Flash-Next**、
 **Qwen3.6**（同一引擎也執行 Qwen3-Coder 與稠密的 Qwen3.8-27B）、**Gemma-4**（26B-A4B 混合專家模型）以及
-**OLMoE**。一個用來生成圖片：**Qwen-Image-2.1**。兩個用來回答決策問題：
+**OLMoE**。兩個用來生成圖片：**Qwen-Image-2.1** 與 **Z-Image**。兩個用來回答決策問題：
 **Laya** 與 **GLiNER2.5-Decide**；第三個決策模型 **Clef** 則執行在
 Qwen3.6 引擎上。[我的機器適合哪一個](#which-model-for-my-machine)
 
@@ -201,6 +201,7 @@ Starting colibri
 | **Qwen3.6-35B-A3B**：支援思考與工具的聊天 | `qwen36-35b` | 23 GB | 10 / 20 GB | CUDA、Vulkan（含內建顯示晶片） | CPU 上 6.0 tok/s，在內建顯示晶片上用 Vulkan 為 9.9（A）；用 CUDA 為 30.0（C） |
 | Qwen3-Coder-30B-A3B：程式碼與工具呼叫，不含思考 | `qwen3-coder-30b` | 19 GB | 8 / 18 GB | CUDA、Vulkan（含內建顯示晶片） | 所有專家都在 RAM 中時 8.5-9.6 tok/s，每層 32 個時 5.1（A，CPU） |
 | **Qwen-Image-2.1**：文字生成圖片，非商業授權 | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 一張 768x512 的圖片 2 分 40 秒（8 個 Zen 4 核心，CPU） |
+| **Z-Image-Turbo**：文字生成圖片，Apache-2.0 授權，較輕量的圖片模型 | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 一張 768x768 的圖片，在 RTX 5090 上去雜訊 13 秒（每步 1.4 秒），在 CPU（24 核心 i9）上 171 秒 |
 | **ACE-Step 1.5**：文字生成音樂，MIT 授權 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音樂 16 秒（24 核心 i9，CPU） |
 
 **大型模型，專家從硬碟串流讀取**（速度由硬碟決定：
@@ -644,6 +645,7 @@ c/
 ├── qwen36.c              Qwen3.6, Qwen3-Coder, Qwen3.8-27B, Clef  (make qwen36)
 ├── olmoe.c               OLMoE  (make olmoe)
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
+├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)

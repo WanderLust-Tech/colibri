@@ -452,6 +452,15 @@ cd colibri
           <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>qwenimage.c</span></div>
         <div class="mget"><code>hf download Qwen/Qwen-Image-2.1 --local-dir ~/Models/Qwen-Image-2.1</code><button class="cp" type="button">copy</button></div>
       </article>
+      <article class="mrow" data-find="z-image zimage z image tongyi alibaba picture text to image turbo zimage.c dit int8 apache" data-tags="image int8 dit setup">
+        <h3><a href="https://github.com/JustVugg/colibri/blob/main/docs/zimage.md">z-image-turbo</a></h3>
+        <p class="d">Text to picture, the lighter picture model, read straight from the official diffusers checkpoint and quantized to int8 while loading. Eight steps; a 768x768 picture denoises in 13 s on an RTX 5090 (1.4 s a step) and in 171 s on a 24-core CPU, holding 8.6 GB of RAM. Apache-2.0.</p>
+        <div class="tg"><span class="s">setup</span><span class="b">image</span><span class="e">int8</span><span class="g">DiT</span><span class="g">Apache 2.0</span></div>
+        <div class="mm"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>text to image</span>
+          <a href="https://huggingface.co/Tongyi-MAI/Z-Image-Turbo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>official, 33 GB, no conversion</a>
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>zimage.c</span></div>
+        <div class="mget"><code>hf download Tongyi-MAI/Z-Image-Turbo --local-dir ~/Models/Z-Image-Turbo --exclude "assets/*"</code><button class="cp" type="button">copy</button></div>
+      </article>
       <article class="mrow" data-find="laya convai innovations laya.c decision system one jev modernbert english" data-tags="decision">
         <h3><a href="https://github.com/JustVugg/colibri/blob/main/docs/laya.md">laya</a></h3>
         <p class="d">A decision model: a state and typed questions in, a calibrated probability for every option out, in one forward pass. Served on POST /v1/systemone; 219 ms for one question on a laptop CPU, in 1.7 GB of RAM. English.</p>
@@ -522,7 +531,7 @@ cd colibri
         GLM-5.3-Flash, GLM-5.2/5.3, Inkling, Kimi K3, OLMoE, Gemma-4-26B-A4B, Qwen3.6-35B-A3B (which also runs
         Qwen3-Coder-30B-A3B and the dense Qwen3.8-27B), Qwen3.8-Flash-Next, DeepSeek V4 Flash,
         DeepSeek V4.1 Flash, MiMo-V2.6 Flash (and Pro, on the same engine).
-        And for images, Qwen-Image-2.1: text to picture, drawn inside the terminal.
+        And for images, Qwen-Image-2.1 and Z-Image: text to picture, drawn inside the terminal.
         And for music, ACE-Step 1.5: a description and lyrics in, a 48 kHz stereo song out.
         And for decisions, Laya and GLiNER2.5-Decide, with Clef on the Qwen3.6 engine: typed
         questions in, a probability per option out. Every language engine serves up to 16
