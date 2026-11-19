@@ -100,6 +100,8 @@ def _children(root):
     except OSError:
         return
     for name in names[:MAX_ENTRIES]:
+        if name.endswith(".deleting"):          # a model being uninstalled (model_installer.py): already gone
+            continue
         path = os.path.join(root, name)
         if os.path.isdir(path):
             yield path
