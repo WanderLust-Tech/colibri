@@ -344,6 +344,87 @@ export async function unloadModel(baseUrl: string, apiKey: string, key: string, 
   return { status: body.status, id: body.id }
 }
 
+/* An install of a catalog model (c/model_installer.py): the router fetches its files as a background job. */
+export interface InstallJob {
+  id: string
+  name: string
+  state: "starting" | "downloading" | "finishing" | "done" | "failed" | "cancelled"
+  done: number
+  total: number
+  rate: number | null
+  eta_seconds: number | null
+  file: string | null
+  error: string | null
+  license_note?: string
+}
+
+export function installActive(job: InstallJob | null | undefined): boolean {
+  return !!job && (job.state === "starting" || job.state === "downloading" || job.state === "finishing")
+}
+
+/* One row of GET /v1/models/catalog: a model that can be fetched, what this machine makes of it, and whether it is here. */
+export interface CatalogRow {
+  id: string
+  name: string
+  kind: "text" | "image" | "audio"
+  download_gb: number
+  ram_min_gb: number
+  ram_good_gb: number
+  summary: string
+  license_note: string
+  status: "good" | "tight" | "needs-ram" | "needs-disk" | "unsupported"
+  fits: boolean
+  reason: string
+  installed: { key: string; id: string; state: string } | null
+  /* A download of it was started and is not finished: installing again continues it. */
+  unfinished: boolean
+  partial_bytes?: number
+  job: InstallJob | null
+}
+
+export interface ModelCatalog {
+  rows: CatalogRow[]
+  roots: string[]
+  freeGb: number | null
+}
+
+/* What can be fetched, or null when this server cannot install models (not a router, or an older one). */
+export async function getModelCatalog(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelCatalog | null> {
+  const response = await fetch(endpoint(baseUrl, "models/catalog"), { headers: headers(apiKey), signal })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { data?: CatalogRow[]; roots?: string[]; free_gb?: number | null }
+  return { rows: body.data ?? [], roots: body.roots ?? [], freeGb: body.free_gb ?? null }
+}
+
+/* Starts fetching a catalog model. `confirm` is sent because the person was shown its size and licence first; the router
+   refuses without it. Answers the job (202); follow it through getModelCatalog's `job`. */
+export async function installModel(baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<InstallJob> {
+  const response = await fetch(endpoint(baseUrl, "models/install"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ id, confirm: true }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  return (await response.json()) as InstallJob
+}
+
+/* Stops an install; what was fetched is kept and installing again continues it. */
+export async function cancelInstall(baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(endpoint(baseUrl, "models/install/cancel"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ id }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+}
+
+/* Removes an installed model's files. The router refuses a model that is loaded. `presets` names the presets that used it. */
+export async function uninstallModel(baseUrl: string, apiKey: string, key: string, signal?: AbortSignal): Promise<{ freedBytes: number; presets: string[] }> {
+  const response = await fetch(endpoint(baseUrl, "models/uninstall"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ key, confirm: true }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { freed_bytes?: number; presets?: string[] }
+  return { freedBytes: body.freed_bytes ?? 0, presets: body.presets ?? [] }
+}
+
 /* Where a model runs: the graphics card, the CPU, or whatever the router's policy says ("auto"). */
 export type GpuChoice = "auto" | "vulkan" | "cpu"
 

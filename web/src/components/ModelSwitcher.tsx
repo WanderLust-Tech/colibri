@@ -2,11 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { HardDrive, LoaderCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import ModelInstaller from "@/components/ModelInstaller"
 import { useLocale } from "@/i18n"
 import {
-  getModelSettings, listInstalledModels, setModelSettings, switchModel, unloadModel, waitForModel,
-  type GpuChoice, type InstalledModel, type InstalledModels, type ModelSettings,
+  cancelInstall, getModelCatalog, getModelSettings, installActive, installModel, listInstalledModels, setModelSettings,
+  switchModel, uninstallModel, unloadModel, waitForModel,
+  type CatalogRow, type GpuChoice, type InstalledModel, type InstalledModels, type ModelCatalog, type ModelSettings,
 } from "@/lib/api"
+import { formatBytes } from "@/lib/installs"
 import { detailsLine } from "@/lib/modelDetails"
 import { cn } from "@/lib/utils"
 
@@ -41,7 +44,13 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
   const [unloading, setUnloading] = useState<string | null>(null)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
   const [changing, setChanging] = useState<string | null>(null)
+  /* What can be installed, or null when this router cannot (an older one, or not a router). */
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
+  const [removeKey, setRemoveKey] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
   const waiting = useRef<AbortController | null>(null)
+  const wasInstalling = useRef(false)
+  const lastInstalling = useRef("")
   const router = installed?.router === true
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -50,6 +59,7 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
       setInstalled(list)
       /* a router that keeps model settings says which models are off and where each is pinned; any other server has none */
       setSettings(list.router ? await getModelSettings(baseUrl, apiKey, signal).catch(() => null) : null)
+      setCatalog(list.router ? await getModelCatalog(baseUrl, apiKey, signal).catch(() => null) : null)
       setLoadError("")
     } catch (cause) {
       if (signal?.aborted) return
@@ -63,6 +73,29 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
     void refresh(controller.signal)
     return () => controller.abort()
   }, [connected, refresh])
+
+  /* While a download runs, ask the router how far it is; when it ends, re-read the models that are here. */
+  const installing = !!catalog && catalog.rows.some((row) => installActive(row.job))
+  useEffect(() => {
+    if (!connected || !installing) return
+    const timer = window.setInterval(() => {
+      getModelCatalog(baseUrl, apiKey).then((next) => { if (next) setCatalog(next) }).catch(() => undefined)
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [connected, installing, baseUrl, apiKey])
+
+  useEffect(() => {
+    const active = catalog?.rows.find((row) => installActive(row.job))
+    if (active) lastInstalling.current = active.id
+    if (wasInstalling.current && !installing) {
+      const row = catalog?.rows.find((candidate) => candidate.id === lastInstalling.current)
+      if (row?.job?.state === "done") setResult({ kind: "info", text: t("install.done", { name: row.name }) })
+      else if (row?.job?.state === "failed") setResult({ kind: "error", text: t("install.failed", { message: row.job.error ?? "" }) })
+      void refresh()
+      onSwitched()
+    }
+    wasInstalling.current = installing
+  }, [installing, catalog, refresh, onSwitched, t])
 
   useEffect(() => () => waiting.current?.abort(), [])
 
@@ -117,6 +150,44 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
       setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
     } finally {
       setChanging(null)
+    }
+  }
+
+  /* Router with install routes only. The confirmation (size and licence) was asked by ModelInstaller. */
+  const install = async (row: CatalogRow) => {
+    setResult(null)
+    try {
+      await installModel(baseUrl, apiKey, row.id)
+      const next = await getModelCatalog(baseUrl, apiKey)
+      if (next) setCatalog(next)
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }
+
+  const stopInstall = async (row: CatalogRow) => {
+    try {
+      await cancelInstall(baseUrl, apiKey, row.id)
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }
+
+  /* Deletes the model's files. The router refuses a model that is loaded, and the button is off for one. */
+  const remove = async (entry: InstalledModel) => {
+    setRemoveKey(null)
+    setResult(null)
+    setRemoving(entry.key)
+    try {
+      const outcome = await uninstallModel(baseUrl, apiKey, entry.key)
+      const text = t("models.removed", { name: entry.name, size: formatBytes(outcome.freedBytes) })
+      setResult({ kind: "info", text: outcome.presets.length ? `${text} ${t("models.removedPresets", { names: outcome.presets.join(", ") })}` : text })
+      onSwitched()
+      await refresh()
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setRemoving(null)
     }
   }
 
@@ -190,25 +261,46 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
                 <Button type="button" size="sm" variant="secondary" disabled={!model.switchable || busy || !!switching}
                   onClick={() => setConfirmKey(model.key)}>{t("models.switch")}</Button>
               )}
-            {router && setting && (
+            {router && (setting || catalog) && (
               <div className="model-controls">
-                <label>
-                  <span>{t("models.runsOn")}</span>
-                  <select className="model-select" aria-label={`${t("models.runsOn")} ${model.name}`} title={t("models.runsOnHelp")} value={setting.gpu}
-                    disabled={changing !== null} onChange={(event) => void change(model, { gpu: event.target.value as GpuChoice })}>
-                    {(["auto", "vulkan", "cpu"] as const).map((choice) => <option key={choice} value={choice}>{gpuLabel(choice)}</option>)}
-                  </select>
-                </label>
-                <Button type="button" size="sm" variant="secondary" disabled={changing !== null}
-                  aria-label={`${t(enabled ? "models.turnOff" : "models.turnOn")} ${model.name}`}
-                  onClick={() => void change(model, { enabled: !enabled })}>{t(enabled ? "models.turnOff" : "models.turnOn")}</Button>
+                {setting && (
+                  <>
+                    <label>
+                      <span>{t("models.runsOn")}</span>
+                      <select className="model-select" aria-label={`${t("models.runsOn")} ${model.name}`} title={t("models.runsOnHelp")} value={setting.gpu}
+                        disabled={changing !== null} onChange={(event) => void change(model, { gpu: event.target.value as GpuChoice })}>
+                        {(["auto", "vulkan", "cpu"] as const).map((choice) => <option key={choice} value={choice}>{gpuLabel(choice)}</option>)}
+                      </select>
+                    </label>
+                    <Button type="button" size="sm" variant="secondary" disabled={changing !== null}
+                      aria-label={`${t(enabled ? "models.turnOff" : "models.turnOn")} ${model.name}`}
+                      onClick={() => void change(model, { enabled: !enabled })}>{t(enabled ? "models.turnOff" : "models.turnOn")}</Button>
+                  </>
+                )}
+                {catalog && (removeKey === model.key ? (
+                  <span className="model-confirm">
+                    <span>{t("models.removeConfirm", { name: model.name, size: model.size_bytes ? ` (${formatSize(model.size_bytes)})` : "" })}</span>
+                    <Button type="button" size="sm" onClick={() => void remove(model)}>{t("models.removeYes")}</Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={() => setRemoveKey(null)}>{t("models.cancel")}</Button>
+                  </span>
+                ) : (
+                  <Button type="button" size="sm" variant="secondary"
+                    disabled={model.current || model.missing === true || model.state === "starting" || model.state === "stopping" || removing !== null || !!switching}
+                    title={model.current ? t("models.removeLoaded") : undefined}
+                    aria-label={`${t("models.remove")} ${model.name}`} onClick={() => setRemoveKey(model.key)}>
+                    {t(removing === model.key ? "models.removing" : "models.remove")}
+                  </Button>
+                ))}
               </div>
             )}
           </li>
           )
         })}
       </ul>
-      {installed && installed.models.length <= 1 && <p className="field-help">{t("models.empty")}</p>}
+      {installed && installed.models.length <= 1 && !catalog && <p className="field-help">{t("models.empty")}</p>}
+      {router && catalog && (
+        <ModelInstaller catalog={catalog} onInstall={(row) => void install(row)} onStop={(row) => void stopInstall(row)} disabled={!!switching || removing !== null} />
+      )}
     </section>
   )
 }

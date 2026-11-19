@@ -215,6 +215,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .model-result.fell-back { color: #c9a45c; }
 @media (max-width: 760px) { .model-row { flex-direction: column; align-items: stretch; } .model-confirm { justify-content: flex-start; } }
 
+/* Settings -> Model: the models that can be installed, and their downloads. */
+.model-install { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+.install-progress { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
+.install-bar { height: 6px; border-radius: 999px; background: var(--secondary); overflow: hidden; }
+.install-bar > span { display: block; height: 100%; background: var(--primary); transition: width .4s ease; }
+.install-progress small { color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.install-row .model-info .install-kind { text-transform: uppercase; letter-spacing: .04em; }
+
 /* Settings -> Presets and Requests. */
 .preset-panel { gap: 12px; }
 .preset-row .model-info small.preset-system { font-style: italic; overflow-wrap: anywhere; }
