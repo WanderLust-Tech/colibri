@@ -39,7 +39,13 @@
  * weights are tied).
  *   qwen3embed --model DIR --query Q --text DOC [--instruction TASK]     prints one SCORES line
  *   protocol:  READY {..., "task":"rerank"}   RERANK {id, query, documents, instruction, truncate}
- *              SCORES {id, scores [0..1 per document], logits [yes minus no], tokens, truncated}   or ERROR */
+ *              SCORES {id, scores [0..1 per document], logits [yes minus no], tokens, truncated}   or ERROR
+ *   The pairs of a request begin with the same system prompt, instruction and query: that shared start goes through the layers
+ *   once and every pair attends to its keys and values (QePast; COLI_RERANK_SHARE=0 turns it off).
+ *
+ * On a Vulkan device (make qwen3embed VK=1, COLI_VULKAN=1): the whole stack of layers runs as one frame of the dense chain
+ * (qe_chain_run), the activations never leaving the device; without a device, or when a frame fails, the CPU runs the same
+ * forward. READY says which: "device":"vulkan" or "cpu". docs/vulkan.md, "Embeddings and reranking on the chain". */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +85,87 @@ typedef struct {
     float *head;                    /* rerank: the output rows of "no" [0] and "yes" [1], [2][hidden] */
     int *prefix, nprefix, *suffix, nsuffix;     /* rerank: the fixed ends of every pair, as token ids */
 } QeEngine;
+
+/* The dense matrices on a Vulkan device (COLI_VULKAN=1 in a VK=1 build): every matrix product of the layers (q, k, v, o, gate, up,
+ * down) goes through coli_vk_matmul, which uploads a matrix on its first use and keeps it. The norms, RoPE, the attention and the
+ * SiLU stay on the CPU, so the activations cross to the device and back once for each product; at a few thousand rows that is
+ * a small part of the time the CPU spent on the product. A matrix the device cannot take (an odd width, no memory left) and a
+ * device that fails run on the CPU, which gives the same numbers to rounding. docs/vulkan.md. */
+#ifdef COLI_VULKAN
+#include "backend_vulkan.h"
+#include "vk_chain.h"
+#define QE_VK_SLOTS 4096
+static struct {
+    int ready;                                  /* the device is open */
+    int chain;                                  /* the layers run as one frame on the device (COLI_VK_CHAIN, on by default) */
+    struct { const void *w; ColiVkTensor *t; int off; } slot[QE_VK_SLOTS];
+    unsigned long long dev, cpu;                /* products run on the device / on the CPU */
+    double dev_s, att_s, hid_s;                 /* seconds: in device products, in the attention, in all the layers */
+} qe_vk;
+
+static void qe_vk_open(void){
+    memset(&qe_vk, 0, sizeof qe_vk);
+    if (!coli_vk_init_env("qwen3embed")) return;      /* COLI_VULKAN unset, or no device: the CPU */
+    qe_vk.ready = 1;
+    atexit(coli_vk_shutdown);
+    const char *c = getenv("COLI_VK_CHAIN");
+    if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { qe_vk.chain = 1; atexit(vkc_shutdown); }   /* registered after the backend's: runs before it */
+}
+
+/* The device copy of a matrix (uploaded on first use, shared with qe_vk_gemm), or NULL. */
+static ColiVkTensor *qe_vk_tensor(const QiMat *W){
+    if (!qe_vk.ready || W->ld || !W->w || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2) return NULL;
+    uintptr_t key = (uintptr_t)W->w;
+    unsigned h = (unsigned)((key >> 4) * 2654435761u) % QE_VK_SLOTS;
+    for (int n = 0; n < QE_VK_SLOTS; n++, h = (h + 1) % QE_VK_SLOTS) {
+        if (qe_vk.slot[h].w == W->w) {
+            if (qe_vk.slot[h].off) return NULL;
+            if (!qe_vk.slot[h].t && !coli_vk_tensor_ensure(&qe_vk.slot[h].t, W->w, NULL, W->fmt == QI_BF16 ? 11 : 10, W->K, W->N, 0)) { qe_vk.slot[h].off = 1; return NULL; }
+            return qe_vk.slot[h].t;
+        }
+        if (!qe_vk.slot[h].w) {
+            qe_vk.slot[h].w = W->w;
+            if (!coli_vk_tensor_ensure(&qe_vk.slot[h].t, W->w, NULL, W->fmt == QI_BF16 ? 11 : 10, W->K, W->N, 0)) { qe_vk.slot[h].off = 1; return NULL; }
+            return qe_vk.slot[h].t;
+        }
+    }
+    return NULL;
+}
+
+/* y = x W^T (+ bias) on the device; 0 = the caller runs it */
+static int qe_vk_gemm(float *Y, const float *X, int M, const QiMat *W, const float *bias){
+    if (!qe_vk.ready || W->ld || !W->w || M < 1 || M > 65535 || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2) return 0;
+    uintptr_t key = (uintptr_t)W->w;
+    unsigned h = (unsigned)((key >> 4) * 2654435761u) % QE_VK_SLOTS;
+    int at = -1;
+    for (int n = 0; n < QE_VK_SLOTS; n++, h = (h + 1) % QE_VK_SLOTS) {
+        if (qe_vk.slot[h].w == W->w) { at = (int)h; break; }
+        if (!qe_vk.slot[h].w) { qe_vk.slot[h].w = W->w; at = (int)h; break; }
+    }
+    if (at < 0 || qe_vk.slot[at].off) return 0;
+    const int fmt = W->fmt == QI_BF16 ? 11 : 10;
+    if (!coli_vk_matmul(&qe_vk.slot[at].t, Y, X, W->w, NULL, fmt, M, W->K, W->N, 0)) {
+        if (!qe_vk.slot[at].t) qe_vk.slot[at].off = 1;       /* it could not be uploaded: this matrix stays on the CPU */
+        return 0;
+    }
+    if (bias) {
+        const int N = W->N;
+        #pragma omp parallel for schedule(static)
+        for (int r = 0; r < M; r++) for (int j = 0; j < N; j++) Y[(int64_t)r * N + j] += bias[j];
+    }
+    return 1;
+}
+#endif
+
+/* One product Y[M][N] = X[M][K] W^T (+ bias): the device when there is one, else the CPU. */
+static void qe_lin(float *Y, const float *X, int M, const AcdLin *l){
+#ifdef COLI_VULKAN
+    const double t0 = omp_get_wtime();
+    if (qe_vk_gemm(Y, X, M, &l->m, l->b)) { qe_vk.dev++; qe_vk.dev_s += omp_get_wtime() - t0; return; }
+    qe_vk.cpu++;
+#endif
+    acd_lin(Y, X, M, l);
+}
 
 static void qe_escape(const char *s){
     for (; *s; s++) {
@@ -259,10 +346,19 @@ static void qe_attention(float *cx, const float *q, const float *k, const float 
 /* A shared start: the keys and values (after the norm and RoPE) of the first P tokens of every text of a request, one pair of
  * [P][Hk*hd] arrays for each layer. The rerank pairs of one request begin with the same instruction and query, so those
  * tokens go through the layers once (qe_past_make) and every pair attends to them (the texts then hold only what differs). */
-typedef struct { int P; float **k, **v; } QePast;
+typedef struct { int P; float **k, **v;
+#ifdef COLI_VULKAN
+    void **dk, **dv;                     /* the same keys and values on the device (VkcBuf), made when a device forward needs them */
+#endif
+} QePast;
 
 static void qe_past_free(QePast *p, int layers){
     if (!p) return;
+#ifdef COLI_VULKAN
+    for (int i = 0; p->dk && i < layers; i++) vkc_free((VkcBuf *)p->dk[i]);
+    for (int i = 0; p->dv && i < layers; i++) vkc_free((VkcBuf *)p->dv[i]);
+    free(p->dk); free(p->dv);
+#endif
     for (int i = 0; p->k && i < layers; i++) free(p->k[i]);
     for (int i = 0; p->v && i < layers; i++) free(p->v[i]);
     free(p->k); free(p->v);
@@ -282,7 +378,7 @@ static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total
     float *g = (float *)malloc((size_t)total * m->inter * sizeof(float)), *u = (float *)malloc((size_t)total * m->inter * sizeof(float));
     if (!n || !o || !q || !k || !v || !cx || !g || !u) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
     acd_rmsnorm(n, x, total, D, l->ln1, m->eps);
-    acd_lin(q, n, total, &l->sa.q); acd_lin(k, n, total, &l->sa.k); acd_lin(v, n, total, &l->sa.v);
+    qe_lin(q, n, total, &l->sa.q); qe_lin(k, n, total, &l->sa.k); qe_lin(v, n, total, &l->sa.v);
     acd_head_norm(q, total, H, hd, l->sa.qn, m->eps);
     acd_head_norm(k, total, Hk, hd, l->sa.kn, m->eps);
     acd_rope(q, total, H, hd, cs, sn);
@@ -295,24 +391,202 @@ static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total
         acd_attention_ex(cx + (size_t)offs[s] * H * hd, H * hd, q + (size_t)offs[s] * H * hd, H * hd, lens[s],
                          k + (size_t)offs[s] * Hk * hd, v + (size_t)offs[s] * Hk * hd, Hk * hd, lens[s], H, Hk, hd, -1, 1);
     }
+#ifdef COLI_VULKAN
+    const double ta = omp_get_wtime();
+#endif
     if (nshort) qe_attention(cx, q, k, v, lens, offs, shortseq, nshort, H, Hk, hd, kp, vp, P);
+#ifdef COLI_VULKAN
+    qe_vk.att_s += omp_get_wtime() - ta;
+#endif
     free(shortseq);
-    acd_lin(o, cx, total, &l->sa.o);
+    qe_lin(o, cx, total, &l->sa.o);
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t)total * D; i++) x[i] += o[i];
     acd_rmsnorm(n, x, total, D, l->ln2, m->eps);
-    acd_lin(g, n, total, &l->gate); acd_lin(u, n, total, &l->up);
+    qe_lin(g, n, total, &l->gate); qe_lin(u, n, total, &l->up);
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t)total * m->inter; i++) g[i] = acd_silu(g[i]) * u[i];
-    acd_lin(o, g, total, &l->down);
+    qe_lin(o, g, total, &l->down);
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t)total * D; i++) x[i] += o[i];
     free(n); free(o); free(q); free(k); free(v); free(cx); free(g); free(u);
 }
 
+#ifdef COLI_VULKAN
+/* The whole stack of layers on the device, in one frame: the activations never leave it (the per-matrix path moves every
+ * product's input and output across PCIe, which cost more than the product). The embedding rows go up once; what comes back is
+ * the last row of each text (the only rows the callers read) and, when the keys and values of a shared start are wanted, those.
+ * Per layer: RMSNorm, q/k/v, the q and k head norms, RoPE, attention (one dispatch per text, over the shared start's keys then
+ * its own, as one position-major cache), o, the residual, RMSNorm, gate and up, SwiGLU, down, the residual. */
+typedef struct {
+    int tried, ok, nl;
+    ColiVkTensor **t;                    /* [nl][7]: q k v o gate up down */
+    VkcBuf *prm;                         /* per layer: ln1 [D], ln2 [D], q norm [hd], k norm [hd] */
+    VkcBuf *xu, *csu, *x, *nrm, *q, *k, *v, *ctx, *g, *u, *tmp, *cs, *kc, *vc, *xd, *kvd;
+    unsigned long long forwards;
+    double ms;
+} QeChain;
+static QeChain qe_ch;
+
+static int qe_chain_setup(const AceText *m){
+    QeChain *c = &qe_ch;
+    if (c->tried) return c->ok;
+    c->tried = 1;
+    if (!qe_vk.chain || m->hd > 256 || m->heads % m->kv) return 0;
+    const int D = m->hidden, hd = m->hd, nl = m->nl;
+    c->nl = nl;
+    c->t = (ColiVkTensor **)calloc((size_t)nl * 7, sizeof(ColiVkTensor *));
+    const size_t per = (size_t)2 * D + 2 * hd;
+    float *arena = (float *)calloc((size_t)nl * per, sizeof(float));
+    if (!c->t || !arena) { free(arena); return 0; }
+    for (int l = 0; l < nl; l++) {
+        const AcdEncLayer *L = &m->L[l];
+        const AcdLin *mats[7] = { &L->sa.q, &L->sa.k, &L->sa.v, &L->sa.o, &L->gate, &L->up, &L->down };
+        for (int i = 0; i < 7; i++) {
+            c->t[l * 7 + i] = mats[i]->b ? NULL : qe_vk_tensor(&mats[i]->m);          /* these models have no biases */
+            if (!c->t[l * 7 + i]) { fprintf(stderr, "[VK] qwen3embed: a matrix of layer %d did not reach the device; per-matrix path\n", l); free(arena); return 0; }
+        }
+        memcpy(arena + l * per, L->ln1, (size_t)D * sizeof(float));
+        memcpy(arena + l * per + D, L->ln2, (size_t)D * sizeof(float));
+        memcpy(arena + l * per + 2 * D, L->sa.qn, (size_t)hd * sizeof(float));
+        memcpy(arena + l * per + 2 * D + hd, L->sa.kn, (size_t)hd * sizeof(float));
+    }
+    c->prm = vkc_buf((size_t)nl * per * sizeof(float), VKC_DEV);
+    int ok = c->prm && vkc_begin() && vkc_write(c->prm, 0, arena, (size_t)nl * per * sizeof(float)) && vkc_submit(1);
+    free(arena);
+    if (!ok) return 0;
+    c->ok = 1;
+    fprintf(stderr, "[VK] qwen3embed: %d layers on the device, one frame a forward\n", nl);
+    return 1;
+}
+
+static void qe_chain_off(const char *why){
+    qe_ch.ok = 0;
+    fprintf(stderr, "[VK] qwen3embed: the chain stopped (%s); per-matrix path from here on\n", why);
+    if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); qe_vk.ready = 0; }
+}
+
+/* x [total][hidden]: the embedding rows (host). Returns the hidden states in a calloc'd [total][hidden] of which only the last
+ * row of each text is filled, or NULL (the caller runs the CPU). past: the shared start (device copies made here when it has none);
+ * capture: asks for the keys and values of this one text to be kept (host copies in capture->k/v, device copies in dk/dv). */
+static float *qe_chain_run(const AceText *m, const float *xh, int total, const int *lens, const int *offs, int nseq,
+                           const float *cs, const float *sn, QePast *past, QePast *capture){
+    if (!qe_chain_setup(m)) return NULL;
+    QeChain *c = &qe_ch;
+    const int D = m->hidden, H = m->heads, Hk = m->kv, hd = m->hd, I = m->inter, nl = m->nl, P = past ? past->P : 0;
+    const size_t rq = (size_t)H * hd, rk = (size_t)Hk * hd, per = (size_t)2 * D + 2 * hd, T = (size_t)total;
+    const size_t cache_rows = P ? (size_t)nseq * P + T : 0;
+    const double t0 = omp_get_wtime();
+    if (!vkc_reserve(&c->xu, T * D * 4, VKC_UP) || !vkc_reserve(&c->csu, T * hd * 4, VKC_UP) ||
+        !vkc_reserve(&c->x, T * D * 4, VKC_DEV) || !vkc_reserve(&c->nrm, T * D * 4, VKC_DEV) || !vkc_reserve(&c->tmp, T * D * 4, VKC_DEV) ||
+        !vkc_reserve(&c->q, T * rq * 4, VKC_DEV) || !vkc_reserve(&c->ctx, T * rq * 4, VKC_DEV) ||
+        !vkc_reserve(&c->k, T * rk * 4, VKC_DEV) || !vkc_reserve(&c->v, T * rk * 4, VKC_DEV) ||
+        !vkc_reserve(&c->g, T * I * 4, VKC_DEV) || !vkc_reserve(&c->u, T * I * 4, VKC_DEV) || !vkc_reserve(&c->cs, T * hd * 4, VKC_DEV) ||
+        !vkc_reserve(&c->xd, (size_t)nseq * D * 4, VKC_DOWN) ||
+        (P && (!vkc_reserve(&c->kc, cache_rows * rk * 4, VKC_DEV) || !vkc_reserve(&c->vc, cache_rows * rk * 4, VKC_DEV))) ||
+        (capture && !vkc_reserve(&c->kvd, (size_t)nl * 2 * T * rk * 4, VKC_DOWN))) {
+        fprintf(stderr, "[VK] qwen3embed: device memory for %d rows refused; this forward runs per matrix\n", total);
+        return NULL;
+    }
+    if (P && !past->dk) {                                       /* a shared start made on the host: its device copy */
+        past->dk = (void **)calloc((size_t)nl, sizeof(void *)); past->dv = (void **)calloc((size_t)nl, sizeof(void *));
+        if (!past->dk || !past->dv) return NULL;
+        int ok = vkc_begin();
+        for (int l = 0; l < nl && ok; l++) {
+            past->dk[l] = vkc_buf((size_t)P * rk * 4, VKC_DEV); past->dv[l] = vkc_buf((size_t)P * rk * 4, VKC_DEV);
+            ok = past->dk[l] && past->dv[l] && vkc_write((VkcBuf *)past->dk[l], 0, past->k[l], (size_t)P * rk * 4) &&
+                 vkc_write((VkcBuf *)past->dv[l], 0, past->v[l], (size_t)P * rk * 4);
+        }
+        ok = ok && vkc_submit(1);
+        if (!ok) { qe_chain_off("the shared start would not go up"); return NULL; }
+    }
+    if (capture) {
+        capture->dk = (void **)calloc((size_t)nl, sizeof(void *)); capture->dv = (void **)calloc((size_t)nl, sizeof(void *));
+        if (!capture->dk || !capture->dv) return NULL;
+        for (int l = 0; l < nl; l++) {
+            capture->dk[l] = vkc_buf(T * rk * 4, VKC_DEV); capture->dv[l] = vkc_buf(T * rk * 4, VKC_DEV);
+            if (!capture->dk[l] || !capture->dv[l]) { qe_past_free(capture, nl); capture->dk = capture->dv = NULL; return NULL; }
+        }
+    }
+    memcpy(vkc_ptr(c->xu), xh, T * D * sizeof(float));
+    {
+        float *u = (float *)vkc_ptr(c->csu);                    /* the table the shader reads: cos, sin pairs, one row a position */
+        for (size_t r = 0; r < T; r++)
+            for (int j = 0; j < hd / 2; j++) { u[r * hd + 2 * j] = cs[r * hd + j]; u[r * hd + 2 * j + 1] = sn[r * hd + j]; }
+    }
+    VkcRegion *pre = NULL, *own = NULL;                         /* the per-text cache: the shared start, then the text's rows */
+    if (P) {
+        pre = (VkcRegion *)malloc((size_t)nseq * sizeof *pre); own = (VkcRegion *)malloc((size_t)nseq * sizeof *own);
+        if (!pre || !own) { free(pre); free(own); return NULL; }
+        for (int s = 0; s < nseq; s++) {
+            const size_t at = ((size_t)s * P + offs[s]) * rk;
+            pre[s] = (VkcRegion){at, 0, (size_t)P * rk};
+            own[s] = (VkcRegion){at + (size_t)P * rk, (size_t)offs[s] * rk, (size_t)lens[s] * rk};
+        }
+    }
+    VkcRegion *last = (VkcRegion *)malloc((size_t)nseq * sizeof *last);
+    if (!last) { free(pre); free(own); return NULL; }
+    for (int s = 0; s < nseq; s++) last[s] = (VkcRegion){(size_t)s * D, ((size_t)offs[s] + lens[s] - 1) * D, (size_t)D};
+    const float scale = 1.f / sqrtf((float)hd);
+    int ok = vkc_begin() && vkc_copy(c->x, 0, c->xu, 0, T * D) && vkc_copy(c->cs, 0, c->csu, 0, T * hd);
+    for (int l = 0; l < nl && ok; l++) {
+        ColiVkTensor **t = c->t + (size_t)l * 7;
+        const int wb = (int)(l * per);
+        VkcNorm n1 = {total, D, 1, 0, D, D, 0, D, D, wb, 0, 0, m->eps, 1.f};
+        VkcNorm qn = {total * H, hd, H, 0, H * hd, hd, 0, H * hd, hd, wb + 2 * D, 0, 0, m->eps, 1.f};
+        VkcNorm kn = {total * Hk, hd, Hk, 0, Hk * hd, hd, 0, Hk * hd, hd, wb + 2 * D + hd, 0, 0, m->eps, 1.f};
+        VkcRope rq_ = {total * H, H, 0, H * hd, hd, hd / 2, 0, hd}, rk_ = {total * Hk, Hk, 0, Hk * hd, hd, hd / 2, 0, hd};
+        ok = vkc_norm(c->x, c->prm, c->nrm, &n1) &&
+             vkc_matmul(t[0], c->nrm, 0, c->q, 0, total) && vkc_matmul(t[1], c->nrm, 0, c->k, 0, total) && vkc_matmul(t[2], c->nrm, 0, c->v, 0, total) &&
+             vkc_norm(c->q, c->prm, c->q, &qn) && vkc_norm(c->k, c->prm, c->k, &kn) && vkc_rope(c->q, c->cs, &rq_) && vkc_rope(c->k, c->cs, &rk_);
+        if (ok && capture)
+            ok = vkc_copy((VkcBuf *)capture->dk[l], 0, c->k, 0, T * rk) && vkc_copy((VkcBuf *)capture->dv[l], 0, c->v, 0, T * rk) &&
+                 vkc_copy(c->kvd, (size_t)l * 2 * T * rk, c->k, 0, T * rk) && vkc_copy(c->kvd, (size_t)l * 2 * T * rk + T * rk, c->v, 0, T * rk);
+        if (ok && P)
+            ok = vkc_copy_regions(c->kc, (VkcBuf *)past->dk[l], pre, nseq) && vkc_copy_regions(c->kc, c->k, own, nseq) &&
+                 vkc_copy_regions(c->vc, (VkcBuf *)past->dv[l], pre, nseq) && vkc_copy_regions(c->vc, c->v, own, nseq);
+        for (int s = 0; s < nseq && ok; s++) {
+            VkcAttnW a;
+            memset(&a, 0, sizeof a);
+            const size_t kb = P ? ((size_t)s * P + offs[s]) * rk : (size_t)offs[s] * rk;
+            a.a = (VkcAttn){.S = lens[s], .H = H, .KVH = Hk, .hd = hd, .pos_base = P, .cap = P + lens[s], .q_off = (int)((size_t)offs[s] * rq),
+                            .q_row = (int)rq, .q_seg = hd, .o_off = (int)((size_t)offs[s] * rq), .o_row = (int)rq, .scale = scale,
+                            .k_off = (int)kb, .v_off = (int)kb};
+            a.vd = hd; a.kv_pm = 1;
+            ok = vkc_attn_w(c->q, P ? c->kc : c->k, P ? c->vc : c->v, c->ctx, NULL, NULL, NULL, &a);
+        }
+        VkcNorm n2 = {total, D, 1, 0, D, D, 0, D, D, wb + D, 0, 0, m->eps, 1.f};
+        VkcEw add = {VKC_EW_ADD, total * D, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f}, act = {VKC_EW_SWIGLU, (int)(T * I), 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f};
+        ok = ok && vkc_matmul(t[3], c->ctx, 0, c->tmp, 0, total) && vkc_ew(c->x, c->x, c->tmp, NULL, NULL, &add) &&
+             vkc_norm(c->x, c->prm, c->nrm, &n2) && vkc_matmul(t[4], c->nrm, 0, c->g, 0, total) && vkc_matmul(t[5], c->nrm, 0, c->u, 0, total) &&
+             vkc_ew(c->g, c->g, c->u, NULL, NULL, &act) && vkc_matmul(t[6], c->g, 0, c->tmp, 0, total) && vkc_ew(c->x, c->x, c->tmp, NULL, NULL, &add);
+    }
+    ok = ok && vkc_copy_regions(c->xd, c->x, last, nseq) && vkc_submit(1);
+    free(pre); free(own); free(last);
+    if (!ok) {
+        if (capture) { qe_past_free(capture, nl); capture->dk = capture->dv = NULL; }
+        qe_chain_off("a frame failed");
+        return NULL;
+    }
+    float *out = (float *)calloc(T * D, sizeof(float));
+    if (!out) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+    for (int s = 0; s < nseq; s++) memcpy(out + ((size_t)offs[s] + lens[s] - 1) * D, (const float *)vkc_ptr(c->xd) + (size_t)s * D, (size_t)D * sizeof(float));
+    if (capture) {
+        const float *kv = (const float *)vkc_ptr(c->kvd);
+        for (int l = 0; l < nl; l++) {
+            memcpy(capture->k[l], kv + (size_t)l * 2 * T * rk, T * rk * sizeof(float));
+            memcpy(capture->v[l], kv + (size_t)l * 2 * T * rk + T * rk, T * rk * sizeof(float));
+        }
+    }
+    c->forwards++;
+    c->ms += (omp_get_wtime() - t0) * 1e3;
+    return out;
+}
+#endif
+
 /* nseq sequences (ids concatenated, lens each) through every layer: the hidden states [total][hidden] before the final norm
  * (malloc'd; NULL for a bad id). */
-static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int nseq, const QePast *past, QePast *capture){
+static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int nseq, QePast *past, QePast *capture){
     const AceText *m = e->m;
     const int P = past ? past->P : 0;
     int total = 0, longest = 0;
@@ -340,9 +614,19 @@ static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int 
             if (!capture->k[i] || !capture->v[i]) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
         }
     }
+#ifdef COLI_VULKAN
+    const double th = omp_get_wtime();
+    if (qe_vk.chain) {                                               /* the whole stack on the device; NULL: the host runs it below */
+        float *r = qe_chain_run(m, x, total, lens, offs, nseq, cs, sn, past, capture);
+        if (r) { free(x); free(cs); free(sn); free(offs); qe_vk.hid_s += omp_get_wtime() - th; return r; }
+    }
+#endif
     for (int i = 0; i < m->nl; i++)
         qe_layer(m, &m->L[i], x, total, lens, offs, nseq, cs, sn, past ? past->k[i] : NULL, past ? past->v[i] : NULL, P,
                  capture ? capture->k[i] : NULL, capture ? capture->v[i] : NULL);
+#ifdef COLI_VULKAN
+    qe_vk.hid_s += omp_get_wtime() - th;
+#endif
     free(cs); free(sn); free(offs);
     return x;
 }
@@ -438,7 +722,7 @@ static int qe_hidden_free(const QeEngine *e, const int *ids, const int *len, QeP
 
 /* The logit difference (yes minus no) of nseq pairs (ids concatenated, lens each): out[nseq]; 0 on failure. The head is two
  * rows of the output matrix, so a pair costs the layers and then two dot products over the last row. */
-static int qe_score(const QeEngine *e, const int *ids, const int *lens, int nseq, double *out, const QePast *past){
+static int qe_score(const QeEngine *e, const int *ids, const int *lens, int nseq, double *out, QePast *past){
     const AceText *m = e->m;
     const int D = m->hidden;
     float *x = qe_hidden(e, ids, lens, nseq, past, NULL);
@@ -566,10 +850,17 @@ static char *qe_read_line(int *too_long){
     return buf;
 }
 
+static const char *qe_device(void){
+#ifdef COLI_VULKAN
+    if (qe_vk.ready) return "vulkan";
+#endif
+    return "cpu";
+}
+
 static int qe_serve(QeEngine *e){
     printf("READY {\"model\":\""); qe_escape(e->name);
-    if (e->rerank) printf("\",\"task\":\"rerank\",\"max_tokens\":%d,\"layers\":%d,\"max_documents\":%d}\n", e->max_tokens, e->m->nl, QE_MAX_INPUTS);
-    else printf("\",\"dimensions\":%d,\"max_tokens\":%d,\"layers\":%d,\"min_dimensions\":1}\n", e->m->hidden, e->max_tokens, e->m->nl);
+    if (e->rerank) printf("\",\"task\":\"rerank\",\"max_tokens\":%d,\"layers\":%d,\"max_documents\":%d,\"device\":\"%s\"}\n", e->max_tokens, e->m->nl, QE_MAX_INPUTS, qe_device());
+    else printf("\",\"dimensions\":%d,\"max_tokens\":%d,\"layers\":%d,\"min_dimensions\":1,\"device\":\"%s\"}\n", e->m->hidden, e->max_tokens, e->m->nl, qe_device());
     fflush(stdout);
     for (;;) {
         int too_long;
@@ -663,6 +954,9 @@ int main(int argc, char **argv){
     QeEngine *e = qe_open(model, err, sizeof err);
     if (!e) { fprintf(stderr, "qwen3embed: %s\n", err); return 2; }
     if (max_tokens >= 2 && max_tokens <= QE_DEFAULT_MAX_TOKENS) e->max_tokens = max_tokens;
+#ifdef COLI_VULKAN
+    qe_vk_open();                      /* once the weights are loaded: the device opens, and each matrix goes up on its first use */
+#endif
     int rc;
     if (serve) rc = qe_serve(e);
     else if (e->rerank) {
@@ -670,6 +964,10 @@ int main(int argc, char **argv){
         rc = qe_rerank(e, "1", query, &text, 1, instruction, 1);
     }
     else rc = qe_run(e, "1", &text, 1, instruction, dims, 1);
+#ifdef COLI_VULKAN
+    if (qe_vk.ready) fprintf(stderr, "[VK] qwen3embed: %llu forwards as one frame (%.2f s); %llu products on the device, %llu on the CPU; layers %.2f s, of it products %.2f s, attention %.2f s\n",
+                             qe_ch.forwards, qe_ch.ms / 1e3, qe_vk.dev, qe_vk.cpu, qe_vk.hid_s, qe_vk.dev_s, qe_vk.att_s);
+#endif
     qe_close(e);
     return rc;
 }

@@ -30,7 +30,7 @@ def send(keyword, body):
 def main():
     if "--serve" not in sys.argv:
         sys.exit("rerank_stub: --serve only")
-    send("READY", {"model": "rerank-stub", "task": "rerank", "max_tokens": MAX_TOKENS, "layers": 1, "max_documents": 2048})
+    send("READY", {"model": "rerank-stub", "task": "rerank", "max_tokens": MAX_TOKENS, "layers": 1, "max_documents": 2048, "device": "cpu"})
     for line in sys.stdin:
         keyword, _, rest = line.rstrip("\r\n").partition(" ")
         if keyword != "RERANK":

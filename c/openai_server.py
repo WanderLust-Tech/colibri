@@ -6733,9 +6733,13 @@ class APIServer(ThreadingHTTPServer):
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}
+            if info.get("device"):
+                entry["embedding"]["device"] = info["device"]          # "vulkan" or "cpu": where the layers run
         if is_rerank_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["rerank"] = {key: info.get(key) for key in RERANK_OPTION_KEYS}
+            if info.get("device"):
+                entry["rerank"]["device"] = info["device"]
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}

@@ -93,7 +93,7 @@ instruction for every request of one search.
 
 ## How fast, and how big
 
-Measured on the 14900KF (24 cores, 32 threads), CPU, the whole request including its tokenizing. The pairs are a short query and a
+Measured on the 14900KF (24 cores, 32 threads), **CPU**, the whole request including its tokenizing. The pairs are a short query and a
 passage, so each is about 107 tokens (the fixed prompt is a good half of that) or about 290 for the longer passages. The first
 measurement (2026-11-20) was before the shared start below; the 0.6B was measured again after it:
 
@@ -117,6 +117,11 @@ keys and values, and lets every pair attend to them: the pairs then hold only wh
 a pair of over 2048 tokens makes the request use the old path. The share is worth most for short passages (8 pairs: 1.18 s to 0.40 s;
 64 pairs of 107 tokens: 11.3 s to 4.6 s) and least for long ones, whose own tokens dominate (32 pairs of 290 tokens: 14.2 s to
 11.0 s). `COLI_RERANK_SHARE=0` in the engine's environment turns it off, to compare.
+
+**On the graphics card.** With a `VK=1` build and `COLI_VULKAN=1` (the router sets it when the card has room) the whole forward runs
+on the device in one frame, so the numbers above fall by an order of magnitude: the 4B ranks 20 passages in 1.2 s (24.8 s on the
+CPU) and the 0.6B in 0.37 s (5.9 s). [vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc) has the table and the
+reasons. The scores are the CPU's to rounding.
 
 ## Checked
 
@@ -145,5 +150,4 @@ then for each `RERANK {id, query, documents, instruction, truncate}` exactly one
 
 ## Not done
 
-* A GPU path (the Vulkan chain that Z-Image and Gemma 4 use).
 * Sharing the start across requests (the same query against a new list of documents): each request still computes it once.

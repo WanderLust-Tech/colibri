@@ -22,9 +22,9 @@ REFERENCE = os.path.join(C_DIR, "tools", "qwen3_embedding_0.6b_reference.json")
 
 
 class Engine:
-    def __init__(self, model=MODEL, extra=()):
+    def __init__(self, model=MODEL, extra=(), env=None):
         self.process = subprocess.Popen([EXE, "--model", model, "--serve", *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        text=True, encoding="utf-8", bufsize=1)
+                                        text=True, encoding="utf-8", bufsize=1, env=dict(os.environ, **env) if env else None)
         self.ready = self.process.stdout.readline()
 
     def send(self, line):
@@ -86,6 +86,27 @@ class RealEngineTest(unittest.TestCase):
         self.assertGreater(cosine(alone["vectors"][0], batch["vectors"][1]), 0.99999)
         _, again = self.engine.embed([long_text])
         self.assertGreater(cosine(again["vectors"][0], batch["vectors"][0]), 0.99999)
+
+    def test_the_graphics_card_gives_the_cpus_vectors(self):
+        # The same engine with COLI_VULKAN=1 and =0 (a build without Vulkan, or no device, says "cpu" and the test is skipped).
+        card = Engine(env={"COLI_VULKAN": "1"})
+        try:
+            if json.loads(card.ready.partition(" ")[2]).get("device") != "vulkan":
+                self.skipTest("this build or machine has no Vulkan device")
+            cpu = Engine(env={"COLI_VULKAN": "0"})
+            try:
+                texts = ["The capital of France is Paris.", "cat", "kitten", "", "日本語のテキスト", "The quick brown fox jumps over the lazy dog. " * 60]
+                _, want = cpu.embed(texts)
+                keyword, got = card.embed(texts)
+                self.assertEqual(keyword, "VECTORS", got)
+                self.assertEqual(got["tokens"], want["tokens"])
+                for a, b in zip(got["vectors"], want["vectors"]):
+                    self.assertGreater(cosine(a, b), 0.999999)
+                self.assertEqual(card.embed(["alive"])[0], "VECTORS")
+            finally:
+                cpu.close()
+        finally:
+            card.close()
 
     def test_every_vector_is_a_unit_vector_and_a_cut_one_is_normalised_again(self):
         _, body = self.engine.embed(["alpha", "beta"], dimensions=32)

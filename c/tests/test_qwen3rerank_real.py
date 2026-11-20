@@ -94,14 +94,41 @@ class RealEngineTest(unittest.TestCase):
         self.assertEqual(keyword, "SCORES", body)
         self.assertEqual(body["tokens"], expected["tokens"])
         for got, want in zip(body["logits"], expected["logits"]):
-            self.assertAlmostEqual(got, want, places=5)
+            self.assertAlmostEqual(got, want, places=4)             # on a graphics card the two paths cut the sums differently
         self.assertEqual(body["logits"][0], body["logits"][5])                  # the same pair twice is the same score
         self.assertGreater(body["scores"][0], body["scores"][1])
         # every pair the same: the whole text is shared, yet each pair keeps its last row (the score is read from it)
         keyword, body = self.engine.rerank("What is the capital of France?", ["Paris."] * 3)
         self.assertEqual(keyword, "SCORES", body)
         self.assertEqual(len(set(body["logits"])), 1)
-        self.assertEqual(body["logits"][0], self.engine.rerank("What is the capital of France?", ["Paris."])[1]["logits"][0])
+        self.assertAlmostEqual(body["logits"][0], self.engine.rerank("What is the capital of France?", ["Paris."])[1]["logits"][0], places=4)
+
+    def test_the_graphics_card_scores_like_the_cpu(self):
+        # The same engine with COLI_VULKAN=1 and =0 (a build without Vulkan, or no device, says "cpu" and the test is skipped).
+        card = Engine(env={"COLI_VULKAN": "1"})
+        try:
+            if json.loads(card.ready.partition(" ")[2]).get("device") != "vulkan":
+                self.skipTest("this build or machine has no Vulkan device")
+            cpu = Engine(env={"COLI_VULKAN": "0"})
+            try:
+                docs = ["The capital of France is Paris.", "The capital of Spain is Madrid.", "", "Bananas are rich in potassium. " * 40,
+                        "日本の首都は東京です。", "The capital of France is Paris."] + [f"Passage {i} about cities." for i in range(30)]
+                keyword, want = cpu.rerank("What is the capital of France?", docs)
+                self.assertEqual(keyword, "SCORES", want)
+                keyword, got = card.rerank("What is the capital of France?", docs)
+                self.assertEqual(keyword, "SCORES", got)
+                self.assertEqual(got["tokens"], want["tokens"])
+                for a, b in zip(got["logits"], want["logits"]):
+                    self.assertAlmostEqual(a, b, places=3)
+                self.assertEqual(sorted(range(len(docs)), key=lambda i: -round(got["logits"][i], 2)),
+                                 sorted(range(len(docs)), key=lambda i: -round(want["logits"][i], 2)))
+                keyword, body = card.rerank("anything", ["word " * 3000, "short"], truncate=True)      # a long text on the card
+                self.assertEqual(keyword, "SCORES", body)
+                self.assertEqual(card.rerank("q", ["alive"])[0], "SCORES")
+            finally:
+                cpu.close()
+        finally:
+            card.close()
 
     def test_the_right_document_wins_and_a_score_is_a_probability(self):
         keyword, body = self.engine.rerank("What is the capital of China?", [

@@ -279,7 +279,7 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(status, 200)
         card = models["data"][0]
         self.assertEqual((card["id"], card["capabilities"]), (MODEL_ID, ["rerank"]))
-        self.assertEqual(card["rerank"], {"max_tokens": 14, "max_documents": 2048})
+        self.assertEqual(card["rerank"], {"max_tokens": 14, "max_documents": 2048, "device": "cpu"})       # where the layers run, from READY
         status, _, health = self.gw.request("/health")
         self.assertEqual((status, health["capabilities"]), (200, ["rerank"]))
         self.assertEqual(health["rerank"]["max_tokens"], 14)

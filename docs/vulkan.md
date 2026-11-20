@@ -1917,6 +1917,32 @@ middle of a step leaves the host's caches describing whole steps: the same step 
 sized to the context and the chain declines when they do not fit. Not the bits of the CPU's: the residual agrees to about 1e-5
 (`COLI_VK_CHAIN_CHECK=1`), and the continuation of the tiny models and the real E2B, E4B and 26B-A4B is the CPU's.
 
+### Embeddings and reranking on the chain (`qwen3embed.c`)
+
+The Qwen3 embedding and reranking engine ([embeddings.md](embeddings.md), [rerank.md](rerank.md)) runs a whole forward as **one
+frame**: the embedding rows go up once, and per layer the chain does the input norm, q, k and v, the q and k head norms, RoPE (a host
+table of cosine and sine pairs, one row a position), attention, o, the residual add, the post-attention norm, gate and up, SwiGLU, down
+and the residual add; only the last row of each text (and, for a rerank request's shared start, its keys and values) comes back.
+Attention is `vkc_attn_w` with position-major rows, one dispatch a text, over a cache made of the shared start's keys followed by
+the text's own (copied on the device: `vkc_copy_regions`). Needs `make qwen3embed VK=1` and `COLI_VULKAN=1`; the engine's `READY`
+line says `"device":"vulkan"`. The router puts it on the card by the same free-memory rule as every other model.
+
+Why a chain and not a matrix at a time: the matrix-by-matrix path (`COLI_VK_CHAIN=0`) sends every product's input across PCIe and
+its output back. Measured here (RTX 5090, PCIe at about 9 GB/s), a 2000-row product of the 4B (2560 by 9728) costs 13.5 ms of which
+about 10 are the 98 MB crossing; the card's arithmetic is 3 to 4 ms of it. Reranking 20 passages (about 5200 tokens) with the 4B:
+
+| | CPU (14900KF) | matrix by matrix | chain |
+|---|---|---|---|
+| Qwen3-Reranker-0.6B | 5.9 s | 2.5 s | **0.37 s** |
+| Qwen3-Reranker-4B | 24.8 s | 7.5 s | **1.2 s** |
+| Qwen3-Reranker-4B, 20 passages of about 520 tokens | 61.6 s | | **3.05 s** |
+
+The scores are the CPU's to rounding (largest logit difference 3.9e-5 over twelve request shapes; embedding vectors have cosine
+1.0000000 with the CPU's); a 7000-token document 40 s to 4.1 s. A request the card cannot hold (memory for its rows refused) runs
+per matrix, and a matrix that does not reach the device keeps that product on the CPU; a frame that fails (a lost device) turns the
+chain off for the rest of the run and the CPU does the forward again from the ids. The matrices go up as bf16 (fmt 11): they use
+the fp32 tiled GEMM, not the cooperative-matrix one, which needs weights that are exact in fp16.
+
 ### Gemma 4 experts on the tier
 
 The 26B-A4B's routed experts go through the shared tier (`vk_tier.c`) like the other mixture-of-experts engines', wired in
