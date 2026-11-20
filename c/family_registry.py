@@ -1904,6 +1904,47 @@ FAMILIES = (
         tokenizer_file="tokenizer.json",
     ),
     FamilyDescriptor(
+        id="qwen3_reranker",
+        # A Qwen3-Reranker checkpoint (0.6B, 4B, 8B): a Qwen3ForCausalLM whose config.json says model_type "qwen3", as the
+        # chat models' base does, told apart by 1_LogitScore/config.json (see resolve_model). The keyed type is synthetic.
+        # The same engine as Qwen3-Embedding (c/qwen3embed): the checkpoint says which of the two it runs.
+        model_types=("qwen3_reranker",),
+        display_name="Qwen3-Reranker",
+        display_scale="",
+        display_variants=(
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-Reranker", "0.6B",
+                           model_id="qwen3-reranker-0.6b"),
+            DisplayVariant((("hidden_size", 2560), ("num_hidden_layers", 36)), "Qwen3-Reranker", "4B",
+                           model_id="qwen3-reranker-4b"),
+            DisplayVariant((("hidden_size", 4096), ("num_hidden_layers", 36)), "Qwen3-Reranker", "8B",
+                           model_id="qwen3-reranker-8b"),
+        ),
+        engine_artifact="qwen3embed",
+        engine_aliases=(),
+        engine_group="qwen3embed",
+        internal_arch="qwen3_reranker",
+        build_target="qwen3embed",
+        process_names=("qwen3embed",),
+        default_model_id="qwen3-reranker",
+        cli_adapter="qwen3_reranker",
+        gateway_adapter="qwen3_reranker",
+        planner_id="qwen3_reranker",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "a reranking model has no KV cache and no experts: its whole size is its weights, read once"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="root",
+        # One request at a time, and no context or output-token budget (it generates nothing): the limits exist because
+        # every descriptor has them. The longest pair is the engine's own (8192 tokens), not an environment variable.
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="rerank",
+        tokenizer_file="tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="laya",
         # A Laya checkpoint has no config.json at its root: resolve_model reads
         # rl_agent_config.json and the encoder's own config.json, and names it
@@ -2018,7 +2059,7 @@ def _build_registry(families):
                 not isinstance(family.has_cli_adapter, bool) or
                 not isinstance(family.tune_prompt_template, str) or
                 "{prompt}" not in family.tune_prompt_template or
-                family.modality not in ("text", "image", "audio", "decision", "embedding") or
+                family.modality not in ("text", "image", "audio", "decision", "embedding", "rerank") or
                 family.capabilities.decision != (family.modality == "decision") or
                 not isinstance(family.tokenizer_file, str) or not family.tokenizer_file or
                 not isinstance(family.checkpoint_files, tuple) or
@@ -2194,6 +2235,13 @@ def _is_embedding_checkpoint(model, config):
             and (model / "modules.json").is_file() and (model / "1_Pooling" / "config.json").is_file())
 
 
+def _is_reranker_checkpoint(model, config):
+    """A Qwen3-Reranker checkpoint: a plain Qwen3 config.json beside the sentence-transformers file that names the two
+    tokens its answer is read from (a "yes" and a "no": the score is the chance of the first)."""
+    return (isinstance(config, dict) and config.get("model_type") == "qwen3"
+            and (model / "modules.json").is_file() and (model / "1_LogitScore" / "config.json").is_file())
+
+
 def resolve_model(model_dir):
     model = Path(model_dir).expanduser().resolve()
     path = model / "config.json"
@@ -2228,6 +2276,8 @@ def resolve_model(model_dir):
         return _resolve_gliner2_checkpoint(model, config)
     if _is_embedding_checkpoint(model, config):
         return ResolvedFamily(_BY_TYPE["qwen3_embedding"], "qwen3_embedding", config, config, str(model))
+    if _is_reranker_checkpoint(model, config):
+        return ResolvedFamily(_BY_TYPE["qwen3_reranker"], "qwen3_reranker", config, config, str(model))
     family = family_for_config(config)
     family_config = config
     if family.config_section == "text_config":

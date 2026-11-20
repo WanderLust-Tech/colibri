@@ -82,7 +82,7 @@ order.
 | Request | Priority |
 |---|---|
 | `/v1/images/generations`, `/v1/images/edits`, `/v1/audio/music` | low |
-| everything else (chat, completions, messages, transcriptions, embeddings, System One) | normal |
+| everything else (chat, completions, messages, transcriptions, embeddings, rerank, System One) | normal |
 
 A client can choose with the header `X-Colibri-Priority: low`, `normal` or `high`; any other value is ignored (the
 default applies), since priority is a hint and never a reason to refuse a request. Two things to know: a low-priority

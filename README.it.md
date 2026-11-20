@@ -220,6 +220,7 @@ Hugging Face indica per ciascun repository.
 | **Z-Image-Turbo**: da testo a immagine, licenza Apache-2.0, il modello di immagini più leggero | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | un'immagine 768x768, 13 s di denoising su una RTX 5090 (1,4 s a passo), 171 s su CPU (i9 a 24 core) |
 | **ACE-Step 1.5**: da testo a musica, licenza MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s di musica in 16 s (i9 a 24 core, CPU) |
 | **Qwen3-Embedding-0.6B**: da testo a vettori per la ricerca, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 testi da 24 token in 2,6 s (i9 a 24 core, CPU) |
+| **Qwen3-Reranker-0.6B**: ordina i documenti per quanto rispondono a una query, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documenti da circa 25 token in 10,6 s (i9 a 24 core, CPU) |
 
 **Modelli grandi, i cui expert vengono letti dal disco in streaming** (la
 velocità la decide il disco: un NVMe veloce è ciò che aiuta di più)
@@ -484,6 +485,7 @@ API:
   Qwen3.8-Flash-Next e Qwen3.8-27B: un percorso in un messaggio di `coli chat`,
   un allegato in `coli web` o una parte `image_url`;
 - **embedding in uscita** con Qwen3-Embedding su `POST /v1/embeddings`, nella forma di OpenAI così gli strumenti di ricerca usuali funzionano: testo in ingresso, vettore unitario in uscita, a lotti, con un'istruzione di query facoltativa e un taglio a meno dimensioni ([embeddings.md](docs/embeddings.md));
+- **riordinamento** con Qwen3-Reranker su `POST /v1/rerank` (e `/v2/rerank`), nella forma dei client di Jina e Cohere: una query e un elenco di documenti in ingresso, l'elenco ordinato dal migliore con un punteggio da 0 a 1 in uscita, con `top_n` e un'istruzione di compito facoltativa ([rerank.md](docs/rerank.md));
 - **musica in uscita** con ACE-Step 1.5 su `POST /v1/audio/music` e `coli music "calm piano"`: un brano, con o senza testo, come WAV stereo a 48 kHz ([acestep.md](docs/acestep.md));
 - **immagini in uscita** con Qwen-Image-2.1 su `POST /v1/images/generations`,
   disegnate anche dentro il terminale da `coli chat`
@@ -702,7 +704,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
-├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
+├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

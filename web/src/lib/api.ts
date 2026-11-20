@@ -366,7 +366,7 @@ export function installActive(job: InstallJob | null | undefined): boolean {
 export interface CatalogRow {
   id: string
   name: string
-  kind: "text" | "image" | "audio" | "embedding"
+  kind: "text" | "image" | "audio" | "embedding" | "rerank"
   download_gb: number
   ram_min_gb: number
   ram_good_gb: number
@@ -633,6 +633,11 @@ export function generatesMusic(model: ModelInfo | undefined) {
 /* An embedding model: it answers POST /v1/embeddings and refuses chat, so it has no place in the conversation's model list */
 export function makesEmbeddings(model: ModelInfo | undefined) {
   return !!model?.capabilities?.includes("embeddings")
+}
+
+/* A reranking model: it answers POST /v1/rerank and refuses chat, so it has no place in the conversation's model list either */
+export function ranksDocuments(model: ModelInfo | undefined) {
+  return !!model?.capabilities?.includes("rerank")
 }
 
 /* An image model whose engine can also edit pictures: POST /v1/images/edits */

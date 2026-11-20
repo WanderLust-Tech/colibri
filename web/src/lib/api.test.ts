@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  getModelSettings, listInstalledModels, listModelInfo, makesEmbeddings, serverEndpoint, setModelSettings, streamChat, switchModel, unloadModel,
+  getModelSettings, listInstalledModels, listModelInfo, makesEmbeddings, ranksDocuments, serverEndpoint, setModelSettings, streamChat, switchModel, unloadModel,
   waitForModel,
   type GenerateImageOptions, type ImageProgress,
 } from "./api"
@@ -227,6 +227,17 @@ describe("model capabilities", () => {
     const models = await listModelInfo("http://x/v1", "")
     expect(models.map(makesEmbeddings)).toEqual([true, false])
     expect(makesEmbeddings(undefined)).toBe(false)
+  })
+
+  it("recognises a reranking model, which has no place in the chat list either", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [
+      { id: "qwen3-reranker-0.6b", object: "model", capabilities: ["rerank"], rerank: { max_tokens: 8192 } },
+      { id: "qwen3-embedding-0.6b", object: "model", capabilities: ["embeddings"] },
+      { id: "glm-5.2-colibri", object: "model", capabilities: ["chat", "systemone"] },
+    ] }))))
+    const models = await listModelInfo("http://x/v1", "")
+    expect(models.map(ranksDocuments)).toEqual([true, false, false])
+    expect(ranksDocuments(undefined)).toBe(false)
   })
 
   it("reads what an image-editing model accepts, and nothing it did not state", async () => {

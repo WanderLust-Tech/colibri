@@ -205,6 +205,29 @@ CATALOG = (
         modality="embedding", summary="the best of the family, 4096 numbers a text; about 13 times slower than the 0.6B",
         license_note="Apache-2.0",
         prebuilt_since="2.3.0", doc="docs/embeddings.md"),
+    CatalogModel(
+        id="qwen3-reranker-0.6b", family="qwen3_reranker", name="Qwen3-Reranker-0.6B",
+        repo="Qwen/Qwen3-Reranker-0.6B", disk_gb=1.2,
+        # docs/rerank.md: the same decoder as the embedding model, held as bf16 (1.2 GB); only two rows of its output
+        # matrix are read, and a batch of pairs needs a few hundred MB on top.
+        ram_min_gb=2, ram_good_gb=4, dense_gb=1.2, rank=1, size_class="small",
+        modality="rerank", summary="sorts documents by how well they answer a query (search results, retrieval; not chat)",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/rerank.md"),
+    CatalogModel(
+        id="qwen3-reranker-4b", family="qwen3_reranker", name="Qwen3-Reranker-4B",
+        repo="Qwen/Qwen3-Reranker-4B", disk_gb=8.1,
+        ram_min_gb=10, ram_good_gb=12, dense_gb=8.1, rank=2, size_class="small",
+        modality="rerank", summary="a sharper reranker than the 0.6B; about 4 times slower",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/rerank.md"),
+    CatalogModel(
+        id="qwen3-reranker-8b", family="qwen3_reranker", name="Qwen3-Reranker-8B",
+        repo="Qwen/Qwen3-Reranker-8B", disk_gb=16.4,
+        ram_min_gb=18, ram_good_gb=20, dense_gb=15.2, rank=3, size_class="small",
+        modality="rerank", summary="the best of the family; about 7 times slower than the 0.6B",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/rerank.md"),
 )
 
 

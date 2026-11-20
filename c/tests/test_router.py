@@ -230,6 +230,20 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((loaded["state"], loaded["embedding"]), ("loaded", {"dimensions": 8}))   # what its engine said
         self.assertEqual(router.request_priority("/v1/embeddings", {}), 0)      # a vector is quick: it does not wait behind renders
 
+    def test_rerank_is_routed_by_its_model_field_on_both_paths_and_the_idle_card_says_what_it_does(self):
+        rig = Rig(self, [entry("text-a"), entry("rank-r", "rerank")])
+        listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}
+        self.assertEqual(listing["rank-r-colibri"]["capabilities"], ["rerank"])                 # from the modality
+        self.assertEqual(listing["rank-r-colibri"]["rerank"], {})
+        for path in ("/v1/rerank", "/v2/rerank"):
+            with self.subTest(path=path):
+                status, _, _, body = rig.call("POST", path, {"model": "rank-r", "query": "q", "documents": ["a"]})
+                self.assertEqual((status, body["model"]), (200, "rank-r-colibri"))
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle", "rank-r-colibri": "ready"})
+        loaded = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}["rank-r-colibri"]
+        self.assertEqual((loaded["state"], loaded["rerank"]), ("loaded", {"max_tokens": 64}))   # what its engine said
+        self.assertEqual(router.request_priority("/v1/rerank", {}), 0)
+
     def test_a_transcription_is_routed_by_its_model_field_and_may_carry_a_long_file(self):
         rig = Rig(self, [entry("text-a"), entry("music-m", "audio")])
         boundary = "xyz"

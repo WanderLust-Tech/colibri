@@ -149,8 +149,29 @@ static AceText *act_load(const char *model_dir){
 }
 
 /* The same encoder from a folder that is the encoder itself (config.json and the weights at its root): what a standalone
- * Qwen3-Embedding checkpoint is, and what qwen3embed.c loads. */
-static AceText *act_load_dir(const char *dir){
+ * Qwen3-Embedding checkpoint is, and what qwen3embed.c loads. A Qwen3-Reranker checkpoint is the same decoder under the
+ * names of a language model (a "model." prefix on every tensor, and an lm_head); the prefix is found by looking. */
+static AceText *act_load_impl(const char *dir, const int *head_rows, int nhead, float **head);
+static AceText *act_load_dir(const char *dir){ return act_load_impl(dir, NULL, 0, NULL); }
+
+/* Row r of a [rows][D] float tensor on disk, as floats (D of them): one pread, not the whole matrix. 0 on success. */
+static int act_read_row(shards *S, const char *name, int r, int D, float *out){
+    st_tensor *t = st_find(S, name);
+    if (!t || t->rank != 2 || r < 0 || r >= t->shape[0] || t->shape[1] != D || t->dtype > 2) return -1;
+    const int esz = st_dtype_esz(t->dtype);
+    if (t->nbytes != (int64_t)t->shape[0] * D * esz) return -1;
+    uint8_t *raw = (uint8_t *)malloc((size_t)D * esz);
+    if (!raw) return -1;
+    st_pread_full(t->fd, raw, (size_t)D * esz, t->off + (int64_t)r * D * esz, "pread row");
+    for (int j = 0; j < D; j++)
+        out[j] = t->dtype == 2 ? ((const float *)raw)[j] : t->dtype == 0 ? bf16_to_f32(((const uint16_t *)raw)[j]) : f16_to_f32(((const uint16_t *)raw)[j]);
+    free(raw);
+    return 0;
+}
+
+/* act_load_dir; and when head_rows is given, the rows of the output projection for those token ids go to *head
+ * ([nhead][hidden] floats, malloc'd): lm_head.weight when the file has one, else the embedding table (tied weights). */
+static AceText *act_load_impl(const char *dir, const int *head_rows, int nhead, float **head){
     char err[512] = "", path[4200];
     AceText *m = (AceText *)calloc(1, sizeof *m);
     shards S; int have_s = 0;
@@ -190,7 +211,10 @@ static AceText *act_load_dir(const char *dir){
     if (S.n == 0) { snprintf(err, sizeof err, "no safetensors in %.400s", dir); goto fail; }
     const int D = m->hidden;
     int64_t shD[1] = {D};
-    st_tensor *te = st_find(&S, "embed_tokens.weight");
+    const char *pre = st_find(&S, "embed_tokens.weight") ? "" : "model.";
+    char tn[300];
+    #define ACT_NAME(...) (snprintf(tn, sizeof tn, __VA_ARGS__), tn)
+    st_tensor *te = st_find(&S, ACT_NAME("%sembed_tokens.weight", pre));
     if (!te) { snprintf(err, sizeof err, "missing tensor embed_tokens.weight"); goto fail; }
     if (te->rank != 2 || te->shape[0] != m->vocab || te->shape[1] != D) {
         snprintf(err, sizeof err, "tensor embed_tokens.weight is %lldx%lld, expected %dx%d", (long long)(te->rank > 0 ? te->shape[0] : 0), (long long)(te->rank > 1 ? te->shape[1] : 0), m->vocab, D);
@@ -198,25 +222,33 @@ static AceText *act_load_dir(const char *dir){
     if (te->dtype == 0) {
         m->embed = malloc((size_t)m->vocab * D * 2);
         if (!m->embed) { snprintf(err, sizeof err, "out of memory"); goto fail; }
-        st_read_raw(&S, "embed_tokens.weight", m->embed, 1); m->wbytes += (size_t)m->vocab * D * 2;
+        st_read_raw(&S, ACT_NAME("%sembed_tokens.weight", pre), m->embed, 1); m->wbytes += (size_t)m->vocab * D * 2;
     } else if (te->dtype == 2 || te->dtype == 1) {
         m->embed = malloc((size_t)m->vocab * D * sizeof(float)); m->f32 = 1;
         if (!m->embed) { snprintf(err, sizeof err, "out of memory"); goto fail; }
-        st_read_f32_cap(&S, "embed_tokens.weight", (float *)m->embed, (int64_t)m->vocab * D, 1); m->wbytes += (size_t)m->vocab * D * 4;
+        st_read_f32_cap(&S, ACT_NAME("%sembed_tokens.weight", pre), (float *)m->embed, (int64_t)m->vocab * D, 1); m->wbytes += (size_t)m->vocab * D * 4;
     } else { snprintf(err, sizeof err, "tensor embed_tokens.weight is %s, not a float tensor", st_dtype_name(te->dtype)); goto fail; }
-    if (!(m->norm = acd_read_f32(&S, "norm.weight", 1, shD, err, sizeof err))) goto fail;
+    if (!(m->norm = acd_read_f32(&S, ACT_NAME("%snorm.weight", pre), 1, shD, err, sizeof err))) goto fail;
     m->L = (AcdEncLayer *)calloc((size_t)m->nl, sizeof(AcdEncLayer));
     if (!m->L) { snprintf(err, sizeof err, "out of memory"); goto fail; }
     for (int i = 0; i < m->nl; i++) {
         char p[256], nm[256];
         AcdEncLayer *e = &m->L[i];
-        snprintf(p, sizeof p, "layers.%d.self_attn", i);
+        snprintf(p, sizeof p, "%slayers.%d.self_attn", pre, i);
         if (acd_load_attn(&S, p, D, m->heads, m->kv, m->hd, &e->sa, &m->wbytes, err, sizeof err)) goto fail;
-        snprintf(nm, sizeof nm, "layers.%d.input_layernorm.weight", i);          if (!(e->ln1 = acd_read_f32(&S, nm, 1, shD, err, sizeof err))) goto fail;
-        snprintf(nm, sizeof nm, "layers.%d.post_attention_layernorm.weight", i); if (!(e->ln2 = acd_read_f32(&S, nm, 1, shD, err, sizeof err))) goto fail;
-        snprintf(p, sizeof p, "layers.%d.mlp", i);
+        snprintf(nm, sizeof nm, "%slayers.%d.input_layernorm.weight", pre, i);          if (!(e->ln1 = acd_read_f32(&S, nm, 1, shD, err, sizeof err))) goto fail;
+        snprintf(nm, sizeof nm, "%slayers.%d.post_attention_layernorm.weight", pre, i); if (!(e->ln2 = acd_read_f32(&S, nm, 1, shD, err, sizeof err))) goto fail;
+        snprintf(p, sizeof p, "%slayers.%d.mlp", pre, i);
         if (acd_load_mlp(&S, p, D, m->inter, &e->gate, &e->up, &e->down, &m->wbytes, err, sizeof err)) goto fail;
     }
+    if (head_rows && nhead > 0 && head) {
+        const char *hn = st_find(&S, "lm_head.weight") ? "lm_head.weight" : ACT_NAME("%sembed_tokens.weight", pre);
+        *head = (float *)malloc((size_t)nhead * D * sizeof(float));
+        for (int r = 0; *head && r < nhead; r++)
+            if (act_read_row(&S, hn, head_rows[r], D, *head + (size_t)r * D)) { free(*head); *head = NULL; }
+        if (!*head) { snprintf(err, sizeof err, "cannot read the output rows of %s", hn); goto fail; }
+    }
+    #undef ACT_NAME
     st_destroy(&S);
     json_free(cfg); free(text);
     return m;

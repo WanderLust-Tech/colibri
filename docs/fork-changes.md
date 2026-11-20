@@ -407,7 +407,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Not done:** building the engine of a model that has none (that is `coli setup`), a download queue, several downloads at once, moving
   a model, translations of the dashboard strings (English only; the others fall back).
 
-### 2.23 Embeddings: Qwen3-Embedding on `/v1/embeddings` (`feat/embeddings`, 2026-11-19; local branch, not merged yet)
+### 2.23 Embeddings: Qwen3-Embedding on `/v1/embeddings` (`feat/embeddings`, 2026-11-19; merged, pushed (`a6a2407a`) and live 2026-11-20)
 
 - **`c/qwen3embed`** ([embeddings.md](embeddings.md)): Qwen/Qwen3-Embedding 0.6B, 4B and 8B (Apache-2.0) read straight from the
   checkpoint: the tokenizer, the Qwen3 decoder, last-token pooling, L2 normalisation, an optional `Instruct: ... Query:` prefix for
@@ -436,7 +436,38 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   broke at least one), `tests/test_qwen3embed_real.py` (13, the real engine, skipped without `QWEN3EMBED_MODEL`; three mutations of the C
   each broke it), a router test, the registry, catalog and API-spec tests updated, `web/src/lib/api.test.ts`, the extension's unit tests.
 - **Not done:** a GPU path (the Vulkan chain would make the 4B and 8B several times faster), token arrays as `input`, other embedding
-  models, a reranker (Qwen3-Reranker is the same architecture with a yes/no head), `coli embed`, translations of the one new dashboard string.
+  models, a reranker (built next: 2.24), `coli embed`, translations of the one new dashboard string.
+
+### 2.24 Reranking: Qwen3-Reranker on `/v1/rerank` (`feat/reranker`, 2026-11-20; local branch, not merged yet)
+
+- **The same engine**: `c/qwen3embed` runs a Qwen3-Reranker checkpoint (0.6B, 4B, 8B; Apache-2.0) when the folder has
+  `1_LogitScore/config.json` ([rerank.md](rerank.md)). A pair is written the way the model card does (a system prompt, then
+  `<Instruct>`, `<Query>` and `<Document>`, then the assistant turn with an empty think block), run through the decoder together with
+  the other pairs of the request, and the score is the chance of "yes" against "no" at the last position: `sigmoid(logit(yes) -
+  logit(no))`. Only those two rows of the output matrix are read (`lm_head.weight`, or the embedding table when the weights are tied, as
+  they are on the 0.6B and the 4B). `acestep_text.h` gained a loader that finds the `model.` prefix of a language-model checkpoint and
+  returns chosen rows of the head; the layers, the batching and the attention are the embedding model's.
+- **Gateway and router**: `POST /v1/rerank` and `/v2/rerank` in the shape Jina's and Cohere's clients use (`query`, `documents` as strings
+  or `{text}`, `top_n`, `return_documents`; `results[]` best first with `index` and `relevance_score`), plus `instruction` and
+  `truncate`; `embedding_engine.py` has a `RerankEngine` beside the embedding one; the model card says `capabilities: ["rerank"]` and a
+  `rerank` block; every other route answers a reranking model with a 400 that names the right one, and the new refusals share one helper
+  (`engine_purpose`). A new family `qwen3_reranker` (told apart by `1_LogitScore/config.json`), three catalog entries (1.2, 8.1 and 16.4
+  GB, Apache-2.0), a new modality `rerank` for the router, `coli`, the dashboard and the extension. No new binary: the CI, release and
+  clean lists are unchanged.
+- **A bug in the embedding wrapper, found by a test of this work**: an `ERROR` line with no id (what the engine sends for a request line
+  it cannot read, such as one over 64 MiB) was ignored as stray output, so the gateway would have waited for it for ever. It is now the
+  answer to the request in hand (requests go one at a time).
+- **Checked** against transformers (the model card's recipe, fp32) on the real 0.6B: the logit differences agree to 1.6e-5 and the
+  token counts exactly, on nine pairs (default task, a custom task, two languages, code with tabs, the empty document, a 450-token pair).
+  `tools/rerank_ref.py` captures and compares; the golden values are in `tools/qwen3_reranker_0.6b_reference.json`.
+- **Checked on the other sizes**: the 4B (tied head) and the 8B (its own `lm_head.weight` in the fifth of five shards) against bf16
+  references: every logit within 0.11 (bf16 quantises them to 1/16 or 1/8), identical token counts.
+- **Measured** on the 14900KF, CPU: 64 pairs of about 107 tokens in 10.6 s (0.6B), 43.5 s (4B), 72.2 s (8B); one pair 0.2, 0.8, 1.4 s;
+  32 pairs of about 290 tokens 15.5, 63.8, 101 s. Half of a short pair is the fixed prompt, instruction and query, which every pair of
+  a request repeats: sharing them is the obvious next speed-up (not done).
+- **Tests:** `tests/test_rerank_gateway.py` (33, a real gateway over `tools/rerank_stub.py`; eight mutations of the Python each broke at
+  least one), `tests/test_qwen3rerank_real.py` (6, the real engine, skipped without `QWEN3RERANK_MODEL`; four mutations of the C each
+  broke it), a router test, the registry and API-spec tests updated, `web/src/lib/api.test.ts`.
 
 ## 3. Planned and open
 

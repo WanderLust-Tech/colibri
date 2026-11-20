@@ -25,7 +25,7 @@ import v4_dsml                      # vendored DeepSeek V4 DSML reference primit
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
-import embedding_engine             # the qwen3embed serve protocol and POST /v1/embeddings request rules
+import embedding_engine             # the qwen3embed serve protocol and the request rules of POST /v1/embeddings and /v1/rerank
 import media_meta                   # the settings written inside a finished picture or song
 import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
@@ -6408,6 +6408,26 @@ def is_embedding_engine(engine):
     return getattr(engine, "modality", "text") == "embedding"
 
 
+def is_rerank_engine(engine):
+    """True when the server fronts a reranking engine (Qwen3-Reranker): decided by the engine object."""
+    return getattr(engine, "modality", "text") == "rerank"
+
+
+def engine_purpose(engine):
+    """What a model that is not the one asked for does, in the words a refusal uses ('it draws pictures (POST ...)')."""
+    if is_image_engine(engine):
+        return "it draws pictures (POST /v1/images/generations)"
+    if is_music_engine(engine):
+        return f"it makes music (POST {MUSIC_ENDPOINT})"
+    if is_embedding_engine(engine):
+        return f"it makes embeddings (POST {EMBEDDINGS_ENDPOINT})"
+    if is_rerank_engine(engine):
+        return f"it ranks documents (POST {RERANK_ENDPOINT})"
+    if not engine_chats(engine):
+        return "it is a decision model (POST /v1/systemone)"
+    return "it is a chat model (POST /v1/chat/completions)"
+
+
 # The endpoints that only make sense for a chat model, refused with a pointer
 # when the model draws images instead.
 # POST /v1/images/edits: the request's pictures and fields. multipart/form-data (what OpenAI's SDKs send)
@@ -6608,6 +6628,9 @@ MUSIC_OPTION_KEYS = ("sample_rate", "channels", "default_duration", "min_duratio
 MUSIC_ENDPOINT = "/v1/audio/music"
 EMBEDDINGS_ENDPOINT = "/v1/embeddings"
 EMBEDDING_OPTION_KEYS = ("dimensions", "min_dimensions", "max_tokens")
+RERANK_ENDPOINT = "/v1/rerank"
+RERANK_ENDPOINTS = (RERANK_ENDPOINT, "/v2/rerank")          # Jina's and Cohere's paths: the same request
+RERANK_OPTION_KEYS = ("max_tokens", "max_documents")
 
 
 def cors_origin_list(given):
@@ -6710,6 +6733,9 @@ class APIServer(ThreadingHTTPServer):
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}
+        if is_rerank_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["rerank"] = {key: info.get(key) for key in RERANK_OPTION_KEYS}
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6751,6 +6777,8 @@ class APIServer(ThreadingHTTPServer):
             return ["music_generation", "audio_input"] if audio else ["music_generation"]
         if is_embedding_engine(self.engine):
             return ["embeddings"]
+        if is_rerank_engine(self.engine):
+            return ["rerank"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -7417,6 +7445,8 @@ class APIHandler(BaseHTTPRequestHandler):
                         payload["audio"] = dict(getattr(self.server.engine, "info", None) or {})
                     if is_embedding_engine(self.server.engine):
                         payload["embedding"] = dict(getattr(self.server.engine, "info", None) or {})
+                    if is_rerank_engine(self.server.engine):
+                        payload["rerank"] = dict(getattr(self.server.engine, "info", None) or {})
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -7561,6 +7591,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` is an embedding model and "
                                     f"does not chat: POST {EMBEDDINGS_ENDPOINT} instead.",
                                "model", "unsupported_endpoint")
+            if is_rerank_engine(self.server.engine) and path in TEXT_ENDPOINTS:
+                raise APIError(400, f"`{self.server.model_id}` is a reranking model and "
+                                    f"does not chat: POST {RERANK_ENDPOINT} instead.",
+                               "model", "unsupported_endpoint")
             if not engine_chats(self.server.engine) and path in GENERATING_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a decision model: it answers typed "
                                     "questions with calibrated probabilities and does not generate "
@@ -7568,6 +7602,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                "model", "unsupported_endpoint")
             if path == EMBEDDINGS_ENDPOINT:
                 self.embeddings(body, request_id)
+            elif path in RERANK_ENDPOINTS:
+                self.rerank(body, request_id)
             elif path == MUSIC_ENDPOINT:
                 self.music_generation(body, request_id)
             elif path == TRANSCRIBE_ENDPOINT:
@@ -8037,9 +8073,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
                                     f"music (POST {MUSIC_ENDPOINT}).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine):
-                raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
-                                    f"embeddings (POST {EMBEDDINGS_ENDPOINT}).",
+            if is_embedding_engine(engine) or is_rerank_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not generate images: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it is a "
@@ -8360,15 +8395,7 @@ class APIHandler(BaseHTTPRequestHandler):
     def embeddings(self, body, request_id):
         engine = self.server.engine
         if not is_embedding_engine(engine):
-            if is_image_engine(engine):
-                what = "it draws pictures (POST /v1/images/generations)"
-            elif is_music_engine(engine):
-                what = f"it makes music (POST {MUSIC_ENDPOINT})"
-            elif not engine_chats(engine):
-                what = "it is a decision model (POST /v1/systemone)"
-            else:
-                what = "it is a chat model (POST /v1/chat/completions)"
-            raise APIError(400, f"`{self.server.model_id}` does not make embeddings: {what}.",
+            raise APIError(400, f"`{self.server.model_id}` does not make embeddings: {engine_purpose(engine)}.",
                            "model", "unsupported_endpoint")
         try:
             request = embedding_engine.embedding_request(body, engine.info)
@@ -8390,6 +8417,33 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_json(200, embedding_engine.embedding_payload(request, result, self.server.model_id), request_id,
                        {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))})
 
+    # POST /v1/rerank (and /v2/rerank): the body Jina's and Cohere's rerank endpoints take, answered by a reranking engine
+    # (Qwen3-Reranker). Each document is scored against the query, 0 to 1; the results come back best first.
+    def rerank(self, body, request_id):
+        engine = self.server.engine
+        if not is_rerank_engine(engine):
+            raise APIError(400, f"`{self.server.model_id}` does not rank documents: {engine_purpose(engine)}.",
+                           "model", "unsupported_endpoint")
+        try:
+            request = embedding_engine.rerank_request(body, engine.info)
+        except embedding_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
+            if not engine.alive:
+                raise APIError(503, f"The reranking engine is not running ({engine.dead or 'exited'}).",
+                               None, "engine_unavailable", "server_error")
+            try:
+                result = engine.rerank(request["query"], request["documents"], instruction=request["instruction"],
+                                       truncate=request["truncate"])
+            except embedding_engine.EmbeddingEngineError as error:
+                message = str(error)
+                if engine.alive and "longer than" in message:
+                    raise APIError(400, message, "documents", "invalid_value") from None
+                raise APIError(500, f"The reranking engine failed: {message}", None, "engine_error",
+                               "server_error") from None
+        self.send_json(200, embedding_engine.rerank_payload(request, result, self.server.model_id, request_id), request_id,
+                       {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))})
+
     def music_generation(self, body, request_id):
         engine = self.server.engine
         if not is_music_engine(engine):
@@ -8397,9 +8451,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it draws pictures "
                                     "(POST /v1/images/generations).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine):
-                raise APIError(400, f"`{self.server.model_id}` does not make music: it makes "
-                                    f"embeddings (POST {EMBEDDINGS_ENDPOINT}).",
+            if is_embedding_engine(engine) or is_rerank_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not make music: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it is a "
@@ -9560,6 +9613,11 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
             runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
             print(f"[embeddings] {model_id}: {runtime.info['dimensions']} dimensions, up to "
                   f"{runtime.info['max_tokens']} tokens an input", file=sys.stderr)
+        elif family.modality == "rerank":
+            runtime = embedding_engine.RerankEngine(engine, model, env=env)
+            runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
+            print(f"[rerank] {model_id}: up to {runtime.info['max_tokens']} tokens a pair, "
+                  f"{runtime.info['max_documents']} documents a request", file=sys.stderr)
         elif family.modality == "audio":
             # The music engine speaks the image engine's kind of protocol (lines of JSON,
             # PCM frames): its own process class, no byte stream.
@@ -9588,7 +9646,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
                       file=sys.stderr)
                 sys.exit(1)
         server.engine = runtime
-        if family.modality not in ("image", "audio", "embedding"):
+        if family.modality not in ("image", "audio", "embedding", "rerank"):
             # Said once at start-up, so a checkpoint that declares a tower it does
             # not carry is visible in the log and not only in a client's 400.
             print(f"[gateway] input modalities: {', '.join(server.input_modalities())}"

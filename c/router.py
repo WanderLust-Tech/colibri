@@ -76,7 +76,7 @@ LOOPBACK = {"127.0.0.1", "localhost", "::1", ""}
 PRESET_FILE_LOCK = threading.Lock()      # one change to the presets file at a time (it is read, changed and written back)
 COMPUTE_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/systemone",
                  "/v1/images/generations", "/v1/images/edits", "/v1/audio/music", "/v1/audio/transcriptions",
-                 "/v1/embeddings")
+                 "/v1/embeddings", "/v1/rerank", "/v2/rerank")
 
 # Who goes first in the queue. A render (a picture, a song) takes minutes to an hour and a chat takes seconds, so a chat
 # that arrives while renders are waiting goes ahead of them. Nothing is interrupted: a request that is already
@@ -2234,6 +2234,9 @@ class RouterHandler(BaseHTTPRequestHandler):
         elif modality == "embedding":
             item["capabilities"] = ["embeddings"]
             item["embedding"] = {}
+        elif modality == "rerank":
+            item["capabilities"] = ["rerank"]
+            item["rerank"] = {}
         else:
             item["capabilities"] = ["chat", "systemone"]
         item["input_modalities"] = ["text"]

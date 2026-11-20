@@ -23,7 +23,7 @@ Sixteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B),
-**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings: **Qwen3-Embedding**. Two answer decisions:
+**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings and ranks documents: **Qwen3-Embedding** and **Qwen3-Reranker**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 
@@ -208,6 +208,7 @@ downloads are the sizes Hugging Face lists for each repository.
 | **Z-Image-Turbo**: text to picture, Apache-2.0 licence, the lighter picture model | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | one 768x768 picture in 13 s of denoising on an RTX 5090 (1.4 s a step), 171 s on the CPU (24-core i9) |
 | **ACE-Step 1.5**: text to music, MIT licence | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s of music in 16 s (24-core i9, CPU) |
 | **Qwen3-Embedding-0.6B**: text to vectors for search, Apache-2.0 licence (4B and 8B too) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 texts of 24 tokens in 2.6 s (24-core i9, CPU) |
+| **Qwen3-Reranker-0.6B**: sorts documents by how well they answer a query, Apache-2.0 licence (4B and 8B too) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documents of about 25 tokens in 10.6 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:
 a fast NVMe drive helps most)
@@ -462,6 +463,7 @@ with the last 30 turns as a trend.
   Qwen3.8-Flash-Next and Qwen3.8-27B: a path in a `coli chat` message, an
   attachment in `coli web`, or an `image_url` part;
 - **embeddings out** with Qwen3-Embedding on `POST /v1/embeddings`, in OpenAI's shape so the usual retrieval tools work: text in, a unit vector out, in batches, with an optional query instruction and a cut to fewer dimensions ([embeddings.md](docs/embeddings.md));
+- **rerank** with Qwen3-Reranker on `POST /v1/rerank` (and `/v2/rerank`), in the shape Jina's and Cohere's clients use: a query and a list of documents in, the list sorted best first with a 0 to 1 score each out, with `top_n` and an optional task instruction ([rerank.md](docs/rerank.md));
 - **music out** with ACE-Step 1.5 on `POST /v1/audio/music` and `coli music "calm piano"`:
   a song, with or without lyrics, as a 48 kHz stereo WAV, with a player in the dashboard; it also takes a clip in: a reference for
   the style, a cover of a song, a repaint of a stretch of one ([acestep.md](docs/acestep.md));
@@ -675,7 +677,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
-├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
+├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

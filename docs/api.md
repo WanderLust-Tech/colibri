@@ -271,7 +271,7 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 the engine's word (`GET /v1/models`, `input_modalities`; `context_length`, in tokens, is the window it serves with, for the engines that
 say: Gemma 4 and Qwen3.6/Qwen3-Coder). Speech to text has its own route on the Gemma E2B and E4B
 ([below](#speech-to-text-v1audiotranscriptions)), and the Qwen3-Embedding models have `/v1/embeddings`
-([below](#embeddings-v1embeddings)). There is no text-to-speech route (`/v1/audio/speech`) and no `/v1/responses`.
+([below](#embeddings-v1embeddings)) and the Qwen3-Reranker models `/v1/rerank` ([below](#rerank-v1rerank)). There is no text-to-speech route (`/v1/audio/speech`) and no `/v1/responses`.
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to
 `/v1/chat/completions`. The Anthropic endpoint translates `tools`,
@@ -706,6 +706,27 @@ curl http://127.0.0.1:8000/v1/embeddings -H "Authorization: Bearer $KEY" -H "Con
 
 An embedding model answers 400 on the chat, completions, images and music routes, and a model that does not embed answers 400 here,
 each naming the route to use.
+
+## Rerank (`/v1/rerank`)
+
+When the served model is Qwen3-Reranker (`coli serve --model <reranker dir>`, or one of the models of `coli router`),
+`POST /v1/rerank` (and `/v2/rerank`, Cohere's path: the same endpoint) scores documents against a query, in the shape Jina's and
+Cohere's rerank clients send and read. `query` is a string, `documents` is a list of up to 2048 strings (or of objects with a `text`
+string), `top_n` keeps only the best N, `return_documents` echoes each text back. Two fields are Colibri's: `instruction` names the
+task (the default is web search: "Given a web search query, retrieve relevant passages that answer the query") and `truncate: false`
+refuses a pair longer than the model takes (8192 tokens) instead of cutting the document. The answer lists `results` best first,
+each with its `index` in `documents` and a `relevance_score` from 0 to 1 (the model's chance of "yes" to "does this document meet the
+requirements of the query"). `GET /v1/models` says what the model takes (the capability `rerank` and the `rerank` block); the engine
+and its limits are described in [rerank.md](rerank.md).
+
+```bash
+curl http://127.0.0.1:8000/v1/rerank -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-reranker-0.6b", "query": "What is the capital of China?", "top_n": 1,
+       "documents": ["Gravity pulls things together.", "The capital of China is Beijing."]}'
+```
+
+A reranking model answers 400 on the chat, completions, images, music and embeddings routes, and a model that does not rank answers
+400 here, each naming the route to use.
 
 ## Connect a coding CLI or editor
 

@@ -15,6 +15,7 @@
     { "name": "Inference", "description": "Generate text through OpenAI- or Anthropic-compatible request shapes." },
     { "name": "Music", "description": "Make music with an ACE-Step model: from a description, as a cover of a clip, as a repaint of a span of one, or in the style of a reference clip." },
     { "name": "Embeddings", "description": "Turn text into vectors for search and retrieval with a Qwen3-Embedding model." },
+    { "name": "Rerank", "description": "Sort documents by how well they answer a query with a Qwen3-Reranker model." },
     { "name": "Images", "description": "Draw and edit pictures with a Qwen-Image model." },
     { "name": "Speech", "description": "Turn a recording into text with a Gemma 4 model that has an audio tower." },
     { "name": "Router", "description": "What only `coli router` has: model settings, presets, the request log and the server log." },
@@ -171,6 +172,50 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "503": { "description": "The queue is full or the embedding engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v1/rerank": {
+      "post": {
+        "tags": ["Rerank"],
+        "summary": "Rank documents against a query",
+        "description": "The body Jina's and Cohere's rerank endpoints take, answered by a Qwen3-Reranker model (`GET /v1/models` lists `rerank.max_tokens` and `rerank.max_documents`); `/v1/rerank` and `/v2/rerank` are the same endpoint. Each document is judged against the query with the model's task instruction, and `relevance_score` is the model's chance of answering \"yes\" (0 to 1). `results` come best first (equal scores keep the order the documents came in); `top_n` keeps the best N and `return_documents` echoes each text. A pair longer than `rerank.max_tokens` has its document cut and is listed in `colibri.truncated`, unless `truncate` is `false`, which refuses it. `usage` counts the tokens of every pair the model read, `top_n` or not. A model that does not rank answers 400, and a reranking model answers 400 on every other endpoint. See `docs/rerank.md`.",
+        "operationId": "createRerank",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RerankRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The documents' positions and scores, best first.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RerankResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "description": "The queue is full or the reranking engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v2/rerank": {
+      "post": {
+        "tags": ["Rerank"],
+        "summary": "Rank documents against a query (Cohere's path)",
+        "description": "The body Jina's and Cohere's rerank endpoints take, answered by a Qwen3-Reranker model (`GET /v1/models` lists `rerank.max_tokens` and `rerank.max_documents`); `/v1/rerank` and `/v2/rerank` are the same endpoint. Each document is judged against the query with the model's task instruction, and `relevance_score` is the model's chance of answering \"yes\" (0 to 1). `results` come best first (equal scores keep the order the documents came in); `top_n` keeps the best N and `return_documents` echoes each text. A pair longer than `rerank.max_tokens` has its document cut and is listed in `colibri.truncated`, unless `truncate` is `false`, which refuses it. `usage` counts the tokens of every pair the model read, `top_n` or not. A model that does not rank answers 400, and a reranking model answers 400 on every other endpoint. See `docs/rerank.md`.",
+        "operationId": "createRerankV2",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RerankRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The documents' positions and scores, best first.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RerankResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "description": "The queue is full or the reranking engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -3004,6 +3049,45 @@
         },
         "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } },
         "colibri": { "type": "object", "description": "Present when an input was cut: `truncated`, the indexes of the inputs that were.", "properties": { "truncated": { "type": "array", "items": { "type": "integer" } } } }
+      }
+    },
+    "RerankRequest": {
+      "type": "object",
+      "required": ["model", "query", "documents"],
+      "properties": {
+        "model": { "type": "string", "example": "qwen3-reranker-0.6b" },
+        "query": { "description": "What the documents are judged against (Jina's `{text}` form is taken too).", "oneOf": [{ "type": "string" }, { "type": "object", "properties": { "text": { "type": "string" } } }] },
+        "documents": {
+          "type": "array", "minItems": 1, "maxItems": 2048,
+          "description": "The texts to rank: strings, or objects with a `text` string.",
+          "items": { "oneOf": [{ "type": "string" }, { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }] }
+        },
+        "top_n": { "type": "integer", "minimum": 1, "description": "Return only the best N results." },
+        "return_documents": { "type": "boolean", "default": false, "description": "Echo each result's text as `document.text`." },
+        "instruction": { "type": "string", "description": "The task the model judges by; the default is web search. Colibri's addition." },
+        "truncate": { "type": "boolean", "default": true, "description": "Cut a document that makes the pair longer than the model takes; `false` refuses it. Colibri's addition." }
+      }
+    },
+    "RerankResponse": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "object": { "type": "string", "const": "rerank" },
+        "model": { "type": "string" },
+        "results": {
+          "type": "array",
+          "description": "Best first.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "integer", "description": "The document's position in `documents`." },
+              "relevance_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "document": { "type": "object", "description": "Present with `return_documents`.", "properties": { "text": { "type": "string" } } }
+            }
+          }
+        },
+        "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } },
+        "colibri": { "type": "object", "description": "Present when a document was cut: `truncated`, the indexes of the documents that were.", "properties": { "truncated": { "type": "array", "items": { "type": "integer" } } } }
       }
     },
     "MusicResponse": {

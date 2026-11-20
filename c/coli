@@ -327,6 +327,12 @@ def embedding_refusal(family):
             f"  Start it with: coli serve --model <dir>   (or install it in coli router: coli model install qwen3-embedding-0.6b)\n"
             f"  then POST /v1/embeddings (docs/embeddings.md)")
 
+def rerank_refusal(family):
+    """What the chatting commands say about a reranking model, and where to go."""
+    return (f"{C.yel}{family.display_name} is a reranking model:{C.r} it scores documents against a query and does not chat.\n"
+            f"  Start it with: coli serve --model <dir>   (or install it in coli router: coli model install qwen3-reranker-0.6b)\n"
+            f"  then POST /v1/rerank (docs/rerank.md)")
+
 def image_banner_line(model):
     """Banner line of an image model: name, what it does, bytes on disk. Sizes
     come from stat() alone; the banner must never parse a header."""
@@ -585,6 +591,9 @@ def env_for_engine(a, arch, plan=None):
     if family.modality == "embedding" and getattr(a, "ctx", None):
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} an embedding model has "
                  f"no context window (each text is read once, up to 8192 tokens)")
+    if family.modality == "rerank" and getattr(a, "ctx", None):
+        sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a reranking model has "
+                 f"no context window (each pair is read once, up to 8192 tokens)")
     if family.modality == "decision" and getattr(a, "ctx", None):
         reads, knob = DECISION_LENGTH.get(family.id, ("what its engine allows", "its engine's own variable"))
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a decision model reads "
@@ -717,7 +726,7 @@ def env_for_engine(a, arch, plan=None):
             sys.exit(f"{C.yel}--vram needs the CUDA build:{C.r} the engine binary is CPU-only")
         env["COLI_CUDA"] = "1"
         env["CUDA_EXPERT_GB"] = str(vram)
-    if getattr(a, "auto_tier", False) and family.modality in ("image", "audio", "decision", "embedding"):
+    if getattr(a, "auto_tier", False) and family.modality in ("image", "audio", "decision", "embedding", "rerank"):
         # The tier plan places experts and KV state; an image or decision model
         # has neither, and build_plan would stop on "no safetensors shards".
         print(f"  {C.dim}[PLAN] --auto-tier has nothing to place for "
@@ -1360,6 +1369,9 @@ def cmd_info(a):
     if family is not None and family.modality == "embedding":
         info_embedding_model(a, resolved, row)
         return
+    if family is not None and family.modality == "rerank":
+        info_rerank_model(a, resolved, row)
+        return
     if os.path.exists(cfgp):
         c=json.load(open(cfgp))
         # Multimodal wrappers such as Qwen3.8 keep the language architecture
@@ -1426,6 +1438,22 @@ def info_embedding_model(a, resolved, row):
     row("vector", f"{cfg.get('hidden_size')} numbers a text; \"dimensions\" keeps the first N (1 up to {cfg.get('hidden_size')})")
     row("budget", "up to 8192 tokens an input, 2048 inputs a request")
     row("use", "coli serve --model DIR, then POST /v1/embeddings (docs/embeddings.md); coli router lists it beside the others")
+
+def info_rerank_model(a, resolved, row):
+    """`coli info` for a Qwen3-Reranker checkpoint: its depth, its weight on disk, what it serves."""
+    family, cfg = resolved.descriptor, resolved.family_config
+    name, scale = display_for(resolved)
+    row("model", a.model)
+    row("type", f"{name}{' · ' + scale if scale else ''} · reranking model · {cfg.get('num_hidden_layers')} layers x "
+                f"{cfg.get('hidden_size')} · reads the chance of \"yes\" for each query and document pair")
+    disk = 0
+    for entry in os.listdir(a.model):
+        if entry.endswith(".safetensors"):
+            disk += os.path.getsize(os.path.join(a.model, entry))
+    row("weights", f"{disk/1e9:.1f} GB on disk, held as bf16 in RAM (the whole model; no cache to size)")
+    row("score", "0 to 1 a document; \"instruction\" names the task (the default is web search)")
+    row("budget", "up to 8192 tokens a pair, 2048 documents a request")
+    row("use", "coli serve --model DIR, then POST /v1/rerank (docs/rerank.md); coli router lists it beside the others")
 
 def info_music_model(a, family, row):
     """`coli info` for a text-to-music checkpoint: its parts and their weight on disk, what it
@@ -1725,7 +1753,7 @@ def cmd_tune(a):
     # family it then mis-dispatched.
     family=resolve_model(a.model).descriptor
     arch=family.id
-    if family.modality in ("image","audio","decision","embedding"):
+    if family.modality in ("image","audio","decision","embedding","rerank"):
         sys.exit(f"{C.yel}coli tune measures text engines;{C.r} {family.display_name} has no "
                  f"expert cache or decode loop to tune")
     if not family.has_gateway_adapter:
@@ -1800,6 +1828,8 @@ def cmd_run(a):
         sys.exit(decision_refusal(family))
     if family.modality=="embedding":
         sys.exit(embedding_refusal(family))
+    if family.modality=="rerank":
+        sys.exit(rerank_refusal(family))
     if not family.has_cli_adapter:
         sys.exit(f"{C.yel}coli run is not wired for {family.display_name};{C.r} "
                  f"use coli chat or coli serve")
@@ -3218,6 +3248,8 @@ def cmd_chat(a):
         sys.exit(decision_refusal(family))
     if family.modality=="embedding":
         sys.exit(embedding_refusal(family))
+    if family.modality=="rerank":
+        sys.exit(rerank_refusal(family))
     if family.modality=="audio":
         sys.exit(f"{C.yel}coli chat does not make music;{C.r} use: coli music \"calm piano\" "
                  f"(or coli serve, POST /v1/audio/music)")

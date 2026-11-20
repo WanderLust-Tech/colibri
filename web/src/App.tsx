@@ -32,7 +32,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { dashboardTags, newChatTag } from "@/lib/tags"
 import {
-  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, makesEmbeddings, setClientTags, streamChat,
+  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, makesEmbeddings, ranksDocuments, setClientTags, streamChat,
   type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type PresetInfo, type StreamChatResult,
 } from "@/lib/api"
 import { controlDefaults } from "@/lib/presets"
@@ -266,7 +266,7 @@ export default function App() {
     setError("")
     try {
       const info = await listModelInfo(baseUrl, apiKey, controller.signal)
-      const found = info.filter((item) => !makesEmbeddings(item)).map((item) => item.id)
+      const found = info.filter((item) => !makesEmbeddings(item) && !ranksDocuments(item)).map((item) => item.id)
       setModels(found)
       setModelInfos(info)
       setPresetInfos(Object.fromEntries(info.flatMap((item) => item.preset ? [[item.id, item.preset] as const] : [])))

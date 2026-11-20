@@ -109,6 +109,6 @@ vector of one text, for trying a checkpoint.
 ## Not done
 
 * A GPU path (the Vulkan chain that Z-Image and Gemma 4 use would make the 4B and 8B several times faster).
-* Other embedding models (BGE, e5, nomic), a reranker (Qwen3-Reranker is the same architecture with a yes/no head: a small step from
-  here), token arrays as `input`, and a vector store: the point of this route is that the stores and the frameworks already exist.
+* Other embedding models (BGE, e5, nomic), token arrays as `input`, and a vector store: the point of this route is that the stores and
+  the frameworks already exist. The reranker that goes with these models is built: [rerank.md](rerank.md).
 * `coli embed` for the terminal.
