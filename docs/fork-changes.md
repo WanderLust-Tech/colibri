@@ -438,7 +438,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Not done:** a GPU path (the Vulkan chain would make the 4B and 8B several times faster), token arrays as `input`, other embedding
   models, a reranker (built next: 2.24), `coli embed`, translations of the one new dashboard string.
 
-### 2.24 Reranking: Qwen3-Reranker on `/v1/rerank` (`feat/reranker`, 2026-11-20; local branch, not merged yet)
+### 2.24 Reranking: Qwen3-Reranker on `/v1/rerank` (`feat/reranker`, 2026-11-20; merged, pushed (`ea3f4bda`) and live the same day)
 
 - **The same engine**: `c/qwen3embed` runs a Qwen3-Reranker checkpoint (0.6B, 4B, 8B; Apache-2.0) when the folder has
   `1_LogitScore/config.json` ([rerank.md](rerank.md)). A pair is written the way the model card does (a system prompt, then
@@ -464,10 +464,29 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   references: every logit within 0.11 (bf16 quantises them to 1/16 or 1/8), identical token counts.
 - **Measured** on the 14900KF, CPU: 64 pairs of about 107 tokens in 10.6 s (0.6B), 43.5 s (4B), 72.2 s (8B); one pair 0.2, 0.8, 1.4 s;
   32 pairs of about 290 tokens 15.5, 63.8, 101 s. Half of a short pair is the fixed prompt, instruction and query, which every pair of
-  a request repeats: sharing them is the obvious next speed-up (not done).
+  a request repeats: sharing them is built in 2.25.
 - **Tests:** `tests/test_rerank_gateway.py` (33, a real gateway over `tools/rerank_stub.py`; eight mutations of the Python each broke at
   least one), `tests/test_qwen3rerank_real.py` (6, the real engine, skipped without `QWEN3RERANK_MODEL`; four mutations of the C each
   broke it), a router test, the registry and API-spec tests updated, `web/src/lib/api.test.ts`.
+
+### 2.25 Rerank: a shared start, and `coli embed` / `coli rerank` (`feat/rerank-prefix`, 2026-11-20; local branch, not merged yet)
+
+- **The shared start**: the pairs of one rerank request begin with the same system prompt, instruction and query. `qwen3embed` finds the
+  longest run of token ids all the pairs share (cut so that each keeps its last row, and at least 8 tokens, and only when no pair is
+  over 2048 tokens), runs it through the layers once, keeps the keys and values of every layer (`QePast`), and the pairs then run only
+  their own tokens, with positions that start after the shared part and attention that reads the shared keys first. The scores are
+  identical to the last digit with it on and off (checked on twelve request shapes: distinct documents, shared first words,
+  identical documents, one document the start of another, empty ones, unicode, a custom instruction, long and very long ones,
+  truncation). `COLI_RERANK_SHARE=0` turns it off. 0.6B on the 14900KF: 64 short pairs 11.3 s to 4.6 s, 32 pairs of 290 tokens 14.2 s
+  to 11.0 s, 8 short pairs 1.18 s to 0.40 s. The 4B and 8B were not measured again.
+- **`coli embed` and `coli rerank`** (`c/retrieval_cli.py`): the retrieval routes from the terminal, through the running server's API.
+  `coli embed TEXT...` prints the width, the first numbers of each vector and, for two to ten texts, a cosine table; `coli rerank QUERY
+  DOCUMENT...` prints the documents best first with score and position; both take `--file` (or `-` for standard input), `--model`,
+  `--instruction`, `--json`; `--dimensions` for embed, `--top` and `--truncate` for rerank. Plain one-line refusals for no model
+  installed, a server that does not answer, a wrong key and a server error.
+- **Tests:** `tests/test_retrieval_cli.py` (11, a stub server; three mutations each broke a test), a new real-engine test that
+  compares the shared start with the one-pair-at-a-time path (two of three mutations of the C broke it; the third, dropping the
+  one-token cap, is already enforced by the loop beside it).
 
 ## 3. Planned and open
 

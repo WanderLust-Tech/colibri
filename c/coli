@@ -3763,6 +3763,18 @@ def _api_call(a, method, path, body=None, timeout=60):
     except (urllib.error.URLError,OSError):
         return None,None
 
+def cmd_embed(a):
+    """coli embed TEXT... : vectors from a running server's embedding model (retrieval_cli.py, docs/embeddings.md)."""
+    banner("embed")
+    import retrieval_cli
+    return retrieval_cli.embed(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),C)
+
+def cmd_rerank(a):
+    """coli rerank QUERY DOCUMENT... : documents ranked by a running server's reranking model (retrieval_cli.py, docs/rerank.md)."""
+    banner("rerank")
+    import retrieval_cli
+    return retrieval_cli.rerank(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),C)
+
 def _duration_text(seconds):
     seconds=int(seconds)
     if seconds>=3600: return f"{seconds//3600}h {seconds%3600//60:02d}m"
@@ -4595,6 +4607,26 @@ def main():
     pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)
     pmodel.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pmodel.add_argument("--file",default=None,metavar="FILE",help="with no server running: the settings file (default: the setup folder's model-settings.json)")
+    pemb=sub.add_parser("embed",help="turn text into vectors with the server's embedding model; two or more texts also show how alike they are")
+    pemb.add_argument("texts",nargs="*",metavar="TEXT",help="the texts (- reads lines from standard input)")
+    pemb.add_argument("--file",default=None,metavar="FILE",help="more texts, one a line (- for standard input)")
+    pemb.add_argument("--model",default=None,help="the embedding model (default: the first the server lists)")
+    pemb.add_argument("--dimensions",type=int,default=None,metavar="N",help="keep the first N numbers of each vector")
+    pemb.add_argument("--instruction",default=None,metavar="TASK",help="treat the texts as search queries for this task (leave out for documents)")
+    pemb.add_argument("--json",action="store_true",help="print the server's answer as it is")
+    pemb.add_argument("--host",default="127.0.0.1"); pemb.add_argument("--port",type=int,default=None)
+    pemb.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    prr=sub.add_parser("rerank",help="rank documents against a query with the server's reranking model")
+    prr.add_argument("query",nargs="?",default=None,help="the question or search words")
+    prr.add_argument("documents",nargs="*",metavar="DOCUMENT",help="the documents to rank (- reads lines from standard input)")
+    prr.add_argument("--file",default=None,metavar="FILE",help="more documents, one a line (- for standard input)")
+    prr.add_argument("--model",default=None,help="the reranking model (default: the first the server lists)")
+    prr.add_argument("--top",type=int,default=None,metavar="N",help="show only the best N")
+    prr.add_argument("--instruction",default=None,metavar="TASK",help="what a good match is (default: a passage that answers the query)")
+    prr.add_argument("--truncate",action="store_true",help="cut a document that is over the model's limit instead of refusing it")
+    prr.add_argument("--json",action="store_true",help="print the server's answer as it is")
+    prr.add_argument("--host",default="127.0.0.1"); prr.add_argument("--port",type=int,default=None)
+    prr.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     psettings=sub.add_parser("settings",help="the settings colibri reads, which are set here, and which that are set are read by nothing")
     psettings.add_argument("words",nargs="*",help="search the names and descriptions")
     psettings.add_argument("--all",action="store_true",help="every documented setting, by section")
@@ -4695,7 +4727,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

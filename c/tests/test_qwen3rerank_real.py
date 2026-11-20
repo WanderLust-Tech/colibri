@@ -19,9 +19,9 @@ REFERENCE = os.path.join(C_DIR, "tools", "qwen3_reranker_0.6b_reference.json")
 
 
 class Engine:
-    def __init__(self, model=MODEL, extra=()):
+    def __init__(self, model=MODEL, extra=(), env=None):
         self.process = subprocess.Popen([EXE, "--model", model, "--serve", *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        text=True, encoding="utf-8", bufsize=1)
+                                        text=True, encoding="utf-8", bufsize=1, env=dict(os.environ, **env) if env else None)
         self.ready = self.process.stdout.readline()
 
     def send(self, line):
@@ -78,6 +78,30 @@ class RealEngineTest(unittest.TestCase):
         for i, case in enumerate(reference):
             self.assertLess(abs(body["logits"][i] - case["logit"]), 1e-3)
             self.assertLess(abs(body["logits"][2 * n - 1 - i] - case["logit"]), 1e-3)
+
+    def test_pairs_that_share_a_start_score_as_if_each_ran_alone(self):
+        # One request: the pairs share the fixed prefix, the instruction, the query (and here also a first word); the engine runs
+        # that start through the layers once. COLI_RERANK_SHARE=0 turns that off, so the two engines must agree to the last digit.
+        docs = ["The capital of France is Paris.", "The capital of Spain is Madrid.", "The weather is mild today.", "The", "",
+                "The capital of France is Paris."]
+        alone = Engine(env={"COLI_RERANK_SHARE": "0"})
+        try:
+            keyword, expected = alone.rerank("What is the capital of France?", docs)
+        finally:
+            alone.close()
+        self.assertEqual(keyword, "SCORES", expected)
+        keyword, body = self.engine.rerank("What is the capital of France?", docs)
+        self.assertEqual(keyword, "SCORES", body)
+        self.assertEqual(body["tokens"], expected["tokens"])
+        for got, want in zip(body["logits"], expected["logits"]):
+            self.assertAlmostEqual(got, want, places=5)
+        self.assertEqual(body["logits"][0], body["logits"][5])                  # the same pair twice is the same score
+        self.assertGreater(body["scores"][0], body["scores"][1])
+        # every pair the same: the whole text is shared, yet each pair keeps its last row (the score is read from it)
+        keyword, body = self.engine.rerank("What is the capital of France?", ["Paris."] * 3)
+        self.assertEqual(keyword, "SCORES", body)
+        self.assertEqual(len(set(body["logits"])), 1)
+        self.assertEqual(body["logits"][0], self.engine.rerank("What is the capital of France?", ["Paris."])[1]["logits"][0])
 
     def test_the_right_document_wins_and_a_score_is_a_probability(self):
         keyword, body = self.engine.rerank("What is the capital of China?", [

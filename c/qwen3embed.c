@@ -62,9 +62,13 @@
 #define QE_SMALL 2048               /* texts up to this many tokens use the one-region attention; longer ones the blocked routine */
 #define QE_BATCH_ROWS 4096          /* tokens through the layers at once: bounds the working memory (a few times rows x the MLP width) */
 
+#define QE_SHARE_MIN 8              /* a shared start shorter than this is not worth keeping */
+
 #define QE_DEFAULT_TASK "Given a web search query, retrieve relevant passages that answer the query"
 #define QE_RERANK_PREFIX "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
 #define QE_RERANK_SUFFIX "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+static int qe_share = 1;            /* COLI_RERANK_SHARE=0 turns the shared start off (to compare the two paths) */
 
 typedef struct {
     AceText *m;
@@ -201,7 +205,7 @@ static int *qe_tokens(QeEngine *e, const char *text, const char *instruction, in
  * q is [total][H*hd], k and v [total][Hk*hd]; offs[s] is where text s starts. */
 #define QE_QBLOCK 16
 static void qe_attention(float *cx, const float *q, const float *k, const float *v, const int *lens, const int *offs,
-                         const int *which, int nwhich, int H, int Hk, int hd){
+                         const int *which, int nwhich, int H, int Hk, int hd, const float *kp, const float *vp, int P){
     const int group = H / Hk;
     const float scale = 1.f / sqrtf((float)hd);
     int64_t units = 0;
@@ -227,8 +231,8 @@ static void qe_attention(float *cx, const float *q, const float *k, const float 
             for (int i = i0; i < i1; i++) {
                 const float *qi = q + (size_t)(off + i) * H * hd + (size_t)h * hd;
                 float mx = -INFINITY;
-                for (int j = 0; j <= i; j++) {
-                    const float *kj = k + (size_t)(off + j) * Hk * hd + (size_t)kh * hd;
+                for (int j = 0; j < P + i + 1; j++) {                /* the shared past first, then this text's own rows */
+                    const float *kj = j < P ? kp + (size_t)j * Hk * hd + (size_t)kh * hd : k + (size_t)(off + j - P) * Hk * hd + (size_t)kh * hd;
                     float d = 0.f;
                     #pragma omp simd reduction(+:d)
                     for (int t = 0; t < hd; t++) d += qi[t] * kj[t];
@@ -236,13 +240,13 @@ static void qe_attention(float *cx, const float *q, const float *k, const float 
                     if (d > mx) mx = d;
                 }
                 double sum = 0;
-                for (int j = 0; j <= i; j++) { sc[j] = expf(sc[j] - mx); sum += sc[j]; }
+                for (int j = 0; j < P + i + 1; j++) { sc[j] = expf(sc[j] - mx); sum += sc[j]; }
                 const float inv = (float)(1.0 / sum);
                 float *o = cx + (size_t)(off + i) * H * hd + (size_t)h * hd;
                 for (int t = 0; t < hd; t++) o[t] = 0.f;
-                for (int j = 0; j <= i; j++) {
+                for (int j = 0; j < P + i + 1; j++) {
                     const float pj = sc[j] * inv;
-                    const float *vj = v + (size_t)(off + j) * Hk * hd + (size_t)kh * hd;
+                    const float *vj = j < P ? vp + (size_t)j * Hk * hd + (size_t)kh * hd : v + (size_t)(off + j - P) * Hk * hd + (size_t)kh * hd;
                     #pragma omp simd
                     for (int t = 0; t < hd; t++) o[t] += pj * vj[t];
                 }
@@ -252,11 +256,25 @@ static void qe_attention(float *cx, const float *q, const float *k, const float 
     }
 }
 
+/* A shared start: the keys and values (after the norm and RoPE) of the first P tokens of every text of a request, one pair of
+ * [P][Hk*hd] arrays for each layer. The rerank pairs of one request begin with the same instruction and query, so those
+ * tokens go through the layers once (qe_past_make) and every pair attends to them (the texts then hold only what differs). */
+typedef struct { int P; float **k, **v; } QePast;
+
+static void qe_past_free(QePast *p, int layers){
+    if (!p) return;
+    for (int i = 0; p->k && i < layers; i++) free(p->k[i]);
+    for (int i = 0; p->v && i < layers; i++) free(p->v[i]);
+    free(p->k); free(p->v);
+    memset(p, 0, sizeof *p);
+}
+
 /* One layer on x [total][hidden] where the rows are several sequences one after another (lens[nseq], starting at offs[]): the
  * matrix products run over all the rows at once; RoPE runs over all of them too, with a table whose positions start again
  * at each sequence (cs and sn have `total` rows); the causal attention runs inside each sequence. act_layer is the
  * one-sequence version of this. */
-static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total, const int *lens, const int *offs, int nseq, const float *cs, const float *sn){
+static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total, const int *lens, const int *offs, int nseq, const float *cs, const float *sn,
+                     const float *kp, const float *vp, int P, float *kcap, float *vcap){
     const int D = m->hidden, H = m->heads, Hk = m->kv, hd = m->hd;
     float *n = (float *)malloc((size_t)total * D * sizeof(float)), *o = (float *)malloc((size_t)total * D * sizeof(float));
     float *q = (float *)malloc((size_t)total * H * hd * sizeof(float)), *k = (float *)malloc((size_t)total * Hk * hd * sizeof(float));
@@ -269,14 +287,15 @@ static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total
     acd_head_norm(k, total, Hk, hd, l->sa.kn, m->eps);
     acd_rope(q, total, H, hd, cs, sn);
     acd_rope(k, total, Hk, hd, cs, sn);
+    if (kcap) { memcpy(kcap, k, (size_t)total * Hk * hd * sizeof(float)); memcpy(vcap, v, (size_t)total * Hk * hd * sizeof(float)); }
     int *shortseq = (int *)malloc((size_t)nseq * sizeof(int)), nshort = 0;
     if (!shortseq) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
     for (int s = 0; s < nseq; s++) {
-        if (lens[s] <= QE_SMALL) { shortseq[nshort++] = s; continue; }
+        if (P > 0 || lens[s] <= QE_SMALL) { shortseq[nshort++] = s; continue; }       /* with a past every text uses qe_attention (the caller keeps P + len within QE_SMALL) */
         acd_attention_ex(cx + (size_t)offs[s] * H * hd, H * hd, q + (size_t)offs[s] * H * hd, H * hd, lens[s],
                          k + (size_t)offs[s] * Hk * hd, v + (size_t)offs[s] * Hk * hd, Hk * hd, lens[s], H, Hk, hd, -1, 1);
     }
-    if (nshort) qe_attention(cx, q, k, v, lens, offs, shortseq, nshort, H, Hk, hd);
+    if (nshort) qe_attention(cx, q, k, v, lens, offs, shortseq, nshort, H, Hk, hd, kp, vp, P);
     free(shortseq);
     acd_lin(o, cx, total, &l->sa.o);
     #pragma omp parallel for schedule(static)
@@ -293,24 +312,37 @@ static void qe_layer(const AceText *m, const AcdEncLayer *l, float *x, int total
 
 /* nseq sequences (ids concatenated, lens each) through every layer: the hidden states [total][hidden] before the final norm
  * (malloc'd; NULL for a bad id). */
-static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int nseq){
+static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int nseq, const QePast *past, QePast *capture){
     const AceText *m = e->m;
+    const int P = past ? past->P : 0;
     int total = 0, longest = 0;
     for (int s = 0; s < nseq; s++) { total += lens[s]; if (lens[s] > longest) longest = lens[s]; }
     float *x = act_embed(m, ids, total);
     if (!x) return NULL;
-    float *bcs = (float *)malloc((size_t)longest * m->hd * sizeof(float)), *bsn = (float *)malloc((size_t)longest * m->hd * sizeof(float));
+    float *bcs = (float *)malloc((size_t)(P + longest) * m->hd * sizeof(float)), *bsn = (float *)malloc((size_t)(P + longest) * m->hd * sizeof(float));
     float *cs = (float *)malloc((size_t)total * m->hd * sizeof(float)), *sn = (float *)malloc((size_t)total * m->hd * sizeof(float));
     int *offs = (int *)malloc((size_t)nseq * sizeof(int));
     if (!bcs || !bsn || !cs || !sn || !offs) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
-    acd_rope_table(bcs, bsn, longest, m->hd, m->theta);
-    for (int s = 0, at = 0; s < nseq; at += lens[s], s++) {          /* the position of a row is its place in its own text */
+    acd_rope_table(bcs, bsn, P + longest, m->hd, m->theta);
+    for (int s = 0, at = 0; s < nseq; at += lens[s], s++) {          /* the position of a row is its place in its own text (after the past) */
         offs[s] = at;
-        memcpy(cs + (size_t)at * m->hd, bcs, (size_t)lens[s] * m->hd * sizeof(float));
-        memcpy(sn + (size_t)at * m->hd, bsn, (size_t)lens[s] * m->hd * sizeof(float));
+        memcpy(cs + (size_t)at * m->hd, bcs + (size_t)P * m->hd, (size_t)lens[s] * m->hd * sizeof(float));
+        memcpy(sn + (size_t)at * m->hd, bsn + (size_t)P * m->hd, (size_t)lens[s] * m->hd * sizeof(float));
     }
     free(bcs); free(bsn);
-    for (int i = 0; i < m->nl; i++) qe_layer(m, &m->L[i], x, total, lens, offs, nseq, cs, sn);
+    if (capture) {                                                   /* the keys and values of this one text become a past */
+        const size_t row = (size_t)m->kv * m->hd;
+        capture->P = total;
+        capture->k = (float **)calloc((size_t)m->nl, sizeof(float *)); capture->v = (float **)calloc((size_t)m->nl, sizeof(float *));
+        if (!capture->k || !capture->v) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+        for (int i = 0; i < m->nl; i++) {
+            capture->k[i] = (float *)malloc((size_t)total * row * sizeof(float)); capture->v[i] = (float *)malloc((size_t)total * row * sizeof(float));
+            if (!capture->k[i] || !capture->v[i]) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+        }
+    }
+    for (int i = 0; i < m->nl; i++)
+        qe_layer(m, &m->L[i], x, total, lens, offs, nseq, cs, sn, past ? past->k[i] : NULL, past ? past->v[i] : NULL, P,
+                 capture ? capture->k[i] : NULL, capture ? capture->v[i] : NULL);
     free(cs); free(sn); free(offs);
     return x;
 }
@@ -320,7 +352,7 @@ static float *qe_hidden(const QeEngine *e, const int *ids, const int *lens, int 
 static int qe_encode(const QeEngine *e, const int *ids, const int *lens, int nseq, float *out){
     const AceText *m = e->m;
     const int D = m->hidden;
-    float *x = qe_hidden(e, ids, lens, nseq);
+    float *x = qe_hidden(e, ids, lens, nseq, NULL, NULL);
     if (!x) return 0;
     int ok = 1;
     for (int s = 0, off = 0; s < nseq; off += lens[s], s++) {
@@ -396,12 +428,20 @@ static int qe_run(QeEngine *e, const char *id, const char **texts, int count, co
     return rc;
 }
 
+/* Runs one text (the shared start of a request) through the layers to keep its keys and values as a past; 0 on failure. */
+static int qe_hidden_free(const QeEngine *e, const int *ids, const int *len, QePast *past){
+    float *x = qe_hidden(e, ids, len, 1, NULL, past);
+    if (!x) return 0;
+    free(x);
+    return 1;
+}
+
 /* The logit difference (yes minus no) of nseq pairs (ids concatenated, lens each): out[nseq]; 0 on failure. The head is two
  * rows of the output matrix, so a pair costs the layers and then two dot products over the last row. */
-static int qe_score(const QeEngine *e, const int *ids, const int *lens, int nseq, double *out){
+static int qe_score(const QeEngine *e, const int *ids, const int *lens, int nseq, double *out, const QePast *past){
     const AceText *m = e->m;
     const int D = m->hidden;
-    float *x = qe_hidden(e, ids, lens, nseq);
+    float *x = qe_hidden(e, ids, lens, nseq, past, NULL);
     if (!x) return 0;
     float *h = (float *)malloc((size_t)D * sizeof(float));
     if (!h) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
@@ -451,16 +491,38 @@ static int qe_rerank(QeEngine *e, const char *id, const char *query, const char 
         toks[i] = e->nprefix + k + e->nsuffix;
         free(body);
     }
+    /* The longest start every pair has in common (the fixed prefix, the instruction, the query, often a first word of the
+     * document): it goes through the layers once. One token at least is left to each pair, since the score is read from
+     * its last row; the pairs must still fit the one-region attention with the start in front of them. */
+    int P = 0;
+    if (!rc && count >= 2 && qe_share) {
+        int small = 1, lim = toks[0] - 1;
+        for (int i = 0; i < count; i++) { if (toks[i] > QE_SMALL) small = 0; if (toks[i] - 1 < lim) lim = toks[i] - 1; }
+        if (small) {
+            P = lim;
+            for (int i = 1; i < count && P > 0; i++) { int j = 0; while (j < P && ids[i][j] == ids[0][j]) j++; P = j; }
+        }
+        if (P < QE_SHARE_MIN) P = 0;
+    }
+    QePast past; memset(&past, 0, sizeof past);
+    if (P > 0) {
+        int *pi = ids[0], pl = P;
+        if (!qe_hidden_free(e, pi, &pl, &past)) { qe_error(id, "the pair could not be scored"); rc = 1; }
+    }
     for (int from = 0; from < count && !rc; ) {
         int to = from, rows = 0;
-        while (to < count && (to == from || rows + toks[to] <= QE_BATCH_ROWS)) rows += toks[to++];
-        int *flat = (int *)malloc((size_t)rows * sizeof(int));
-        if (!flat) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
-        for (int i = from, at = 0; i < to; i++) { memcpy(flat + at, ids[i], (size_t)toks[i] * sizeof(int)); at += toks[i]; }
-        if (!qe_score(e, flat, toks + from, to - from, logits + from)) { qe_error(id, "the pair could not be scored"); rc = 1; }
-        free(flat);
+        while (to < count && (to == from || rows + toks[to] - P <= QE_BATCH_ROWS)) rows += toks[to++] - P;
+        int *flat = (int *)malloc((size_t)rows * sizeof(int)), *lens = (int *)malloc((size_t)(to - from) * sizeof(int));
+        if (!flat || !lens) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+        for (int i = from, at = 0; i < to; i++) {
+            lens[i - from] = toks[i] - P;
+            memcpy(flat + at, ids[i] + P, (size_t)(toks[i] - P) * sizeof(int)); at += toks[i] - P;
+        }
+        if (!qe_score(e, flat, lens, to - from, logits + from, P > 0 ? &past : NULL)) { qe_error(id, "the pair could not be scored"); rc = 1; }
+        free(flat); free(lens);
         from = to;
     }
+    qe_past_free(&past, e->m->nl);
     if (!rc) {
         printf("SCORES {\"id\":\""); qe_escape(id);
         printf("\",\"scores\":[");
@@ -578,6 +640,7 @@ static void usage(void){
 int main(int argc, char **argv){
     const char *model = NULL, *text = NULL, *instruction = NULL, *query = NULL;
     int serve = 0, dims = 0, max_tokens = 0;
+    { const char *sh = getenv("COLI_RERANK_SHARE"); if (sh && !strcmp(sh, "0")) qe_share = 0; }
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--model") && v) { model = v; i++; }

@@ -18,6 +18,20 @@ or the **Models** tab of the dashboard, or the models menu of the editor extensi
 `coli router` the model is listed next to the others and starts the first time something asks it for vectors; with `coli serve --model
 DIR` it is the one model served. The engine needs `make qwen3embed` (`coli setup` and the release archives build it).
 
+## Try it from the terminal
+
+```
+coli embed "What is the capital of France?" "Paris is the capital of France." "Bananas are rich in potassium."
+coli embed --file notes.txt --dimensions 256          one text a line; - reads standard input
+coli embed "capital of France" --instruction "Given a web search query, retrieve relevant passages that answer the query"
+```
+
+It asks the running server (`--host`, `--port`, `--api-key` or `COLI_API_KEY`, like `coli model`) and uses the first embedding model it
+lists unless `--model` names one. It prints how many numbers each vector has, the first four of each, and, for two to ten texts, how
+alike they are (the vectors have length 1, so a dot product is the cosine: 1.00 is the same direction). `--instruction` marks the
+texts as search queries for that task, as the route's field does; leave it out for documents. `--json` prints the server's answer as
+it is.
+
 ## Use it
 
 ```bash
@@ -111,4 +125,4 @@ vector of one text, for trying a checkpoint.
 * A GPU path (the Vulkan chain that Z-Image and Gemma 4 use would make the 4B and 8B several times faster).
 * Other embedding models (BGE, e5, nomic), token arrays as `input`, and a vector store: the point of this route is that the stores and
   the frameworks already exist. The reranker that goes with these models is built: [rerank.md](rerank.md).
-* `coli embed` for the terminal.
+* Nothing else is waiting: `coli embed` for the terminal is built (below).

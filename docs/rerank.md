@@ -20,6 +20,18 @@ or the **Models** tab of the dashboard, or the models menu of the editor extensi
 `coli router` the model is listed next to the others and starts the first time something asks it to rank; with `coli serve --model DIR`
 it is the one model served.
 
+## Try it from the terminal
+
+```
+coli rerank "What is the capital of France?" "Berlin is in Germany." "Paris is the capital of France." "Bananas are rich in potassium."
+coli rerank "cats" --file passages.txt --top 3          one document a line; - reads standard input
+coli rerank "query" ... --instruction "Judge by tone" --truncate --json
+```
+
+It asks the running server (`--host`, `--port`, `--api-key` or `COLI_API_KEY`, like `coli model`), uses the first reranking model it
+lists unless `--model` names one, and prints the documents best first with their score and their position in what you gave it.
+`--json` prints the server's answer as it is.
+
 ## Use it
 
 ```bash
@@ -82,20 +94,29 @@ instruction for every request of one search.
 ## How fast, and how big
 
 Measured on the 14900KF (24 cores, 32 threads), CPU, the whole request including its tokenizing. The pairs are a short query and a
-passage, so each is about 107 tokens (the fixed prompt is a good half of that) or about 290 for the longer passages:
+passage, so each is about 107 tokens (the fixed prompt is a good half of that) or about 290 for the longer passages. The first
+measurement (2026-11-20) was before the shared start below; the 0.6B was measured again after it:
 
 | Model | Weights in RAM | one pair | 64 pairs, ~107 tokens each | 32 pairs, ~290 tokens each |
 |---|---|---|---|---|
-| Qwen3-Reranker-0.6B | 1.2 GB | 0.2 s | 10.6 s (165 ms a pair) | 15.5 s (484 ms a pair) |
-| Qwen3-Reranker-4B | 8.0 GB | 0.8 s | 43.5 s (680 ms a pair) | 63.8 s (2.0 s a pair) |
-| Qwen3-Reranker-8B | 15.1 GB | 1.4 s | 72.2 s (1.1 s a pair) | 101 s (3.2 s a pair) |
+| Qwen3-Reranker-0.6B, after | 1.2 GB | 0.2 s | **4.6 s** (72 ms a pair) | **11.0 s** (340 ms a pair) |
+| Qwen3-Reranker-0.6B, before | | 0.2 s | 11.3 s (176 ms a pair) | 14.2 s (440 ms a pair) |
+| Qwen3-Reranker-4B, before | 8.0 GB | 0.8 s | 43.5 s (680 ms a pair) | 63.8 s (2.0 s a pair) |
+| Qwen3-Reranker-8B, before | 15.1 GB | 1.4 s | 72.2 s (1.1 s a pair) | 101 s (3.2 s a pair) |
 
-About 650 tokens a second on the 0.6B, 160 on the 4B and 95 on the 8B.
+The 4B and the 8B were not measured again (their test checkpoints were deleted); the saving is a share of the work, so it should be
+much the same there: 2.4x for short passages, 1.3x for the longer ones.
 
 A request is a batch: the pairs go through the layers together, up to 4096 tokens at a time, so the weights are read once for the batch
-and **a list is much cheaper per document than one document at a time**. What would help most is not recomputing the part every pair
-shares (the system prompt, the instruction and the query are the same for all documents of a request and a good half of a short
-passage's tokens): not done, see below.
+and **a list is much cheaper per document than one document at a time**.
+
+**The shared start.** All the pairs of a request begin with the same system prompt, instruction and query (and sometimes a first word
+of the document). The engine finds the longest run of token ids every pair has in common, runs it through the layers once, keeps the
+keys and values, and lets every pair attend to them: the pairs then hold only what differs. The scores are the same to the last digit
+(the sums are made in the same order; a test compares the engine with sharing on and off). It takes a request of two pairs or more;
+a pair of over 2048 tokens makes the request use the old path. The share is worth most for short passages (8 pairs: 1.18 s to 0.40 s;
+64 pairs of 107 tokens: 11.3 s to 4.6 s) and least for long ones, whose own tokens dominate (32 pairs of 290 tokens: 14.2 s to
+11.0 s). `COLI_RERANK_SHARE=0` in the engine's environment turns it off, to compare.
 
 ## Checked
 
@@ -109,9 +130,11 @@ engine reads the two rows it needs from whichever it finds, and that path is che
 
 `tests/test_rerank_gateway.py` (33 tests) runs a real gateway against `tools/rerank_stub.py`, a stand-in that speaks the engine's
 protocol: the request rules, sorting and ties, `top_n`, `return_documents`, the Cohere path, truncation both ways, a failing engine,
-a dead one, requests at the same time and the refusals on the other routes. `tests/test_qwen3rerank_real.py` (6) compares the real
-engine with stored transformers values (`tools/qwen3_reranker_0.6b_reference.json`, made by `tools/rerank_ref.py capture`); it needs
-the model, so it is skipped without `QWEN3RERANK_MODEL` pointing at a folder with the 0.6B reranker.
+a dead one, requests at the same time and the refusals on the other routes. `tests/test_qwen3rerank_real.py` (7) compares the real
+engine with stored transformers values (`tools/qwen3_reranker_0.6b_reference.json`, made by `tools/rerank_ref.py capture`) and checks
+that a request whose pairs share a start scores as if every pair ran alone; it needs
+the model, so it is skipped without `QWEN3RERANK_MODEL` pointing at a folder with the 0.6B reranker. `tests/test_retrieval_cli.py`
+(11, shared with `coli embed`) runs the terminal commands against a stub of the server.
 
 ## The engine's protocol
 
@@ -122,7 +145,5 @@ then for each `RERANK {id, query, documents, instruction, truncate}` exactly one
 
 ## Not done
 
-* **Sharing the prompt.** All the pairs of a request start with the same system prompt, instruction and query. Computing their keys
-  and values once and letting every document attend to them would cut the work of a short-passage request roughly in half.
 * A GPU path (the Vulkan chain that Z-Image and Gemma 4 use).
-* Other rerankers (BGE, Jina), and `coli rerank` for the terminal.
+* Sharing the start across requests (the same query against a new list of documents): each request still computes it once.

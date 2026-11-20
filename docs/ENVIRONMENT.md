@@ -656,6 +656,14 @@ With a `VK=1` build, `COLI_VULKAN=1` runs the forward on a Vulkan device (`COLI_
 
 ---
 
+## Qwen3 embedding and reranking engine (`qwen3embed`)
+
+Read **only** by `c/qwen3embed.c` ([embeddings.md](embeddings.md), [rerank.md](rerank.md)).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `COLI_RERANK_SHARE` | on | Reranker: `0` makes every pair of a request run in full instead of running the start all the pairs share (the system prompt, the instruction, the query) once. The scores are the same; it is slower, and exists to compare the two paths. |
+
 ## Server / CLI (`openai_server.py`, `coli`)
 
 These are read by the Python programs (not the `glm` engine), so they don't appear in `glm.c`. They cover the OpenAI-compatible server, tool calling, and the debug view.
