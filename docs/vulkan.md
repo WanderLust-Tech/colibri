@@ -1935,10 +1935,12 @@ about 10 are the 98 MB crossing; the card's arithmetic is 3 to 4 ms of it. Reran
 |---|---|---|---|
 | Qwen3-Reranker-0.6B | 5.9 s | 2.5 s | **0.37 s** |
 | Qwen3-Reranker-4B | 24.8 s | 7.5 s | **1.2 s** |
+| Qwen3-Reranker-8B (its own `lm_head`, 15 GB on the card) | 40.8 s | | **1.96 s** |
 | Qwen3-Reranker-4B, 20 passages of about 520 tokens | 61.6 s | | **3.05 s** |
 
-The scores are the CPU's to rounding (largest logit difference 3.9e-5 over twelve request shapes; embedding vectors have cosine
-1.0000000 with the CPU's); a 7000-token document 40 s to 4.1 s. A request the card cannot hold (memory for its rows refused) runs
+Embedding 64 passages of about 230 tokens with the 0.6B: 23.5 s on the CPU, 1.13 s on the card. The scores are the CPU's to
+rounding (largest logit difference 3.9e-5 over twelve request shapes on the 0.6B; the 4B and the 8B agree to the 4th decimal;
+embedding vectors have cosine 1.0000000 with the CPU's); a 7000-token document 40 s to 4.1 s. A request the card cannot hold (memory for its rows refused) runs
 per matrix, and a matrix that does not reach the device keeps that product on the CPU; a frame that fails (a lost device) turns the
 chain off for the rest of the run and the CPU does the forward again from the ids. The matrices go up as bf16 (fmt 11): they use
 the fp32 tiled GEMM, not the cooperative-matrix one, which needs weights that are exact in fp16.

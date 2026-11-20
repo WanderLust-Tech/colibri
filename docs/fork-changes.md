@@ -488,7 +488,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   compares the shared start with the one-pair-at-a-time path (two of three mutations of the C broke it; the third, dropping the
   one-token cap, is already enforced by the loop beside it).
 
-### 2.26 Embeddings and reranking on the graphics card (`feat/embed-gpu`, 2026-11-20; local branch, not merged yet)
+### 2.26 Embeddings and reranking on the graphics card (`feat/embed-gpu`, 2026-11-20; merged into local main)
 
 - **One frame a forward**: with `make qwen3embed VK=1` and `COLI_VULKAN=1`, `qwen3embed` runs the embedding and reranking models'
   whole stack of layers on a Vulkan device in a single submission (`qe_chain_run`, on the dense chain of `vk_chain.h`: norms, q/k/v,
@@ -497,7 +497,8 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   bf16 through `coli_vk_tensor_ensure` and are shared with the per-matrix path (`qe_lin`, `COLI_VK_CHAIN=0`). `READY` says
   `"device":"vulkan"` or `"cpu"`. A refused allocation runs that forward per matrix; a failed frame turns the chain off and the CPU
   redoes the forward. The Makefile rule links `$(VK_OBJ)`.
-- **Measured** (RTX 5090 against the 14900KF): 20 passages, 4B 24.8 s to 1.2 s, 0.6B 5.9 s to 0.37 s; 20 passages of 520 tokens on the
+- **Measured** (RTX 5090 against the 14900KF): 20 passages, 0.6B 5.9 s to 0.37 s, 4B 24.8 s to 1.2 s, 8B 40.8 s to 1.96 s (all three
+  agree with the CPU's scores); 64 embeddings of 230 tokens on the 0.6B 23.5 s to 1.13 s; 20 passages of 520 tokens on the
   4B 61.6 s to 3.05 s; a 7000-token document 40 s to 4.1 s; 120 passages over several batches 39.8 s to 2.2 s. The per-matrix path first
   built (activations over PCIe for every product) got only 3.3x on the 4B: a product's 98 MB crossing at 9 GB/s was most of its time.
 - **Checked** against the CPU on twelve request shapes (largest logit difference 3.9e-5, same token counts, truncation, empty and

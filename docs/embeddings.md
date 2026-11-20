@@ -120,6 +120,13 @@ the reference): `READY` once the weights are loaded, then for each `EMBED {id, i
 `VECTORS {id, dimensions, tokens, truncated, vectors}` or `ERROR {id, message}`. `qwen3embed --model DIR --text "..."` prints the
 vector of one text, for trying a checkpoint.
 
+## On the graphics card
+
+With a `VK=1` build and `COLI_VULKAN=1` (the router sets it when the card has room) the layers run on the device in one frame
+([vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc)): 64 passages of about 230 tokens with the 0.6B take 1.13 s
+instead of 23.5 s on the CPU (a 14900KF against an RTX 5090). The vectors have cosine 1.0000000 with the CPU's, and the engine's
+`READY` line (and the model card's `embedding.device`) says `"vulkan"` or `"cpu"`.
+
 ## Not done
 
 * Other embedding models (BGE, e5, nomic), token arrays as `input`, and a vector store: the point of this route is that the stores and

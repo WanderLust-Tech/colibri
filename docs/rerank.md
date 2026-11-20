@@ -120,7 +120,7 @@ a pair of over 2048 tokens makes the request use the old path. The share is wort
 
 **On the graphics card.** With a `VK=1` build and `COLI_VULKAN=1` (the router sets it when the card has room) the whole forward runs
 on the device in one frame, so the numbers above fall by an order of magnitude: the 4B ranks 20 passages in 1.2 s (24.8 s on the
-CPU) and the 0.6B in 0.37 s (5.9 s). [vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc) has the table and the
+CPU) and the 0.6B in 0.37 s (5.9 s), the 8B in 1.96 s (40.8 s). [vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc) has the table and the
 reasons. The scores are the CPU's to rounding.
 
 ## Checked
