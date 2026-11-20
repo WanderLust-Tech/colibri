@@ -469,7 +469,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   least one), `tests/test_qwen3rerank_real.py` (6, the real engine, skipped without `QWEN3RERANK_MODEL`; four mutations of the C each
   broke it), a router test, the registry and API-spec tests updated, `web/src/lib/api.test.ts`.
 
-### 2.25 Rerank: a shared start, and `coli embed` / `coli rerank` (`feat/rerank-prefix`, 2026-11-20; local branch, not merged yet)
+### 2.25 Rerank: a shared start, and `coli embed` / `coli rerank` (`feat/rerank-prefix`, 2026-11-20; merged into local main, not pushed or deployed yet)
 
 - **The shared start**: the pairs of one rerank request begin with the same system prompt, instruction and query. `qwen3embed` finds the
   longest run of token ids all the pairs share (cut so that each keeps its last row, and at least 8 tokens, and only when no pair is
