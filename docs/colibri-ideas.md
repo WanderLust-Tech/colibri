@@ -83,7 +83,7 @@ Needs A1/A2 to mean anything.
     JSON is not guaranteed (checked in the doc, 2026-11-07). **No engine can promise valid JSON; this is the real gap.**
     Reusable parts exist: `c/grammar.h` (a byte-level GBNF pushdown automaton with `gr_accept` and `gr_admissible`) and
     `c/schema_gbnf.h` (JSON schema to GBNF).
-  - **Embeddings: no.** No `/v1/embeddings` route, and no engine produces embeddings.
+  - **Embeddings: no** when this was surveyed; **built 2026-11-19**: `/v1/embeddings` on Qwen3-Embedding 0.6B, 4B and 8B (`c/qwen3embed`, [embeddings.md](embeddings.md)).
   - **Speech to text: on Gemma E2B/E4B.** Send `input_audio` (WAV) in a chat message (JFK clip transcribed word
     for word). *Built 2026-11-08 on `feat/audio-transcriptions` (not merged):* a `/v1/audio/transcriptions` route over the same path,
     with cutting of long files, [api.md](api.md#speech-to-text-v1audiotranscriptions). Inkling also takes audio (DMel frames, command line only).

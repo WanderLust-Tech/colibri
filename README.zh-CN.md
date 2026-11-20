@@ -149,6 +149,7 @@ Starting colibri
 | **Qwen-Image-2.1**：文生图，非商业许可 | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 一张 768x512 的图片用时 2 分 40 秒（8 个 Zen 4 核心，CPU） |
 | **Z-Image-Turbo**：文生图，Apache-2.0 许可，更轻量的图像模型 | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 一张 768x768 的图片，在 RTX 5090 上去噪 13 秒（每步 1.4 秒），在 CPU（24 核 i9）上 171 秒 |
 | **ACE-Step 1.5**：文生音乐，MIT 许可 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音乐用时 16 秒（24 核 i9，CPU） |
+| **Qwen3-Embedding-0.6B**：文本转检索用向量，Apache-2.0 许可（另有 4B 和 8B） | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 段各 24 个 token 的文本用时 2.6 秒（24 核 i9，CPU） |
 
 **大模型，专家从磁盘流式读取**（速度由磁盘决定：快速的 NVMe 硬盘帮助最大）
 
@@ -292,6 +293,7 @@ curl -s http://127.0.0.1:8000/v1/systemone -H 'Content-Type: application/json' -
 - **兼容 Anthropic**：`/v1/messages`，因此 Claude Code 和 Anthropic SDK 可以直接连接它；
 - **工具调用**：除 Inkling 和 OLMoE 之外的每个聊天引擎都支持，各自使用其模型的原生格式（[各引擎对照表](docs/api.md#tool-calling-support)）；
 - **图像输入**：GLM-5.3-Flash、DeepSeek V4.1 Flash、MiMo-V2.6、Qwen3.8-Flash-Next 和 Qwen3.8-27B 支持，方式可以是 `coli chat` 消息中的一个路径、`coli web` 中的一个附件，或一个 `image_url` 部分；
+- **嵌入输出**：Qwen3-Embedding 通过 `POST /v1/embeddings` 提供，格式与 OpenAI 相同，常见的检索工具可直接使用：输入文本，返回单位向量，可批量处理，可选查询指令，也可截取较少的维度（[embeddings.md](docs/embeddings.md)）；
 - **音乐输出**：ACE-Step 1.5 通过 `POST /v1/audio/music` 和 `coli music "calm piano"` 提供，可带歌词也可纯音乐，输出 48 kHz 立体声 WAV（[acestep.md](docs/acestep.md)）；
 - **图像输出**：Qwen-Image-2.1 通过 `POST /v1/images/generations` 提供，`coli chat` 还能直接在终端中显示图片（[qwen-image.md](docs/qwen-image.md)）；
 - **决策**：通过 `POST /v1/systemone`（[见上文](#system-one-a-decision-with-a-probability)）。
@@ -423,6 +425,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
+├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

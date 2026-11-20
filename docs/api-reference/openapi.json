@@ -14,6 +14,7 @@
   "tags": [
     { "name": "Inference", "description": "Generate text through OpenAI- or Anthropic-compatible request shapes." },
     { "name": "Music", "description": "Make music with an ACE-Step model: from a description, as a cover of a clip, as a repaint of a span of one, or in the style of a reference clip." },
+    { "name": "Embeddings", "description": "Turn text into vectors for search and retrieval with a Qwen3-Embedding model." },
     { "name": "Images", "description": "Draw and edit pictures with a Qwen-Image model." },
     { "name": "Speech", "description": "Turn a recording into text with a Gemma 4 model that has an audio tower." },
     { "name": "Router", "description": "What only `coli router` has: model settings, presets, the request log and the server log." },
@@ -148,6 +149,28 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "503": { "description": "The queue is full or the music engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "tags": ["Embeddings"],
+        "summary": "Embed text",
+        "description": "OpenAI's embeddings request, answered by a Qwen3-Embedding model (`GET /v1/models` lists `embedding.dimensions`, `embedding.min_dimensions` and `embedding.max_tokens`). Each input becomes one unit vector: the last token's hidden state, normalised. `input` is a string or a list of up to 2048 strings (token arrays are refused: the model has its own tokenizer). `dimensions` keeps the first N components and normalises again (1 up to the model's width). `instruction` turns each input into a query for that task (`Instruct: {instruction}\\nQuery:{input}`); leave it out for documents. An input longer than `embedding.max_tokens` is cut and listed in `colibri.truncated`, unless `truncate` is `false`, which refuses it. `usage` counts the tokens the model saw, the appended end-of-text token included. A model that does not embed answers 400, and an embedding model answers 400 on every other endpoint. See `docs/embeddings.md`.",
+        "operationId": "createEmbeddings",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EmbeddingRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The vectors, in the order of the inputs.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EmbeddingResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "description": "The queue is full or the embedding engine is not running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -2945,6 +2968,42 @@
         "repainting_end": { "type": "number", "description": "Repaint only: where the span ends, in seconds; 0 or less (the default) is the end of the clip, past it adds silence after." },
         "repaint_mode": { "type": "string", "enum": ["balanced", "conservative", "aggressive"], "default": "balanced", "description": "Repaint only: how much of the source the span's edges keep." },
         "repaint_strength": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.5, "description": "Repaint, balanced mode: higher is freer." }
+      }
+    },
+    "EmbeddingRequest": {
+      "type": "object",
+      "required": ["model", "input"],
+      "properties": {
+        "model": { "type": "string", "example": "qwen3-embedding-0.6b" },
+        "input": {
+          "description": "The text to embed: one string, or a list of strings (at most 2048).",
+          "oneOf": [{ "type": "string" }, { "type": "array", "minItems": 1, "maxItems": 2048, "items": { "type": "string" } }]
+        },
+        "encoding_format": { "type": "string", "enum": ["float", "base64"], "default": "float", "description": "`base64` is the vector as little-endian float32." },
+        "dimensions": { "type": "integer", "minimum": 1, "description": "Keep the first N components and normalise again; at most the model's width." },
+        "instruction": { "type": "string", "description": "Makes each input a query for this task; leave out for documents. Colibri's addition." },
+        "truncate": { "type": "boolean", "default": true, "description": "Cut an input longer than the model takes; `false` refuses it. Colibri's addition." },
+        "user": { "type": "string" }
+      }
+    },
+    "EmbeddingResponse": {
+      "type": "object",
+      "properties": {
+        "object": { "type": "string", "const": "list" },
+        "model": { "type": "string" },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "object": { "type": "string", "const": "embedding" },
+              "index": { "type": "integer" },
+              "embedding": { "description": "The unit vector: numbers, or base64 for `encoding_format: base64`.", "oneOf": [{ "type": "array", "items": { "type": "number" } }, { "type": "string" }] }
+            }
+          }
+        },
+        "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } },
+        "colibri": { "type": "object", "description": "Present when an input was cut: `truncated`, the indexes of the inputs that were.", "properties": { "truncated": { "type": "array", "items": { "type": "integer" } } } }
       }
     },
     "MusicResponse": {

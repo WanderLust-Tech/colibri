@@ -1352,6 +1352,15 @@ endif
 acestep$(EXE): acestep.c acestep_vae.h acestep_vae_enc.h acestep_dit.h acestep_tok.h acestep_text.h acestep_audio.h third_party/minimp3.h acestep_gen.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
 	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
 
+# Qwen3-Embedding (0.6B, 4B, 8B): text embeddings for POST /v1/embeddings (docs/embeddings.md). The layers are ACE-Step's text
+# encoder's (acestep_text.h loads and computes them), so this builds from the same headers.
+ifneq ($(EXE),)
+.PHONY: qwen3embed
+qwen3embed: qwen3embed$(EXE)
+endif
+qwen3embed$(EXE): qwen3embed.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
+	$(CC) $(CFLAGS) qwen3embed.c -o qwen3embed$(EXE) $(LDFLAGS)
+
 # Gemma 4 mixture of experts (gemma-4-26B-A4B-it) and the dense 31B, E4B and E2B, with pictures and audio (docs/gemma4.md): the chat engine, with the
 # routed experts streamed through expert_ffn.h and its own tokenizer header (gemma4_tok.h).
 ifneq ($(EXE),)
@@ -2956,7 +2965,7 @@ check:
 	$(MAKE) portable
 	$(MAKE) test
 
-install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) acestep_audio_tool$(EXE) qwenimage$(EXE) zimage$(EXE) acestep$(EXE) laya$(EXE) gliner_decide$(EXE) \
+install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen36$(EXE) qwen38$(EXE) deepseek_v41$(EXE) mimo$(EXE) gemma4$(EXE) acestep_audio_tool$(EXE) qwenimage$(EXE) zimage$(EXE) acestep$(EXE) qwen3embed$(EXE) laya$(EXE) gliner_decide$(EXE) \
 	$(if $(filter 1,$(COLI_V4_SUPPORTED)),deepseek-v4,)
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)
@@ -2972,6 +2981,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	$(INSTALL) -m 755 qwenimage$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwenimage$(EXE)
 	$(INSTALL) -m 755 zimage$(EXE) $(DESTDIR)$(LIBEXECDIR)/zimage$(EXE)
 	$(INSTALL) -m 755 acestep$(EXE) $(DESTDIR)$(LIBEXECDIR)/acestep$(EXE)
+	$(INSTALL) -m 755 qwen3embed$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen3embed$(EXE)
 	$(INSTALL) -m 755 laya$(EXE) $(DESTDIR)$(LIBEXECDIR)/laya$(EXE)
 	$(INSTALL) -m 755 gliner_decide$(EXE) $(DESTDIR)$(LIBEXECDIR)/gliner_decide$(EXE)
 	$(INSTALL) -m 755 deepseek_v41$(EXE) $(DESTDIR)$(LIBEXECDIR)/deepseek_v41$(EXE)
@@ -2983,7 +2993,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 	fi
 	$(INSTALL) -m 644 family_registry.py resource_plan.py doctor.py autotune.py \
 		openai_server.py model_switch.py router.py launch.py cluster.py v4_dsml.py v41_dsml.py version.py \
-		image_engine.py music_engine.py gemma4_chat.py term_image.py setup_flow.py setup_hw.py setup_catalog.py \
+		image_engine.py music_engine.py embedding_engine.py gemma4_chat.py term_image.py setup_flow.py setup_hw.py setup_catalog.py \
 		setup_download.py mcp_server.py presets.py request_log.py service.py tray.py gpu.py model_settings.py \
 		client_tags.py features.py jobs.py library.py log_tail.py media_meta.py model_info.py model_installer.py model_cli.py settings_index.py web_headers.py \
 		$(DESTDIR)$(LIBEXECDIR)/

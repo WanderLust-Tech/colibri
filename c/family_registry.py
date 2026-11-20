@@ -1863,6 +1863,47 @@ FAMILIES = (
         tokenizer_file="Qwen3-Embedding-0.6B/tokenizer.json",
     ),
     FamilyDescriptor(
+        id="qwen3_embedding",
+        # A Qwen3-Embedding checkpoint (0.6B, 4B, 8B): config.json says model_type "qwen3", as the chat models' base does,
+        # so it is told apart by the sentence-transformers files it ships (modules.json and 1_Pooling/config.json); see
+        # resolve_model. The keyed type below is synthetic.
+        model_types=("qwen3_embedding",),
+        display_name="Qwen3-Embedding",
+        display_scale="",
+        display_variants=(
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-Embedding", "0.6B",
+                           model_id="qwen3-embedding-0.6b"),
+            DisplayVariant((("hidden_size", 2560), ("num_hidden_layers", 36)), "Qwen3-Embedding", "4B",
+                           model_id="qwen3-embedding-4b"),
+            DisplayVariant((("hidden_size", 4096), ("num_hidden_layers", 36)), "Qwen3-Embedding", "8B",
+                           model_id="qwen3-embedding-8b"),
+        ),
+        engine_artifact="qwen3embed",
+        engine_aliases=(),
+        engine_group="qwen3embed",
+        internal_arch="qwen3_embedding",
+        build_target="qwen3embed",
+        process_names=("qwen3embed",),
+        default_model_id="qwen3-embedding",
+        cli_adapter="qwen3_embedding",
+        gateway_adapter="qwen3_embedding",
+        planner_id="qwen3_embedding",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "an embedding model has no KV cache and no experts: its whole size is its weights, read once"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="root",
+        # One request at a time, and no context or output-token budget (it generates nothing): the limits exist because
+        # every descriptor has them. The longest input is the engine's own (8192 tokens), not an environment variable.
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="embedding",
+        tokenizer_file="tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="laya",
         # A Laya checkpoint has no config.json at its root: resolve_model reads
         # rl_agent_config.json and the encoder's own config.json, and names it
@@ -1977,7 +2018,7 @@ def _build_registry(families):
                 not isinstance(family.has_cli_adapter, bool) or
                 not isinstance(family.tune_prompt_template, str) or
                 "{prompt}" not in family.tune_prompt_template or
-                family.modality not in ("text", "image", "audio", "decision") or
+                family.modality not in ("text", "image", "audio", "decision", "embedding") or
                 family.capabilities.decision != (family.modality == "decision") or
                 not isinstance(family.tokenizer_file, str) or not family.tokenizer_file or
                 not isinstance(family.checkpoint_files, tuple) or
@@ -2146,6 +2187,13 @@ def _resolve_gliner2_checkpoint(model, config):
     return ResolvedFamily(family, model_type, config, encoder, str(model))
 
 
+def _is_embedding_checkpoint(model, config):
+    """A Qwen3-Embedding checkpoint: a plain Qwen3 config.json (the chat models' base has the same model_type) beside the
+    sentence-transformers files that make it an embedder, whose last-token pooling and normalisation they name."""
+    return (isinstance(config, dict) and config.get("model_type") == "qwen3"
+            and (model / "modules.json").is_file() and (model / "1_Pooling" / "config.json").is_file())
+
+
 def resolve_model(model_dir):
     model = Path(model_dir).expanduser().resolve()
     path = model / "config.json"
@@ -2178,6 +2226,8 @@ def resolve_model(model_dir):
         raise FamilyConfigError(f"invalid config.json: {error}") from error
     if isinstance(config, dict) and config.get("model_type") == GLINER2_MODEL_TYPE:
         return _resolve_gliner2_checkpoint(model, config)
+    if _is_embedding_checkpoint(model, config):
+        return ResolvedFamily(_BY_TYPE["qwen3_embedding"], "qwen3_embedding", config, config, str(model))
     family = family_for_config(config)
     family_config = config
     if family.config_section == "text_config":

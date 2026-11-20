@@ -41,9 +41,7 @@ typedef struct { Tok tok; int eot; } AceTok;
 
 /* model_dir holds Qwen3-Embedding-0.6B/tokenizer.json. 0 on success. A malformed tokenizer.json ends the process, as in
  * the other engines (tok_load). */
-static int act_tok_open(AceTok *t, const char *model_dir){
-    char path[4300];
-    if (snprintf(path, sizeof path, "%s/Qwen3-Embedding-0.6B/tokenizer.json", model_dir) >= (int)sizeof path) return -1;
+static int act_tok_open_file(AceTok *t, const char *path){
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "acestep text: cannot open %.400s\n", path); return -1; }
     fclose(f);
@@ -52,6 +50,13 @@ static int act_tok_open(AceTok *t, const char *model_dir){
     t->eot = tok_id_of(&t->tok, "<|endoftext|>");
     if (t->eot < 0) { fprintf(stderr, "acestep text: the tokenizer has no <|endoftext|>\n"); tok_free(&t->tok); return -1; }
     return 0;
+}
+
+/* The ACE-Step checkpoint keeps the encoder's files in Qwen3-Embedding-0.6B/ under its root. */
+static int act_tok_open(AceTok *t, const char *model_dir){
+    char path[4300];
+    if (snprintf(path, sizeof path, "%s/Qwen3-Embedding-0.6B/tokenizer.json", model_dir) >= (int)sizeof path) return -1;
+    return act_tok_open_file(t, path);
 }
 
 static void act_tok_close(AceTok *t){ tok_free(&t->tok); memset(t, 0, sizeof *t); }
@@ -136,13 +141,21 @@ static void act_free(AceText *m){
 }
 
 /* model_dir holds Qwen3-Embedding-0.6B/ (config.json, model.safetensors). */
+static AceText *act_load_dir(const char *enc_dir);
 static AceText *act_load(const char *model_dir){
-    char err[512] = "", path[4200], dir[4096];
+    char dir[4096];
+    if (snprintf(dir, sizeof dir, "%s/Qwen3-Embedding-0.6B", model_dir) >= (int)sizeof dir) { fprintf(stderr, "acestep text: path too long\n"); return NULL; }
+    return act_load_dir(dir);
+}
+
+/* The same encoder from a folder that is the encoder itself (config.json and the weights at its root): what a standalone
+ * Qwen3-Embedding checkpoint is, and what qwen3embed.c loads. */
+static AceText *act_load_dir(const char *dir){
+    char err[512] = "", path[4200];
     AceText *m = (AceText *)calloc(1, sizeof *m);
     shards S; int have_s = 0;
     jval *cfg = NULL; char *text = NULL;
     if (!m) { fprintf(stderr, "acestep text: out of memory\n"); return NULL; }
-    if (snprintf(dir, sizeof dir, "%s/Qwen3-Embedding-0.6B", model_dir) >= (int)sizeof dir) { snprintf(err, sizeof err, "path too long"); goto fail; }
     snprintf(path, sizeof path, "%s/config.json", dir);
     FILE *f = fopen(path, "rb");
     if (!f) { snprintf(err, sizeof err, "cannot open %.400s", path); goto fail; }

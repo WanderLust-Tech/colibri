@@ -270,8 +270,8 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 "Pictures in" means the gateway can expand them for the family; whether the checkpoint being served loaded its vision tower is
 the engine's word (`GET /v1/models`, `input_modalities`; `context_length`, in tokens, is the window it serves with, for the engines that
 say: Gemma 4 and Qwen3.6/Qwen3-Coder). Speech to text has its own route on the Gemma E2B and E4B
-([below](#speech-to-text-v1audiotranscriptions)). There is no embeddings route, no text-to-speech route
-(`/v1/audio/speech`) and no `/v1/responses`.
+([below](#speech-to-text-v1audiotranscriptions)), and the Qwen3-Embedding models have `/v1/embeddings`
+([below](#embeddings-v1embeddings)). There is no text-to-speech route (`/v1/audio/speech`) and no `/v1/responses`.
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to
 `/v1/chat/completions`. The Anthropic endpoint translates `tools`,
@@ -688,6 +688,24 @@ and `steps`, then `music_generation.completed` with the same payload as the plai
 are `encode` (reading the clip, only when a clip was sent), `text`, `condition`, `denoise` (the sampler's steps) and
 `decode`. The `colibri` block of the answer says the `task` and the `src_seconds` of the clip (0 for text to music).
 A client that hangs up cancels the song, and the clips the gateway wrote for the engine are removed at once.
+
+## Embeddings (`/v1/embeddings`)
+
+When the served model is Qwen3-Embedding (`coli serve --model <embedding dir>`, or one of the models of `coli router`),
+`POST /v1/embeddings` turns text into vectors, in OpenAI's request and response shape. `input` is a string or a list of up to
+2048 strings, `dimensions` keeps the first N numbers of each vector and normalises again, `encoding_format` is `float` or `base64`,
+and two fields are Colibri's: `instruction` makes the inputs queries for a task (leave it out for documents) and `truncate: false`
+refuses an input longer than the model takes (8192 tokens) instead of cutting it. Every vector has length 1. `GET /v1/models` says
+what the model takes (the capability `embeddings` and the `embedding` block); the engine and its limits are described in
+[embeddings.md](embeddings.md).
+
+```bash
+curl http://127.0.0.1:8000/v1/embeddings -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-embedding-0.6b", "input": ["How do I reset my password?", "Our refund policy"], "dimensions": 256}'
+```
+
+An embedding model answers 400 on the chat, completions, images and music routes, and a model that does not embed answers 400 here,
+each naming the route to use.
 
 ## Connect a coding CLI or editor
 

@@ -226,6 +226,7 @@ ukuran yang dicantumkan Hugging Face untuk setiap repository.
 | **Qwen-Image-2.1**: teks ke gambar, lisensi nonkomersial | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | satu gambar 768x512 dalam 2 min 40 s (8 core Zen 4, CPU) |
 | **Z-Image-Turbo**: teks ke gambar, lisensi Apache-2.0, model gambar yang lebih ringan | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | satu gambar 768x768, denoising 13 s di RTX 5090 (1,4 s per langkah), 171 s di CPU (i9 24 core) |
 | **ACE-Step 1.5**: teks ke musik, lisensi MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 detik musik dalam 16 detik (i9 24 core, CPU) |
+| **Qwen3-Embedding-0.6B**: teks ke vektor untuk pencarian, lisensi Apache-2.0 (juga 4B dan 8B) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 teks masing-masing 24 token dalam 2,6 detik (i9 24 core, CPU) |
 
 **Model besar, yang pakarnya melakukan streaming dari disk** (disk menentukan
 kecepatan: drive NVMe yang cepat paling membantu)
@@ -502,6 +503,7 @@ dengan beberapa API:
 - **input gambar** pada GLM-5.3-Flash, DeepSeek V4.1 Flash, MiMo-V2.6,
   Qwen3.8-Flash-Next, dan Qwen3.8-27B: sebuah path dalam pesan `coli chat`,
   attachment di `coli web`, atau bagian `image_url`;
+- **output embedding** dengan Qwen3-Embedding pada `POST /v1/embeddings`, dalam bentuk OpenAI sehingga alat pencarian yang umum berfungsi: teks masuk, vektor satuan keluar, dalam batch, dengan instruksi kueri opsional dan pemotongan ke dimensi lebih sedikit ([embeddings.md](docs/embeddings.md));
 - **output musik** dengan ACE-Step 1.5 pada `POST /v1/audio/music` dan `coli music "calm piano"`: sebuah lagu, dengan atau tanpa lirik, sebagai WAV stereo 48 kHz ([acestep.md](docs/acestep.md));
 - **output gambar** dengan Qwen-Image-2.1 pada `POST /v1/images/generations`,
   dan digambar langsung di terminal oleh `coli chat`
@@ -726,6 +728,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
+├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

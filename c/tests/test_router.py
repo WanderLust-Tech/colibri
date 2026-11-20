@@ -218,6 +218,18 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((status, body["model"], body["parts"]), (200, "music-m-colibri", 3))
         self.assertEqual(body["size"], len(raw))
 
+    def test_embeddings_are_routed_by_their_model_field_and_the_idle_card_says_what_it_does(self):
+        rig = Rig(self, [entry("text-a"), entry("embed-e", "embedding")])
+        listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}
+        self.assertEqual(listing["embed-e-colibri"]["capabilities"], ["embeddings"])            # from the modality
+        self.assertEqual(listing["embed-e-colibri"]["embedding"], {})
+        status, _, _, body = rig.call("POST", "/v1/embeddings", {"model": "embed-e", "input": "a text"})
+        self.assertEqual((status, body["model"]), (200, "embed-e-colibri"))
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle", "embed-e-colibri": "ready"})
+        loaded = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}["embed-e-colibri"]
+        self.assertEqual((loaded["state"], loaded["embedding"]), ("loaded", {"dimensions": 8}))   # what its engine said
+        self.assertEqual(router.request_priority("/v1/embeddings", {}), 0)      # a vector is quick: it does not wait behind renders
+
     def test_a_transcription_is_routed_by_its_model_field_and_may_carry_a_long_file(self):
         rig = Rig(self, [entry("text-a"), entry("music-m", "audio")])
         boundary = "xyz"

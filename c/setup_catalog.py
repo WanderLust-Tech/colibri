@@ -183,6 +183,28 @@ CATALOG = (
         # which the engine does not use.
         exclude=("acestep-5Hz-lm-*/*",),
         prebuilt_since="2.1.0", doc="docs/acestep.md"),
+    CatalogModel(
+        id="qwen3-embedding-0.6b", family="qwen3_embedding", name="Qwen3-Embedding-0.6B",
+        repo="Qwen/Qwen3-Embedding-0.6B", disk_gb=1.2,
+        # docs/embeddings.md: the weights are held as bf16 (1.2 GB), and a batch of texts needs a few hundred MB on top.
+        ram_min_gb=2, ram_good_gb=4, dense_gb=1.2, rank=1, size_class="small",
+        modality="embedding", summary="text embeddings for search and retrieval (1024 numbers a text, not chat)",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/embeddings.md"),
+    CatalogModel(
+        id="qwen3-embedding-4b", family="qwen3_embedding", name="Qwen3-Embedding-4B",
+        repo="Qwen/Qwen3-Embedding-4B", disk_gb=8.1,
+        ram_min_gb=10, ram_good_gb=12, dense_gb=8.1, rank=2, size_class="small",
+        modality="embedding", summary="better embeddings than the 0.6B, 2560 numbers a text; about 7 times slower",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/embeddings.md"),
+    CatalogModel(
+        id="qwen3-embedding-8b", family="qwen3_embedding", name="Qwen3-Embedding-8B",
+        repo="Qwen/Qwen3-Embedding-8B", disk_gb=15.2,
+        ram_min_gb=18, ram_good_gb=20, dense_gb=15.2, rank=3, size_class="small",
+        modality="embedding", summary="the best of the family, 4096 numbers a text; about 13 times slower than the 0.6B",
+        license_note="Apache-2.0",
+        prebuilt_since="2.3.0", doc="docs/embeddings.md"),
 )
 
 

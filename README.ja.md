@@ -149,6 +149,7 @@ Mixture-of-Experts モデルは、ディスク上では巨大でも、1 トー�
 | **Qwen-Image-2.1**：テキストから画像、非商用ライセンス | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 768x512 の画像 1 枚に 2 分 40 秒（Zen 4 の 8 コア、CPU） |
 | **Z-Image-Turbo**：テキストから画像、Apache-2.0 ライセンス、より軽い画像モデル | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 768x768 の画像 1 枚、RTX 5090 でデノイズ 13 秒（1 ステップ 1.4 秒）、CPU（24 コアの i9）で 171 秒 |
 | **ACE-Step 1.5**：テキストから音楽、MIT ライセンス | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒の曲を 16 秒で（24 コアの i9、CPU） |
+| **Qwen3-Embedding-0.6B**：テキストから検索用のベクトル、Apache-2.0 ライセンス（4B と 8B もあります） | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 24 トークンの文 64 件を 2.6 秒で（24 コアの i9、CPU） |
 
 **大きなモデル：エキスパートをディスクからストリーミングします**（速度を決めるのはディスクで、高速な NVMe ドライブが最も効果的です）
 
@@ -300,6 +301,7 @@ curl -s http://127.0.0.1:8000/v1/systemone -H 'Content-Type: application/json' -
 - **Anthropic 互換**：`/v1/messages`。Claude Code や Anthropic の SDK をそのまま接続できます。
 - **ツール呼び出し**：Inkling と OLMoE を除くすべてのチャットエンジンで、それぞれのモデルのネイティブ形式で行います（[エンジンごとの表](docs/api.md#tool-calling-support)）。
 - **画像入力**：GLM-5.3-Flash、DeepSeek V4.1 Flash、MiMo-V2.6、Qwen3.8-Flash-Next、Qwen3.8-27B で使えます。`coli chat` のメッセージ内のパス、`coli web` での添付、または `image_url` パートで渡します。
+- **エンベディング出力**：Qwen3-Embedding で `POST /v1/embeddings` から生成します。OpenAI と同じ形式なので、一般的な検索ツールがそのまま使えます。テキストを渡すと長さ 1 のベクトルが返り、まとめて処理でき、クエリ用の指示と次元数の削減も指定できます（[embeddings.md](docs/embeddings.md)）；
 - **音楽出力**：ACE-Step 1.5 で `POST /v1/audio/music` と `coli music "calm piano"` から生成します。歌詞の有無を選べて、48 kHz ステレオの WAV で出力されます（[acestep.md](docs/acestep.md)）。
 - **画像出力**：Qwen-Image-2.1 で `POST /v1/images/generations` から生成します。`coli chat` ではターミナル内に描画されます（[qwen-image.md](docs/qwen-image.md)）。
 - **判定**：`POST /v1/systemone` で行います（[前述](#system-one-a-decision-with-a-probability)）。
@@ -431,6 +433,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
+├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

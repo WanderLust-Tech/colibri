@@ -389,7 +389,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   for the steps, 6 s for the CPU's VAE decode); 8.6 GB of RAM with the text encoder staged. Through the live router: 49 s for the first
   picture (it loads), 18 s after.
 
-### 2.22 Installing and removing models while it runs (`feat/model-installer`, 2026-11-19; local branch, not merged yet)
+### 2.22 Installing and removing models while it runs (`feat/model-installer`, 2026-11-19; merged, pushed (`6b0e6432`) and live the same day)
 
 - **`c/model_installer.py`**: fetch a catalog model as a background job (progress, cancel, resume, one at a time, a lock file between
   processes) and remove an installed one (only a direct child of a models folder, never a link, never one a download is writing;
@@ -406,6 +406,37 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   router. The install list of the Makefile needed the two new modules (`test_install_closure` caught it).
 - **Not done:** building the engine of a model that has none (that is `coli setup`), a download queue, several downloads at once, moving
   a model, translations of the dashboard strings (English only; the others fall back).
+
+### 2.23 Embeddings: Qwen3-Embedding on `/v1/embeddings` (`feat/embeddings`, 2026-11-19; local branch, not merged yet)
+
+- **`c/qwen3embed`** ([embeddings.md](embeddings.md)): Qwen/Qwen3-Embedding 0.6B, 4B and 8B (Apache-2.0) read straight from the
+  checkpoint: the tokenizer, the Qwen3 decoder, last-token pooling, L2 normalisation, an optional `Instruct: ... Query:` prefix for
+  queries, and `dimensions` (the first N components, normalised again). The layers are ACE-Step's text encoder's (that encoder is
+  Qwen3-Embedding-0.6B), so `acestep_text.h` only gained a loader that takes the encoder's own folder. Texts go through the layers
+  together (up to 4096 tokens at a time, the matrix products over all the rows; RoPE and a causal attention kernel per text), which is
+  what makes a list of short texts cost a tenth of what the same texts one by one do.
+- **Gateway and router**: `POST /v1/embeddings` in OpenAI's shape (`input` a string or up to 2048 strings, `encoding_format` float or
+  base64, `dimensions`, `usage`), plus `instruction` and `truncate`; `embedding_engine.py` drives the engine over its line protocol;
+  the model card says `capabilities: ["embeddings"]` and an `embedding` block; the router forwards the path, and every other route
+  answers an embedding model with a 400 that names the right one. A new family `qwen3_embedding` (told apart from a chat Qwen3 by
+  `modules.json` and `1_Pooling/config.json`), three catalog entries (1.2, 8.1 and 15.2 GB, Apache-2.0), `make qwen3embed` and the CI,
+  release and clean lists. OpenAPI and `api.md` have the route.
+- **Checked** against transformers (the model card's recipe) on the real models: the 0.6B and the 4B in fp32 match to 1e-7 on every
+  component (plain, query, empty, non-ASCII, code, `dimensions`, a 300-token text, a batch of seven different lengths in one request,
+  a text cut at 8192 tokens), with the same token counts; the 8B against a bf16 reference (its fp32 one needs 32 GB), cosine 0.9998 or
+  better. The real-engine test keeps stored transformers vectors (`tools/qwen3_embedding_0.6b_reference.json`), so it needs neither torch
+  nor transformers.
+- **Measured** on the 14900KF, CPU: 64 texts of 24 tokens in 2.6 s (0.6B), 17.6 s (4B), 31.2 s (8B); one text 0.10, 0.51, 0.84 s; a text
+  of 880 tokens 3.0, 13.2, 20.9 s. A first version took 27 s for the 64 texts: the DiT's attention routine forks and joins per head, which
+  costs more than the attention of a short text, so the engine has its own for texts up to 2048 tokens.
+- **`coli`**: `coli info` describes an embedding checkpoint; `coli run`, `chat`, `tune` and `--ctx` refuse one and point at the route.
+  The dashboard keeps embedding models out of the conversation's model list; its installer list and the extension's menu say
+  "embeddings" for the kind.
+- **Tests:** `tests/test_embeddings_gateway.py` (36, a real gateway over `tools/embedding_stub.py`; five mutations of the code each
+  broke at least one), `tests/test_qwen3embed_real.py` (13, the real engine, skipped without `QWEN3EMBED_MODEL`; three mutations of the C
+  each broke it), a router test, the registry, catalog and API-spec tests updated, `web/src/lib/api.test.ts`, the extension's unit tests.
+- **Not done:** a GPU path (the Vulkan chain would make the 4B and 8B several times faster), token arrays as `input`, other embedding
+  models, a reranker (Qwen3-Reranker is the same architecture with a yes/no head), `coli embed`, translations of the one new dashboard string.
 
 ## 3. Planned and open
 
@@ -440,7 +471,7 @@ Status as of today (the file itself has been brought into line with this):
 | C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard live (`feat/web-presets`) |
 | C3 Windows tray or autostart (would replace the restart script) | **done**, live (2.13), and it starts at sign-in |
 | C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |
-| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, live (2.10) |
+| C5 Embeddings, structured JSON output, speech to text and back: check what the chat engines have | **surveyed** (no embeddings, no speech route; STT only through Gemma E-model chat); structured JSON **built**, live (2.10); embeddings **built** 2026-11-19 (2.23) |
 | D1 Delete the original after convert | mostly there (`coli convert --repo` does it); not built for `--indir`, on purpose |
 | D2 Free pipeline stages | already in the engine (`COLI_IMG_TE=stage`, about 14 s per new prompt); not needed on 64 GB |
 | D3 Try `TRUNK_RESIDENT_LAYERS` on the dense Qwen3.8-27B | open, S |

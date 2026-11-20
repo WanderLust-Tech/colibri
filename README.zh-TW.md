@@ -203,6 +203,7 @@ Starting colibri
 | **Qwen-Image-2.1**：文字生成圖片，非商業授權 | `qwen-image-2.1` | 33 GB | 12 / 18 GB | Vulkan | 一張 768x512 的圖片 2 分 40 秒（8 個 Zen 4 核心，CPU） |
 | **Z-Image-Turbo**：文字生成圖片，Apache-2.0 授權，較輕量的圖片模型 | `z-image-turbo` | 33 GB | 10 / 14 GB | Vulkan | 一張 768x768 的圖片，在 RTX 5090 上去雜訊 13 秒（每步 1.4 秒），在 CPU（24 核心 i9）上 171 秒 |
 | **ACE-Step 1.5**：文字生成音樂，MIT 授權 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音樂 16 秒（24 核心 i9，CPU） |
+| **Qwen3-Embedding-0.6B**：文字轉成搜尋用向量，Apache-2.0 授權（另有 4B 與 8B） | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 段各 24 個 token 的文字用時 2.6 秒（24 核心 i9，CPU） |
 
 **大型模型，專家從硬碟串流讀取**（速度由硬碟決定：
 快速的 NVMe 硬碟幫助最大）
@@ -449,6 +450,7 @@ curl -s http://127.0.0.1:8000/v1/systemone -H 'Content-Type: application/json' -
 - **圖片輸入**：支援 GLM-5.3-Flash、DeepSeek V4.1 Flash、MiMo-V2.6、
   Qwen3.8-Flash-Next 與 Qwen3.8-27B，可以是 `coli chat` 訊息中的路徑、
   `coli web` 中的附件，或是一個 `image_url` 部分；
+- **嵌入輸出**：使用 Qwen3-Embedding，透過 `POST /v1/embeddings` 提供，格式與 OpenAI 相同，常見的檢索工具可直接使用：輸入文字，回傳單位向量，可批次處理，可選查詢指令，也可截取較少的維度（[embeddings.md](docs/embeddings.md)）；
 - **音樂輸出**：使用 ACE-Step 1.5，透過 `POST /v1/audio/music` 與 `coli music "calm piano"` 提供，可有歌詞或純音樂，輸出 48 kHz 立體聲 WAV（[acestep.md](docs/acestep.md)）；
 - **圖片輸出**：使用 Qwen-Image-2.1，透過 `POST /v1/images/generations` 提供，
   `coli chat` 也會直接在終端機中繪出圖片
@@ -647,6 +649,7 @@ c/
 ├── qwenimage.c           Qwen-Image-2.1  (make qwenimage)
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
+├── qwen3embed.c          Qwen3-Embedding  (make qwen3embed)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

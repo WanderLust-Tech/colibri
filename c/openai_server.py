@@ -25,6 +25,7 @@ import v4_dsml                      # vendored DeepSeek V4 DSML reference primit
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
+import embedding_engine             # the qwen3embed serve protocol and POST /v1/embeddings request rules
 import media_meta                   # the settings written inside a finished picture or song
 import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
@@ -6402,6 +6403,11 @@ def is_music_engine(engine):
     return getattr(engine, "modality", "text") == "audio"
 
 
+def is_embedding_engine(engine):
+    """True when the server fronts an embedding engine (Qwen3-Embedding): decided by the engine object."""
+    return getattr(engine, "modality", "text") == "embedding"
+
+
 # The endpoints that only make sense for a chat model, refused with a pointer
 # when the model draws images instead.
 # POST /v1/images/edits: the request's pictures and fields. multipart/form-data (what OpenAI's SDKs send)
@@ -6600,6 +6606,8 @@ IMAGE_OPTION_KEYS = ("default_width", "default_height", "default_steps", "min_si
 MUSIC_OPTION_KEYS = ("sample_rate", "channels", "default_duration", "min_duration", "max_duration",
                      "default_steps", "max_steps", "default_shift", "max_caption_bytes", "max_lyric_bytes")
 MUSIC_ENDPOINT = "/v1/audio/music"
+EMBEDDINGS_ENDPOINT = "/v1/embeddings"
+EMBEDDING_OPTION_KEYS = ("dimensions", "min_dimensions", "max_tokens")
 
 
 def cors_origin_list(given):
@@ -6699,6 +6707,9 @@ class APIServer(ThreadingHTTPServer):
             entry["audio"] = {key: info.get(key) for key in MUSIC_OPTION_KEYS}
             entry["audio"]["tasks"] = list(info.get("tasks") or ["text2music"])
             entry["audio"]["audio_in"] = self.music_audio_info()
+        if is_embedding_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6738,6 +6749,8 @@ class APIServer(ThreadingHTTPServer):
             # audio_input: the engine announced tasks (a cover, a repaint) and takes a reference clip
             audio = music_engine.audio_in_info(getattr(self.engine, "info", None)) is not None
             return ["music_generation", "audio_input"] if audio else ["music_generation"]
+        if is_embedding_engine(self.engine):
+            return ["embeddings"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -7402,6 +7415,8 @@ class APIHandler(BaseHTTPRequestHandler):
                         payload["image"] = dict(getattr(self.server.engine, "info", None) or {})
                     if is_music_engine(self.server.engine):
                         payload["audio"] = dict(getattr(self.server.engine, "info", None) or {})
+                    if is_embedding_engine(self.server.engine):
+                        payload["embedding"] = dict(getattr(self.server.engine, "info", None) or {})
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -7542,12 +7557,18 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` is a music generation model and "
                                     f"does not chat: POST {MUSIC_ENDPOINT} instead.",
                                "model", "unsupported_endpoint")
+            if is_embedding_engine(self.server.engine) and path in TEXT_ENDPOINTS:
+                raise APIError(400, f"`{self.server.model_id}` is an embedding model and "
+                                    f"does not chat: POST {EMBEDDINGS_ENDPOINT} instead.",
+                               "model", "unsupported_endpoint")
             if not engine_chats(self.server.engine) and path in GENERATING_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a decision model: it answers typed "
                                     "questions with calibrated probabilities and does not generate "
                                     "text. POST /v1/systemone instead.",
                                "model", "unsupported_endpoint")
-            if path == MUSIC_ENDPOINT:
+            if path == EMBEDDINGS_ENDPOINT:
+                self.embeddings(body, request_id)
+            elif path == MUSIC_ENDPOINT:
                 self.music_generation(body, request_id)
             elif path == TRANSCRIBE_ENDPOINT:
                 self.audio_transcription(body, request_id)
@@ -8016,6 +8037,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
                                     f"music (POST {MUSIC_ENDPOINT}).",
                                "model", "unsupported_endpoint")
+            if is_embedding_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
+                                    f"embeddings (POST {EMBEDDINGS_ENDPOINT}).",
+                               "model", "unsupported_endpoint")
             if not engine_chats(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it is a "
                                     "decision model (POST /v1/systemone).",
@@ -8330,12 +8355,51 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, {"text": whole, "usage": {"type": "tokens", **usage}}, request_id, headers)
 
+    # POST /v1/embeddings: OpenAI's embeddings request, answered by an embedding engine (Qwen3-Embedding). The vectors are
+    # unit length; `dimensions` keeps the first N components and normalises again; `instruction` makes the inputs queries.
+    def embeddings(self, body, request_id):
+        engine = self.server.engine
+        if not is_embedding_engine(engine):
+            if is_image_engine(engine):
+                what = "it draws pictures (POST /v1/images/generations)"
+            elif is_music_engine(engine):
+                what = f"it makes music (POST {MUSIC_ENDPOINT})"
+            elif not engine_chats(engine):
+                what = "it is a decision model (POST /v1/systemone)"
+            else:
+                what = "it is a chat model (POST /v1/chat/completions)"
+            raise APIError(400, f"`{self.server.model_id}` does not make embeddings: {what}.",
+                           "model", "unsupported_endpoint")
+        try:
+            request = embedding_engine.embedding_request(body, engine.info)
+        except embedding_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
+            if not engine.alive:
+                raise APIError(503, f"The embedding engine is not running ({engine.dead or 'exited'}).",
+                               None, "engine_unavailable", "server_error")
+            try:
+                result = engine.embed(request["inputs"], instruction=request["instruction"],
+                                      dimensions=request["dimensions"], truncate=request["truncate"])
+            except embedding_engine.EmbeddingEngineError as error:
+                message = str(error)
+                if engine.alive and "longer than" in message:
+                    raise APIError(400, message, "input", "invalid_value") from None
+                raise APIError(500, f"The embedding engine failed: {message}", None, "engine_error",
+                               "server_error") from None
+        self.send_json(200, embedding_engine.embedding_payload(request, result, self.server.model_id), request_id,
+                       {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))})
+
     def music_generation(self, body, request_id):
         engine = self.server.engine
         if not is_music_engine(engine):
             if is_image_engine(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it draws pictures "
                                     "(POST /v1/images/generations).",
+                               "model", "unsupported_endpoint")
+            if is_embedding_engine(engine):
+                raise APIError(400, f"`{self.server.model_id}` does not make music: it makes "
+                                    f"embeddings (POST {EMBEDDINGS_ENDPOINT}).",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it is a "
@@ -9490,7 +9554,13 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
         if kv_slots > family.limits.max_kv_slots:
             raise ValueError(f"{family.id} engine supports at most "
                              f"{family.limits.max_kv_slots} KV slot(s)")
-        if family.modality == "audio":
+        if family.modality == "embedding":
+            # Lines of JSON like the image and music engines, one answer per request.
+            runtime = embedding_engine.EmbeddingEngine(engine, model, env=env)
+            runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
+            print(f"[embeddings] {model_id}: {runtime.info['dimensions']} dimensions, up to "
+                  f"{runtime.info['max_tokens']} tokens an input", file=sys.stderr)
+        elif family.modality == "audio":
             # The music engine speaks the image engine's kind of protocol (lines of JSON,
             # PCM frames): its own process class, no byte stream.
             runtime = music_engine.MusicEngine(engine, model, env=env)
@@ -9518,7 +9588,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
                       file=sys.stderr)
                 sys.exit(1)
         server.engine = runtime
-        if family.modality not in ("image", "audio"):
+        if family.modality not in ("image", "audio", "embedding"):
             # Said once at start-up, so a checkpoint that declares a tower it does
             # not carry is visible in the log and not only in a client's 400.
             print(f"[gateway] input modalities: {', '.join(server.input_modalities())}"

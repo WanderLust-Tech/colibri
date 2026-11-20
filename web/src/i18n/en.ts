@@ -266,6 +266,7 @@ const en: Record<string, string> = {
   "install.kind.text": "chat",
   "install.kind.image": "pictures",
   "install.kind.audio": "music",
+  "install.kind.embedding": "embeddings",
   "install.allHere": "Everything this router can install is already here.",
   "install.loadError": "Could not read the list of models to install: {{message}}",
   "sidebar.model": "Model",

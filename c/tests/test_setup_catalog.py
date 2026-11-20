@@ -76,7 +76,7 @@ class Recommendation(unittest.TestCase):
         self.assertEqual({r["entry"].id: r["status"] for r in rows}["qwen36-35b"], "tight")
 
     def test_nothing_fits(self):
-        rows = setup_catalog.recommend(4 * GB, 1000 * GB)
+        rows = setup_catalog.recommend(1 * GB, 1000 * GB)
         self.assertIsNone(recommended(rows))
         self.assertFalse(any(r["fits"] for r in rows))
 

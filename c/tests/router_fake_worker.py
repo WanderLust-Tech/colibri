@@ -57,7 +57,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def caps(self):
-        return {"text": ["chat", "systemone"], "image": ["image_generation"], "audio": ["music_generation"]}[args.modality]
+        return {"text": ["chat", "systemone"], "image": ["image_generation"], "audio": ["music_generation"],
+                "embedding": ["embeddings"]}[args.modality]
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
@@ -69,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
                 item["image"] = {"default_width": 640}                  # what only the engine could say
             if args.modality == "audio":
                 item["audio"] = {"tasks": ["text2music", "cover"]}
+            if args.modality == "embedding":
+                item["embedding"] = {"dimensions": 8}
             return self.reply(200, {"object": "list", "data": [item],
                                     "models": [{"name": args.id, "description": "fake", "release_date": "2026-01-01"}]})
         if self.path.split("?")[0] == "/profile":

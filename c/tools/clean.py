@@ -45,6 +45,7 @@ FILES = [
     "qwenimage", "qwenimage.exe",
     "zimage", "zimage.exe",
     "acestep", "acestep.exe",
+    "qwen3embed", "qwen3embed.exe",
     "laya", "laya.exe",
     "gliner_decide", "gliner_decide.exe",
     "native_quant.o", "native_quant_parallel.o", "native_quant_dual.o",

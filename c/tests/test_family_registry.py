@@ -1059,6 +1059,7 @@ class FamilyRegistryTest(unittest.TestCase):
             "zimage": "hello {world}",
             # The same for a music model: the caption is the prompt, nothing to replay.
             "ace_step": "hello {world}",
+            "qwen3_embedding": "hello {world}",
             # A decision model answers questions; it has no prompt to replay.
             "laya": "hello {world}",
             "gliner_decide": "hello {world}",
