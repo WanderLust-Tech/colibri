@@ -7,7 +7,9 @@ It "speaks" by writing a 24 kHz mono WAV file of 0.05 s a character of the text.
 first samples of the file are not sound: sample 0 is the length of a string and the samples after it are that string's bytes, the
 string being `speaker|language|seed|greedy|max_frames` (the fields as the engine got them). Environment: TTS_STUB_DELAY (seconds a
 request takes), TTS_STUB_DIE_ON (a text that makes the stub exit without answering), TTS_STUB_FAIL_ON (a text it answers with ERROR),
-TTS_STUB_TRUNCATE (say every answer was cut at the frame limit), TTS_STUB_NOFILE (answer AUDIO without writing the file).
+TTS_STUB_TRUNCATE (say every answer was cut at the frame limit), TTS_STUB_NOFILE (answer AUDIO without writing the file),
+TTS_STUB_INSTRUCT (a model that takes a style instruction: READY says so, and the echo ends with `|instruct`), TTS_STUB_KIND=voice_design
+(no speakers: the instruction makes the voice).
 """
 import json
 import os
@@ -21,6 +23,8 @@ DIE_ON = os.environ.get("TTS_STUB_DIE_ON")
 FAIL_ON = os.environ.get("TTS_STUB_FAIL_ON")
 TRUNCATE = bool(os.environ.get("TTS_STUB_TRUNCATE"))
 NOFILE = bool(os.environ.get("TTS_STUB_NOFILE"))
+INSTRUCT = bool(os.environ.get("TTS_STUB_INSTRUCT"))
+KIND = os.environ.get("TTS_STUB_KIND", "custom_voice")
 RATE = 24000
 SPEAKERS = ["serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric", "dylan"]
 LANGUAGES = ["chinese", "english", "german", "italian", "portuguese", "spanish", "japanese", "korean", "french", "russian",
@@ -35,8 +39,8 @@ def send(keyword, body):
 def main():
     if "--serve" not in sys.argv:
         sys.exit("tts_stub: --serve only")
-    send("READY", {"model": "tts-stub", "task": "speech", "kind": "custom_voice", "sample_rate": RATE, "layers": 1,
-                   "speakers": SPEAKERS, "languages": LANGUAGES, "device": "cpu"})
+    send("READY", {"model": "tts-stub", "task": "speech", "kind": KIND, "instruct": INSTRUCT or KIND == "voice_design", "sample_rate": RATE,
+                   "layers": 1, "speakers": [] if KIND == "voice_design" else SPEAKERS, "languages": LANGUAGES, "device": "cpu"})
     for line in sys.stdin:
         keyword, _, rest = line.rstrip("\r\n").partition(" ")
         if keyword != "SPEAK":
@@ -68,6 +72,8 @@ def main():
             continue
         echo = "|".join(str(x) for x in (speaker, request.get("language", ""), request.get("seed", 0), int(bool(request.get("greedy"))),
                                          request.get("max_frames", 0))).encode()
+        if request.get("instruct"):
+            echo += b"|" + request["instruct"].encode()
         samples = max(int(len(text) * 0.05 * RATE), len(echo) + 2)
         pcm = [len(echo)] + list(echo) + [0] * (samples - len(echo) - 1)
         if not NOFILE:

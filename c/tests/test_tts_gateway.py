@@ -64,7 +64,7 @@ class RequestRulesTest(unittest.TestCase):
 
     def test_the_defaults(self):
         self.assertEqual(speech_request({"input": "hello"}, INFO),
-                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "seed": None, "greedy": False})
+                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "seed": None, "greedy": False, "instruct": None})
 
     def test_input_is_required_and_limited(self):
         self.refused({}, "input", "required")
@@ -114,7 +114,14 @@ class RequestRulesTest(unittest.TestCase):
         self.assertEqual(speech_request({"input": "x", "stream_format": "audio"}, INFO)["format"], "wav")
 
     def test_a_model_that_takes_instructions_gets_them_through_the_check(self):
-        self.assertEqual(speech_request({"input": "x", "instructions": "calm"}, dict(INFO, instruct=True))["speaker"], "ryan")
+        request = speech_request({"input": "x", "instructions": "calm"}, dict(INFO, instruct=True))
+        self.assertEqual((request["speaker"], request["instruct"]), ("ryan", "calm"))
+        self.assertIsNone(speech_request({"input": "x", "instructions": "  "}, dict(INFO, instruct=True))["instruct"])
+        self.assertIsNone(speech_request({"input": "x"}, dict(INFO, instruct=True))["instruct"])
+
+    def test_a_voice_design_model_has_no_speakers_to_check_the_voice_against(self):
+        info = {"speakers": [], "languages": INFO["languages"], "instruct": True, "kind": "voice_design"}
+        self.assertEqual(speech_request({"input": "x", "voice": "alloy", "instructions": "a low voice"}, info)["instruct"], "a low voice")
 
     def test_a_seed_is_a_non_negative_integer(self):
         self.assertEqual(speech_request({"input": "x", "seed": 7}, INFO)["seed"], 7)
@@ -221,6 +228,11 @@ class EngineClientTest(unittest.TestCase):
         self.assertEqual((rate, channels, len(samples)), (24000, 1, int(len("hello there") * 0.05 * 24000)))
         self.assertAlmostEqual(result["audio_seconds"], len("hello there") * 0.05, places=3)
         self.assertEqual((result["sample_rate"], result["truncated"]), (24000, False))
+
+    def test_an_instruction_reaches_the_engine(self):
+        engine = self.engine(TTS_STUB_INSTRUCT=1)
+        self.assertTrue(engine.info["instruct"])
+        self.assertEqual(echo_of(engine.speak("hello there", speaker="ryan", instruct="whisper")["wav"]), "ryan|auto|0|0|0|whisper")
 
     def test_unset_fields_are_not_sent(self):
         self.assertEqual(echo_of(self.engine().speak("hello there", speaker="ryan")["wav"]), "ryan|auto|0|0|0")
@@ -421,6 +433,36 @@ class EndpointTest(unittest.TestCase):
                 self.assertEqual(status, 400, body)
                 self.assertIn(f"does not {what}", body["error"]["message"])
                 self.assertIn("speaks text", body["error"]["message"])
+
+
+class InstructionEndpointTest(unittest.TestCase):
+    """The 1.7B CustomVoice (a style on top of a named speaker) and VoiceDesign (the voice made of the description alone)."""
+
+    def test_a_style_instruction_reaches_a_custom_voice_model(self):
+        gw = GatewayHarness(TTS_STUB_INSTRUCT=1)
+        self.addCleanup(gw.close)
+        status, _headers, raw = gw.speak(voice="vivian", instructions="Speak slowly and sadly.")
+        self.assertEqual((status, echo_of(raw)), (200, "vivian|auto|0|0|0|Speak slowly and sadly."))
+        card = next(item for item in gw.json("/v1/models", method="GET")[2]["data"] if item["id"] == MODEL_ID)
+        self.assertEqual((card["speech"]["instructions"], card["speech"]["kind"]), (True, "custom_voice"))
+
+    def test_voice_design_makes_the_voice_from_the_description(self):
+        gw = GatewayHarness(TTS_STUB_KIND="voice_design")
+        self.addCleanup(gw.close)
+        status, _headers, raw = gw.speak(voice="alloy", instructions="A low, warm voice.")
+        self.assertEqual(status, 200, raw[:200])
+        self.assertTrue(echo_of(raw).endswith("|A low, warm voice."), echo_of(raw))
+        card = next(item for item in gw.json("/v1/models", method="GET")[2]["data"] if item["id"] == MODEL_ID)
+        self.assertEqual((card["speech"]["instructions"], card["speech"]["kind"], card["speech"]["speakers"]), (True, "voice_design", []))
+
+    def test_the_plain_model_still_refuses_instructions_and_says_so_on_its_card(self):
+        gw = GatewayHarness()
+        self.addCleanup(gw.close)
+        status, _headers, raw = gw.speak(instructions="whisper")
+        self.assertEqual(status, 400, raw[:200])
+        self.assertEqual(json.loads(raw)["error"]["param"], "instructions")
+        card = next(item for item in gw.json("/v1/models", method="GET")[2]["data"] if item["id"] == MODEL_ID)
+        self.assertFalse(card["speech"]["instructions"])
 
 
 class DeadEngineTest(unittest.TestCase):

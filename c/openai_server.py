@@ -6773,6 +6773,8 @@ class APIServer(ThreadingHTTPServer):
                                "voices": dict(speech_engine.OPENAI_VOICES), "max_input_chars": speech_engine.MAX_INPUT_CHARS}
             if info.get("device"):
                 entry["speech"]["device"] = info["device"]
+            entry["speech"]["kind"] = info.get("kind") or "custom_voice"
+            entry["speech"]["instructions"] = bool(info.get("instruct"))        # a style (CustomVoice 1.7B) or the voice's description (VoiceDesign)
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -8511,7 +8513,7 @@ class APIHandler(BaseHTTPRequestHandler):
                                None, "engine_unavailable", "server_error")
             try:
                 result = engine.speak(request["input"], speaker=request["speaker"], language=request["language"], seed=request["seed"],
-                                      greedy=request["greedy"])
+                                      greedy=request["greedy"], instruct=request["instruct"])
             except speech_engine.EmbeddingEngineError as error:
                 raise APIError(500, f"The speech synthesis engine failed: {error}", None, "engine_error", "server_error") from None
         try:

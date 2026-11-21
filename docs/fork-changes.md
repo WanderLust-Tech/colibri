@@ -629,8 +629,15 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   1.05 s to 0.17 s for 5 s of speech, 56 s of speech from 21 s to 11 s in all; the waveform is the CPU's to one step of the 16-bit sample.
 - **Tests:** `tests/test_tts_gateway.py` (45, a stub engine), `tests/test_speech_cli.py` (+11 for `coli speak`), `tests/test_router.py` (one),
   `tests/test_qwen3tts_real.py` (10, against `tools/qwen3_tts_0.6b_reference.json`).
-- **Not done**: the 1.7B and style `instructions`, VoiceDesign, voice cloning (the Base models: the codec's encoder and a speaker encoder),
-  streaming, the codec's first half on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
+- **T4 (2026-11-21): the 1.7B models and style instructions.** The 1.7B CustomVoice and VoiceDesign run on the same engine: a talker 2048 wide
+  with a predictor of 1024 behind `small_to_mtp_projection`, the instruction rows (`<|im_start|>user\n{instruct}<|im_end|>`) before the role rows
+  of the prompt, and no speaker row for VoiceDesign (the description makes the voice). Held to the official package with an instruction each:
+  prefill 1.2e-7, 0 of 752 and 0 of 640 choices differ, the codes identical, on the CPU and on the card (21 to 27 ms a frame; CPU 139).
+  Around it: the `instructions` field of `POST /v1/audio/speech` reaches the engine (`instruct` in `SPEAK`; the model card says `kind` and
+  `instructions`), `coli speak --instruct`, `qwen3-tts-1.7b-customvoice` and `qwen3-tts-1.7b-voicedesign` in the catalogue, a VoiceDesign display
+  variant (`qwen3-tts-1.7b-voicedesign` as its API id), `tests/test_qwen3tts_17_real.py` (14 tests), the stub engine and gateway tests.
+- **Not done**: voice cloning (the Base models: the codec's encoder and a speaker encoder), streaming, the codec's first half on the card;
+  the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 

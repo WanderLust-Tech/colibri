@@ -81,7 +81,7 @@ SUFFIX_OF_FORMAT = {"wav": ".wav", "mp3": ".mp3", "flac": ".flac", "opus": ".opu
 
 
 def speak(a, api, fetch, C):
-    """coli speak TEXT... [--voice NAME] [--language CODE] [--out FILE] [--format F] [--seed N] [--model ID]
+    """coli speak TEXT... [--voice NAME] [--instruct STYLE] [--language CODE] [--out FILE] [--format F] [--seed N] [--model ID]
 
     `fetch(path, body)` is coli's POST that hands back (status, the raw body bytes, the headers as a dict), or (None, None, None) when
     nothing answers. The audio goes to --out (speech.wav by default; the file's suffix picks the format when --format is not given);
@@ -90,7 +90,7 @@ def speak(a, api, fetch, C):
     if words == "-":
         words = sys.stdin.read().strip()
     if not words:
-        print(f"  {C.yel}usage: coli speak TEXT [--voice ryan] [--language en] [--out speech.wav] [--format wav|mp3|flac|opus|aac|pcm] [--seed N] [--model ID]{C.r}")
+        print(f"  {C.yel}usage: coli speak TEXT [--voice ryan] [--instruct \"speak slowly\"] [--language en] [--out speech.wav] [--format wav|mp3|flac|opus|aac|pcm] [--seed N] [--model ID]{C.r}")
         return 1
     out = a.out or "speech" + SUFFIX_OF_FORMAT.get(a.format or "wav", ".wav")
     fmt = a.format or FORMAT_OF_SUFFIX.get(os.path.splitext(out)[1].lower(), "wav")
@@ -102,6 +102,8 @@ def speak(a, api, fetch, C):
     body = {"model": model, "input": words, "response_format": fmt}
     if a.voice:
         body["voice"] = a.voice
+    if getattr(a, "instruct", None):
+        body["instructions"] = a.instruct
     if a.language:
         body["language"] = a.language
     if a.seed is not None:

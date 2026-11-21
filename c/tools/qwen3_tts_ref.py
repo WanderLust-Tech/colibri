@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--speaker", default="Ryan")
     ap.add_argument("--language", default="English")
     ap.add_argument("--max-new", type=int, default=400)
+    ap.add_argument("--instruct", default=None, help="a style (CustomVoice 1.7B) or the voice's description (VoiceDesign)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -56,8 +57,16 @@ def main():
     handle = talker.codec_head.register_forward_hook(head_hook)
     text = tts._build_assistant_text(a.text)
     ids = tts._tokenize_texts([text])[0]
-    wavs, sr = tts.generate_custom_voice(text=a.text, speaker=a.speaker, language=a.language, do_sample=False, subtalker_dosample=False,
-                                         max_new_tokens=a.max_new)
+    design = inner.tts_model_type == "voice_design"
+
+    def synth():
+        if design:
+            return tts.generate_voice_design(text=a.text, instruct=a.instruct or "", language=a.language, do_sample=False, subtalker_dosample=False,
+                                             max_new_tokens=a.max_new)
+        return tts.generate_custom_voice(text=a.text, speaker=a.speaker, language=a.language, instruct=a.instruct, do_sample=False,
+                                         subtalker_dosample=False, max_new_tokens=a.max_new)
+
+    wavs, sr = synth()
     handle.remove()
     # the codes: run the talker part again through the same entry point, to get them (generate_custom_voice returns audio only)
     captured = {}
@@ -69,8 +78,7 @@ def main():
         return codes, hidden
 
     inner.generate = keep
-    wavs2, _ = tts.generate_custom_voice(text=a.text, speaker=a.speaker, language=a.language, do_sample=False, subtalker_dosample=False,
-                                         max_new_tokens=a.max_new)
+    wavs2, _ = synth()
     codes = captured["codes"].to(torch.int32)
     ids.reshape(-1).to(torch.int32).numpy().astype("<i4").tofile(os.path.join(a.out, "input_ids.i32"))
     seen["prefill"][0].numpy().astype("<f4").tofile(os.path.join(a.out, "prefill.f32"))
@@ -78,7 +86,7 @@ def main():
     codes.numpy().astype("<i4").tofile(os.path.join(a.out, "codes.i32"))
     wav = np.asarray(wavs[0], dtype=np.float32)
     wav.astype("<f4").tofile(os.path.join(a.out, "wav.f32"))
-    meta = {"model": os.path.basename(os.path.normpath(a.model)), "text": a.text, "speaker": a.speaker, "language": a.language,
+    meta = {"model": os.path.basename(os.path.normpath(a.model)), "text": a.text, "speaker": "" if design else a.speaker, "instruct": a.instruct, "language": a.language,
             "prompt_text": text, "prompt_ids": int(ids.numel()), "prefill_len": int(seen["prefill"].shape[1]), "frames": int(codes.shape[0]),
             "code_groups": int(codes.shape[1]), "sample_rate": int(sr), "samples": int(wav.shape[0]),
             "same_waveform_twice": bool(np.array_equal(wav, np.asarray(wavs2[0], dtype=np.float32))), "codes": codes.tolist()}

@@ -1989,6 +1989,9 @@ FAMILIES = (
         display_scale="",
         display_variants=(
             DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-TTS", "0.6B", model_id="qwen3-tts-0.6b"),
+            # voice_design: 1 is made by resolve_model from the top of config.json (tts_model_type "voice_design"), for the talker's section
+            DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28), ("voice_design", 1)), "Qwen3-TTS", "1.7B VoiceDesign",
+                           model_id="qwen3-tts-1.7b-voicedesign"),
             DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28)), "Qwen3-TTS", "1.7B", model_id="qwen3-tts-1.7b"),
         ),
         engine_artifact="qwen3tts",
@@ -2365,7 +2368,7 @@ def resolve_model(model_dir):
     elif family.config_section == "talker_config":
         # Qwen3-TTS keeps the talker's sizes in talker_config; read as it stands when the section is missing (see above)
         inner = config.get("talker_config")
-        family_config = inner if isinstance(inner, dict) else config
+        family_config = (dict(inner, voice_design=1) if config.get("tts_model_type") == "voice_design" else inner) if isinstance(inner, dict) else config
     head = ""
     for candidate in DECISION_HEADS:
         present = [name for name in candidate.files if (model / name).is_file()]

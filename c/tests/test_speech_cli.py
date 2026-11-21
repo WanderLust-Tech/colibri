@@ -230,6 +230,20 @@ class SpeakCommandTest(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertEqual(test_tts_gateway.echo_of(Path(out).read_bytes()), "vivian|french|5|0|0")
 
+    def test_an_instruction_goes_to_the_server_as_instructions(self):
+        gw = test_tts_gateway.GatewayHarness(model_id=test_tts_gateway.MODEL_ID, TTS_STUB_INSTRUCT=1)
+        self.addCleanup(gw.close)
+        api, _upload = clients(gw.port)
+        out = self.path("styled.wav")
+        code, text, _ = self.run_command(speak_args("hello there", voice="vivian", instruct="Speak slowly.", out=out), api=api, fetch=fetcher(gw.port))
+        self.assertEqual(code, 0, text)
+        self.assertEqual(test_tts_gateway.echo_of(Path(out).read_bytes()), "vivian|auto|0|0|0|Speak slowly.")
+
+    def test_a_model_without_styles_says_so_when_one_is_asked_for(self):
+        code, text, _ = self.run_command(speak_args("hello there", instruct="Speak slowly.", out=self.path("no.wav")))
+        self.assertEqual(code, 1)
+        self.assertIn("instructions", text)
+
     def test_the_suffix_picks_the_format_and_a_flag_overrides_it(self):
         out = self.path("c.pcm")
         self.assertEqual(self.run_command(speak_args("hello there", out=out))[0], 0)

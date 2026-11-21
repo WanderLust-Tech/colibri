@@ -258,6 +258,24 @@ CATALOG = (
         # the repository ships vocab.json and merges.txt, not the tokenizer.json the engine reads
         post_install=(("qwen3_tokenizer", "tokenizer.json"),),
         doc="docs/qwen3-tts.md"),
+    CatalogModel(
+        id="qwen3-tts-1.7b-customvoice", family="qwen3_tts", name="Qwen3-TTS-1.7B-CustomVoice",
+        repo="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", disk_gb=4.5,
+        # the talker is 2048 wide (the predictor stays 1024, behind a projection); a style instruction steers the delivery
+        ram_min_gb=7, ram_good_gb=10, dense_gb=4.5, rank=2, size_class="small",
+        modality="speech", summary="text to speech with nine named speakers and a style instruction (\"speak slowly and sadly\"); the larger Qwen3-TTS",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-tts.md"),
+    CatalogModel(
+        id="qwen3-tts-1.7b-voicedesign", family="qwen3_tts", name="Qwen3-TTS-1.7B-VoiceDesign",
+        repo="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", disk_gb=4.5,
+        # no named speakers: the voice is described in words (`instructions`)
+        ram_min_gb=7, ram_good_gb=10, dense_gb=4.5, rank=3, size_class="small",
+        modality="speech", summary="text to speech in a voice you describe in words (no named speakers; `instructions` makes the voice)",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-tts.md"),
 )
 
 

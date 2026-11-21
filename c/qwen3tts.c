@@ -568,6 +568,8 @@ typedef struct {
     QtDec talker, pred;
     uint16_t *codec_emb, *text_emb, *pred_emb[QT_GROUPS - 1];     /* bf16 [3072][D], [151936][2048], 15 x [2048][D] */
     AcdLin fc1, fc2, codec_head, pred_head[QT_GROUPS - 1];
+    AcdLin mtp;                                                   /* small_to_mtp_projection: talker width -> predictor width (the 1.7B) */
+    int has_mtp, design, instruct_ok;                              /* the projection is there; VoiceDesign checkpoint; the model takes a style instruction */
     int vocab, text_vocab, text_hidden, cb_vocab;
     int tts_bos, tts_eos, tts_pad, im_start, im_end;
     int codec_bos, codec_eos, codec_pad, codec_think, codec_nothink, codec_think_bos, codec_think_eos;
@@ -625,7 +627,12 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     jval *tc = m->cfg ? json_get(m->cfg, "talker_config") : NULL, *pc = tc ? json_get(tc, "code_predictor_config") : NULL;
     if (!tc || !pc) { snprintf(err, errn, "config.json has no talker_config.code_predictor_config: not a Qwen3-TTS checkpoint"); return -1; }
     jval *type = json_get(m->cfg, "tts_model_type");
-    if (!type || type->t != J_STR || strcmp(type->str, "custom_voice")) { snprintf(err, errn, "only the CustomVoice checkpoints are supported so far (this one is %s)", type && type->t == J_STR ? type->str : "unknown"); return -1; }
+    if (!type || type->t != J_STR || (strcmp(type->str, "custom_voice") && strcmp(type->str, "voice_design"))) {
+        snprintf(err, errn, "only the CustomVoice and VoiceDesign checkpoints are supported so far (this one is %s)", type && type->t == J_STR ? type->str : "unknown"); return -1;
+    }
+    m->design = !strcmp(type->str, "voice_design");
+    jval *msize = json_get(m->cfg, "tts_model_size");
+    m->instruct_ok = m->design || (msize && msize->t == J_STR && strcmp(msize->str, "0b6"));                  /* the 0.6B ignores `instruct` */
     m->tts_bos = qt_json_id(m->cfg, "tts_bos_token_id"); m->tts_eos = qt_json_id(m->cfg, "tts_eos_token_id"); m->tts_pad = qt_json_id(m->cfg, "tts_pad_token_id");
     m->codec_bos = qt_json_id(tc, "codec_bos_id"); m->codec_eos = qt_json_id(tc, "codec_eos_token_id"); m->codec_pad = qt_json_id(tc, "codec_pad_id");
     m->codec_think = qt_json_id(tc, "codec_think_id"); m->codec_nothink = qt_json_id(tc, "codec_nothink_id");
@@ -637,8 +644,12 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     st_init(&S, dir);
     if (qt_dec_load(&S, "talker.model", tc, 0, &m->talker, &m->bytes, err, errn)) return -1;
     if (qt_dec_load(&S, "talker.code_predictor.model", pc, 0, &m->pred, &m->bytes, err, errn)) return -1;
-    if (m->pred.D != m->talker.D) { snprintf(err, errn, "a code predictor of another width than the talker (the 1.7B) is not supported yet"); return -1; }
     const int D = m->talker.D;
+    m->has_mtp = m->pred.D != D;
+    if (m->has_mtp) {                                                                 /* the predictor is narrower: its inputs go through a projection with a bias */
+        int64_t sm[2] = {m->pred.D, D};
+        if (acd_load_lin(&S, "talker.code_predictor.small_to_mtp_projection.weight", "talker.code_predictor.small_to_mtp_projection.bias", m->pred.D, D, 2, sm, NULL, 0, 0, &m->mtp, &m->bytes, err, errn)) return -1;
+    }
     if (!(m->codec_emb = qt_bf16_table(&S, "talker.model.codec_embedding.weight", (int64_t)m->vocab * D, &m->bytes, err, errn))) return -1;
     if (!(m->text_emb = qt_bf16_table(&S, "talker.model.text_embedding.weight", (int64_t)m->text_vocab * m->text_hidden, &m->bytes, err, errn))) return -1;
     char n[300], b[300];
@@ -649,12 +660,12 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     if (acd_load_lin(&S, "talker.codec_head.weight", NULL, m->vocab, D, 2, sh, NULL, 0, 0, &m->codec_head, &m->bytes, err, errn)) return -1;
     const int pv = acd_json_int(pc, "vocab_size", 2048);
     m->cb_vocab = pv;
-    int64_t sp[2] = {pv, D};
+    int64_t sp[2] = {pv, m->pred.D};
     for (int g = 0; g < QT_GROUPS - 1; g++) {
         snprintf(n, sizeof n, "talker.code_predictor.model.codec_embedding.%d.weight", g);
         if (!(m->pred_emb[g] = qt_bf16_table(&S, n, (int64_t)pv * D, &m->bytes, err, errn))) return -1;
         snprintf(n, sizeof n, "talker.code_predictor.lm_head.%d.weight", g); (void)b;
-        if (acd_load_lin(&S, n, NULL, pv, D, 2, sp, NULL, 0, 0, &m->pred_head[g], &m->bytes, err, errn)) return -1;
+        if (acd_load_lin(&S, n, NULL, pv, m->pred.D, 2, sp, NULL, 0, 0, &m->pred_head[g], &m->bytes, err, errn)) return -1;
     }
     st_destroy(&S);
     snprintf(path, sizeof path, "%s/tokenizer.json", dir);
@@ -700,12 +711,12 @@ static int qt_lookup(jval *obj, const char *key, int fallback){
 
 static void qt_lower(char *s){ for (; *s; s++) if (*s >= 'A' && *s <= 'Z') *s += 32; }
 
-/* The text prompt's token ids: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n, malloc'd, count in *n. */
-static int *qt_text_ids(const QtModel *m_, const char *text, int *n){
+/* The token ids of a chat-framed text: fmt is a printf format with one %s, malloc'd, count in *n. */
+static int *qt_frame_ids(const QtModel *m_, const char *fmt, const char *text, int *n){
     QtModel *m = (QtModel *)m_;
-    const size_t len = strlen(text) + 96;
+    const size_t len = strlen(text) + strlen(fmt) + 16;
     char *s = (char *)malloc(len);
-    snprintf(s, len, "<|im_start|>assistant\n%s<|im_end|>\n<|im_start|>assistant\n", text);
+    snprintf(s, len, fmt, text);
     char *nrm = NULL; size_t nl = 0;
     if (q38_nfc_normalize(s, strlen(s), &nrm, &nl) != 0) { nrm = strdup(s); nl = strlen(s); }
     free(s);
@@ -716,16 +727,25 @@ static int *qt_text_ids(const QtModel *m_, const char *text, int *n){
     return ids;
 }
 
-/* The talker's prefill input for a CustomVoice request in the reference's non-streaming mode: [L][D] malloc'd, L in *rows. Returns NULL with err
- * set for an unknown speaker or language. */
-static float *qt_prefill(const QtModel *m, const int *ids, int nids, const char *speaker, const char *language, int *rows, char *err, size_t errn){
+/* The text prompt's token ids: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n, malloc'd, count in *n. */
+static int *qt_text_ids(const QtModel *m, const char *text, int *n){
+    return qt_frame_ids(m, "<|im_start|>assistant\n%s<|im_end|>\n<|im_start|>assistant\n", text, n);
+}
+
+/* The talker's prefill input for a request in the reference's non-streaming mode: [L][D] malloc'd, L in *rows. A style instruction (or, for
+ * VoiceDesign, the description of the voice) goes first as <|im_start|>user\n{instruct}<|im_end|>\n through the text embedding; no speaker (an
+ * empty name) leaves the speaker's row out. Returns NULL with err set for an unknown speaker or language or an instruction the model cannot take. */
+static float *qt_prefill(const QtModel *m, const int *ids, int nids, const char *speaker, const char *instruct, const char *language, int *rows, char *err, size_t errn){
     const int D = m->talker.D;
+    int ninst = 0, *inst_ids = NULL;
+    if (instruct && *instruct && !m->instruct_ok) { snprintf(err, errn, "this model takes no style instruction (the 1.7B CustomVoice and VoiceDesign do)"); return NULL; }
     jval *tc = json_get(m->cfg, "talker_config");
     int spk = -1, lang = -1;
     char name[64] = "", lg[64] = "";
     snprintf(name, sizeof name, "%s", speaker ? speaker : "");
     snprintf(lg, sizeof lg, "%s", language && *language ? language : "auto");
     qt_lower(name); qt_lower(lg);
+    if (m->design) name[0] = 0;                                                       /* VoiceDesign has no speakers: the instruction makes the voice */
     if (*name) {
         spk = qt_lookup(json_get(tc, "spk_id"), name, -1);
         if (spk < 0) { snprintf(err, errn, "the speaker `%s` is not one this model has", speaker); return NULL; }
@@ -742,16 +762,22 @@ static float *qt_prefill(const QtModel *m, const int *ids, int nids, const char 
     int prefix[8], np = 0;
     if (lang < 0) { prefix[np++] = m->codec_nothink; prefix[np++] = m->codec_think_bos; prefix[np++] = m->codec_think_eos; }
     else { prefix[np++] = m->codec_think; prefix[np++] = m->codec_think_bos; prefix[np++] = lang; prefix[np++] = m->codec_think_eos; }
+    if (instruct && *instruct) inst_ids = qt_frame_ids(m, "<|im_start|>user\n%s<|im_end|>\n", instruct, &ninst);
     const int ntext = nids - 8;                                                       /* ids[3 .. nids - 5) */
-    const int total = 3 + (np + (spk >= 0) + 2 - 1) + (ntext + 1) + 1;
+    const int total = ninst + 3 + (np + (spk >= 0) + 2 - 1) + (ntext + 1) + 1;
     float *out = (float *)calloc((size_t)total * D, sizeof(float));
     float *tmp = (float *)malloc((size_t)D * sizeof(float));
     const int sp[3] = {m->tts_bos, m->tts_eos, m->tts_pad};
     float *sv = qt_text_embed(m, sp, 3);                                              /* tts_bos, tts_eos, tts_pad, projected */
     const float *bos = sv, *eos = sv + D, *pad = sv + 2 * D;
     int at = 0;
+    if (ninst) {                                                                      /* the instruction first */
+        float *ie = qt_text_embed(m, inst_ids, ninst);
+        memcpy(out, ie, (size_t)ninst * D * sizeof(float)); at = ninst;
+        free(ie); free(inst_ids);
+    }
     float *role = qt_text_embed(m, ids, 3);
-    memcpy(out, role, (size_t)3 * D * sizeof(float)); at = 3;
+    memcpy(out + (size_t)at * D, role, (size_t)3 * D * sizeof(float)); at += 3;
     free(role);
     int codec[12], nc = 0;                                                            /* the codec ids of the prefix, the speaker and [pad, bos] */
     for (int i = 0; i < np; i++) codec[nc++] = prefix[i];
@@ -1243,7 +1269,7 @@ static void qt_teach_note(QtTeacher *t, const float *logits, int n, int taught, 
 /* The frames of codes [frames][16] (malloc'd) for a prefill [L][D]. logits0, when not NULL, gets the first step's raw logits [vocab]. */
 static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const QtGen *g, int *frames, float *logits0, QtTeacher *teach, int allow_dev, int *dev_failed){
     const QtDec *T = &m->talker, *P = &m->pred;
-    const int D = T->D, maxf = g->max_frames;
+    const int D = T->D, Dp = P->D, maxf = g->max_frames;
     const int cap = L + maxf + 1;
     QtCache *tc = qt_cache_new(T, cap), *pcache = qt_cache_new(P, QT_GROUPS + 1);
     float *tcs = (float *)malloc((size_t)cap * T->hd * sizeof(float)), *tsn = (float *)malloc((size_t)cap * T->hd * sizeof(float));
@@ -1272,7 +1298,8 @@ static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const 
     int *seen = (int *)calloc((size_t)m->vocab, sizeof(int));
     QtRng rng = {g->seed ? g->seed : 0x9E3779B97F4A7C15ULL};
     float *pad = qt_text_embed(m, &m->tts_pad, 1);
-    float *prow = (float *)malloc((size_t)2 * D * sizeof(float)), *ph = (float *)malloc((size_t)D * sizeof(float)), *pl = (float *)malloc((size_t)m->cb_vocab * sizeof(float));
+    float *prow = (float *)malloc((size_t)2 * D * sizeof(float)), *ph = (float *)malloc((size_t)Dp * sizeof(float)), *pl = (float *)malloc((size_t)m->cb_vocab * sizeof(float));
+    float *prj = (float *)malloc((size_t)2 * Dp * sizeof(float));                  /* the predictor's input rows: prow, projected when its width is not the talker's */
     float *emb = (float *)malloc((size_t)D * sizeof(float)), *sum = (float *)malloc((size_t)D * sizeof(float)), *next = (float *)malloc((size_t)D * sizeof(float));
     int f = 0;
     for (; f < maxf; f++) {
@@ -1296,25 +1323,27 @@ static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const 
         /* the code predictor: [the talker's hidden state, embedding of c0], then one code at a time */
         memcpy(prow, hn, (size_t)D * sizeof(float));
         qt_row(m->codec_emb, c0, D, prow + D);
+        if (m->has_mtp) qt_lin_any(prj, prow, 2, &m->mtp); else memcpy(prj, prow, (size_t)2 * D * sizeof(float));
         pcache->len = 0;
 #ifdef COLI_VULKAN
-        if (dev && !qt_vk_run(&qt_vk_pred, prow, 2, 0, 0, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
+        if (dev && !qt_vk_run(&qt_vk_pred, prj, 2, 0, 0, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
 #endif
         if (!dev) {
-            qt_dec_rows(P, pcache, prow, 2, 0, pcs, psn);
-            acd_rmsnorm(ph, prow + D, 1, D, P->norm, P->eps);
+            qt_dec_rows(P, pcache, prj, 2, 0, pcs, psn);
+            acd_rmsnorm(ph, prj + Dp, 1, Dp, P->norm, P->eps);
             qt_mv(pl, ph, &m->pred_head[0]);
         }
         if (teach) { code[1] = teach->codes[(size_t)f * QT_GROUPS + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[1], f); }
         else code[1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
         for (int i = 1; i < QT_GROUPS - 1; i++) {
             qt_row(m->pred_emb[i - 1], code[i], D, emb);
+            if (m->has_mtp) qt_lin_any(prj, emb, 1, &m->mtp); else memcpy(prj, emb, (size_t)D * sizeof(float));
 #ifdef COLI_VULKAN
-            if (dev && !qt_vk_run(&qt_vk_pred, emb, 1, i + 1, i, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
+            if (dev && !qt_vk_run(&qt_vk_pred, prj, 1, i + 1, i, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
 #endif
             if (!dev) {
-                qt_dec_rows(P, pcache, emb, 1, i + 1, pcs, psn);
-                acd_rmsnorm(ph, emb, 1, D, P->norm, P->eps);
+                qt_dec_rows(P, pcache, prj, 1, i + 1, pcs, psn);
+                acd_rmsnorm(ph, prj, 1, Dp, P->norm, P->eps);
                 qt_mv(pl, ph, &m->pred_head[i]);
             }
             if (teach) { code[i + 1] = teach->codes[(size_t)f * QT_GROUPS + i + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[i + 1], f); }
@@ -1340,7 +1369,7 @@ static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const 
     omp_set_num_threads(team_before);
 #endif
     qt_cache_free(T, tc); qt_cache_free(P, pcache);
-    free(tcs); free(tsn); free(pcs); free(psn); free(x); free(hn); free(logits); free(raw); free(seen); free(pad); free(prow); free(ph); free(pl); free(emb); free(sum); free(next);
+    free(tcs); free(tsn); free(pcs); free(psn); free(x); free(hn); free(logits); free(raw); free(seen); free(pad); free(prow); free(prj); free(ph); free(pl); free(emb); free(sum); free(next);
     if (*dev_failed) { free(codes); return NULL; }
     return codes;
 }
@@ -1409,10 +1438,10 @@ static char *qt_read_line(int *too_long){
 typedef struct { int frames, samples, truncated; double gen_s, codec_s; } QtSpoken;
 
 /* One request end to end: text, speaker and language to a WAV file at `path`. 0 on success, else err set. */
-static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *language, const QtGen *gen, const char *path, QtSpoken *res, char *err, size_t errn){
+static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *instruct, const char *language, const QtGen *gen, const char *path, QtSpoken *res, char *err, size_t errn){
     int nids = 0, rows = 0;
     int *ids = qt_text_ids(m, text, &nids);
-    float *prefill = qt_prefill(m, ids, nids, speaker, language, &rows, err, errn);
+    float *prefill = qt_prefill(m, ids, nids, speaker, instruct, language, &rows, err, errn);
     free(ids);
     if (!prefill) return -1;
     double t0 = qt_now();
@@ -1458,7 +1487,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     jval *tc = json_get(m->cfg, "talker_config");
     jval *kind = json_get(m->cfg, "tts_model_type");
     printf("READY {\"model\":\""); qt_escape(name);
-    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", QT_SR, m->talker.nl);
+    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"instruct\":%s,\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", m->instruct_ok ? "true" : "false", QT_SR, m->talker.nl);
     qt_names(json_get(tc, "spk_id"));
     printf("],\"languages\":[");
     qt_names(json_get(tc, "codec_language_id"));
@@ -1474,7 +1503,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
         jval *j = json_parse_checked(line + 6);
         if (!j || j->t != J_OBJ) { qt_error("", "SPEAK needs a JSON object"); if (j) json_free(j); free(line); continue; }
         jval *jid = json_get(j, "id"), *jt = json_get(j, "text"), *js = json_get(j, "speaker"), *jl = json_get(j, "language"), *jo = json_get(j, "out");
-        jval *jseed = json_get(j, "seed"), *jg = json_get(j, "greedy"), *jmf = json_get(j, "max_frames"), *jtemp = json_get(j, "temperature");
+        jval *jin = json_get(j, "instruct"), *jseed = json_get(j, "seed"), *jg = json_get(j, "greedy"), *jmf = json_get(j, "max_frames"), *jtemp = json_get(j, "temperature");
         const char *id = jid && jid->t == J_STR ? jid->str : "";
         char err[512] = "";
         if (!jt || jt->t != J_STR || !*jt->str) qt_error(id, "text must be a non-empty string");
@@ -1488,7 +1517,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
             QtSpoken r;
             memset(&r, 0, sizeof r);
             const double t0 = qt_now();
-            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err)) qt_error(id, err);
+            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jin && jin->t == J_STR ? jin->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err)) qt_error(id, err);
             else {
                 printf("AUDIO {\"id\":\""); qt_escape(id);
                 printf("\",\"path\":\""); qt_escape(jo->str);
@@ -1505,11 +1534,11 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
 }
 
 static const char *QT_USAGE =
-    "usage: qwen3tts --model DIR --serve | --text TEXT [--speaker NAME] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
+    "usage: qwen3tts --model DIR --serve | --text TEXT [--speaker NAME] [--instruct STYLE] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
     "       qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n";
 
 int main(int argc, char **argv){
-    const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *language = "Auto";
+    const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *instruct = NULL, *language = "Auto";
     int teacher_forcing = 0, serve = 0;
     QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0};
     for (int i = 1; i < argc; i++) {
@@ -1518,6 +1547,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--decode-codes") && i + 1 < argc) codes_path = argv[++i];
         else if (!strcmp(argv[i], "--text") && i + 1 < argc) text = argv[++i];
         else if (!strcmp(argv[i], "--speaker") && i + 1 < argc) speaker = argv[++i];
+        else if (!strcmp(argv[i], "--instruct") && i + 1 < argc) instruct = argv[++i];
         else if (!strcmp(argv[i], "--language") && i + 1 < argc) language = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
@@ -1581,7 +1611,7 @@ int main(int argc, char **argv){
     if (serve) return qt_serve(m, qt_name_of(model_dir), &gen);
     int nids = 0, rows = 0;
     int *ids = qt_text_ids(m, text, &nids);
-    float *prefill = qt_prefill(m, ids, nids, speaker, language, &rows, err, sizeof err);
+    float *prefill = qt_prefill(m, ids, nids, speaker, instruct, language, &rows, err, sizeof err);
     if (!prefill) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
     float *logits0 = (float *)malloc((size_t)m->vocab * sizeof(float));
     t0 = qt_now();

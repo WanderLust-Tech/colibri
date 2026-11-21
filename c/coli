@@ -1515,6 +1515,10 @@ def info_speech_model(a, resolved, row):
     if spk:
         row("speakers", ", ".join(spk))
     row("speaks", "24 kHz mono; " + ", ".join(sorted((cfg.get("codec_language_id") or {}).keys())))
+    if kind == "voice_design":
+        row("voice", "described in words: --instruct / `instructions` (\"a warm, deep male voice, speaking slowly\"); no named speakers")
+    elif cfg.get("hidden_size", 0) >= 2048:
+        row("style", "takes a style instruction on top of the speaker: --instruct / `instructions` (\"speak slowly and sadly\")")
     row("use", "coli serve --model DIR, then POST /v1/audio/speech (docs/qwen3-tts.md); coli speak TEXT; coli router lists it beside the others")
 
 def info_music_model(a, family, row):
@@ -4748,6 +4752,7 @@ def main():
     psp=sub.add_parser("speak",help="turn text into speech with the server's speech synthesis model (Qwen3-TTS)")
     psp.add_argument("text",nargs="*",metavar="TEXT",help="the words to speak (- reads standard input; up to 4096 characters)")
     psp.add_argument("--voice",default=None,metavar="NAME",help="the speaker (ryan, vivian, serena, ...; default ryan; coli info lists them)")
+    psp.add_argument("--instruct",default=None,metavar="STYLE",help="a style (\"speak slowly and sadly\") for the 1.7B CustomVoice, or the voice itself (\"a warm, deep male voice\") for VoiceDesign")
     psp.add_argument("--language",default=None,metavar="CODE",help="the language (en, zh, ... or a name); without it the model decides")
     psp.add_argument("--out",default=None,metavar="FILE",help="where to write the audio (default speech.wav; the suffix picks the format)")
     psp.add_argument("--format",default=None,choices=("wav","mp3","flac","opus","aac","pcm"),help="the audio format (mp3, flac, opus and aac need ffmpeg on the server)")

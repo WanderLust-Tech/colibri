@@ -50,12 +50,14 @@ class SpeechEngine(EmbeddingEngine):
     log_tag = "tts"
     default_info = DEFAULT_INFO
 
-    def speak(self, text, speaker="", language="auto", seed=None, greedy=False, max_frames=None, temperature=None):
+    def speak(self, text, speaker="", language="auto", seed=None, greedy=False, max_frames=None, temperature=None, instruct=None):
         """Run one SPEAK and return {"wav": the WAV file's bytes, "sample_rate", "frames", "audio_seconds", "seconds", "truncated"}."""
         handle, path = tempfile.mkstemp(prefix="coli-tts-", suffix=".wav")
         os.close(handle)
         try:
             request = {"text": text, "speaker": speaker, "language": language, "out": path.replace("\\", "/")}
+            if instruct:
+                request["instruct"] = instruct
             if seed:
                 request["seed"] = int(seed)
             if greedy:
@@ -82,14 +84,15 @@ class SpeechEngine(EmbeddingEngine):
 
 
 def speech_request(body, info=None):
-    """The checked fields of POST /v1/audio/speech: {"input", "speaker", "language", "format", "seed", "greedy"}, or
+    """The checked fields of POST /v1/audio/speech: {"input", "speaker", "language", "format", "seed", "greedy", "instruct"}, or
     EmbeddingRequestError (the gateway answers 400 with its `param`).
 
     `input` is the text (up to 4096 characters). `voice` is a speaker of the model (the READY line lists them) or one of OpenAI's names
     (alloy, echo, ...), which stand for speakers; left out it is Ryan. `language` is an extension: a name or ISO code, "auto" (the
     default) lets the model decide. `response_format` is wav (the default), pcm (raw 16-bit little-endian mono, 24 kHz), and mp3, opus,
     aac and flac when the server has ffmpeg. `speed` other than 1 is refused (the model has no rate control), and so is `instructions`
-    for a model that does not take them. `seed` is an extension (a given seed repeats the same speech)."""
+    for a model that does not take them (the 1.7B CustomVoice takes a style, VoiceDesign the description of the voice: both go to the engine
+    as `instruct`; VoiceDesign has no speakers, so `voice` names no one there). `seed` is an extension (a given seed repeats the same speech)."""
     info = info or {}
     if not isinstance(body, dict):
         raise EmbeddingRequestError("The request body must be a JSON object.")
@@ -139,7 +142,8 @@ def speech_request(body, info=None):
     seed = body.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
         raise EmbeddingRequestError("`seed` must be a non-negative integer.", "seed")
-    return {"input": text, "speaker": speaker, "language": language, "format": fmt, "seed": seed or None, "greedy": False}
+    return {"input": text, "speaker": speaker, "language": language, "format": fmt, "seed": seed or None, "greedy": False,
+            "instruct": instructions if isinstance(instructions, str) and instructions.strip() else None}
 
 
 def wav_pcm(wav):
