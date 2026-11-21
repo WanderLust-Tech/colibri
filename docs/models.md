@@ -26,7 +26,7 @@ when it loads (card when it fits, otherwise the CPU); the embedding model is the
 | `gemma-4-e4b-colibri` | chat | text, pictures, video, audio | 32768 | card when it fits | about 80 tokens/s through the router |
 | `gemma-4-26b-a4b-colibri` | chat | text, pictures, video | 32768 | card when it fits (experts too) | 25 to 28 ms a token (about 36 to 40 tokens/s); 51 ms before the experts went on the card |
 | `qwen3-coder-30b-a3b-colibri` | chat (code) | text | 65536 | card when it fits | 1.4 to 1.9 times the CPU, 17 GB of the card |
-| `qwen-image-2.1-colibri` | pictures, editing | text (and up to 4 pictures to edit) | | CPU build; card not measured | 2 min 40 s for 768x512 on an 8-core CPU (README) |
+| `qwen-image-2.1-colibri` | pictures, editing | text (and up to 4 pictures to edit) | | card when it fits (about 13 GB, 18 GB for an edit) | 768x512 in 6.1 s warm (94 s of denoising on the CPU); an edit 20 s (137 s on the CPU) |
 | `z-image-turbo-colibri` | pictures | text | | card | 13 s of denoising for 768x768 (171 s on the CPU) |
 | `ace-step-1.5-colibri` | music | text, a reference clip (WAV, MP3) | | CPU | 10 s of music in about 16 s |
 | `qwen3-embedding-0.6b` | embeddings | text | 8192 a text | CPU (the card was full when it loaded) | 64 texts of 230 tokens: 23.5 s on the CPU, 1.13 s on the card |
@@ -120,7 +120,7 @@ allow for all of the big families is 1,048,576 (Qwen3.8: 262144) with a default 
 
 | Model | Does | Sizes | Steps | Download | RAM | GPU | Licence | Page |
 |---|---|---|---|---|---|---|---|---|
-| Qwen-Image-2.1 | text to picture; edit up to 4 pictures with an instruction | each side a multiple of 32, 256 to 2048; default 768x512; edit references 384 to 1024 (default 768), at most 4 megapixels | default 8 | 33 GB | 12 / 18 GB | Vulkan (unmeasured here) | Qwen Research Licence, **non-commercial** | [qwen-image.md](qwen-image.md) |
+| Qwen-Image-2.1 | text to picture; edit up to 4 pictures with an instruction | each side a multiple of 32, 256 to 2048; default 768x512; edit references 384 to 1024 (default 768), at most 4 megapixels | default 8 | 33 GB | 12 / 18 GB | Vulkan (15.7 times the CPU's denoise here) | Qwen Research Licence, **non-commercial** | [qwen-image.md](qwen-image.md) |
 | Z-Image-Turbo | text to picture only (no editing) | each side a multiple of 16, 256 to 2048; default 768x768 | 1 to 200, default 8 (distilled for 8) | 33 GB | 10 / 14 GB | Vulkan | Apache-2.0 | [zimage.md](zimage.md) |
 
 Both read the official diffusers checkpoint and quantize to int8 while loading (no conversion). Z-Image is the lighter one and the one with an

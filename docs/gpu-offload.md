@@ -55,7 +55,7 @@ the three Gemma models together would add 9.3 GB. A render that wants more than 
 |---|---|---|---|
 | `qwen36` | Qwen3-Coder-30B, Qwen3.6, Qwen3.8-27B | the dense trunk (whole layers in one submission, the "chain"), and the routed-expert tier | built `VK=1` and measured: above |
 | `gemma4` | Gemma 4 E2B, E4B, 26B-A4B, 31B | the dense matrices: attention, dense MLP, the vision and audio towers, the output head. Not the experts | built `VK=1`, live ([gemma4.md](gemma4.md#vulkan-for-the-dense-matrices)) |
-| `qwenimage` | Qwen-Image-2.1 | the transformer: every block of a step on the chain. Not the text encoder or the VAE | **not built or measured here**; [qwen-image.md](qwen-image.md) |
+| `qwenimage` | Qwen-Image-2.1 | the transformer: every block of a step on the chain. Not the text encoder or the VAE | built `VK=1` and measured (2026-11-17, and again 2026-11-21 with editing); live since 2026-11-21: [qwen-image.md](qwen-image.md) |
 | `acestep` | ACE-Step 1.5 | nothing: no Vulkan path | CPU only |
 | others | GLM, Kimi, DeepSeek, MiMo, OLMoE, Inkling, Qwen3.8 Flash | see [vulkan.md](vulkan.md#the-other-engines) | not installed here |
 
@@ -85,7 +85,7 @@ load looks again), and it cannot see a card without `nvidia-smi` (an AMD or Inte
 says so in the router's log). What it does about a model that holds the card is [below](#giving-the-card-back).
 
 `RUNS ON` and `running` report the router's decision. An engine that is not a `VK=1` build ignores `COLI_VULKAN`, so a model can say `GPU`
-and still run on the CPU (ACE-Step does: it has no Vulkan path; the live `qwenimage.exe` is a CPU build). The engine's own log line
+and still run on the CPU (ACE-Step does: it has no Vulkan path). The engine's own log line
 (`[VK] <engine>: device ready, dense matrices on the device`) is the proof.
 
 A loaded model says where it runs: `coli ps` has a RUNS ON column (`GPU`, `CPU`), `coli model` shows it with the policy and the free
@@ -164,8 +164,8 @@ and run the `gcc` lines. Running `make` itself from the Claude Code Bash tool fa
 
 ## Not done, and what it would take
 
-* **Qwen-Image on the card.** The transformer is where the time goes; `make qwenimage VK=1` and `COLI_VULKAN=1`. Not built here. Its
-  weights (7 GB for the transformer) and the 6.95 GB text encoder together are about what the card has to spare while a render runs.
+* **Qwen-Image's text encoder on the card.** The transformer and the VAE are on the card (about 13 GB with the picture's working
+  buffers, 18 GB during an edit); the 6.95 GB text encoder still runs on the CPU, and it is most of what is left of a warm render's time.
 * **Gemma 4 experts on the card** (the 26B-A4B's 12.9 GB of experts): the dense half is on the card, the experts are not. The Gemma
   engine has no expert tier; the shared one in `vk_tier.c` is what Qwen uses and is the way to add it.
 * **A prompt chunk of Gemma on the chain.** A decode row's layers run in one submission ([gemma4.md](gemma4.md#the-decode-chain-gemma4_chainh):

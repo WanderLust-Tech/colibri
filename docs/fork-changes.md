@@ -541,6 +541,22 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Live check** (router restarted at `36788f74`): with the 8B reranker and Qwen3-Coder on the card (1.2 GB free) the embedding model started on
   the CPU; after both were stopped the router unloaded it 57 s later (`router.card_promote.stops` 1), and the next request ran it on the card.
 
+### 2.29 Qwen-Image on the card, live, with editing checked (2026-11-21)
+
+- **What was wrong in the docs**: they said Qwen-Image on Vulkan was unbuilt and unmeasured here. `qwen-image.md` had the RTX 5090
+  measurement from 2026-11-17 (a 512x512 picture 10 s against 95 s, SSIM 0.999999), but the live `qwenimage.exe` was still the CPU build
+  of 2026-10-31, so the router's "card" decision for it changed nothing.
+- **Done**: the `VK=1` build (the same objects and command as the other engines) is now the live `c/qwenimage.exe` (the old one kept as
+  `qwenimage.exe.cpu-oct31`). Measured 2026-11-21, 768x512, 8 steps, seed 42: **denoise 6.0 s on the card (0.69 s a step) against 94.0 s
+  on the CPU, 15.7 times**; decode 1.8 s against 6.4 s; a warm render through the router 6.1 s from request to picture, the first
+  one 36.5 s with the load. An **edit** (a 768x512 picture as the reference, `--ref-resolution 512`, "make the fox black"): 20 s on the
+  card (denoise 4.5 s) against 137 s on the CPU (denoise 111 s). Peak card use 13.3 GB for a render and 17.9 GB for an edit (the card
+  held 3.8 GB of other models).
+- **Checked**: the card's pictures against the CPU's f32 path: 84.1 dB (render) and 86.2 dB, largest pixel difference 1 (edit). The
+  CPU's default path is *not* the f32 one here: with the int8 activations it takes by default (`COLI_IMG_ACT8`, VNNI) the same seed
+  gives a different picture (28.8 dB against both: the 768x512 fox drawn as two foxes against one), so the card is the more faithful
+  of the two. The first run through the router also edited a generated lighthouse into a sunset.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -589,9 +605,9 @@ Status as of today (the file itself has been brought into line with this):
 
 - **Catching up with upstream**: 1,412 commits behind. Merging them is a large job with conflicts in `openai_server.py`, `coli`,
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
-- **Qwen-Image editing**: Linux, ASan and UBSan runs; a Vulkan check of the chain with an edit prefix; a real edit at the 1024
-  reference; translated READMEs (it, ja, zh, id) for editing.
-- **Graphics card**: Qwen-Image on Vulkan (`make qwenimage VK=1`) is unmeasured; ACE-Step has no Vulkan path. Making room on the card **is
+- **Qwen-Image editing**: Linux, ASan and UBSan runs; a real edit at the 1024
+  reference (the chain with an edit prefix was checked on the card 2026-11-21, 2.29); translated READMEs (it, ja, zh, id) for editing.
+- **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; ACE-Step has no Vulkan path. Making room on the card **is
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
   Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small

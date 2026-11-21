@@ -426,6 +426,15 @@ f32 path in both of its runs here (`COLI_IMG_ACT8=0` gave a byte-identical pictu
 machine), which is the reference the device is meant to reproduce. Not measured: 1024x1024 (the VAE's bands, the attention over 4096
 tokens) and a card with less room than the 7 GB transformer.
 
+**Again on 2026-11-21, with an edit (same RTX 5090 and 24-core i9).** 768x512, 8 steps, seed 42, straight from the engine: denoise **6.0 s
+on the card** (0.69 s a step) against 94.0 s on the CPU (11.7 s a step), the VAE decode 1.8 s against 6.4 s. The card matches the CPU's f32 path
+at 84.1 dB; the CPU's *default* path (int8 activations, `COLI_IMG_ACT8`) draws a different picture from the same seed (28.8 dB against
+either: here two foxes where the other two have one), so `COLI_IMG_ACT8=0` is the setting to compare with. An **edit** on the card
+(a 768x512 reference at `--ref-resolution 512`, 640x416 out) took 20 s, denoise 4.5 s, against 137 s with a denoise of 111 s on the CPU in f32;
+the two pictures differ by at most 1 of 255 (86.2 dB). Through `coli router` a warm 768x512 generation is 6.1 s from request to picture
+(36.5 s the first time, with the load) and an edit 37 s the first time. Peak use of the card: 13.3 GB for a render, 17.9 GB for an edit.
+The text encoder (6.95 GB) stays on the CPU.
+
 ### Checking a picture against a baseline
 
 `python c/image_quality.py NEW.png BASELINE.png --min 0.95` scores two pictures by structural similarity (SSIM) and exits 1 under the
