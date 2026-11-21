@@ -1530,6 +1530,8 @@ def choose_model(ui, rows, wanted=None, show_all=False):
             runs = "makes embeddings"
         elif entry.modality == "rerank":
             runs = "ranks documents"
+        elif entry.modality == "transcription":
+            runs = "transcribes speech"
         tag = "  [recommended]" if row["recommended"] else ""
         ui.say(f"  {number:>2}) {entry.name:<28} {entry.disk_gb:>7.0f} GB   {runs:<20}{tag}".rstrip())
         ui.say(f"      {entry.summary}; {row['reason']}"

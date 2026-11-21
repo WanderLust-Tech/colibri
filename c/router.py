@@ -2286,9 +2286,12 @@ class RouterHandler(BaseHTTPRequestHandler):
         elif modality == "rerank":
             item["capabilities"] = ["rerank"]
             item["rerank"] = {}
+        elif modality == "transcription":
+            item["capabilities"] = ["transcription"]
+            item["transcription"] = {}
         else:
             item["capabilities"] = ["chat", "systemone"]
-        item["input_modalities"] = ["text"]
+        item["input_modalities"] = ["audio"] if modality == "transcription" else ["text"]
         return item
 
     def entry_for(self, name):

@@ -26,6 +26,7 @@ import v41_dsml                     # ...and V4.1's, whose tag names differ by a
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import embedding_engine             # the qwen3embed serve protocol and the request rules of POST /v1/embeddings and /v1/rerank
+import asr_engine                   # the qwen3asr serve protocol and POST /v1/audio/transcriptions rules for it
 import media_meta                   # the settings written inside a finished picture or song
 import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
@@ -6413,6 +6414,11 @@ def is_rerank_engine(engine):
     return getattr(engine, "modality", "text") == "rerank"
 
 
+def is_transcription_engine(engine):
+    """True when the server fronts a speech-recognition engine (Qwen3-ASR): decided by the engine object."""
+    return getattr(engine, "modality", "text") == "transcription"
+
+
 def engine_purpose(engine):
     """What a model that is not the one asked for does, in the words a refusal uses ('it draws pictures (POST ...)')."""
     if is_image_engine(engine):
@@ -6423,6 +6429,8 @@ def engine_purpose(engine):
         return f"it makes embeddings (POST {EMBEDDINGS_ENDPOINT})"
     if is_rerank_engine(engine):
         return f"it ranks documents (POST {RERANK_ENDPOINT})"
+    if is_transcription_engine(engine):
+        return f"it transcribes speech (POST {TRANSCRIBE_ENDPOINT})"
     if not engine_chats(engine):
         return "it is a decision model (POST /v1/systemone)"
     return "it is a chat model (POST /v1/chat/completions)"
@@ -6740,6 +6748,13 @@ class APIServer(ThreadingHTTPServer):
             entry["rerank"] = {key: info.get(key) for key in RERANK_OPTION_KEYS}
             if info.get("device"):
                 entry["rerank"]["device"] = info["device"]
+        if is_transcription_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["transcription"] = {"sample_rate": info.get("sample_rate"), "piece_seconds": info.get("piece_seconds"),
+                                      "max_seconds": TRANSCRIBE_MAX_SECONDS, "languages": list(asr_engine.LANGUAGES),
+                                      "formats": list(asr_engine.FORMATS)}
+            if info.get("device"):
+                entry["transcription"]["device"] = info["device"]
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6783,6 +6798,8 @@ class APIServer(ThreadingHTTPServer):
             return ["embeddings"]
         if is_rerank_engine(self.engine):
             return ["rerank"]
+        if is_transcription_engine(self.engine):
+            return ["transcription"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -6810,6 +6827,8 @@ class APIServer(ThreadingHTTPServer):
         the engine alone is not either (a tower the gateway cannot feed is no
         modality). An engine that announced nothing is text: the card under-claims
         rather than promising a picture nobody checked."""
+        if is_transcription_engine(self.engine):
+            return ["audio"]                              # speech in, text out: it takes nothing else
         modalities = ["text"]
         if family_by_id(ARCH).capabilities.image and getattr(self.engine, "vision", None) is True:
             modalities.append("image")
@@ -7451,6 +7470,8 @@ class APIHandler(BaseHTTPRequestHandler):
                         payload["embedding"] = dict(getattr(self.server.engine, "info", None) or {})
                     if is_rerank_engine(self.server.engine):
                         payload["rerank"] = dict(getattr(self.server.engine, "info", None) or {})
+                    if is_transcription_engine(self.server.engine):
+                        payload["transcription"] = dict(getattr(self.server.engine, "info", None) or {})
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -7598,6 +7619,10 @@ class APIHandler(BaseHTTPRequestHandler):
             if is_rerank_engine(self.server.engine) and path in TEXT_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a reranking model and "
                                     f"does not chat: POST {RERANK_ENDPOINT} instead.",
+                               "model", "unsupported_endpoint")
+            if is_transcription_engine(self.server.engine) and path in TEXT_ENDPOINTS:
+                raise APIError(400, f"`{self.server.model_id}` is a speech recognition model and "
+                                    f"does not chat: POST {TRANSCRIBE_ENDPOINT} instead.",
                                "model", "unsupported_endpoint")
             if not engine_chats(self.server.engine) and path in GENERATING_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a decision model: it answers typed "
@@ -8077,7 +8102,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
                                     f"music (POST {MUSIC_ENDPOINT}).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine) or is_rerank_engine(engine):
+            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
@@ -8303,6 +8328,8 @@ class APIHandler(BaseHTTPRequestHandler):
         one admission. Pieces with no sound are skipped, not asked about: a model asked to transcribe silence invents
         something. Segments of verbose_json are those pieces (there are no word times), `language` is what was asked for."""
         engine = self.server.engine
+        if is_transcription_engine(engine):
+            return self.transcribe_speech(body, request_id)
         if (is_image_engine(engine) or is_music_engine(engine) or not engine_chats(engine) or ARCH != "gemma4"
                 or getattr(engine, "audio", None) is not True):
             why = ("it has no audio tower" if ARCH == "gemma4" and getattr(engine, "audio", None) is False
@@ -8394,6 +8421,49 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, {"text": whole, "usage": {"type": "tokens", **usage}}, request_id, headers)
 
+    # POST /v1/audio/transcriptions for a speech-recognition model (Qwen3-ASR): the same request as for Gemma's audio tower, answered by
+    # a dedicated engine. The upload is read, mixed to mono and resampled to 16 kHz here; the engine hears the whole clip (it cuts one
+    # over 20 minutes itself) and says which language it heard.
+    def transcribe_speech(self, body, request_id):
+        engine = self.server.engine
+        data = body.get("file")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise APIError(400, "`file` is required: the audio, as a WAV or MP3 file (or any audio ffmpeg reads, when the server has one).",
+                           "file", "missing_required_parameter")
+        try:
+            request = asr_engine.transcription_request(body)
+        except asr_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+            import gemma4_audio
+            samples = gemma4_audio.load_clip(bytes(data))
+        except ImportError as problem:
+            raise APIError(400, f"audio support needs numpy ({problem}).", "file")
+        except ValueError as problem:
+            raise APIError(400, str(problem), "file", "invalid_audio")
+        seconds = len(samples) / gemma4_audio.SAMPLE_RATE
+        if seconds > TRANSCRIBE_MAX_SECONDS:
+            raise APIError(400, f"the file is {seconds:.0f} s long; the limit is {TRANSCRIBE_MAX_SECONDS} s.", "file", "invalid_audio")
+        with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
+            if not engine.alive:
+                raise APIError(503, f"The speech recognition engine is not running ({engine.dead or 'exited'}).",
+                               None, "engine_unavailable", "server_error")
+            if gemma4_audio.is_silent(samples):                 # nothing to hear: no question for the model
+                result = {"text": "", "language": ""}
+            else:
+                try:
+                    result = engine.transcribe_samples(gemma4_audio.to_wav(samples), language=request["language"], context=request["context"])
+                except asr_engine.EmbeddingEngineError as error:
+                    raise APIError(500, f"The speech recognition engine failed: {error}", None, "engine_error", "server_error") from None
+        headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
+        if request["format"] == "text":
+            self.send_bytes(200, (result["text"] + "\n").encode("utf-8"), "text/plain; charset=utf-8", request_id, headers)
+        else:
+            self.send_json(200, asr_engine.transcription_payload(request, result, seconds, self.server.model_id), request_id, headers)
+
     # POST /v1/embeddings: OpenAI's embeddings request, answered by an embedding engine (Qwen3-Embedding). The vectors are
     # unit length; `dimensions` keeps the first N components and normalises again; `instruction` makes the inputs queries.
     def embeddings(self, body, request_id):
@@ -8455,7 +8525,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it draws pictures "
                                     "(POST /v1/images/generations).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine) or is_rerank_engine(engine):
+            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
@@ -9622,6 +9692,10 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
             runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
             print(f"[rerank] {model_id}: up to {runtime.info['max_tokens']} tokens a pair, "
                   f"{runtime.info['max_documents']} documents a request", file=sys.stderr)
+        elif family.modality == "transcription":
+            runtime = asr_engine.TranscriptionEngine(engine, model, env=env)
+            runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
+            print(f"[asr] {model_id}: pieces of up to {runtime.info['piece_seconds']} s, {runtime.info['sample_rate']} Hz", file=sys.stderr)
         elif family.modality == "audio":
             # The music engine speaks the image engine's kind of protocol (lines of JSON,
             # PCM frames): its own process class, no byte stream.
@@ -9650,7 +9724,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
                       file=sys.stderr)
                 sys.exit(1)
         server.engine = runtime
-        if family.modality not in ("image", "audio", "embedding", "rerank"):
+        if family.modality not in ("image", "audio", "embedding", "rerank", "transcription"):
             # Said once at start-up, so a checkpoint that declares a tower it does
             # not carry is visible in the log and not only in a client's 400.
             print(f"[gateway] input modalities: {', '.join(server.input_modalities())}"

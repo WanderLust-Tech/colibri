@@ -228,6 +228,7 @@ ukuran yang dicantumkan Hugging Face untuk setiap repository.
 | **ACE-Step 1.5**: teks ke musik, lisensi MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 detik musik dalam 16 detik (i9 24 core, CPU) |
 | **Qwen3-Embedding-0.6B**: teks ke vektor untuk pencarian, lisensi Apache-2.0 (juga 4B dan 8B) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 teks masing-masing 24 token dalam 2,6 detik (i9 24 core, CPU) |
 | **Qwen3-Reranker-0.6B**: mengurutkan dokumen menurut seberapa baik ia menjawab sebuah kueri, lisensi Apache-2.0 (juga 4B dan 8B) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 dokumen masing-masing sekitar 25 token dalam 10,6 detik (i9 24 core, CPU) |
+| **Qwen3-ASR-0.6B**: ucapan ke teks dalam 30 bahasa, lisensi Apache-2.0 (juga 1.7B) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 detik ucapan dalam 4,3 detik (i9 24 core, CPU) |
 
 **Model besar, yang pakarnya melakukan streaming dari disk** (disk menentukan
 kecepatan: drive NVMe yang cepat paling membantu)
@@ -731,6 +732,7 @@ c/
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
+├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

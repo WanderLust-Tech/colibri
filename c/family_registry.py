@@ -1945,6 +1945,42 @@ FAMILIES = (
         tokenizer_file="tokenizer.json",
     ),
     FamilyDescriptor(
+        id="qwen3_asr",
+        # A Qwen3-ASR checkpoint (0.6B, 1.7B): config.json says model_type "qwen3_asr", with the audio encoder's and the Qwen3
+        # decoder's sizes under thinker_config (audio_config, text_config). Speech in, text out: POST /v1/audio/transcriptions.
+        model_types=("qwen3_asr",),
+        display_name="Qwen3-ASR",
+        display_scale="",
+        display_variants=(
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-ASR", "0.6B", model_id="qwen3-asr-0.6b"),
+            DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28)), "Qwen3-ASR", "1.7B", model_id="qwen3-asr-1.7b"),
+        ),
+        engine_artifact="qwen3asr",
+        engine_aliases=(),
+        engine_group="qwen3asr",
+        internal_arch="qwen3_asr",
+        build_target="qwen3asr",
+        process_names=("qwen3asr",),
+        default_model_id="qwen3-asr",
+        cli_adapter="qwen3_asr",
+        gateway_adapter="qwen3_asr",
+        planner_id="qwen3_asr",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "a speech recognition model has no experts: its whole size is its weights, read once (the decoder's cache grows with the audio)"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="thinker_text_config",
+        # One request at a time; no context window to set (the audio's length decides the prompt) and no output budget of its
+        # own: the limits exist because every descriptor has them.
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="transcription",
+        tokenizer_file="tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="laya",
         # A Laya checkpoint has no config.json at its root: resolve_model reads
         # rl_agent_config.json and the encoder's own config.json, and names it
@@ -2059,7 +2095,7 @@ def _build_registry(families):
                 not isinstance(family.has_cli_adapter, bool) or
                 not isinstance(family.tune_prompt_template, str) or
                 "{prompt}" not in family.tune_prompt_template or
-                family.modality not in ("text", "image", "audio", "decision", "embedding", "rerank") or
+                family.modality not in ("text", "image", "audio", "decision", "embedding", "rerank", "transcription") or
                 family.capabilities.decision != (family.modality == "decision") or
                 not isinstance(family.tokenizer_file, str) or not family.tokenizer_file or
                 not isinstance(family.checkpoint_files, tuple) or
@@ -2284,6 +2320,11 @@ def resolve_model(model_dir):
         family_config = config.get("text_config", config)
         if not isinstance(family_config, dict):
             raise FamilyConfigError(f"{family.id}: text_config is not an object")
+    elif family.config_section == "thinker_text_config":
+        thinker = config.get("thinker_config")
+        family_config = thinker.get("text_config") if isinstance(thinker, dict) else None
+        if not isinstance(family_config, dict):
+            raise FamilyConfigError(f"{family.id}: thinker_config.text_config is not an object")
     head = ""
     for candidate in DECISION_HEADS:
         present = [name for name in candidate.files if (model / name).is_file()]

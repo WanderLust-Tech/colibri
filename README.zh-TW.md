@@ -205,6 +205,7 @@ Starting colibri
 | **ACE-Step 1.5**：文字生成音樂，MIT 授權 | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 秒音樂 16 秒（24 核心 i9，CPU） |
 | **Qwen3-Embedding-0.6B**：文字轉成搜尋用向量，Apache-2.0 授權（另有 4B 與 8B） | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 段各 24 個 token 的文字用時 2.6 秒（24 核心 i9，CPU） |
 | **Qwen3-Reranker-0.6B**：依文件回答查詢的程度排序，Apache-2.0 授權（另有 4B 與 8B） | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 篇約 25 個 token 的文件用時 10.6 秒（24 核心 i9，CPU） |
+| **Qwen3-ASR-0.6B**：30 種語言的語音轉文字，Apache-2.0 授權（另有 1.7B） | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 秒語音耗時 4.3 秒（24 核心 i9，CPU） |
 
 **大型模型，專家從硬碟串流讀取**（速度由硬碟決定：
 快速的 NVMe 硬碟幫助最大）
@@ -652,6 +653,7 @@ c/
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
+├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

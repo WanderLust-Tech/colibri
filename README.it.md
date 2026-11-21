@@ -221,6 +221,7 @@ Hugging Face indica per ciascun repository.
 | **ACE-Step 1.5**: da testo a musica, licenza MIT | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s di musica in 16 s (i9 a 24 core, CPU) |
 | **Qwen3-Embedding-0.6B**: da testo a vettori per la ricerca, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 testi da 24 token in 2,6 s (i9 a 24 core, CPU) |
 | **Qwen3-Reranker-0.6B**: ordina i documenti per quanto rispondono a una query, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documenti da circa 25 token in 10,6 s (i9 a 24 core, CPU) |
+| **Qwen3-ASR-0.6B**: da voce a testo in 30 lingue, licenza Apache-2.0 (anche 1.7B) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 s di parlato in 4,3 s (i9 a 24 core, CPU) |
 
 **Modelli grandi, i cui expert vengono letti dal disco in streaming** (la
 velocità la decide il disco: un NVMe veloce è ciò che aiuta di più)
@@ -705,6 +706,7 @@ c/
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
+├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

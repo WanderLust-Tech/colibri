@@ -19,11 +19,11 @@ parameters uses only a small part of itself for each token, so colibri keeps
 that part in RAM and reads the rest, the experts, from the disk when the model
 asks for them. Pure C, one file per model family, no GPU required.
 
-Sixteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
+Seventeen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B),
-**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings and ranks documents: **Qwen3-Embedding** and **Qwen3-Reranker**. Two answer decisions:
+**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings and ranks documents: **Qwen3-Embedding** and **Qwen3-Reranker**. One transcribes speech: **Qwen3-ASR**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 
@@ -212,6 +212,7 @@ and what is installed on the fork owner's machine.
 | **ACE-Step 1.5**: text to music, MIT licence | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s of music in 16 s (24-core i9, CPU) |
 | **Qwen3-Embedding-0.6B**: text to vectors for search, Apache-2.0 licence (4B and 8B too) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 texts of 24 tokens in 2.6 s (24-core i9, CPU) |
 | **Qwen3-Reranker-0.6B**: sorts documents by how well they answer a query, Apache-2.0 licence (4B and 8B too) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documents of about 25 tokens in 10.6 s (24-core i9, CPU) |
+| **Qwen3-ASR-0.6B**: speech to text in 30 languages, Apache-2.0 licence (1.7B too) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 s of speech in 4.3 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:
 a fast NVMe drive helps most)
@@ -681,6 +682,7 @@ c/
 ├── zimage.c              Z-Image  (make zimage)
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
+├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

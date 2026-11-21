@@ -228,6 +228,25 @@ CATALOG = (
         modality="rerank", summary="the best of the family; about 7 times slower than the 0.6B",
         license_note="Apache-2.0",
         prebuilt_since="2.3.0", doc="docs/rerank.md"),
+    CatalogModel(
+        id="qwen3-asr-0.6b", family="qwen3_asr", name="Qwen3-ASR-0.6B",
+        repo="Qwen/Qwen3-ASR-0.6B", disk_gb=1.9,
+        # docs/qwen3-asr.md: the weights are held as bf16 (1.9 GB, the audio encoder and the decoder); the decoder's cache and the
+        # encoder's activations grow with the audio (a minute of speech is a few hundred MB).
+        ram_min_gb=3, ram_good_gb=5, dense_gb=1.9, rank=1, size_class="small",
+        modality="transcription", summary="speech to text in 30 languages and 22 Chinese dialects (audio in, text out, not chat)",
+        license_note="Apache-2.0",
+        # the repository ships vocab.json and merges.txt, not the tokenizer.json the engine reads
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        prebuilt_since="2.4.0", doc="docs/qwen3-asr.md"),
+    CatalogModel(
+        id="qwen3-asr-1.7b", family="qwen3_asr", name="Qwen3-ASR-1.7B",
+        repo="Qwen/Qwen3-ASR-1.7B", disk_gb=4.7,
+        ram_min_gb=7, ram_good_gb=10, dense_gb=4.7, rank=2, size_class="small",
+        modality="transcription", summary="the more accurate Qwen3-ASR (about 5.4% word error on English); about 2.5 times the work",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        prebuilt_since="2.4.0", doc="docs/qwen3-asr.md"),
 )
 
 
