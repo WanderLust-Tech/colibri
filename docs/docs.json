@@ -19,11 +19,11 @@
           },
           {
             "group": "Serve models",
-            "pages": ["api-reference/overview", "api", "systemone", "serve_protocol"]
+            "pages": ["api-reference/overview", "api", "models", "router", "model-install", "systemone", "serve_protocol"]
           },
           {
             "group": "Model engines",
-            "pages": ["deepseek-v4", "kimi_k3", "qwen38", "qwen36", "gemma4", "inkling", "mimo", "qwen-image", "acestep", "laya", "gliner_decide", "clef"]
+            "pages": ["deepseek-v4", "kimi_k3", "qwen38", "qwen36", "gemma4", "inkling", "mimo", "qwen-image", "zimage", "acestep", "embeddings", "rerank", "laya", "gliner_decide", "clef"]
           },
           {
             "group": "Configure and tune",

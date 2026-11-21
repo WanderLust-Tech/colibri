@@ -3,19 +3,21 @@
 Written 2026-11-07 for the owner of this fork (WanderLust-Tech/colibri, used on one Windows machine). It lists
 everything that differs from the checkout we started from, where each piece stands (built, merged, pushed, running),
 and what is still open, including the items in [colibri-ideas.md](colibri-ideas.md). Brought up to date on 2026-11-10
-(Gemma on the graphics card, video, the card-or-CPU choice, model settings, context windows, the VS Code extension).
+(Gemma on the graphics card, video, the card-or-CPU choice, model settings, context windows, the VS Code extension), and
+again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and their graphics-card path, the models page).
+[models.md](models.md) lists every model and what it can do.
 
 ## 1. The baseline and how far we have moved
 
 | | |
 |---|---|
 | Original checkout | `e0db083c`, upstream PR #2139 merged, 2026-10-17 (upstream v2.0.0 plus what followed) |
-| Local `main` now | the tip of `main` (`git log origin/main..main` lists what the fork lacks: on 2026-11-10 one docs commit, Gemma's context window) |
-| Size of the difference | 76 commits (72 of ours, 4 merges), 206 files, +51,505 / -314 lines (2026-11-10) |
+| Local `main` now | the tip of `main`; on 2026-11-20 the fork has all of it (`git log origin/main..main` is empty) |
+| Size of the difference | 129 commits, 322 files, +81,836 / -5,995 lines (2026-11-20, before the models page) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `26af52c9` (pushed 2026-11-10); local `main` is ahead by the docs commits that follow it |
-| Live server | clone `C:\Users\kp-mi\colibri` at `26af52c9` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets) |
+| Fork's `main` | `98abb119` (pushed 2026-11-20); the models page lands after it |
+| Live server | clone `C:\Users\kp-mi\colibri` at `98abb119` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe` and `qwen3embed.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -40,12 +42,17 @@ the clone that serves port 8000):
 | Tray icon and background service (`coli tray`, `coli service`, C3) | `feat/tray` | yes (`ecfd9219`) | yes | yes (2026-11-09): live clone at `ecfd9219`, tray started from it; router on 8000 not restarted (the tray is not part of it); the Windows sign-in entry is installed (the `Colibri tray` value under `HKCU\...\Run`, seen 2026-11-18) |
 | Gemma 4 dense matrices on the Vulkan device (G2) | `396a774f` | yes | yes | yes (2026-11-10): `gemma4.exe` is the `VK=1` build; the router decides per model whether it runs on the card (2.14) |
 | Gemma 4 decode chain (`gemma4_chain.h`): a decode row's layers in one submission, the head fused | `feat/gemma4-chain` | yes (`877fa6bd`) | yes | yes (2026-11-18): live clone at `877fa6bd`, `gemma4.exe` rebuilt with `VK=1`, router restarted; E2B ~109 tok/s and E4B ~80 through it (2.19) |
-| Gemma 4 experts on the card (the shared expert tier, GeGLU in the device shaders) | `feat/gemma4-experts-gpu` | local `main` only, see 2.20 | no | no |
+| Gemma 4 experts on the card (the shared expert tier, GeGLU in the device shaders) | `feat/gemma4-experts-gpu` | yes (`c54ed0e9`) | yes | yes (2026-11-18): the 26B-A4B decodes in 25 to 28 ms a token (2.20) |
 | Gemma 4 video, and audio that is not WAV (G5) | `b6fae35c` | yes | yes | yes (2026-11-10): ffmpeg 9.0.2 installed with winget, `acestep_audio_tool.exe` built |
 | Card or CPU by free memory (`coli router --gpu auto`), models turned off and on, `service.json` `env` | `3b4bd293` | yes | yes | yes (2026-11-10): `COLI_GPU=auto` in the restart script and in `service.json` |
 | Dashboard: Runs on and Turn off/on per model | `7ae38131` | yes | yes | yes (2026-11-10): `web/dist` rebuilt in the live clone |
 | `context_length` on the model card | `26af52c9` | yes | yes | yes (2026-11-10): `gemma4.exe` and `qwen36.exe` relinked, router restarted |
-| VS Code extension 0.4.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine |
+| Z-Image-Turbo (text to picture) | `feat/zimage` | yes (`6a506de9`) | yes | yes (2026-11-18), 2.21 |
+| Installing and removing models while it runs (`coli model install`, router API, dashboard) | `feat/model-installer` | yes (`6b0e6432`) | yes | yes (2026-11-19), 2.22 |
+| Embeddings, `/v1/embeddings` (Qwen3-Embedding) | `feat/embeddings` | yes (`a6a2407a`) | yes | yes (2026-11-20), 2.23 |
+| Reranking, `/v1/rerank` (Qwen3-Reranker); shared start; `coli embed` and `coli rerank` | `feat/reranker`, `feat/rerank-prefix` | yes (`ea3f4bda`, `f29d170c`) | yes | yes (2026-11-20), 2.24, 2.25 |
+| Embeddings and reranking on the card (one Vulkan frame a forward) | `feat/embed-gpu` | yes (`d94a2a1b`, LF fix `98abb119`) | yes | yes (2026-11-20): `qwen3embed.exe` is the `VK=1` build; rerankers report `device: vulkan`, 2.26 |
+| VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
 containers moved from `colibri-staging` to `colibri-models`, and the router restarted with `restart-colibri.ps1 -Router` (the
@@ -469,7 +476,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   least one), `tests/test_qwen3rerank_real.py` (6, the real engine, skipped without `QWEN3RERANK_MODEL`; four mutations of the C each
   broke it), a router test, the registry and API-spec tests updated, `web/src/lib/api.test.ts`.
 
-### 2.25 Rerank: a shared start, and `coli embed` / `coli rerank` (`feat/rerank-prefix`, 2026-11-20; merged into local main, not pushed or deployed yet)
+### 2.25 Rerank: a shared start, and `coli embed` / `coli rerank` (`feat/rerank-prefix`, 2026-11-20; merged, pushed (`f29d170c`) and live the same day)
 
 - **The shared start**: the pairs of one rerank request begin with the same system prompt, instruction and query. `qwen3embed` finds the
   longest run of token ids all the pairs share (cut so that each keeps its last row, and at least 8 tokens, and only when no pair is
@@ -488,7 +495,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   compares the shared start with the one-pair-at-a-time path (two of three mutations of the C broke it; the third, dropping the
   one-token cap, is already enforced by the loop beside it).
 
-### 2.26 Embeddings and reranking on the graphics card (`feat/embed-gpu`, 2026-11-20; merged into local main)
+### 2.26 Embeddings and reranking on the graphics card (`feat/embed-gpu`, 2026-11-20; merged, pushed (`98abb119`) and live the same day)
 
 - **One frame a forward**: with `make qwen3embed VK=1` and `COLI_VULKAN=1`, `qwen3embed` runs the embedding and reranking models'
   whole stack of layers on a Vulkan device in a single submission (`qe_chain_run`, on the dense chain of `vk_chain.h`: norms, q/k/v,
@@ -505,6 +512,19 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   unicode documents, 300 tiny documents, a request over one batch, a 7000-token text) and on embeddings (cosine 1.0000000); the
   real-engine tests gained a card-against-CPU test each (skipped without a Vulkan build and device); seven mutations of the device
   code (RoPE pairs, attention positions and cache rows, the q norm weight, SwiGLU, the last-row pick, a residual) each broke them.
+- **Through the router** (2026-11-20, after the deploy): 20 passages of about 400 tokens ranked in 0.9 s (0.6B), 3.0 s (4B) and 4.6 s (8B)
+  with the model loaded; the model cards say `device: vulkan`. The 0.6B embedding model loaded last, with the three rerankers holding
+  about 25 GB of the card, and the router put it on the CPU.
+- **A slip, fixed**: the first commits of this work wrote six files with CRLF line endings (a Python text-mode write on Windows), so
+  every line of the Makefile, `openai_server.py`, `rerank_stub.py`, two tests and `docs/vulkan.md` showed as changed. `98abb119` put them
+  back to LF; the content did not change.
+
+### 2.27 The models page (`docs/models-catalogue`, 2026-11-20)
+
+- [models.md](models.md): every model the engines here can serve, with size, RAM, window, what it takes in and can do (tools, thinking,
+  pictures, audio, video, JSON mode), the route it answers, the measurements, and a table of what is installed on this machine, built from
+  `setup_catalog.py`, `family_registry.py`, the family pages and the live `GET /v1/models`.
+- `docs.json` lists the pages the fork added since the navigation was written (models, router, model-install, zimage, embeddings, rerank).
 
 ## 3. Planned and open
 

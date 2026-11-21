@@ -189,6 +189,9 @@ machine, and lists the larger ones that stream from the disk right below it.
 the setup's own catalog ([`c/setup_catalog.py`](c/setup_catalog.py)); the
 downloads are the sizes Hugging Face lists for each repository.
 
+[docs/models.md](docs/models.md) is the whole list in one place: every model with its size, window, capabilities and route,
+and what is installed on the fork owner's machine.
+
 - **RAM** is two numbers: below the first the model does not start, from the
   second it runs as measured.
 - **GPU** is what the setup can build for that engine ([GPUs](#gpus)).
