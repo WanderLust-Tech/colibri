@@ -1369,8 +1369,8 @@ ifneq ($(EXE),)
 .PHONY: qwen3asr
 qwen3asr: qwen3asr$(EXE)
 endif
-qwen3asr$(EXE): qwen3asr.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
-	$(CC) $(CFLAGS) qwen3asr.c -o qwen3asr$(EXE) $(LDFLAGS)
+qwen3asr$(EXE): qwen3asr.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) qwen3asr.c $(VK_OBJ) -o qwen3asr$(EXE) $(LDFLAGS)
 
 # Qwen3-TTS (0.6B, 1.7B): text to speech for POST /v1/audio/speech (docs/qwen3-tts.md). The talker and the code predictor are Qwen3 stacks, the
 # codec's decoder a transformer and a convolutional vocoder, all computed with ACE-Step's kernels and layer code and its text tokenizer header.

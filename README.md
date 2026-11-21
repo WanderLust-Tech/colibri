@@ -212,7 +212,7 @@ and what is installed on the fork owner's machine.
 | **ACE-Step 1.5**: text to music, MIT licence | `ace-step-1.5` | 6.4 GB | 9 / 12 GB | CPU | 10 s of music in 16 s (24-core i9, CPU) |
 | **Qwen3-Embedding-0.6B**: text to vectors for search, Apache-2.0 licence (4B and 8B too) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 texts of 24 tokens in 2.6 s (24-core i9, CPU) |
 | **Qwen3-Reranker-0.6B**: sorts documents by how well they answer a query, Apache-2.0 licence (4B and 8B too) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documents of about 25 tokens in 10.6 s (24-core i9, CPU) |
-| **Qwen3-ASR-0.6B**: speech to text in 30 languages, Apache-2.0 licence (1.7B too) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 s of speech in 4.3 s (24-core i9, CPU) |
+| **Qwen3-ASR-0.6B**: speech to text in 30 languages, Apache-2.0 licence (1.7B too) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU or card | 11 s of speech in 0.23 s on the card, 4.3 s on the CPU (24-core i9) |
 | **Qwen3-TTS-0.6B**: text to speech in 10 languages with nine speakers, Apache-2.0 licence | `qwen3-tts-0.6b-customvoice` | 2.5 GB | 4 / 6 GB | CPU | 5 s of speech in 17 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:

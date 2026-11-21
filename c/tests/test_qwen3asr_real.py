@@ -68,6 +68,21 @@ class RealEngineTest(unittest.TestCase):
         self.assertEqual(keyword, "READY")
         self.assertEqual((info["task"], info["sample_rate"], info["layers"], info["encoder_layers"]), ("transcribe", 16000, 28, 18))
         self.assertEqual(info["piece_seconds"], 1200)
+        self.assertEqual(info["device"], "vulkan" if os.environ.get("COLI_VULKAN") == "1" else "cpu")
+
+    @unittest.skipUnless(os.environ.get("COLI_VULKAN") == "1", "the card runs only with COLI_VULKAN=1 and a VK=1 build")
+    def test_on_the_card_a_second_request_is_the_same_text_and_much_faster_than_the_cpu(self):
+        # the same tests below then hold the card to the reference; this one adds that the device keeps its weights between requests
+        times = []
+        for i in range(2):
+            self.engine.process.stdin.write("TRANSCRIBE " + json.dumps({"id": f"w{i}", "wav": CLIP.replace("\\", "/"), "language": "", "context": ""}) + "\n")
+            self.engine.process.stdin.flush()
+            keyword, _, body = self.engine.process.stdout.readline().partition(" ")
+            self.assertEqual(keyword, "TEXT", body)
+            reply = json.loads(body)
+            self.assertIn("ask not what your country can do for you", reply["text"])
+            times.append(reply["seconds"])
+        self.assertLess(times[1], 3.0, times)                         # 4 s on the CPU for the 0.6B
 
     def test_the_clip_comes_back_as_transformers_hears_it(self):
         keyword, body = self.engine.transcribe(CLIP)

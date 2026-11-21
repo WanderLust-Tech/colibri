@@ -71,7 +71,7 @@ punctuates `you. Ask`), the same as the reference's.
 
 ## Speed and memory
 
-An i9-14900KF (24 cores), **CPU** only (no graphics-card path yet); the whole request, 11 s clip:
+An i9-14900KF (24 cores), **CPU**; the whole request, 11 s clip (the card's numbers follow):
 
 | | load | mel | encoder | decode | total | resident |
 |---|---|---|---|---|---|---|
@@ -81,18 +81,35 @@ An i9-14900KF (24 cores), **CPU** only (no graphics-card path yet); the whole re
 A 33 s clip in three pieces (a test limit of 15 s) took the 0.6B 1.6 s of encoder and 11.7 s of decoding for 90 tokens. The decoder is
 most of the time, since each token reads the whole model once; the encoder is a fixed 46 ms a second of audio on the 0.6B.
 
+**On the graphics card** (an RTX 5090, a `VK=1` build run with `COLI_VULKAN=1`; the router does that): the decoder's prompt and each token are one
+submission of the dense chain (`qt`'s chain, the one qwen3tts and the chat engines use: norms, q/k/v, head norms, RoPE, attention over a KV cache
+that stays on the device, o, SwiGLU, down; only the logits come back), and the encoder's layers are one submission too (chain_enc's LayerNorm,
+bias-and-GELU and windowed attention, the q/k/v matrices joined into one product; the three convolutions' GEMMs go up per chunk, their im2col and
+the first convolution stay on the CPU). The matrices sit on the card as bf16 after the first request and the arithmetic is f32. The whole request
+once the weights are up (the first request also uploads them: 1 to 1.3 s):
+
+| | 11 s clip | 70 s clip (175 tokens) | on the CPU |
+|---|---|---|---|
+| Qwen3-ASR-0.6B | 0.23 s | 2.2 s | 4.5 s / about 38 s |
+| Qwen3-ASR-1.7B | 0.30 s | 2.5 s | 5.9 s / about 38 s |
+
+20 times faster than the CPU on the short clip and about 17 times on the long one. The result is the CPU's: the encoder agrees with the
+reference to 9e-6 (on the CPU 5e-6), the prompt ids and the generated ids are identical, on both models; the text of the 70 s clip is the same
+word for word. A device that is missing, or a step that fails, leaves the CPU in charge (the request again from the start).
+
 ## Tests
 
 - `tests/test_asr_gateway.py` (32): the request rules, the engine wrapper, and the whole route over HTTP against `tools/asr_stub.py`: the
   upload decoded to 16 kHz mono whatever it was, the language and the prompt reaching the engine, the three formats, silence, the refusals,
   a dead engine, the model card and the refusals on the other routes, and the family and model-id resolution.
 - `tests/test_speech_cli.py` (14): `coli transcribe` end to end against a real gateway.
-- `tests/test_qwen3asr_real.py` (8, needs the model and the clip): the answer and token count of the stored transformers reference
+- `tests/test_qwen3asr_real.py` (9, needs the model and the clip; with `COLI_VULKAN=1` and a `VK=1` build it holds the card to the same): the answer and token count of the stored transformers reference
   (`tools/qwen3_asr_0.6b_reference.json`), a forced language, a context, bad requests, silence, a clip in pieces joined with spaces; with
   `QWEN3ASR_REF` set, the stage-by-stage tensor comparison above.
 
 ## Not done
 
-- A graphics-card path (the encoder and the decoder on the Vulkan chain, as `qwen3embed` has): decoding is the cost and it is a good fit.
+- The convolutions' im2col and the first convolution are still on the CPU (0.6 s of the 70 s clip's encoder); the card's decoder reads the
+  logits back each token rather than choosing on the device.
 - Word and segment timestamps (Qwen3-ForcedAligner-0.6B), streaming transcription, and a batch of requests at once.
 - Audio that is not 16 kHz is the gateway's job; the engine's own `--wav` reads 16 kHz PCM16 or float WAV only.

@@ -595,11 +595,15 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   mono), a `qwen3_asr` family (the `thinker_text_config` section), model card (`transcription`, `input_modalities: ["audio"]`), refusals on the
   other routes, two catalogue entries with `tools/qwen3_tokenizer.py` as the post-install step (the checkpoints ship `vocab.json` and
   `merges.txt`, not `tokenizer.json`), router card, `coli transcribe`, `coli info`, Makefile, CI and release lists, the READMEs and the site.
-- **Measured** (24-core i9, CPU; the card path is not built): an 11 s clip in 4.3 s on the 0.6B (decode 125 ms a token) and 7.6 s on the
-  1.7B (225 ms a token); 1.9 GB and 4.7 GB resident.
-- **Tests:** `tests/test_asr_gateway.py` (32, a stub engine), `tests/test_speech_cli.py` (14), `tests/test_qwen3asr_real.py` (8, against the stored
-  transformers answer and, with `QWEN3ASR_REF`, the stage tensors).
-- **Not done**: a Vulkan path, timestamps (the forced aligner), streaming; the 0.6B and 1.7B are installed in `colibri-models` and live. Qwen3-TTS
+- **Measured** (24-core i9, CPU): an 11 s clip in 4.3 s on the 0.6B (decode 125 ms a token) and 7.6 s on the 1.7B (225 ms a token); 1.9 GB and
+  4.7 GB resident. **On the card** (A5; `make qwen3asr VK=1`, run with `COLI_VULKAN=1`, which the router sets): the decoder is the dense chain's
+  (a submission for the prompt and one for each token, the KV cache on the device) and the encoder's layers are one submission (chain_enc's
+  LayerNorm, bias + GELU and windowed attention, the q/k/v matrices joined into one product; the convolutions' GEMMs per chunk): the 11 s clip
+  in 0.23 s (0.6B) and 0.30 s (1.7B) once the weights are up, a 70 s clip (175 tokens) in 2.2-2.5 s against about 38 s; encoder 9e-6 from the
+  reference, prompt and generated ids identical on both models, the 70 s text word for word the CPU's.
+- **Tests:** `tests/test_asr_gateway.py` (32, a stub engine), `tests/test_speech_cli.py` (14), `tests/test_qwen3asr_real.py` (9, against the stored
+  transformers answer and, with `QWEN3ASR_REF`, the stage tensors; with `COLI_VULKAN=1` the card is held to the same).
+- **Not done**: timestamps (the forced aligner), streaming; the 0.6B and 1.7B are installed in `colibri-models` and live. Qwen3-TTS
   (text to speech) is the other half of [qwen3-speech.md](qwen3-speech.md): section 2.32.
 
 ### 2.32 Qwen3-TTS: text to speech (`feat/qwen3-speech`, 2026-11-21; merged, pushed and deployed 2026-11-21)

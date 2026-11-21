@@ -39,6 +39,10 @@
 #include "json.h"
 #include "qi_gemm.h"
 #include "acestep_text.h"
+#ifdef COLI_VULKAN
+#include "backend_vulkan.h"
+#include "vk_chain.h"
+#endif
 
 #define AS_SR 16000
 #define AS_NFFT 400
@@ -257,6 +261,11 @@ static int as_load(Asr *m, const char *dir, char *err, size_t errn){
 
 /* ------------------------------------------------------------------------------------------------ the audio encoder */
 
+static void as_lin(float *Y, const float *X, int M, const AcdLin *l);   /* acd_lin; on the device when there is one (defined below) */
+#ifdef COLI_VULKAN
+static float *as_vk_encode(const Asr *m, const float *x, int F, int win);   /* the layers and the output projections on the device; NULL: the CPU does them */
+#endif
+
 static inline float as_gelu(float x){ return 0.5f * x * (1.0f + erff(x * 0.70710678118654752f)); }
 
 static inline int as_fdiv(int a, int b){ int q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }   /* Python's // */
@@ -317,7 +326,7 @@ static void as_conv_chunk(const Asr *m, const float *mel, float *out){
                 }
     }
     free(a1);
-    acd_lin(a2, col, F2 * W2, &m->c2);
+    as_lin(a2, col, F2 * W2, &m->c2);
     free(col);
     for (size_t i = 0; i < (size_t)F2 * W2 * C; i++) a2[i] = as_gelu(a2[i]);
     col = (float *)malloc((size_t)F3 * W3 * K * sizeof(float));
@@ -334,7 +343,7 @@ static void as_conv_chunk(const Asr *m, const float *mel, float *out){
                 }
     }
     free(a2);
-    acd_lin(a3, col, F3 * W3, &m->c3);
+    as_lin(a3, col, F3 * W3, &m->c3);
     free(col);
     for (size_t i = 0; i < (size_t)F3 * W3 * C; i++) a3[i] = as_gelu(a3[i]);
     float *vec = (float *)malloc((size_t)W3 * C * F3 * sizeof(float));
@@ -342,7 +351,7 @@ static void as_conv_chunk(const Asr *m, const float *mel, float *out){
         for (int c = 0; c < C; c++)
             for (int f = 0; f < F3; f++) vec[(size_t)t * C * F3 + (size_t)c * F3 + f] = a3[((size_t)f * W3 + t) * C + c];
     free(a3);
-    acd_lin(out, vec, W3, &m->conv_out);
+    as_lin(out, vec, W3, &m->conv_out);
     free(vec);
 }
 
@@ -378,6 +387,12 @@ static float *as_encode(const Asr *m, const float *mel, int T, int *nf, float **
     if (conv_dump) { *conv_dump = (float *)malloc((size_t)F * D * sizeof(float)); memcpy(*conv_dump, x, (size_t)F * D * sizeof(float)); }
     /* the layers: attention inside windows of 104 frames */
     const int WIN = getenv("AS_FULL_ATTN") ? (F > 0 ? F : 1) : 13 * (800 / AS_CHUNK), H = m->eh, hd = D / H;
+#ifdef COLI_VULKAN
+    {
+        float *dout = as_vk_encode(m, x, F, WIN);
+        if (dout) { free(x); *nf = F; return dout; }
+    }
+#endif
     float *n1 = (float *)malloc((size_t)F * D * sizeof(float)), *q = (float *)malloc((size_t)F * D * sizeof(float));
     float *k = (float *)malloc((size_t)F * D * sizeof(float)), *v = (float *)malloc((size_t)F * D * sizeof(float));
     float *cx = (float *)malloc((size_t)F * D * sizeof(float)), *o = (float *)malloc((size_t)F * D * sizeof(float));
@@ -385,28 +400,28 @@ static float *as_encode(const Asr *m, const float *mel, int T, int *nf, float **
     for (int li = 0; li < m->el; li++) {
         const AsEncLayer *l = &m->EL[li];
         as_layernorm(n1, x, F, D, l->ln1w, l->ln1b);
-        acd_lin(q, n1, F, &l->q); acd_lin(k, n1, F, &l->k); acd_lin(v, n1, F, &l->v);
+        as_lin(q, n1, F, &l->q); as_lin(k, n1, F, &l->k); as_lin(v, n1, F, &l->v);
         for (int w0 = 0; w0 < F; w0 += WIN) {
             const int wl = F - w0 < WIN ? F - w0 : WIN;
             acd_attention_ex(cx + (size_t)w0 * D, D, q + (size_t)w0 * D, D, wl, k + (size_t)w0 * D, v + (size_t)w0 * D, D, wl, H, H, hd, -1, 0);
         }
-        acd_lin(o, cx, F, &l->o);
+        as_lin(o, cx, F, &l->o);
         #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < (int64_t)F * D; i++) x[i] += o[i];
         as_layernorm(n1, x, F, D, l->ln2w, l->ln2b);
-        acd_lin(g, n1, F, &l->fc1);
+        as_lin(g, n1, F, &l->fc1);
         #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < (int64_t)F * m->eff; i++) g[i] = as_gelu(g[i]);
-        acd_lin(o, g, F, &l->fc2);
+        as_lin(o, g, F, &l->fc2);
         #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < (int64_t)F * D; i++) x[i] += o[i];
     }
     as_layernorm(n1, x, F, D, m->lnpw, m->lnpb);
-    acd_lin(g, n1, F, &m->proj1);                                  /* g is [F][eff] >= [F][d_model]: reuse it as the projection's output */
+    as_lin(g, n1, F, &m->proj1);                                  /* g is [F][eff] >= [F][d_model]: reuse it as the projection's output */
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t)F * D; i++) g[i] = as_gelu(g[i]);
     float *out = (float *)malloc((size_t)F * m->eout * sizeof(float));
-    acd_lin(out, g, F, &m->proj2);
+    as_lin(out, g, F, &m->proj2);
     free(x); free(n1); free(q); free(k); free(v); free(cx); free(o); free(g);
     *nf = F;
     return out;
@@ -495,6 +510,317 @@ static int as_argmax_head(const Asr *m, const float *h, float *logits){
     return best;
 }
 
+#ifdef COLI_VULKAN
+/* ------------------------------------------------------------------------------------------------ the decoder on a Vulkan device
+ * The decoder is most of the time (3.6 s of the 4.3 s for 11 s of audio on the CPU: the prompt is a hundred and fifty rows, then each token
+ * is one row against every weight, which is memory-bound). On the card the prompt and each token are one submission of the dense chain
+ * (norms, q/k/v, head norms, RoPE, attention over a KV cache that lives on the device, o, SwiGLU, down); only the logits come back.
+ * The device holds the matrices as bf16 and computes in f32, so a logit differs from the CPU's in the last bits; a device that is
+ * missing, or a step that fails, leaves the CPU in charge (the whole request again, as qwen3tts does). */
+static struct { int ready, chain; } as_vk;
+
+static void as_vk_open(void){
+    memset(&as_vk, 0, sizeof as_vk);
+    if (!coli_vk_init_env("qwen3asr")) return;               /* COLI_VULKAN unset, or no device: the CPU */
+    as_vk.ready = 1;
+    atexit(coli_vk_shutdown);
+    const char *c = getenv("COLI_VK_CHAIN");
+    if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { as_vk.chain = 1; atexit(vkc_shutdown); }   /* registered after the backend's: runs before it */
+}
+
+typedef struct {
+    int tried, ok;
+    ColiVkTensor **t;                       /* [nl][7]: q k v o gate up down */
+    ColiVkTensor *head;
+    VkcBuf *prm;                            /* per layer: ln1 [D], ln2 [D], q norm [hd], k norm [hd]; then the final norm [D] */
+    VkcBuf *cs, *kc, *vc, *xu, *x, *nrm, *q, *k, *v, *ctx, *g, *u, *tmp, *lg, *out;
+    size_t cap, rows;
+} AsVk;
+
+static AsVk as_vk_dec;
+
+static ColiVkTensor *as_vk_tensor(const AcdLin *l){
+    const QiMat *W = &l->m;
+    if (l->b || W->ld || !W->w || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2) return NULL;
+    ColiVkTensor *t = NULL;
+    return coli_vk_tensor_ensure(&t, W->w, NULL, W->fmt == QI_BF16 ? 11 : 10, W->K, W->N, 0) ? t : NULL;
+}
+
+/* The matrices and norm weights go up once (the first request; 0 when anything would not). */
+static int as_vk_setup(AsVk *v, const Asr *m){
+    if (v->tried) return v->ok;
+    v->tried = 1;
+    if (!as_vk.chain || m->hd > 256 || m->H % m->Hk) return 0;
+    v->t = (ColiVkTensor **)calloc((size_t)m->nl * 7, sizeof(ColiVkTensor *));
+    const size_t per = (size_t)2 * m->D + 2 * m->hd, total = (size_t)m->nl * per + m->D;
+    float *arena = (float *)calloc(total, sizeof(float));
+    if (!v->t || !arena) { free(arena); return 0; }
+    for (int l = 0; l < m->nl; l++) {
+        const AcdEncLayer *L = &m->L[l];
+        const AcdLin *mats[7] = { &L->sa.q, &L->sa.k, &L->sa.v, &L->sa.o, &L->gate, &L->up, &L->down };
+        for (int i = 0; i < 7; i++) {
+            v->t[l * 7 + i] = as_vk_tensor(mats[i]);
+            if (!v->t[l * 7 + i]) { fprintf(stderr, "[VK] qwen3asr: a matrix of layer %d did not reach the device; the CPU runs the decoder\n", l); free(arena); return 0; }
+        }
+        memcpy(arena + l * per, L->ln1, (size_t)m->D * sizeof(float));
+        memcpy(arena + l * per + m->D, L->ln2, (size_t)m->D * sizeof(float));
+        memcpy(arena + l * per + 2 * m->D, L->sa.qn, (size_t)m->hd * sizeof(float));
+        memcpy(arena + l * per + 2 * m->D + m->hd, L->sa.kn, (size_t)m->hd * sizeof(float));
+    }
+    memcpy(arena + (size_t)m->nl * per, m->norm, (size_t)m->D * sizeof(float));
+    v->head = as_vk_tensor(&m->head);
+    if (!v->head) { fprintf(stderr, "[VK] qwen3asr: the output matrix did not reach the device; the CPU runs the decoder\n"); free(arena); return 0; }
+    v->prm = vkc_buf(total * sizeof(float), VKC_DEV);
+    int ok = v->prm && vkc_begin() && vkc_write(v->prm, 0, arena, total * sizeof(float)) && vkc_submit(1);
+    free(arena);
+    if (!ok) return 0;
+    v->ok = 1;
+    return 1;
+}
+
+/* The buffers for `rows` rows a step and `cap` positions of cache; the rope table (cos, sin pairs) goes up with them. */
+static int as_vk_reserve(AsVk *v, const Asr *m, size_t rows, size_t cap, const float *cs, const float *sn){
+    const size_t D = m->D, rq = (size_t)m->H * m->hd, rk = (size_t)m->Hk * m->hd, hd = m->hd, I = m->inter, nlog = (size_t)m->vocab;
+    if (!vkc_reserve(&v->xu, rows * D * 4, VKC_UP) || !vkc_reserve(&v->x, rows * D * 4, VKC_DEV) || !vkc_reserve(&v->nrm, rows * D * 4, VKC_DEV) ||
+        !vkc_reserve(&v->tmp, rows * D * 4, VKC_DEV) || !vkc_reserve(&v->q, rows * rq * 4, VKC_DEV) || !vkc_reserve(&v->ctx, rows * rq * 4, VKC_DEV) ||
+        !vkc_reserve(&v->k, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->v, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->g, rows * I * 4, VKC_DEV) ||
+        !vkc_reserve(&v->u, rows * I * 4, VKC_DEV) || !vkc_reserve(&v->lg, nlog * 4, VKC_DEV) || !vkc_reserve(&v->out, nlog * 4, VKC_DOWN) ||
+        !vkc_reserve(&v->kc, (size_t)m->nl * cap * rk * 4, VKC_DEV) || !vkc_reserve(&v->vc, (size_t)m->nl * cap * rk * 4, VKC_DEV) ||
+        !vkc_reserve(&v->cs, cap * hd * 4, VKC_DEV))
+        return 0;
+    float *tab = (float *)malloc(cap * hd * sizeof(float));
+    if (!tab) return 0;
+    for (size_t r = 0; r < cap; r++)
+        for (size_t j = 0; j < hd / 2; j++) { tab[r * hd + 2 * j] = cs[r * hd + j]; tab[r * hd + 2 * j + 1] = sn[r * hd + j]; }
+    const int ok = vkc_begin() && vkc_write(v->cs, 0, tab, cap * hd * sizeof(float)) && vkc_submit(1);
+    free(tab);
+    v->cap = cap; v->rows = rows;
+    return ok;
+}
+
+/* n rows (host, [n][D]) at positions pos0.. through every layer, their keys and values appended to the device cache; then, when `logits` is
+ * not NULL, the last row through the final norm and the output matrix. 1 on success; 0 leaves the CPU to run the request. */
+static int as_vk_run(AsVk *v, const Asr *m, const float *xrows, int n, int pos0, float *logits){
+    if (!v->ok || (size_t)n > v->rows || (size_t)(pos0 + n) > v->cap) return 0;
+    const int D = m->D, H = m->H, Hk = m->Hk, hd = m->hd, I = m->inter;
+    const size_t rq = (size_t)H * hd, rk = (size_t)Hk * hd, per = (size_t)2 * D + 2 * hd;
+    const float scale = 1.f / sqrtf((float)hd);
+    memcpy(vkc_ptr(v->xu), xrows, (size_t)n * D * sizeof(float));
+    int ok = vkc_begin() && vkc_copy(v->x, 0, v->xu, 0, (size_t)n * D);
+    for (int l = 0; l < m->nl && ok; l++) {
+        ColiVkTensor **t = v->t + (size_t)l * 7;
+        const int wb = (int)(l * per);
+        const size_t kbase = (size_t)l * v->cap * rk;
+        VkcNorm n1 = {n, D, 1, 0, D, D, 0, D, D, wb, 0, 0, m->eps, 1.f};
+        VkcNorm qn = {n * H, hd, H, 0, H * hd, hd, 0, H * hd, hd, wb + 2 * D, 0, 0, m->eps, 1.f};
+        VkcNorm kn = {n * Hk, hd, Hk, 0, Hk * hd, hd, 0, Hk * hd, hd, wb + 2 * D + hd, 0, 0, m->eps, 1.f};
+        VkcRope rq_ = {n * H, H, 0, H * hd, hd, hd / 2, pos0 * hd, hd}, rk_ = {n * Hk, Hk, 0, Hk * hd, hd, hd / 2, pos0 * hd, hd};
+        ok = vkc_norm(v->x, v->prm, v->nrm, &n1) &&
+             vkc_matmul(t[0], v->nrm, 0, v->q, 0, n) && vkc_matmul(t[1], v->nrm, 0, v->k, 0, n) && vkc_matmul(t[2], v->nrm, 0, v->v, 0, n) &&
+             vkc_norm(v->q, v->prm, v->q, &qn) && vkc_norm(v->k, v->prm, v->k, &kn) && vkc_rope(v->q, v->cs, &rq_) && vkc_rope(v->k, v->cs, &rk_) &&
+             vkc_copy(v->kc, kbase + (size_t)pos0 * rk, v->k, 0, (size_t)n * rk) && vkc_copy(v->vc, kbase + (size_t)pos0 * rk, v->v, 0, (size_t)n * rk);
+        if (ok) {
+            VkcAttnW a;
+            memset(&a, 0, sizeof a);
+            a.a = (VkcAttn){.S = n, .H = H, .KVH = Hk, .hd = hd, .pos_base = pos0, .cap = pos0 + n, .q_off = 0, .q_row = (int)rq, .q_seg = hd,
+                            .o_off = 0, .o_row = (int)rq, .scale = scale, .k_off = (int)kbase, .v_off = (int)kbase};
+            a.vd = hd; a.kv_pm = 1;
+            ok = vkc_attn_w(v->q, v->kc, v->vc, v->ctx, NULL, NULL, NULL, &a);
+        }
+        VkcNorm n2 = {n, D, 1, 0, D, D, 0, D, D, wb + D, 0, 0, m->eps, 1.f};
+        VkcEw add = {VKC_EW_ADD, n * D, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f}, act = {VKC_EW_SWIGLU, n * I, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f};
+        ok = ok && vkc_matmul(t[3], v->ctx, 0, v->tmp, 0, n) && vkc_ew(v->x, v->x, v->tmp, NULL, NULL, &add) &&
+             vkc_norm(v->x, v->prm, v->nrm, &n2) && vkc_matmul(t[4], v->nrm, 0, v->g, 0, n) && vkc_matmul(t[5], v->nrm, 0, v->u, 0, n) &&
+             vkc_ew(v->g, v->g, v->u, NULL, NULL, &act) && vkc_matmul(t[6], v->g, 0, v->tmp, 0, n) && vkc_ew(v->x, v->x, v->tmp, NULL, NULL, &add);
+    }
+    if (ok && logits) {                                                 /* the last row: final norm, then the output matrix */
+        VkcNorm fn = {1, D, 1, (n - 1) * D, D, D, 0, D, D, (int)(m->nl * per), 0, 0, m->eps, 1.f};
+        ok = vkc_norm(v->x, v->prm, v->nrm, &fn) && vkc_matmul(v->head, v->nrm, 0, v->lg, 0, 1) && vkc_copy(v->out, 0, v->lg, 0, (size_t)m->vocab);
+    }
+    ok = ok && vkc_submit(1);
+    if (!ok) {
+        fprintf(stderr, "[VK] qwen3asr: a step failed; the CPU runs the request\n");
+        v->ok = 0;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); as_vk.ready = 0; as_vk.chain = 0; }
+        return 0;
+    }
+    if (logits) memcpy(logits, vkc_ptr(v->out), (size_t)m->vocab * sizeof(float));
+    return 1;
+}
+#endif
+
+static const char *as_device(void){
+#ifdef COLI_VULKAN
+    if (as_vk.ready && as_vk.chain) return "vulkan";
+#endif
+    return "cpu";
+}
+
+/* The encoder's matrix products (the convolutions as im2col GEMMs, the attention projections, the feed-forwards) on the device: the rows go up,
+ * the product comes back, and the bias, GELU, norms and the windowed attention stay on the CPU (together a third of the encoder). */
+#ifdef COLI_VULKAN
+typedef struct { const AcdLin *l; ColiVkTensor *t; } AsLinT;
+static AsLinT as_lin_tab[512];
+static int as_lin_n, as_lin_off;
+static VkcBuf *as_lin_up, *as_lin_in, *as_lin_out, *as_lin_down;
+
+static ColiVkTensor *as_lin_tensor(const AcdLin *l){
+    for (int i = 0; i < as_lin_n; i++) if (as_lin_tab[i].l == l) return as_lin_tab[i].t;
+    if (as_lin_n >= (int)(sizeof as_lin_tab / sizeof as_lin_tab[0])) return NULL;
+    const QiMat *W = &l->m;
+    ColiVkTensor *t = NULL;
+    if (W->ld || !W->w || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2 || !coli_vk_tensor_ensure(&t, W->w, NULL, W->fmt == QI_BF16 ? 11 : 10, W->K, W->N, 0)) t = NULL;
+    as_lin_tab[as_lin_n].l = l; as_lin_tab[as_lin_n++].t = t;
+    return t;
+}
+
+static int as_vk_lin(float *Y, const float *X, int M, const AcdLin *l){
+    if (as_lin_off || !as_vk.chain || M < 1 || M > 32768) return 0;
+    ColiVkTensor *t = as_lin_tensor(l);
+    if (!t) return 0;
+    const size_t K = l->m.K, N = l->m.N;
+    if (!vkc_reserve(&as_lin_up, (size_t)M * K * 4, VKC_UP) || !vkc_reserve(&as_lin_in, (size_t)M * K * 4, VKC_DEV) ||
+        !vkc_reserve(&as_lin_out, (size_t)M * N * 4, VKC_DEV) || !vkc_reserve(&as_lin_down, (size_t)M * N * 4, VKC_DOWN))
+        return 0;
+    memcpy(vkc_ptr(as_lin_up), X, (size_t)M * K * sizeof(float));
+    if (!(vkc_begin() && vkc_copy(as_lin_in, 0, as_lin_up, 0, (size_t)M * K) && vkc_matmul(t, as_lin_in, 0, as_lin_out, 0, M) &&
+          vkc_copy(as_lin_down, 0, as_lin_out, 0, (size_t)M * N) && vkc_submit(1))) {
+        fprintf(stderr, "[VK] qwen3asr: an encoder product failed; the CPU runs the encoder\n");
+        as_lin_off = 1;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); as_vk.ready = 0; as_vk.chain = 0; }
+        return 0;
+    }
+    memcpy(Y, vkc_ptr(as_lin_down), (size_t)M * N * sizeof(float));
+    if (l->b) {
+        #pragma omp parallel for schedule(static)
+        for (int r = 0; r < M; r++) for (size_t j = 0; j < N; j++) Y[(size_t)r * N + j] += l->b[j];
+    }
+    return 1;
+}
+#endif
+
+static void as_lin(float *Y, const float *X, int M, const AcdLin *l){
+#ifdef COLI_VULKAN
+    if (as_vk_lin(Y, X, M, l)) return;
+#endif
+    acd_lin(Y, X, M, l);
+}
+
+#ifdef COLI_VULKAN
+/* The encoder's layers and its output projections as one submission: LayerNorm, the fused q/k/v product, the windowed attention (chain_enc's
+ * attention over a row range: each row sees its window of 104 frames), the output product, the residuals, the feed-forward with GELU, then
+ * ln_post, proj1 + GELU, proj2. The three attention matrices are joined into one [3 d][d] matrix on the first use (the attention then reads
+ * q, k and v out of one row of 3 d floats). */
+typedef struct {
+    int tried, ok;
+    ColiVkTensor **qkv, **o, **fc1, **fc2, *p1, *p2;
+    VkcBuf *prm, *xu, *x, *nrm, *big, *att, *tmp, *g, *rng, *ob, *out;
+    int *offs;                              /* per layer: ln1 w, ln1 b, ln2 w, ln2 b, bqkv, bo, b1, b2 (8 entries); then lnp w, lnp b, bp1, bp2 */
+} AsVkEnc;
+static AsVkEnc as_enc;
+
+static int as_enc_setup(AsVkEnc *e, const Asr *m){
+    if (e->tried) return e->ok;
+    e->tried = 1;
+    const int L = m->el, D = m->ed, FF = m->eff, O = m->eout;
+    if (!as_vk.chain || !vkc_enc_ready() || D / m->eh > 128 || D % m->eh) return 0;
+    e->qkv = (ColiVkTensor **)calloc((size_t)L, sizeof(ColiVkTensor *)); e->o = (ColiVkTensor **)calloc((size_t)L, sizeof(ColiVkTensor *));
+    e->fc1 = (ColiVkTensor **)calloc((size_t)L, sizeof(ColiVkTensor *)); e->fc2 = (ColiVkTensor **)calloc((size_t)L, sizeof(ColiVkTensor *));
+    e->offs = (int *)calloc((size_t)L * 8 + 4, sizeof(int));
+    const size_t per = (size_t)4 * D + 3 * D + D + FF + D, total = (size_t)L * per + 2 * D + D + O;
+    float *arena = (float *)calloc(total, sizeof(float));
+    if (!e->qkv || !e->o || !e->fc1 || !e->fc2 || !e->offs || !arena) { free(arena); return 0; }
+    for (int l = 0; l < L; l++) {
+        const AsEncLayer *y = &m->EL[l];
+        const AcdLin *q = &y->q, *k = &y->k, *v = &y->v;
+        if (q->m.fmt != k->m.fmt || q->m.fmt != v->m.fmt || q->m.ld || k->m.ld || v->m.ld || !q->b || !k->b || !v->b || !y->o.b || !y->fc1.b || !y->fc2.b ||
+            (q->m.fmt != QI_F32 && q->m.fmt != QI_BF16)) { free(arena); return 0; }
+        const size_t es = q->m.fmt == QI_BF16 ? 2 : 4, blk = (size_t)D * D * es;
+        char *cat = (char *)malloc(3 * blk);                       /* kept for good: the device's tensor is made from it */
+        if (!cat) { free(arena); return 0; }
+        memcpy(cat, q->m.w, blk); memcpy(cat + blk, k->m.w, blk); memcpy(cat + 2 * blk, v->m.w, blk);
+        ColiVkTensor *t = NULL;
+        if (!coli_vk_tensor_ensure(&t, cat, NULL, q->m.fmt == QI_BF16 ? 11 : 10, D, 3 * D, 0)) { free(arena); return 0; }
+        e->qkv[l] = t;
+        e->o[l] = as_lin_tensor(&y->o); e->fc1[l] = as_lin_tensor(&y->fc1); e->fc2[l] = as_lin_tensor(&y->fc2);
+        if (!e->o[l] || !e->fc1[l] || !e->fc2[l]) { free(arena); return 0; }
+        size_t at = l * per;
+        int *of = e->offs + (size_t)l * 8;
+        of[0] = (int)at; memcpy(arena + at, y->ln1w, D * sizeof(float)); at += D;
+        of[1] = (int)at; memcpy(arena + at, y->ln1b, D * sizeof(float)); at += D;
+        of[2] = (int)at; memcpy(arena + at, y->ln2w, D * sizeof(float)); at += D;
+        of[3] = (int)at; memcpy(arena + at, y->ln2b, D * sizeof(float)); at += D;
+        of[4] = (int)at; memcpy(arena + at, q->b, D * sizeof(float)); memcpy(arena + at + D, k->b, D * sizeof(float)); memcpy(arena + at + 2 * D, v->b, D * sizeof(float)); at += 3 * D;
+        of[5] = (int)at; memcpy(arena + at, y->o.b, D * sizeof(float)); at += D;
+        of[6] = (int)at; memcpy(arena + at, y->fc1.b, FF * sizeof(float)); at += FF;
+        of[7] = (int)at; memcpy(arena + at, y->fc2.b, D * sizeof(float));
+    }
+    size_t at = (size_t)L * per;
+    int *tail = e->offs + (size_t)L * 8;
+    tail[0] = (int)at; memcpy(arena + at, m->lnpw, D * sizeof(float)); at += D;
+    tail[1] = (int)at; memcpy(arena + at, m->lnpb, D * sizeof(float)); at += D;
+    tail[2] = (int)at; memcpy(arena + at, m->proj1.b, D * sizeof(float)); at += D;
+    tail[3] = (int)at; memcpy(arena + at, m->proj2.b, O * sizeof(float));
+    e->p1 = as_lin_tensor(&m->proj1); e->p2 = as_lin_tensor(&m->proj2);
+    if (!e->p1 || !e->p2 || !m->proj1.b || !m->proj2.b) { free(arena); return 0; }
+    e->prm = vkc_buf(total * sizeof(float), VKC_DEV);
+    int ok = e->prm && vkc_begin() && vkc_write(e->prm, 0, arena, total * sizeof(float)) && vkc_submit(1);
+    free(arena);
+    e->ok = ok;
+    return ok;
+}
+
+static int as_enc_lin(ColiVkTensor *t, VkcBuf *x, VkcBuf *y, int F, int N, VkcBuf *prm, int boff, int act){
+    VkcEncBias b = {0, F * N, N, 0, N, boff, act};
+    return vkc_matmul(t, x, 0, y, 0, F) && vkc_enc_bias(y, prm, &b);
+}
+
+static float *as_vk_encode(const Asr *m, const float *x, int F, int win){
+    AsVkEnc *e = &as_enc;
+    if (as_lin_off || !as_vk.chain || F < 1 || F > 32768 || !as_enc_setup(e, m)) return NULL;
+    const int D = m->ed, FF = m->eff, O = m->eout, H = m->eh, hd = D / H;
+    if (!vkc_reserve(&e->xu, (size_t)F * D * 4, VKC_UP) || !vkc_reserve(&e->x, (size_t)F * D * 4, VKC_DEV) || !vkc_reserve(&e->nrm, (size_t)F * D * 4, VKC_DEV) ||
+        !vkc_reserve(&e->big, (size_t)F * 3 * D * 4, VKC_DEV) || !vkc_reserve(&e->att, (size_t)F * D * 4, VKC_DEV) || !vkc_reserve(&e->tmp, (size_t)F * D * 4, VKC_DEV) ||
+        !vkc_reserve(&e->g, (size_t)F * FF * 4, VKC_DEV) || !vkc_reserve(&e->rng, (size_t)F * 2 * 4, VKC_DEV) || !vkc_reserve(&e->ob, (size_t)F * O * 4, VKC_DEV) ||
+        !vkc_reserve(&e->out, (size_t)F * O * 4, VKC_DOWN))
+        return NULL;
+    int *rng = (int *)malloc((size_t)F * 2 * sizeof(int));
+    if (!rng) return NULL;
+    for (int i = 0; i < F; i++) { const int w0 = i / win * win; rng[2 * i] = w0; rng[2 * i + 1] = (w0 + win < F ? w0 + win : F) - 1; }
+    memcpy(vkc_ptr(e->xu), x, (size_t)F * D * sizeof(float));
+    const float scale = 1.0f / sqrtf((float)hd);
+    int ok = vkc_begin() && vkc_write(e->rng, 0, rng, (size_t)F * 2 * sizeof(int)) && vkc_copy(e->x, 0, e->xu, 0, (size_t)F * D);
+    free(rng);
+    VkcEw add = {VKC_EW_ADD, F * D, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f};
+    for (int l = 0; l < m->el && ok; l++) {
+        const int *of = e->offs + (size_t)l * 8;
+        VkcEncNorm n1 = {0, F, D, 0, D, 0, D, 0, D, of[0], of[1], 0, 1e-5f}, n2 = {0, F, D, 0, D, 0, D, 0, D, of[2], of[3], 0, 1e-5f};
+        VkcEncAttn ap = {0, F, H, hd, 0, D, 2 * D, 3 * D, 0, D, 0, 0, 0, 0, 0, scale, 0};
+        ok = vkc_enc_norm(e->x, NULL, e->prm, e->nrm, &n1) && as_enc_lin(e->qkv[l], e->nrm, e->big, F, 3 * D, e->prm, of[4], VKC_ENC_ACT_NONE) &&
+             vkc_enc_attn(e->big, NULL, NULL, e->att, e->rng, NULL, NULL, &ap) && as_enc_lin(e->o[l], e->att, e->tmp, F, D, e->prm, of[5], VKC_ENC_ACT_NONE) &&
+             vkc_ew(e->x, e->x, e->tmp, NULL, NULL, &add) && vkc_enc_norm(e->x, NULL, e->prm, e->nrm, &n2) &&
+             as_enc_lin(e->fc1[l], e->nrm, e->g, F, FF, e->prm, of[6], VKC_ENC_ACT_GELU) && as_enc_lin(e->fc2[l], e->g, e->tmp, F, D, e->prm, of[7], VKC_ENC_ACT_NONE) &&
+             vkc_ew(e->x, e->x, e->tmp, NULL, NULL, &add);
+    }
+    if (ok) {
+        const int *tl = e->offs + (size_t)m->el * 8;
+        VkcEncNorm np = {0, F, D, 0, D, 0, D, 0, D, tl[0], tl[1], 0, 1e-5f};
+        ok = vkc_enc_norm(e->x, NULL, e->prm, e->nrm, &np) && as_enc_lin(e->p1, e->nrm, e->tmp, F, D, e->prm, tl[2], VKC_ENC_ACT_GELU) &&
+             as_enc_lin(e->p2, e->tmp, e->ob, F, O, e->prm, tl[3], VKC_ENC_ACT_NONE) && vkc_copy(e->out, 0, e->ob, 0, (size_t)F * O);
+    }
+    ok = ok && vkc_submit(1);
+    if (!ok) {
+        fprintf(stderr, "[VK] qwen3asr: the encoder failed on the device; the CPU runs it from here on\n");
+        e->ok = 0; as_lin_off = 1;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); as_vk.ready = 0; as_vk.chain = 0; }
+        return NULL;
+    }
+    float *out = (float *)malloc((size_t)F * O * sizeof(float));
+    if (out) memcpy(out, vkc_ptr(e->out), (size_t)F * O * sizeof(float));
+    return out;
+}
+#endif
+
 /* The prompt's token ids with `nf` audio slots; malloc'd, length in *n. */
 static int *as_prompt(const Asr *m_, int nf, const char *context, const char *language, int *n){
     Asr *m = (Asr *)m_;
@@ -518,8 +844,14 @@ static int *as_prompt(const Asr *m_, int nf, const char *context, const char *la
 }
 
 /* Greedy transcription of encoder frames `enc` [nf][D]: the generated ids (malloc'd), count in *ng. */
-static int *as_generate(const Asr *m, const float *enc, int nf, const char *context, const char *language, int max_new, int *ng, int *prompt_len,
-                        int **prompt_out){
+static int as_argmax(const float *logits, int n){
+    int best = 0;
+    for (int i = 1; i < n; i++) if (logits[i] > logits[best]) best = i;
+    return best;
+}
+
+static int *as_generate_on(const Asr *m, const float *enc, int nf, const char *context, const char *language, int max_new, int *ng, int *prompt_len,
+                           int **prompt_out, int allow_dev, int *dev_failed){
     int n = 0;
     int *ids = as_prompt(m, nf, context, language, &n);
     const int D = m->D, Hk = m->Hk, hd = m->hd;
@@ -536,25 +868,56 @@ static int *as_generate(const Asr *m, const float *enc, int nf, const char *cont
         if (ids[i] == m->audio_pad && slot < nf) { memcpy(x + (size_t)i * D, enc + (size_t)slot * D, (size_t)D * sizeof(float)); slot++; }
         else as_embed_row(m, ids[i], x + (size_t)i * D);
     }
-    as_decoder_rows(m, &C, x, n, 0, cs, sn);
     float *logits = (float *)malloc((size_t)m->vocab * sizeof(float));
+    int dev = 0;
+#ifdef COLI_VULKAN
+    if (allow_dev && as_vk.chain && as_vk_setup(&as_vk_dec, m))
+        dev = as_vk_reserve(&as_vk_dec, m, (size_t)n, (size_t)cap, cs, sn) && as_vk_run(&as_vk_dec, m, x, n, 0, logits);
+#else
+    (void)allow_dev;
+#endif
+    int tok;
+    if (dev) tok = as_argmax(logits, m->vocab);
+    else {
+        as_decoder_rows(m, &C, x, n, 0, cs, sn);
+        tok = as_argmax_head(m, x + (size_t)(n - 1) * D, logits);
+    }
     int *gen = (int *)malloc((size_t)(max_new + 1) * sizeof(int));
-    int ngen = 0;
-    int tok = as_argmax_head(m, x + (size_t)(n - 1) * D, logits);
+    int ngen = 0, pos = n;
     float *row = (float *)malloc((size_t)D * sizeof(float));
     while (ngen < max_new) {
         gen[ngen++] = tok;
         if (tok == m->im_end || tok == m->eos2) break;
         as_embed_row(m, tok, row);
-        as_decoder_rows(m, &C, row, 1, C.len, cs, sn);
+#ifdef COLI_VULKAN
+        if (dev) {
+            if (!as_vk_run(&as_vk_dec, m, row, 1, pos, logits)) { *dev_failed = 1; break; }
+            tok = as_argmax(logits, m->vocab);
+            pos++;
+            continue;
+        }
+#endif
+        as_decoder_rows(m, &C, row, 1, pos, cs, sn);
         tok = as_argmax_head(m, row, logits);
+        pos++;
     }
     *ng = ngen;
     if (prompt_len) *prompt_len = n;
-    if (prompt_out) *prompt_out = ids; else free(ids);
+    if (*dev_failed) { free(gen); gen = NULL; }
+    if (prompt_out && !*dev_failed) *prompt_out = ids; else free(ids);
     for (int i = 0; i < m->nl; i++) { free(C.k[i]); free(C.v[i]); }
     free(C.k); free(C.v); free(cs); free(sn); free(x); free(logits); free(row);
     return gen;
+}
+
+/* On the device when there is one; if it fails part way, the whole generation again on the CPU (its caches were never filled). */
+static int *as_generate(const Asr *m, const float *enc, int nf, const char *context, const char *language, int max_new, int *ng, int *prompt_len,
+                        int **prompt_out){
+    int failed = 0;
+    int *gen = as_generate_on(m, enc, nf, context, language, max_new, ng, prompt_len, prompt_out, 1, &failed);
+    if (!failed) return gen;
+    failed = 0;
+    return as_generate_on(m, enc, nf, context, language, max_new, ng, prompt_len, prompt_out, 0, &failed);
 }
 
 /* ------------------------------------------------------------------------------------------------ the answer */
@@ -889,7 +1252,7 @@ static char *as_read_line(int *too_long){
  *   TEXT {"id","language","text","tokens","pieces","audio_seconds","seconds","truncated"}      ERROR {"id","message"} */
 static int as_serve(const Asr *m, const char *name){
     printf("READY {\"model\":\""); as_escape(name);
-    printf("\",\"task\":\"transcribe\",\"sample_rate\":%d,\"piece_seconds\":%d,\"layers\":%d,\"encoder_layers\":%d,\"device\":\"cpu\"}\n", AS_SR, (int)as_max_piece(), m->nl, m->el);
+    printf("\",\"task\":\"transcribe\",\"sample_rate\":%d,\"piece_seconds\":%d,\"layers\":%d,\"encoder_layers\":%d,\"device\":\"%s\"}\n", AS_SR, (int)as_max_piece(), m->nl, m->el, as_device());
     fflush(stdout);
     for (;;) {
         int too_long;
@@ -967,6 +1330,9 @@ int main(int argc, char **argv){
         return 1;
     }
     fprintf(stderr, "qwen3asr: %d encoder layers (d %d), %d decoder layers (d %d), %.2f GB resident, loaded in %.1f s\n", m->el, m->ed, m->nl, m->D, (double)m->wbytes / 1e9, as_now() - t0);
+#ifdef COLI_VULKAN
+    as_vk_open();                      /* once the weights are loaded: the device opens, and each matrix goes up on the first request */
+#endif
     if (serve) return as_serve(m, as_name_of(dir));
     int n = 0;
     float *pcm = as_read_wav(wav, &n, err, sizeof err);

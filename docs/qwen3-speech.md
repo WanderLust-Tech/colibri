@@ -122,7 +122,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | A2 | audio encoder in C | against the reference encoder output |
 | A3 | decoder, prompt, greedy decode, parse | the generated ids equal the reference's |
 | A4 | line protocol, gateway route, catalogue, registry, router, long audio, `coli` | tests with a scripted engine, and the real model |
-| A5 | the 1.7B; Vulkan (encoder and decode on the chain); speed table | measured |
+| A5 | the 1.7B; Vulkan (encoder and decode on the chain); speed table | done: 11 s of speech in 0.23 s (0.6B) / 0.30 s (1.7B) on the card, 4.5 / 5.9 s on the CPU |
 | T0 | read `modeling_qwen3_tts*.py`; reference capture (text ids, codes, waveform) | stored |
 | T1 | codec decoder in C | codes to waveform against the reference |
 | T2 | talker and code predictor, sampling | the codes (greedy and seeded) against the reference |
@@ -139,7 +139,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | A2 audio encoder | done: 5e-6 (windowed oracle), 6.6e-7 (full attention against stock transformers) |
 | A3 decoder, prompt, greedy decode, parse | done: the prompt and the 30 generated ids identical, 0.6B and 1.7B |
 | A4 protocol, gateway, catalogue, registry, router, `coli`, long audio, tests | done: [qwen3-asr.md](qwen3-asr.md); on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
-| A5 Vulkan (encoder and decode on the chain) | open: decoding is 125 ms a token on the CPU |
+| A5 Vulkan (encoder and decode on the chain) | done: the decoder and the encoder's layers on the card, 20 times faster, same tokens |
 | T0 reference capture | done: `tools/qwen3_tts_ref.py`, the 0.6B CustomVoice reference (text ids, prefill, logits, 63 frames of codes, waveform) |
 | T1 codec decoder | done: the waveform from the reference's codes to 1.4e-6 |
 | T2 talker, code predictor, sampling | done: the prefill to 1.2e-7, the first logits to 2e-5, 0 of 1008 choices differ teacher forced, the codes identical free-running greedy |
