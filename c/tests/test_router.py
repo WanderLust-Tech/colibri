@@ -218,6 +218,18 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((status, body["model"], body["parts"]), (200, "music-m-colibri", 3))
         self.assertEqual(body["size"], len(raw))
 
+    def test_speech_is_routed_by_its_model_field_and_the_card_says_text_in(self):
+        rig = Rig(self, [entry("text-a"), entry("say-s", "speech")])
+        listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}
+        self.assertEqual(listing["say-s-colibri"]["capabilities"], ["speech"])                    # from the modality
+        self.assertEqual(listing["say-s-colibri"]["input_modalities"], ["text"])
+        self.assertEqual(listing["say-s-colibri"]["speech"], {})
+        status, _, _, body = rig.call("POST", "/v1/audio/speech", {"model": "say-s", "input": "hello"})
+        self.assertEqual((status, body["model"]), (200, "say-s-colibri"))
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle", "say-s-colibri": "ready"})
+        loaded = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}["say-s-colibri"]
+        self.assertEqual((loaded["state"], loaded["speech"]), ("loaded", {"sample_rate": 24000}))   # what its engine said
+
     def test_transcriptions_are_routed_by_their_model_field_and_the_card_says_audio_in(self):
         rig = Rig(self, [entry("text-a"), entry("hear-h", "transcription")])
         listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}

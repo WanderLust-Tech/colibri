@@ -47,6 +47,7 @@ FILES = [
     "acestep", "acestep.exe",
     "qwen3embed", "qwen3embed.exe",
     "qwen3asr", "qwen3asr.exe",
+    "qwen3tts", "qwen3tts.exe",
     "laya", "laya.exe",
     "gliner_decide", "gliner_decide.exe",
     "native_quant.o", "native_quant_parallel.o", "native_quant_dual.o",

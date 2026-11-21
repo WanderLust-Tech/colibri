@@ -535,7 +535,7 @@ cd colibri
         And for music, ACE-Step 1.5: a description and lyrics in, a 48 kHz stereo song out.
         And for search, Qwen3-Embedding: text in, a vector out, through OpenAI's embeddings route; and Qwen3-Reranker: a query and
         documents in, the documents sorted by how well they answer, through the rerank route Jina's and Cohere's clients use.
-        And for speech, Qwen3-ASR: audio in, text out, through the transcription route OpenAI's clients use.
+        And for speech, Qwen3-ASR: audio in, text out, through the transcription route OpenAI's clients use; and Qwen3-TTS, the other way: text in, a named speaker's voice out, through OpenAI's speech route.
         And for decisions, Laya and GLiNER2.5-Decide, with Clef on the Qwen3.6 engine: typed
         questions in, a probability per option out. Every language engine serves up to 16
         conversations at once, their next tokens decoded together.</p>

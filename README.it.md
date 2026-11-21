@@ -222,6 +222,7 @@ Hugging Face indica per ciascun repository.
 | **Qwen3-Embedding-0.6B**: da testo a vettori per la ricerca, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 testi da 24 token in 2,6 s (i9 a 24 core, CPU) |
 | **Qwen3-Reranker-0.6B**: ordina i documenti per quanto rispondono a una query, licenza Apache-2.0 (anche 4B e 8B) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documenti da circa 25 token in 10,6 s (i9 a 24 core, CPU) |
 | **Qwen3-ASR-0.6B**: da voce a testo in 30 lingue, licenza Apache-2.0 (anche 1.7B) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 s di parlato in 4,3 s (i9 a 24 core, CPU) |
+| **Qwen3-TTS-0.6B**: da testo a voce in 10 lingue con nove voci, licenza Apache-2.0 | `qwen3-tts-0.6b-customvoice` | 2.5 GB | 4 / 6 GB | CPU | 5 s di parlato in 17 s (i9 a 24 core, CPU) |
 
 **Modelli grandi, i cui expert vengono letti dal disco in streaming** (la
 velocità la decide il disco: un NVMe veloce è ciò che aiuta di più)
@@ -707,6 +708,7 @@ c/
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
 ├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
+├── qwen3tts.c            Qwen3-TTS  (make qwen3tts)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

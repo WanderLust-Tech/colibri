@@ -247,6 +247,17 @@ CATALOG = (
         license_note="Apache-2.0",
         post_install=(("qwen3_tokenizer", "tokenizer.json"),),
         prebuilt_since="2.4.0", doc="docs/qwen3-asr.md"),
+    CatalogModel(
+        id="qwen3-tts-0.6b-customvoice", family="qwen3_tts", name="Qwen3-TTS-0.6B-CustomVoice",
+        repo="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", disk_gb=2.5,
+        # docs/qwen3-tts.md: the talker, the code predictor and the codec decoder held as bf16 and f32 (2.3 GB resident); the cache and the
+        # codec's activations grow with the length of the speech (a minute is a few hundred MB).
+        ram_min_gb=4, ram_good_gb=6, dense_gb=2.5, rank=1, size_class="small",
+        modality="speech", summary="text to speech in 10 languages with nine named speakers (text in, audio out, not chat)",
+        license_note="Apache-2.0",
+        # the repository ships vocab.json and merges.txt, not the tokenizer.json the engine reads
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-tts.md"),
 )
 
 

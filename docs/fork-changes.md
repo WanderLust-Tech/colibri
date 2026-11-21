@@ -600,7 +600,31 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Tests:** `tests/test_asr_gateway.py` (32, a stub engine), `tests/test_speech_cli.py` (14), `tests/test_qwen3asr_real.py` (8, against the stored
   transformers answer and, with `QWEN3ASR_REF`, the stage tensors).
 - **Not done**: a Vulkan path, timestamps (the forced aligner), streaming; the models are not installed in `colibri-models` yet. Qwen3-TTS
-  (text to speech) is the other half of [qwen3-speech.md](qwen3-speech.md), not started.
+  (text to speech) is the other half of [qwen3-speech.md](qwen3-speech.md): section 2.32.
+
+### 2.32 Qwen3-TTS: text to speech (`feat/qwen3-speech`, 2026-11-21; on the branch only: not merged, pushed or deployed)
+
+- **The engine** (`c/qwen3tts.c`): the 0.6B CustomVoice in C, on the kernels and layer code ACE-Step uses: the prompt (role, language, speaker,
+  text through the text embedding and its projection), the talker (a 28-layer Qwen3 decoder that writes the first of 16 codes for each frame at
+  12.5 frames a second), the code predictor (5 layers, the other 15 codes), sampling as the reference (top-k 50, temperature 0.9, repetition
+  penalty 1.05) or greedy, and the codec's decoder (an 8-layer sliding-window transformer, two upsampling stages, a SnakeBeta vocoder; 1920
+  samples a frame, in pieces of 300 frames). A bf16 matrix-vector kernel for the decode steps and a smaller thread team for them
+  (`--decode-threads`). Held to the official `qwen-tts` package (`tools/qwen3_tts_ref.py`): prompt ids identical, prefill 1.2e-7, first logits
+  2e-5, **0 of 1008 choices differ** with the reference's codes teaching the run, the free-running greedy codes identical, the waveform 1.4e-6.
+  Through the gateway and back through Qwen3-ASR the speech reads as the input text, word for word.
+- **Around it**: `speech_engine.py` (the process wrapper, the route's rules, WAV, PCM and ffmpeg encoding), the gateway route
+  `POST /v1/audio/speech` (OpenAI's shape; OpenAI's voice names stand for speakers; `language` and `seed` as extensions; `speed` other than 1,
+  `instructions` and SSE refused with the field named; MP3, Opus, AAC and FLAC through ffmpeg, refused before any work when there is none), a
+  `qwen3_tts` family (the `talker_config` section, modality `speech`), the model card (`speech`), refusals on the other routes, a catalogue
+  entry with `tools/qwen3_tokenizer.py` as the post-install step, the router card and route, `coli speak`, `coli info`, Makefile, CI and release
+  lists, the READMEs and the site. The engine serves `SPEAK` lines and answers `AUDIO` ([qwen3-tts.md](qwen3-tts.md)).
+- **Measured** (24-core i9, CPU): 5.04 s of speech in 15.8 s of talker and predictor (about 250 ms a frame; the first dozen frames run at about
+  half that, not explained) and 1.4 s of codec; 2.3 GB resident. At 32 threads the decode loop took 346 ms a frame; the smaller team is the
+  fix, not a cure: real time needs about 80 ms.
+- **Tests:** `tests/test_tts_gateway.py` (45, a stub engine), `tests/test_speech_cli.py` (+11 for `coli speak`), `tests/test_router.py` (one),
+  `tests/test_qwen3tts_real.py` (10, against `tools/qwen3_tts_0.6b_reference.json`).
+- **Not done**: the 1.7B and style `instructions`, VoiceDesign, voice cloning (the Base models: the codec's encoder and a speaker encoder),
+  streaming, a Vulkan path; the model is not installed in `colibri-models` yet.
 
 ## 3. Planned and open
 

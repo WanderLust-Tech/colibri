@@ -19,11 +19,11 @@ parameters uses only a small part of itself for each token, so colibri keeps
 that part in RAM and reads the rest, the experts, from the disk when the model
 asks for them. Pure C, one file per model family, no GPU required.
 
-Seventeen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
+Eighteen engines run today. Eleven are for language models: **GLM-5.2/5.3**,
 **GLM-5.3-Flash**, **Inkling**, **Kimi K3**, **DeepSeek V4 Flash**,
 **DeepSeek V4.1 Flash**, **MiMo-V2.6 Flash** (and Pro), **Qwen3.8-Flash-Next**,
 **Qwen3.6** (which also runs Qwen3-Coder and the dense Qwen3.8-27B),
-**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings and ranks documents: **Qwen3-Embedding** and **Qwen3-Reranker**. One transcribes speech: **Qwen3-ASR**. Two answer decisions:
+**Gemma-4** (the 26B-A4B mixture of experts) and **OLMoE**. Two draw pictures: **Qwen-Image-2.1** and **Z-Image**. One makes music: **ACE-Step 1.5**. One makes embeddings and ranks documents: **Qwen3-Embedding** and **Qwen3-Reranker**. One transcribes speech: **Qwen3-ASR**. One speaks text: **Qwen3-TTS**. Two answer decisions:
 **Laya** and **GLiNER2.5-Decide**, with a third decision model, **Clef**, on the
 Qwen3.6 engine. [Which one for my machine](#which-model-for-my-machine)
 
@@ -213,6 +213,7 @@ and what is installed on the fork owner's machine.
 | **Qwen3-Embedding-0.6B**: text to vectors for search, Apache-2.0 licence (4B and 8B too) | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 texts of 24 tokens in 2.6 s (24-core i9, CPU) |
 | **Qwen3-Reranker-0.6B**: sorts documents by how well they answer a query, Apache-2.0 licence (4B and 8B too) | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 documents of about 25 tokens in 10.6 s (24-core i9, CPU) |
 | **Qwen3-ASR-0.6B**: speech to text in 30 languages, Apache-2.0 licence (1.7B too) | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 s of speech in 4.3 s (24-core i9, CPU) |
+| **Qwen3-TTS-0.6B**: text to speech in 10 languages with nine speakers, Apache-2.0 licence | `qwen3-tts-0.6b-customvoice` | 2.5 GB | 4 / 6 GB | CPU | 5 s of speech in 17 s (24-core i9, CPU) |
 
 **Large models, whose experts stream from the disk** (the disk sets the speed:
 a fast NVMe drive helps most)
@@ -469,6 +470,7 @@ with the last 30 turns as a trend.
 - **embeddings out** with Qwen3-Embedding on `POST /v1/embeddings`, in OpenAI's shape so the usual retrieval tools work: text in, a unit vector out, in batches, with an optional query instruction and a cut to fewer dimensions ([embeddings.md](docs/embeddings.md));
 - **rerank** with Qwen3-Reranker on `POST /v1/rerank` (and `/v2/rerank`), in the shape Jina's and Cohere's clients use: a query and a list of documents in, the list sorted best first with a 0 to 1 score each out, with `top_n` and an optional task instruction ([rerank.md](docs/rerank.md));
 - **speech to text** with Qwen3-ASR (0.6B and 1.7B) on `POST /v1/audio/transcriptions`, in the shape Whisper clients send, and `coli transcribe speech.wav`: 30 languages and 22 Chinese dialects, detected or forced with `language`, a `prompt` as context, up to 15 minutes a request; held to the official implementation stage by stage (the generated tokens are identical). [docs/qwen3-asr.md](docs/qwen3-asr.md)
+- **text to speech** with Qwen3-TTS (0.6B CustomVoice) on `POST /v1/audio/speech`, in OpenAI's shape, and `coli speak "Hello there."`: ten languages, nine named speakers (OpenAI's voice names stand for them), WAV or PCM, and MP3, Opus, AAC or FLAC with ffmpeg; the speech read back by Qwen3-ASR is the text that went in, and the codes match the official implementation choice by choice. About three and a half times slower than real time on the CPU. [docs/qwen3-tts.md](docs/qwen3-tts.md)
 - **music out** with ACE-Step 1.5 on `POST /v1/audio/music` and `coli music "calm piano"`:
   a song, with or without lyrics, as a 48 kHz stereo WAV, with a player in the dashboard; it also takes a clip in: a reference for
   the style, a cover of a song, a repaint of a stretch of one ([acestep.md](docs/acestep.md));
@@ -684,6 +686,7 @@ c/
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
 ├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
+├── qwen3tts.c            Qwen3-TTS  (make qwen3tts)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

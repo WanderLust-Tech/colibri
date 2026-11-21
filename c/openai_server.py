@@ -27,6 +27,7 @@ import image_engine                 # the qwenimage serve protocol, PNG and requ
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import embedding_engine             # the qwen3embed serve protocol and the request rules of POST /v1/embeddings and /v1/rerank
 import asr_engine                   # the qwen3asr serve protocol and POST /v1/audio/transcriptions rules for it
+import speech_engine                # the qwen3tts serve protocol and POST /v1/audio/speech rules for it
 import media_meta                   # the settings written inside a finished picture or song
 import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
@@ -6419,6 +6420,11 @@ def is_transcription_engine(engine):
     return getattr(engine, "modality", "text") == "transcription"
 
 
+def is_speech_engine(engine):
+    """True when the server fronts a speech-synthesis engine (Qwen3-TTS): decided by the engine object."""
+    return getattr(engine, "modality", "text") == "speech"
+
+
 def engine_purpose(engine):
     """What a model that is not the one asked for does, in the words a refusal uses ('it draws pictures (POST ...)')."""
     if is_image_engine(engine):
@@ -6431,6 +6437,8 @@ def engine_purpose(engine):
         return f"it ranks documents (POST {RERANK_ENDPOINT})"
     if is_transcription_engine(engine):
         return f"it transcribes speech (POST {TRANSCRIBE_ENDPOINT})"
+    if is_speech_engine(engine):
+        return f"it speaks text (POST {SPEECH_ENDPOINT})"
     if not engine_chats(engine):
         return "it is a decision model (POST /v1/systemone)"
     return "it is a chat model (POST /v1/chat/completions)"
@@ -6564,6 +6572,9 @@ def parse_multipart_music(content_type, raw):
 # base64 works too). A Gemma 4 E2B or E4B hears the file; a clip over what the model takes at once (30 s) is cut at its
 # quiet places and each piece is transcribed in turn.
 TRANSCRIBE_ENDPOINT = "/v1/audio/transcriptions"
+# POST /v1/audio/speech, OpenAI's shape (JSON: model, input, voice, response_format): the text spoken by a Qwen3-TTS speaker, the audio
+# in the body. Rules in speech_engine.py.
+SPEECH_ENDPOINT = "/v1/audio/speech"
 TRANSCRIBE_MAX_BODY = 25 << 20                    # OpenAI's own limit on the file
 TRANSCRIBE_MAX_SECONDS = 900                      # a quarter of an hour: 30+ pieces, each a full generation
 TRANSCRIBE_FORMATS = ("json", "text", "verbose_json")
@@ -6755,6 +6766,13 @@ class APIServer(ThreadingHTTPServer):
                                       "formats": list(asr_engine.FORMATS)}
             if info.get("device"):
                 entry["transcription"]["device"] = info["device"]
+        if is_speech_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["speech"] = {"sample_rate": info.get("sample_rate"), "speakers": list(info.get("speakers") or ()),
+                               "languages": list(info.get("languages") or ()), "formats": list(speech_engine.FORMATS),
+                               "voices": dict(speech_engine.OPENAI_VOICES), "max_input_chars": speech_engine.MAX_INPUT_CHARS}
+            if info.get("device"):
+                entry["speech"]["device"] = info["device"]
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -6800,6 +6818,8 @@ class APIServer(ThreadingHTTPServer):
             return ["rerank"]
         if is_transcription_engine(self.engine):
             return ["transcription"]
+        if is_speech_engine(self.engine):
+            return ["speech"]
         if is_image_engine(self.engine):
             # image_edit: the engine reported a vision tower and a VAE encoder (POST /v1/images/edits)
             edits = (getattr(self.engine, "info", None) or {}).get("edit") is True
@@ -7472,6 +7492,8 @@ class APIHandler(BaseHTTPRequestHandler):
                         payload["rerank"] = dict(getattr(self.server.engine, "info", None) or {})
                     if is_transcription_engine(self.server.engine):
                         payload["transcription"] = dict(getattr(self.server.engine, "info", None) or {})
+                    if is_speech_engine(self.server.engine):
+                        payload["speech"] = dict(getattr(self.server.engine, "info", None) or {})
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -7624,6 +7646,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` is a speech recognition model and "
                                     f"does not chat: POST {TRANSCRIBE_ENDPOINT} instead.",
                                "model", "unsupported_endpoint")
+            if is_speech_engine(self.server.engine) and path in TEXT_ENDPOINTS:
+                raise APIError(400, f"`{self.server.model_id}` is a speech synthesis model and "
+                                    f"does not chat: POST {SPEECH_ENDPOINT} instead.",
+                               "model", "unsupported_endpoint")
             if not engine_chats(self.server.engine) and path in GENERATING_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is a decision model: it answers typed "
                                     "questions with calibrated probabilities and does not generate "
@@ -7637,6 +7663,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.music_generation(body, request_id)
             elif path == TRANSCRIBE_ENDPOINT:
                 self.audio_transcription(body, request_id)
+            elif path == SPEECH_ENDPOINT:
+                self.audio_speech(body, request_id)
             elif path == "/v1/images/generations":
                 self.image_generation(body, request_id)
             elif path == "/v1/images/edits":
@@ -8102,7 +8130,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: it makes "
                                     f"music (POST {MUSIC_ENDPOINT}).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine):
+            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine) or is_speech_engine(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not generate images: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
@@ -8464,6 +8492,40 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, asr_engine.transcription_payload(request, result, seconds, self.server.model_id), request_id, headers)
 
+    # POST /v1/audio/speech: OpenAI's text-to-speech request, answered by a speech engine (Qwen3-TTS CustomVoice). The text is spoken in a
+    # named speaker's voice; the answer is the audio itself (wav, or raw pcm, or with ffmpeg mp3, opus, aac, flac). One request at a
+    # time under the scheduler's admission, like every engine: the speech takes a few times its own length on the CPU.
+    def audio_speech(self, body, request_id):
+        engine = self.server.engine
+        if not is_speech_engine(engine):
+            raise APIError(400, f"`{self.server.model_id}` does not speak: {engine_purpose(engine)}.", "model", "unsupported_endpoint")
+        try:
+            request = speech_engine.speech_request(body, getattr(engine, "info", None))
+        except speech_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        if request["format"] in speech_engine.NEEDS_FFMPEG and not speech_engine.ffmpeg_path():     # refuse before the work, not after it
+            raise APIError(400, speech_engine.FFMPEG_MISSING.format(fmt=request["format"]), "response_format", "invalid_value")
+        with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
+            if not engine.alive:
+                raise APIError(503, f"The speech synthesis engine is not running ({engine.dead or 'exited'}).",
+                               None, "engine_unavailable", "server_error")
+            try:
+                result = engine.speak(request["input"], speaker=request["speaker"], language=request["language"], seed=request["seed"],
+                                      greedy=request["greedy"])
+            except speech_engine.EmbeddingEngineError as error:
+                raise APIError(500, f"The speech synthesis engine failed: {error}", None, "engine_error", "server_error") from None
+        try:
+            audio = speech_engine.encode_audio(result["wav"], request["format"])
+        except speech_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        except (speech_engine.EmbeddingEngineError, ValueError, OSError, subprocess.SubprocessError) as error:
+            raise APIError(500, f"The audio could not be encoded: {error}", None, "engine_error", "server_error") from None
+        headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000)), "x-colibri-audio-seconds": f"{result['audio_seconds']:.3f}",
+                   "x-colibri-sample-rate": str(result["sample_rate"])}
+        if result["truncated"]:
+            headers["x-colibri-truncated"] = "true"
+        self.send_bytes(200, audio, speech_engine.CONTENT_TYPES[request["format"]], request_id, headers)
+
     # POST /v1/embeddings: OpenAI's embeddings request, answered by an embedding engine (Qwen3-Embedding). The vectors are
     # unit length; `dimensions` keeps the first N components and normalises again; `instruction` makes the inputs queries.
     def embeddings(self, body, request_id):
@@ -8525,7 +8587,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: it draws pictures "
                                     "(POST /v1/images/generations).",
                                "model", "unsupported_endpoint")
-            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine):
+            if is_embedding_engine(engine) or is_rerank_engine(engine) or is_transcription_engine(engine) or is_speech_engine(engine):
                 raise APIError(400, f"`{self.server.model_id}` does not make music: {engine_purpose(engine)}.",
                                "model", "unsupported_endpoint")
             if not engine_chats(engine):
@@ -9696,6 +9758,10 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
             runtime = asr_engine.TranscriptionEngine(engine, model, env=env)
             runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
             print(f"[asr] {model_id}: pieces of up to {runtime.info['piece_seconds']} s, {runtime.info['sample_rate']} Hz", file=sys.stderr)
+        elif family.modality == "speech":
+            runtime = speech_engine.SpeechEngine(engine, model, env=env)
+            runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
+            print(f"[tts] {model_id}: {len(runtime.info.get('speakers') or ())} speakers, {runtime.info['sample_rate']} Hz", file=sys.stderr)
         elif family.modality == "audio":
             # The music engine speaks the image engine's kind of protocol (lines of JSON,
             # PCM frames): its own process class, no byte stream.
@@ -9724,7 +9790,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
                       file=sys.stderr)
                 sys.exit(1)
         server.engine = runtime
-        if family.modality not in ("image", "audio", "embedding", "rerank", "transcription"):
+        if family.modality not in ("image", "audio", "embedding", "rerank", "transcription", "speech"):
             # Said once at start-up, so a checkpoint that declares a tower it does
             # not carry is visible in the log and not only in a client's 400.
             print(f"[gateway] input modalities: {', '.join(server.input_modalities())}"

@@ -140,7 +140,13 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | A3 decoder, prompt, greedy decode, parse | done: the prompt and the 30 generated ids identical, 0.6B and 1.7B |
 | A4 protocol, gateway, catalogue, registry, router, `coli`, long audio, tests | done: [qwen3-asr.md](qwen3-asr.md); on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
 | A5 Vulkan (encoder and decode on the chain) | open: decoding is 125 ms a token on the CPU |
-| T0 to T5 (Qwen3-TTS) | not started |
+| T0 reference capture | done: `tools/qwen3_tts_ref.py`, the 0.6B CustomVoice reference (text ids, prefill, logits, 63 frames of codes, waveform) |
+| T1 codec decoder | done: the waveform from the reference's codes to 1.4e-6 |
+| T2 talker, code predictor, sampling | done: the prefill to 1.2e-7, the first logits to 2e-5, 0 of 1008 choices differ teacher forced, the codes identical free-running greedy |
+| T3 protocol, gateway, catalogue, registry, router, `coli speak`, tests | done: [qwen3-tts.md](qwen3-tts.md); the speech comes back through Qwen3-ASR as the input text, word for word; on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
+| T4 1.7B, VoiceDesign (and style `instructions`) | open |
+| T5 cloning (codec encoder, speaker encoder) | open |
+| T6 speed (Vulkan or more CPU work) | open: 130 to 250 ms a frame on the CPU, real time needs about 80 |
 
 Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend
 use; this engine implements the windows and can reproduce the stock behaviour (`AS_FULL_ATTN=1`).

@@ -152,6 +152,7 @@ Starting colibri
 | **Qwen3-Embedding-0.6B**：文本转检索用向量，Apache-2.0 许可（另有 4B 和 8B） | `qwen3-embedding-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 段各 24 个 token 的文本用时 2.6 秒（24 核 i9，CPU） |
 | **Qwen3-Reranker-0.6B**：按文档回答查询的程度排序，Apache-2.0 许可（另有 4B 和 8B） | `qwen3-reranker-0.6b` | 1.2 GB | 2 / 4 GB | CPU | 64 篇约 25 个 token 的文档用时 10.6 秒（24 核 i9，CPU） |
 | **Qwen3-ASR-0.6B**：30 种语言的语音转文字，Apache-2.0 许可（另有 1.7B） | `qwen3-asr-0.6b` | 1.9 GB | 3 / 5 GB | CPU | 11 秒语音用时 4.3 秒（24 核 i9，CPU） |
+| **Qwen3-TTS-0.6B**：10 种语言的文字转语音，9 位说话人，Apache-2.0 许可 | `qwen3-tts-0.6b-customvoice` | 2.5 GB | 4 / 6 GB | CPU | 5 秒语音用时 17 秒（24 核 i9，CPU） |
 
 **大模型，专家从磁盘流式读取**（速度由磁盘决定：快速的 NVMe 硬盘帮助最大）
 
@@ -430,6 +431,7 @@ c/
 ├── acestep.c             ACE-Step 1.5  (make acestep)
 ├── qwen3embed.c          Qwen3-Embedding and Qwen3-Reranker  (make qwen3embed)
 ├── qwen3asr.c            Qwen3-ASR  (make qwen3asr)
+├── qwen3tts.c            Qwen3-TTS  (make qwen3tts)
 ├── laya.c                Laya  (make laya)
 ├── gliner_decide.c       GLiNER2.5-Decide  (make gliner_decide)
 │

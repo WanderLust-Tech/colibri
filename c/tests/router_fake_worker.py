@@ -58,7 +58,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def caps(self):
         return {"text": ["chat", "systemone"], "image": ["image_generation"], "audio": ["music_generation"],
-                "embedding": ["embeddings"], "rerank": ["rerank"], "transcription": ["transcription"]}[args.modality]
+                "embedding": ["embeddings"], "rerank": ["rerank"], "transcription": ["transcription"], "speech": ["speech"]}[args.modality]
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
@@ -76,6 +76,8 @@ class Handler(BaseHTTPRequestHandler):
                 item["rerank"] = {"max_tokens": 64}
             if args.modality == "transcription":
                 item["transcription"] = {"sample_rate": 16000}
+            if args.modality == "speech":
+                item["speech"] = {"sample_rate": 24000}
             return self.reply(200, {"object": "list", "data": [item],
                                     "models": [{"name": args.id, "description": "fake", "release_date": "2026-01-01"}]})
         if self.path.split("?")[0] == "/profile":

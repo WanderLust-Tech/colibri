@@ -46,7 +46,8 @@ def choose_model(api, capability, wanted, hint):
     for item in (body or {}).get("data") or []:
         if capability in (item.get("capabilities") or []):
             return item["id"]
-    installs = {"embeddings": "qwen3-embedding-0.6b", "rerank": "qwen3-reranker-0.6b", "transcription": "qwen3-asr-0.6b"}
+    installs = {"embeddings": "qwen3-embedding-0.6b", "rerank": "qwen3-reranker-0.6b", "transcription": "qwen3-asr-0.6b",
+                "speech": "qwen3-tts-0.6b-customvoice"}
     raise Refused(f"the server has no model that {hint}: coli model install {installs.get(capability, 'MODEL')}")
 
 

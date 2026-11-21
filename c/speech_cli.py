@@ -74,3 +74,61 @@ def transcribe(a, api, upload, C):
             print(f"  {C.dim}{os.path.basename(path)}  ({heard}){C.r}")
         print(text if text else f"  {C.dim}(nothing was heard in {excerpt(os.path.basename(path), 40)}){C.r}")
     return status
+
+
+FORMAT_OF_SUFFIX = {".wav": "wav", ".mp3": "mp3", ".flac": "flac", ".opus": "opus", ".ogg": "opus", ".aac": "aac", ".pcm": "pcm"}
+SUFFIX_OF_FORMAT = {"wav": ".wav", "mp3": ".mp3", "flac": ".flac", "opus": ".opus", "aac": ".aac", "pcm": ".pcm"}
+
+
+def speak(a, api, fetch, C):
+    """coli speak TEXT... [--voice NAME] [--language CODE] [--out FILE] [--format F] [--seed N] [--model ID]
+
+    `fetch(path, body)` is coli's POST that hands back (status, the raw body bytes, the headers as a dict), or (None, None, None) when
+    nothing answers. The audio goes to --out (speech.wav by default; the file's suffix picks the format when --format is not given);
+    the words are the arguments, or standard input when the only argument is -."""
+    words = " ".join(a.text or []).strip()
+    if words == "-":
+        words = sys.stdin.read().strip()
+    if not words:
+        print(f"  {C.yel}usage: coli speak TEXT [--voice ryan] [--language en] [--out speech.wav] [--format wav|mp3|flac|opus|aac|pcm] [--seed N] [--model ID]{C.r}")
+        return 1
+    out = a.out or "speech" + SUFFIX_OF_FORMAT.get(a.format or "wav", ".wav")
+    fmt = a.format or FORMAT_OF_SUFFIX.get(os.path.splitext(out)[1].lower(), "wav")
+    try:
+        model = choose_model(api, "speech", a.model, "speaks text")
+    except Refused as why:
+        print(f"  {C.yel}{why}{C.r}")
+        return 1
+    body = {"model": model, "input": words, "response_format": fmt}
+    if a.voice:
+        body["voice"] = a.voice
+    if a.language:
+        body["language"] = a.language
+    if a.seed is not None:
+        body["seed"] = a.seed
+    status, data, headers = fetch("/v1/audio/speech", body)
+    if status is None:
+        print(f"  {C.yel}nothing answers on that host and port: start the server (coli service start, or coli router){C.r}")
+        return 1
+    if status == 401:
+        print(f"  {C.yel}the server wants an API key: --api-key, or COLI_API_KEY{C.r}")
+        return 1
+    if status != 200:
+        try:
+            error = json.loads(data or b"null")
+            error = error.get("error") if isinstance(error, dict) else None
+            message = error.get("message") if isinstance(error, dict) else error
+        except ValueError:
+            message = None
+        print(f"  {C.yel}the server said {status}: {message or 'no reason given'}{C.r}")
+        return 1
+    try:
+        with open(out, "wb") as handle:
+            handle.write(data)
+    except OSError as error:
+        print(f"  {C.yel}cannot write {out}: {error.strerror or error}{C.r}")
+        return 1
+    seconds = (headers or {}).get("x-colibri-audio-seconds")
+    said = f"{float(seconds):.1f} s of speech, " if seconds else ""
+    print(f"  {out}  ({said}{len(data) / 1e3:.0f} kB, {fmt}){C.dim}{'  [cut short: the text was longer than one piece]' if (headers or {}).get('x-colibri-truncated') else ''}{C.r}")
+    return 0

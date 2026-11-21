@@ -603,6 +603,20 @@ behavior.
 > its system prompt and tool catalog are large, and on a disk-streaming CPU path
 > that is a long silent wait before the first token. Read it before you connect.
 
+## Text to speech (`/v1/audio/speech`)
+
+When the served model is a **Qwen3-TTS** (`qwen3-tts-0.6b`), `POST /v1/audio/speech` speaks a text in a named speaker's voice, in OpenAI's shape:
+`input` (up to 4096 characters), `voice`, `response_format`. The answer is the audio itself: a WAV by default, `pcm` (16-bit mono, 24 kHz), and
+`mp3`, `opus`, `aac` or `flac` when the server has ffmpeg. `voice` is one of the model's nine speakers or one of OpenAI's names, which stand for
+speakers; `language` and `seed` are extensions. `speed` other than 1, `instructions` and `stream_format` `sse` are refused with the field named.
+
+```sh
+curl http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+     -d '{"model": "qwen3-tts-0.6b", "input": "Hello there.", "voice": "alloy", "response_format": "mp3"}' -o hello.mp3
+```
+
+The speakers, the languages, the mapping of OpenAI's names, the speed and how it was checked are in [qwen3-tts.md](qwen3-tts.md).
+
 ## Speech to text (`/v1/audio/transcriptions`)
 
 **Qwen3-ASR** (`qwen3-asr-0.6b`, `qwen3-asr-1.7b`) is the dedicated recogniser: it takes the fields below, detects the language (or is told it

@@ -339,6 +339,12 @@ def transcription_refusal(family):
             f"  Start it with: coli serve --model <dir>   (or install it in coli router: coli model install qwen3-asr-0.6b)\n"
             f"  then POST /v1/audio/transcriptions (docs/qwen3-asr.md)")
 
+def speech_refusal(family):
+    """What the chatting commands say about a speech synthesis model, and where to go."""
+    return (f"{C.yel}{family.display_name} is a speech synthesis model:{C.r} it turns text into speech and does not chat.\n"
+            f"  Start it with: coli serve --model <dir>   (or install it in coli router: coli model install qwen3-tts-0.6b-customvoice)\n"
+            f"  then POST /v1/audio/speech (docs/qwen3-tts.md), or: coli speak \"text\"")
+
 def image_banner_line(model):
     """Banner line of an image model: name, what it does, bytes on disk. Sizes
     come from stat() alone; the banner must never parse a header."""
@@ -603,6 +609,9 @@ def env_for_engine(a, arch, plan=None):
     if family.modality == "transcription" and getattr(a, "ctx", None):
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a speech recognition model has "
                  f"no context window (the audio's length sets the prompt, up to 20 minutes in one piece)")
+    if family.modality == "speech" and getattr(a, "ctx", None):
+        sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a speech synthesis model has "
+                 f"no context window (the text sets the prompt, up to 4096 characters a request)")
     if family.modality == "decision" and getattr(a, "ctx", None):
         reads, knob = DECISION_LENGTH.get(family.id, ("what its engine allows", "its engine's own variable"))
         sys.exit(f"{C.yel}--ctx does not apply to {family.display_name}:{C.r} a decision model reads "
@@ -735,7 +744,7 @@ def env_for_engine(a, arch, plan=None):
             sys.exit(f"{C.yel}--vram needs the CUDA build:{C.r} the engine binary is CPU-only")
         env["COLI_CUDA"] = "1"
         env["CUDA_EXPERT_GB"] = str(vram)
-    if getattr(a, "auto_tier", False) and family.modality in ("image", "audio", "decision", "embedding", "rerank", "transcription"):
+    if getattr(a, "auto_tier", False) and family.modality in ("image", "audio", "decision", "embedding", "rerank", "transcription", "speech"):
         # The tier plan places experts and KV state; an image or decision model
         # has neither, and build_plan would stop on "no safetensors shards".
         print(f"  {C.dim}[PLAN] --auto-tier has nothing to place for "
@@ -1384,6 +1393,9 @@ def cmd_info(a):
     if family is not None and family.modality == "transcription":
         info_transcription_model(a, resolved, row)
         return
+    if family is not None and family.modality == "speech":
+        info_speech_model(a, resolved, row)
+        return
     if os.path.exists(cfgp):
         c=json.load(open(cfgp))
         # Multimodal wrappers such as Qwen3.8 keep the language architecture
@@ -1484,6 +1496,26 @@ def info_transcription_model(a, resolved, row):
                  "detected or forced with `language`")
     row("budget", "up to 20 minutes in one piece (a longer file is cut at its quietest place); the gateway takes 15 minutes a request")
     row("use", "coli serve --model DIR, then POST /v1/audio/transcriptions (docs/qwen3-asr.md); coli transcribe FILE; coli router lists it beside the others")
+
+def info_speech_model(a, resolved, row):
+    """`coli info` for a Qwen3-TTS checkpoint: its parts, its weight on disk, what it serves."""
+    cfg = resolved.family_config
+    name, scale = display_for(resolved)
+    kind = resolved.config.get("tts_model_type") or "custom_voice"
+    row("model", a.model)
+    row("type", f"{name}{' · ' + scale if scale else ''} · speech synthesis ({kind}) · talker {cfg.get('num_hidden_layers')} layers x "
+                f"{cfg.get('hidden_size')}, 16 codebooks at 12.5 frames a second")
+    disk = 0
+    for dirpath, _dirs, files in os.walk(a.model):
+        for entry in files:
+            if entry.endswith(".safetensors"):
+                disk += os.path.getsize(os.path.join(dirpath, entry))
+    row("weights", f"{disk/1e9:.1f} GB on disk (the talker and the codec's decoder), held as bf16 and f32 in RAM")
+    spk = sorted((cfg.get("spk_id") or {}).keys())
+    if spk:
+        row("speakers", ", ".join(spk))
+    row("speaks", "24 kHz mono; " + ", ".join(sorted((cfg.get("codec_language_id") or {}).keys())))
+    row("use", "coli serve --model DIR, then POST /v1/audio/speech (docs/qwen3-tts.md); coli speak TEXT; coli router lists it beside the others")
 
 def info_music_model(a, family, row):
     """`coli info` for a text-to-music checkpoint: its parts and their weight on disk, what it
@@ -1783,7 +1815,7 @@ def cmd_tune(a):
     # family it then mis-dispatched.
     family=resolve_model(a.model).descriptor
     arch=family.id
-    if family.modality in ("image","audio","decision","embedding","rerank","transcription"):
+    if family.modality in ("image","audio","decision","embedding","rerank","transcription","speech"):
         sys.exit(f"{C.yel}coli tune measures text engines;{C.r} {family.display_name} has no "
                  f"expert cache or decode loop to tune")
     if not family.has_gateway_adapter:
@@ -1862,6 +1894,8 @@ def cmd_run(a):
         sys.exit(rerank_refusal(family))
     if family.modality=="transcription":
         sys.exit(transcription_refusal(family))
+    if family.modality=="speech":
+        sys.exit(speech_refusal(family))
     if not family.has_cli_adapter:
         sys.exit(f"{C.yel}coli run is not wired for {family.display_name};{C.r} "
                  f"use coli chat or coli serve")
@@ -3284,6 +3318,8 @@ def cmd_chat(a):
         sys.exit(rerank_refusal(family))
     if family.modality=="transcription":
         sys.exit(transcription_refusal(family))
+    if family.modality=="speech":
+        sys.exit(speech_refusal(family))
     if family.modality=="audio":
         sys.exit(f"{C.yel}coli chat does not make music;{C.r} use: coli music \"calm piano\" "
                  f"(or coli serve, POST /v1/audio/music)")
@@ -3830,6 +3866,27 @@ def _api_upload(a, path, fields, filename, data, timeout=900):
         except ValueError: return error.code,None
     except (urllib.error.URLError,OSError):
         return None,None
+
+def _api_fetch(a, path, body, timeout=900):
+    """(status, raw body bytes, headers as a lower-cased dict) of a JSON POST whose answer is not JSON (audio), or (None, None, None)."""
+    import urllib.error, urllib.request
+    req=urllib.request.Request(f"http://{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}{path}",data=json.dumps(body).encode(),method="POST")
+    req.add_header("Content-Type","application/json")
+    if getattr(a,"api_key",None): req.add_header("Authorization",f"Bearer {a.api_key}")
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as r:
+            return r.status,r.read(),{k.lower():v for k,v in r.headers.items()}
+    except urllib.error.HTTPError as error:
+        return error.code,error.read(),{k.lower():v for k,v in error.headers.items()}
+    except (urllib.error.URLError,OSError):
+        return None,None,None
+
+def cmd_speak(a):
+    """coli speak TEXT... : speech from a running server's speech synthesis model, written to a file (speech_cli.py, docs/qwen3-tts.md)."""
+    banner("speak")
+    import retrieval_cli, speech_cli
+    return speech_cli.speak(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
+                            lambda path,body:_api_fetch(a,path,body),C)
 
 def cmd_transcribe(a):
     """coli transcribe FILE... : text from a running server's speech recognition model (speech_cli.py, docs/qwen3-asr.md)."""
@@ -4688,6 +4745,16 @@ def main():
     ptr.add_argument("--json",action="store_true",help="print the server's answer (verbose_json) as it is")
     ptr.add_argument("--host",default="127.0.0.1"); ptr.add_argument("--port",type=int,default=None)
     ptr.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    psp=sub.add_parser("speak",help="turn text into speech with the server's speech synthesis model (Qwen3-TTS)")
+    psp.add_argument("text",nargs="*",metavar="TEXT",help="the words to speak (- reads standard input; up to 4096 characters)")
+    psp.add_argument("--voice",default=None,metavar="NAME",help="the speaker (ryan, vivian, serena, ...; default ryan; coli info lists them)")
+    psp.add_argument("--language",default=None,metavar="CODE",help="the language (en, zh, ... or a name); without it the model decides")
+    psp.add_argument("--out",default=None,metavar="FILE",help="where to write the audio (default speech.wav; the suffix picks the format)")
+    psp.add_argument("--format",default=None,choices=("wav","mp3","flac","opus","aac","pcm"),help="the audio format (mp3, flac, opus and aac need ffmpeg on the server)")
+    psp.add_argument("--seed",type=int,default=None,help="repeat the same speech by giving the same seed")
+    psp.add_argument("--model",default=None,help="the speech synthesis model (default: the first the server lists)")
+    psp.add_argument("--host",default="127.0.0.1"); psp.add_argument("--port",type=int,default=None)
+    psp.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     prr=sub.add_parser("rerank",help="rank documents against a query with the server's reranking model")
     prr.add_argument("query",nargs="?",default=None,help="the question or search words")
     prr.add_argument("documents",nargs="*",metavar="DOCUMENT",help="the documents to rank (- reads lines from standard input)")
@@ -4799,7 +4866,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

@@ -1981,6 +1981,42 @@ FAMILIES = (
         tokenizer_file="tokenizer.json",
     ),
     FamilyDescriptor(
+        id="qwen3_tts",
+        # A Qwen3-TTS checkpoint (0.6B, 1.7B): config.json says model_type "qwen3_tts", with the talker's sizes under talker_config and
+        # the codec's decoder in speech_tokenizer/. Text in, speech out: POST /v1/audio/speech.
+        model_types=("qwen3_tts",),
+        display_name="Qwen3-TTS",
+        display_scale="",
+        display_variants=(
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-TTS", "0.6B", model_id="qwen3-tts-0.6b"),
+            DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28)), "Qwen3-TTS", "1.7B", model_id="qwen3-tts-1.7b"),
+        ),
+        engine_artifact="qwen3tts",
+        engine_aliases=(),
+        engine_group="qwen3tts",
+        internal_arch="qwen3_tts",
+        build_target="qwen3tts",
+        process_names=("qwen3tts",),
+        default_model_id="qwen3-tts",
+        cli_adapter="qwen3_tts",
+        gateway_adapter="qwen3_tts",
+        planner_id="qwen3_tts",
+        planner_geometry=None,
+        planner_unsupported_reason=(
+            "a speech synthesis model has no experts: its whole size is its weights, read once for every frame of speech"),
+        expert_inventory=lambda _name, _size, _config, _dtype=None: (),
+        config_section="talker_config",
+        # One request at a time; no context window to set (the text's length decides the prompt) and no output budget of its own:
+        # the limits exist because every descriptor has them.
+        limits=FamilyLimits(1, 1, 1, 1, 1, 0, ""),
+        capabilities=FamilyCapabilities(False, False, False, False),
+        has_gateway_adapter=True,
+        has_cli_adapter=True,
+        supports_accelerator=False,
+        modality="speech",
+        tokenizer_file="tokenizer.json",
+    ),
+    FamilyDescriptor(
         id="laya",
         # A Laya checkpoint has no config.json at its root: resolve_model reads
         # rl_agent_config.json and the encoder's own config.json, and names it
@@ -2095,7 +2131,7 @@ def _build_registry(families):
                 not isinstance(family.has_cli_adapter, bool) or
                 not isinstance(family.tune_prompt_template, str) or
                 "{prompt}" not in family.tune_prompt_template or
-                family.modality not in ("text", "image", "audio", "decision", "embedding", "rerank", "transcription") or
+                family.modality not in ("text", "image", "audio", "decision", "embedding", "rerank", "transcription", "speech") or
                 family.capabilities.decision != (family.modality == "decision") or
                 not isinstance(family.tokenizer_file, str) or not family.tokenizer_file or
                 not isinstance(family.checkpoint_files, tuple) or
@@ -2325,6 +2361,10 @@ def resolve_model(model_dir):
         # text_config families' are (the display variants then match nothing and the family's own model id is used).
         thinker = config.get("thinker_config")
         inner = thinker.get("text_config") if isinstance(thinker, dict) else None
+        family_config = inner if isinstance(inner, dict) else config
+    elif family.config_section == "talker_config":
+        # Qwen3-TTS keeps the talker's sizes in talker_config; read as it stands when the section is missing (see above)
+        inner = config.get("talker_config")
         family_config = inner if isinstance(inner, dict) else config
     head = ""
     for candidate in DECISION_HEADS:

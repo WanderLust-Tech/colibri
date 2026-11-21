@@ -62,7 +62,7 @@ or hide, "JSON mode" is `response_format` held to a grammar token by token ([jso
 | Kimi K3 | yes | yes | no | no | no | no | text only |
 | OLMoE | no | no | no | no | no | no | small, to learn the tools on |
 
-Qwen-Image-2.1, Z-Image-Turbo, ACE-Step, Qwen3-ASR, the embedding and reranking models and the decision models do not chat; section 4 and
+Qwen-Image-2.1, Z-Image-Turbo, ACE-Step, Qwen3-ASR, Qwen3-TTS, the embedding and reranking models and the decision models do not chat; section 4 and
 after.
 
 ## 3. Chat models
@@ -165,7 +165,17 @@ Both Apache-2.0. `POST /v1/audio/transcriptions` in the shape Whisper clients se
 `verbose_json`), up to 15 minutes and 25 MB a request (the engine takes 20 minutes in one piece); `coli transcribe FILE` from the terminal.
 Gemma 4's E2B and E4B also transcribe on the same route, as a chat model asked to write down what it hears. Not installed here yet.
 
-## 8. Decision models
+## 8. Text to speech
+
+| Model | `--model` / install id | Gives | Download | RAM | Speed here (CPU) | Page |
+|---|---|---|---|---|---|---|
+| Qwen3-TTS-0.6B-CustomVoice | `qwen3-tts-0.6b-customvoice` | 24 kHz speech in 10 languages, nine named speakers (a dialect for two of them) | 2.5 GB | 4 / 6 GB | 5 s of speech in about 17 s (about 3.5 times slower than real time) | [qwen3-tts.md](qwen3-tts.md) |
+
+Apache-2.0. `POST /v1/audio/speech` in OpenAI's shape (`input`, `voice`, `response_format`; OpenAI's voice names stand for speakers; `language`
+and `seed` are extensions), WAV by default, PCM, and MP3, Opus, AAC and FLAC with ffmpeg; `coli speak "text"` from the terminal. No style
+instructions, voice design or cloning yet (the 1.7B and the Base models are not built). Not installed here yet.
+
+## 9. Decision models
 
 They answer typed questions about a state (`choice`, `score`, `noul`) with calibrated probabilities in one forward pass, and never
 write text. Reached through `POST /v1/systemone` ([systemone.md](systemone.md)). The chat models above also answer it.
@@ -176,12 +186,13 @@ write text. Reached through `POST /v1/systemone` ([systemone.md](systemone.md)).
 | GLiNER2.5-Decide (fastino) | 340M, a DeBERTa-v3-large encoder; intent, routing, sentiment, urgency, moderation | 1.95 GB | 1.9 GB | CPU | 294 ms a question | [gliner_decide.md](gliner_decide.md) |
 | Clef (Cloudflare) | Qwen3.8-27B with a decision head; it also chats | 55 GB, 52 GB converted | 19 GB int4 to 55 GB f16 | CPU | 20.4 s a request (int8) | [clef.md](clef.md) |
 
-## 9. Which route takes which model
+## 10. Which route takes which model
 
 | Route | Models |
 |---|---|
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/messages` | every chat model (section 3) |
 | `POST /v1/audio/transcriptions` | Qwen3-ASR 0.6B and 1.7B (a dedicated recogniser); Gemma 4 E2B and E4B (a chat model asked to transcribe) |
+| `POST /v1/audio/speech` | Qwen3-TTS-0.6B-CustomVoice |
 | `POST /v1/images/generations` | Qwen-Image-2.1, Z-Image-Turbo |
 | `POST /v1/images/edits` | Qwen-Image-2.1 |
 | `POST /v1/audio/music` | ACE-Step 1.5 |
@@ -191,7 +202,7 @@ write text. Reached through `POST /v1/systemone` ([systemone.md](systemone.md)).
 
 A model sent to a route it does not serve answers 400 with a one-line reason. The full request shapes are in [api.md](api.md).
 
-## 10. Keeping this page right
+## 11. Keeping this page right
 
 When a model is added or changes, these places move with it: its `CatalogModel` in `c/setup_catalog.py` and its family in
 `c/family_registry.py` (the tests in `c/tests/test_setup_catalog.py` hold the two together), the family's own page, the README's

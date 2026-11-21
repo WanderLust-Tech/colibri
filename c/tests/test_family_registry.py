@@ -1061,6 +1061,7 @@ class FamilyRegistryTest(unittest.TestCase):
             "ace_step": "hello {world}",
             "qwen3_embedding": "hello {world}",
             "qwen3_asr": "hello {world}",
+            "qwen3_tts": "hello {world}",
             "qwen3_reranker": "hello {world}",
             # A decision model answers questions; it has no prompt to replay.
             "laya": "hello {world}",

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import speech_cli  # noqa: E402
 from test_asr_gateway import KEY, MODEL_ID, GatewayHarness, multipart, wav_bytes  # noqa: E402
+import test_tts_gateway  # noqa: E402
 
 
 class Plain:
@@ -168,3 +169,129 @@ class TranscribeCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def fetcher(port, key=KEY):
+    """coli's _api_fetch, for a gateway on `port`: (status, raw body, headers) of a JSON POST."""
+    def fetch(path, body):
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(), headers=headers, method="POST")
+        try:
+            with urlopen(req, timeout=60) as response:
+                return response.status, response.read(), {k.lower(): v for k, v in response.headers.items()}
+        except HTTPError as error:
+            return error.code, error.read(), {k.lower(): v for k, v in error.headers.items()}
+        except (URLError, OSError):
+            return None, None, None
+    return fetch
+
+
+def speak_args(*words, **kw):
+    base = dict(text=list(words), voice=None, language=None, out=None, format=None, seed=None, model=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+class SpeakCommandTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = test_tts_gateway.GatewayHarness(model_id=test_tts_gateway.MODEL_ID)
+        api, _upload = clients(cls.gw.port)
+        cls.api, cls.fetch = staticmethod(api), staticmethod(fetcher(cls.gw.port))
+        cls.tmp = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.close()
+        cls.tmp.cleanup()
+
+    def run_command(self, a, api=None, fetch=None):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = speech_cli.speak(a, api or self.api, fetch or self.fetch, Plain)
+        return code, out.getvalue(), err.getvalue()
+
+    def path(self, name):
+        return os.path.join(self.tmp.name, name)
+
+    def test_the_audio_is_written_and_the_length_said(self):
+        out = self.path("a.wav")
+        code, text, _ = self.run_command(speak_args("hello", "there", out=out))
+        self.assertEqual(code, 0, text)
+        self.assertIn("a.wav", text)
+        self.assertIn("0.6 s of speech", text)
+        self.assertEqual(test_tts_gateway.echo_of(Path(out).read_bytes()), "ryan|auto|0|0|0")
+
+    def test_the_voice_the_language_and_the_seed_go_to_the_server(self):
+        out = self.path("b.wav")
+        code, text, _ = self.run_command(speak_args("hello there", voice="vivian", language="fr", seed=5, out=out))
+        self.assertEqual(code, 0, text)
+        self.assertEqual(test_tts_gateway.echo_of(Path(out).read_bytes()), "vivian|french|5|0|0")
+
+    def test_the_suffix_picks_the_format_and_a_flag_overrides_it(self):
+        out = self.path("c.pcm")
+        self.assertEqual(self.run_command(speak_args("hello there", out=out))[0], 0)
+        self.assertEqual(len(Path(out).read_bytes()), int(len("hello there") * 0.05 * 24000) * 2)
+        out = self.path("d.dat")
+        self.assertEqual(self.run_command(speak_args("hello there", out=out, format="pcm"))[0], 0)
+        self.assertEqual(len(Path(out).read_bytes()), int(len("hello there") * 0.05 * 24000) * 2)
+
+    def test_the_default_file_name_follows_the_format(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            self.assertEqual(self.run_command(speak_args("hello there"))[0], 0)
+            self.assertEqual(self.run_command(speak_args("hello there", format="pcm"))[0], 0)
+        finally:
+            os.chdir(cwd)
+        self.assertTrue(os.path.exists(self.path("speech.wav")))
+        self.assertTrue(os.path.exists(self.path("speech.pcm")))
+
+    def test_the_words_may_come_from_standard_input(self):
+        out = self.path("e.wav")
+        stdin = sys.stdin
+        sys.stdin = io.StringIO("read from the pipe\n")
+        try:
+            code, _text, _ = self.run_command(speak_args("-", out=out))
+        finally:
+            sys.stdin = stdin
+        self.assertEqual(code, 0)
+        self.assertAlmostEqual(len(test_tts_gateway.read_wav(Path(out).read_bytes())[2]), int(len("read from the pipe") * 0.05 * 24000), delta=1)
+
+    def test_no_words_is_a_usage_line(self):
+        code, text, _ = self.run_command(speak_args())
+        self.assertEqual(code, 1)
+        self.assertIn("usage: coli speak", text)
+
+    def test_the_servers_reason_is_shown_and_nothing_is_written(self):
+        out = self.path("f.wav")
+        code, text, _ = self.run_command(speak_args("hello", voice="morgan", out=out))
+        self.assertEqual(code, 1)
+        self.assertIn("the server said 400", text)
+        self.assertIn("voice", text)
+        self.assertFalse(os.path.exists(out))
+
+    def test_a_server_that_is_not_there(self):
+        code, text, _ = self.run_command(speak_args("hello"), api=lambda *a, **k: (None, None), fetch=lambda *a: (None, None, None))
+        self.assertEqual(code, 1)
+        self.assertIn("nothing answers", text)
+
+    def test_a_server_with_no_speech_model_says_how_to_get_one(self):
+        def api(method, path, body=None):
+            return 200, {"data": [{"id": "chat-model", "capabilities": ["chat"]}]}
+        code, text, _ = self.run_command(speak_args("hello"), api=api)
+        self.assertEqual(code, 1)
+        self.assertIn("coli model install qwen3-tts-0.6b-customvoice", text)
+
+    def test_a_wrong_key_is_said(self):
+        _api, _ = clients(self.gw.port, key="wrong")
+        code, text, _ = self.run_command(speak_args("hello"), api=_api, fetch=fetcher(self.gw.port, key="wrong"))
+        self.assertEqual(code, 1)
+        self.assertIn("API key", text)
+
+    def test_an_unwritable_path_is_said(self):
+        code, text, _ = self.run_command(speak_args("hello", out=self.path("no/such/dir/x.wav")))
+        self.assertEqual(code, 1)
+        self.assertIn("cannot write", text)
