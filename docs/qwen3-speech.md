@@ -69,6 +69,42 @@ after one character, 97 ms).
 - **Speech codec** (`Qwen3-TTS-Tokenizer-12Hz`, 682 MB): 12.5 Hz, 16 quantizers of 2048 entries; a lightweight causal ConvNet decoder (no
   DiT) turns the 16 codes of each frame into audio; an encoder side exists for cloning (`Base`), plus a speaker encoder (x-vector).
 
+**What the reference does** (read from `qwen_tts` 0.1.1, `modeling_qwen3_tts.py`, `qwen3_tts_model.py` and the codec's `modeling_qwen3_tts_tokenizer_v2.py`; T0):
+
+*Text to input embeddings* (CustomVoice, `non_streaming_mode=True`, the default; the 0.6B ignores `instruct`):
+
+1. The text is written `<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n` and tokenized (Qwen2 BPE, `tokenizer.json` made by
+   `tools/qwen3_tokenizer.py`). Its first 3 tokens are the role, the last 5 the closing; the text tokens are `ids[3:-5]`.
+2. Every text id goes through the text embedding (151936 x 2048) and `text_projection` (an MLP 2048 -> 2048 -> 1024 with biases, SiLU) into the
+   talker's width. `tts_bos`, `tts_eos`, `tts_pad` (151672, 151673, 151671) are embedded and projected the same way.
+3. The codec prefix is `[think(2154), think_bos(2156), language_id, think_eos(2157)]` (or `[nothink(2155), think_bos, think_eos]` for language
+   "auto"), then the speaker's codec id (a row of the 3072 x 1024 codec embedding, for example Ryan 3061), then `[pad(2148), bos(2149)]`. A
+   dialect speaker (Dylan, Eric) with language Chinese or auto swaps in the dialect's language id.
+4. The talker's prefill input is: the 3 role embeddings; then (`tts_pad` x (prefix length - 2), `tts_bos`) + the codec prefix without its last
+   id; then, in non-streaming mode, all the text embeddings and `tts_eos`, each + the `codec_pad` embedding; then `tts_pad + codec_bos`.
+   The trailing text hidden state for every later step is `tts_pad` (streaming mode would feed the remaining text instead).
+
+*The talker* is a plain Qwen3 decoder (28 layers, hidden 1024, 16 heads, 8 KV heads, head 128, MLP 3072, per-head q/k RMSNorm, theta 1e6;
+the three rotary streams carry equal positions, so ordinary RoPE), a final RMSNorm and `codec_head` (1024 -> 3072). Logits at the last position:
+suppress ids 2048..3071 except `codec_eos` (2150); the first 2 steps also cannot end (`min_new_tokens` 2); a repetition penalty of 1.05 over the ids
+generated so far (greedy decoding still applies it); then, when sampling, temperature 0.9 and top-k 50.
+
+*Each frame* (12.5 a second; 16 codes): the talker's sampled id `c0` is embedded (codec table); the **code predictor** (5 layers, hidden 1024, 16 heads,
+8 KV heads, vocabulary 2048, its own rotary table, `small_to_mtp_projection` only when the talker's width differs) reads
+`[talker's last hidden state, embedding of c0]`, writes code 1 from `lm_head[0]` at the last position, then embeds that with `codec_embedding[0]`
+(there are 15 tables, 2048 x 1024), runs one more position and writes code 2 from `lm_head[1]`, and so on to code 15. The next talker input is the
+sum of the 16 embeddings (`c0` from the talker's table, `c_i` from predictor table `i-1`) + the trailing text hidden state (`tts_pad`). The stream ends
+at `codec_eos`; `max_new_tokens` defaults to 8192 here (4096 in the code).
+
+*The codec decoder* (`Qwen3-TTS-Tokenizer-12Hz`, 24 kHz out, 1920 samples a frame): the 16 codes are looked up (codebook = `embedding_sum` /
+`max(cluster_usage, 1e-5)`, 2048 x 256), the first codebook through `rvq_first` and the other 15 through `rvq_rest`, each sum projected 256 -> 512 by
+a bias-free 1x1 conv and the two added; `pre_conv` (causal conv, 512 -> 1024, kernel 3); a transformer (`input_proj` 1024 -> 512, 8 layers of RMSNorm,
+causal attention with a sliding window of 72, 16 heads of 64, RoPE theta 10000, no q/k norm, gated SiLU MLP 512 -> 1024, per-channel layer scales,
+`output_proj` 512 -> 1024); two stages of causal transposed conv (factor 2) + ConvNeXt block (depthwise k7, LayerNorm, 4x MLP with GELU, scale);
+`decoder`: causal conv 1024 -> 1536 (k7), four blocks (SnakeBeta, transposed conv by 8, 5, 4, 3 with the channels halved each time, three residual
+units of dilation 1, 3, 9), SnakeBeta, causal conv 96 -> 1 (k7), clamp to [-1, 1]. SnakeBeta is `x + sin(exp(alpha) x)^2 / (exp(beta) + 1e-9)`. The
+reference decodes in chunks of 300 frames with 25 frames of left context.
+
 **Plan for the engine** (`c/qwen3tts.c`, family `qwen3_tts`, modality `speech_out`): start with the 0.6B CustomVoice (a preset voice, no
 cloning): talker, code predictor, codec decoder, sampling as in `generation_config.json`, `POST /v1/audio/speech` in OpenAI's shape (`input`,
 `voice`, `response_format` wav/mp3, `instructions` mapped to `instruct`); then the 1.7B, VoiceDesign, and cloning (codec encoder, speaker
