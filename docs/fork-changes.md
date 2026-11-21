@@ -582,6 +582,26 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   lost device while the start is made falls back; of ten mutations of the C seven broke a test, one is equivalent (every path sets the
   kept row count before using it), one is a bounds guard no input can show, and one is the failed-frame branch no injected fault reaches.
 
+### 2.31 Qwen3-ASR: speech to text (`feat/qwen3-speech`, 2026-11-21; on the branch only: not merged, pushed or deployed)
+
+- **The engine** (`c/qwen3asr.c`): Qwen3-ASR 0.6B and 1.7B in C, on the kernels and layer code ACE-Step and `qwen3embed` use: the Whisper-style
+  log-mel front end, the audio encoder (three stride-2 convolutions over 100-frame chunks, windowed attention, projections), a Qwen3 decoder
+  with a KV cache and greedy decoding, the prompt, the parser and the repetition cleaner, long audio in pieces. Held to the official
+  `qwen-asr` package stage by stage (`tools/qwen3_asr_ref.py`): features 1.4e-5, encoder 5e-6 (4.7e-7 on the 1.7B), the prompt and all 30
+  generated ids identical on both sizes. Found on the way: the stock transformers encoder ignores the 800-frame attention windows the
+  checkpoint and the vLLM backend use (this engine implements them; `AS_FULL_ATTN=1` reproduces the stock path to 7e-7).
+- **Around it**: `asr_engine.py` (the process wrapper and the route's rules), the gateway route `POST /v1/audio/transcriptions` for it (the
+  Gemma route's request shape: `language` forced or detected, `prompt` as context, three formats, silence skipped, the upload decoded to 16 kHz
+  mono), a `qwen3_asr` family (the `thinker_text_config` section), model card (`transcription`, `input_modalities: ["audio"]`), refusals on the
+  other routes, two catalogue entries with `tools/qwen3_tokenizer.py` as the post-install step (the checkpoints ship `vocab.json` and
+  `merges.txt`, not `tokenizer.json`), router card, `coli transcribe`, `coli info`, Makefile, CI and release lists, the READMEs and the site.
+- **Measured** (24-core i9, CPU; the card path is not built): an 11 s clip in 4.3 s on the 0.6B (decode 125 ms a token) and 7.6 s on the
+  1.7B (225 ms a token); 1.9 GB and 4.7 GB resident.
+- **Tests:** `tests/test_asr_gateway.py` (32, a stub engine), `tests/test_speech_cli.py` (14), `tests/test_qwen3asr_real.py` (8, against the stored
+  transformers answer and, with `QWEN3ASR_REF`, the stage tensors).
+- **Not done**: a Vulkan path, timestamps (the forced aligner), streaming; the models are not installed in `colibri-models` yet. Qwen3-TTS
+  (text to speech) is the other half of [qwen3-speech.md](qwen3-speech.md), not started.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision

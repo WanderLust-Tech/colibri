@@ -88,7 +88,8 @@ Needs A1/A2 to mean anything.
   - **Speech to text: on Gemma E2B/E4B.** Send `input_audio` (WAV) in a chat message (JFK clip transcribed word
     for word). *Built 2026-11-08 on `feat/audio-transcriptions` (not merged):* a `/v1/audio/transcriptions` route over the same path,
     with cutting of long files, [api.md](api.md#speech-to-text-v1audiotranscriptions). Inkling also takes audio (DMel frames, command line only).
-  - **Text to speech: no.** ACE-Step makes music, not speech.
+  - **Text to speech: no.** ACE-Step makes music, not speech. (Speech to text got a dedicated engine, Qwen3-ASR, on 2026-11-21:
+    [qwen3-asr.md](qwen3-asr.md); text to speech, Qwen3-TTS, is planned in [qwen3-speech.md](qwen3-speech.md).)
   - **Not served at all:** `/v1/responses` (what Codex needs), and `/v1/completions` exists as the legacy route.
   - Pictures in chat: GLM-5.3, Qwen3.6, Qwen3.8, DeepSeek V4.1, MiMo and Gemma 4.
   - What would be worth building, if anything: (a) JSON mode for the models in daily use (Qwen3-Coder, Gemma 4) as a real

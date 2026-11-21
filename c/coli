@@ -3809,6 +3809,35 @@ def cmd_rerank(a):
     import retrieval_cli
     return retrieval_cli.rerank(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),C)
 
+def _api_upload(a, path, fields, filename, data, timeout=900):
+    """(status, parsed JSON) of a multipart/form-data POST of one file and some text fields, or (None, None) when nothing answers."""
+    import urllib.error, urllib.request, uuid
+    boundary="----coli"+uuid.uuid4().hex
+    parts=[]
+    for name,value in fields.items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                  "Content-Type: application/octet-stream\r\n\r\n").encode()+data+b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    req=urllib.request.Request(f"http://{getattr(a,'host',None) or '127.0.0.1'}:{_server_port(a)}{path}",data=b"".join(parts),method="POST")
+    req.add_header("Content-Type",f"multipart/form-data; boundary={boundary}")
+    if getattr(a,"api_key",None): req.add_header("Authorization",f"Bearer {a.api_key}")
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as r:
+            return r.status,json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as error:
+        try: return error.code,json.loads(error.read() or b"null")
+        except ValueError: return error.code,None
+    except (urllib.error.URLError,OSError):
+        return None,None
+
+def cmd_transcribe(a):
+    """coli transcribe FILE... : text from a running server's speech recognition model (speech_cli.py, docs/qwen3-asr.md)."""
+    banner("transcribe")
+    import retrieval_cli, speech_cli
+    return speech_cli.transcribe(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
+                                 lambda path,fields,filename,data:_api_upload(a,path,fields,filename,data),C)
+
 def _duration_text(seconds):
     seconds=int(seconds)
     if seconds>=3600: return f"{seconds//3600}h {seconds%3600//60:02d}m"
@@ -4650,6 +4679,15 @@ def main():
     pemb.add_argument("--json",action="store_true",help="print the server's answer as it is")
     pemb.add_argument("--host",default="127.0.0.1"); pemb.add_argument("--port",type=int,default=None)
     pemb.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    ptr=sub.add_parser("transcribe",help="turn speech into text with the server's speech recognition model (Qwen3-ASR)")
+    ptr.add_argument("files",nargs="*",metavar="FILE",help="audio files (WAV, MP3, and with ffmpeg more; up to 15 minutes and 25 MB each)")
+    ptr.add_argument("--language",default=None,metavar="CODE",help="force the language (an ISO code such as en); without it the model detects it")
+    ptr.add_argument("--context",default=None,metavar="TEXT",help="names and terms that may come up (up to 1000 characters)")
+    ptr.add_argument("--model",default=None,help="the speech recognition model (default: the first the server lists)")
+    ptr.add_argument("--verbose",action="store_true",help="say the length and the language heard")
+    ptr.add_argument("--json",action="store_true",help="print the server's answer (verbose_json) as it is")
+    ptr.add_argument("--host",default="127.0.0.1"); ptr.add_argument("--port",type=int,default=None)
+    ptr.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     prr=sub.add_parser("rerank",help="rank documents against a query with the server's reranking model")
     prr.add_argument("query",nargs="?",default=None,help="the question or search words")
     prr.add_argument("documents",nargs="*",metavar="DOCUMENT",help="the documents to rank (- reads lines from standard input)")
@@ -4761,7 +4799,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

@@ -710,7 +710,7 @@
           "Speech"
         ],
         "summary": "Turn speech into text",
-        "description": "For a model with an audio tower (Gemma 4 E2B or E4B): a WAV or MP3 (and with ffmpeg on the server FLAC, Ogg, M4A and more) of up to 25 MB and 15 minutes becomes text, in the shape Whisper-style clients send. A longer file is cut where it is quietest and the pieces are joined. `srt`, `vtt` and word timestamps are refused. Any other model answers 400 `unsupported_endpoint` with the reason. See `docs/api.md`, Speech to text.",
+        "description": "For a speech recognition model (Qwen3-ASR 0.6B or 1.7B) or a model with an audio tower (Gemma 4 E2B or E4B): a WAV or MP3 (and with ffmpeg on the server FLAC, Ogg, M4A and more) of up to 25 MB and 15 minutes becomes text, in the shape Whisper-style clients send. Qwen3-ASR detects the language (or is told it with `language`), takes `prompt` as context for the model and says the language it heard in `verbose_json`; Gemma cuts a longer file where it is quietest and joins the pieces. `srt`, `vtt` and word timestamps are refused. Any other model answers 400 `unsupported_endpoint` with the reason. See `docs/api.md`, Speech to text, and `docs/qwen3-asr.md`.",
         "operationId": "createTranscription",
         "security": [
           {

@@ -605,6 +605,11 @@ behavior.
 
 ## Speech to text (`/v1/audio/transcriptions`)
 
+**Qwen3-ASR** (`qwen3-asr-0.6b`, `qwen3-asr-1.7b`) is the dedicated recogniser: it takes the fields below, detects the language (or is told it
+with `language`), takes `prompt` as context for the model, and hears up to 15 minutes in one request; `verbose_json` carries the language
+it heard. Its rules and measurements are in [qwen3-asr.md](qwen3-asr.md); the rest of this section is about the Gemma 4 route, which has the
+same request shape.
+
 When the served model is a Gemma 4 E2B or E4B (the two with an audio tower), `POST /v1/audio/transcriptions` turns a WAV file
 into text, in the shape OpenAI's SDKs and Whisper-style clients send: multipart/form-data with a `file`, `model`, and
 optionally `language`, `prompt`, `response_format` and `temperature`.

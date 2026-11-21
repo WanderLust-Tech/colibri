@@ -96,4 +96,15 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 
 ## Status
 
-Nothing built. A0 in progress (references and weights are in place; the 0.6B reference transcribes the JFK clip).
+| Stage | State |
+|---|---|
+| A0 reference capture | done: `tools/qwen3_asr_ref.py` (stock and `--windowed`), the 0.6B and 1.7B references |
+| A1 mel front end | done: 1.4e-5 against the reference features |
+| A2 audio encoder | done: 5e-6 (windowed oracle), 6.6e-7 (full attention against stock transformers) |
+| A3 decoder, prompt, greedy decode, parse | done: the prompt and the 30 generated ids identical, 0.6B and 1.7B |
+| A4 protocol, gateway, catalogue, registry, router, `coli`, long audio, tests | done: [qwen3-asr.md](qwen3-asr.md); on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
+| A5 Vulkan (encoder and decode on the chain) | open: decoding is 125 ms a token on the CPU |
+| T0 to T5 (Qwen3-TTS) | not started |
+
+Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend
+use; this engine implements the windows and can reproduce the stock behaviour (`AS_FULL_ATTN=1`).

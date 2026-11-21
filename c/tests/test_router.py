@@ -218,6 +218,19 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((status, body["model"], body["parts"]), (200, "music-m-colibri", 3))
         self.assertEqual(body["size"], len(raw))
 
+    def test_transcriptions_are_routed_by_their_model_field_and_the_card_says_audio_in(self):
+        rig = Rig(self, [entry("text-a"), entry("hear-h", "transcription")])
+        listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}
+        self.assertEqual(listing["hear-h-colibri"]["capabilities"], ["transcription"])            # from the modality
+        self.assertEqual(listing["hear-h-colibri"]["input_modalities"], ["audio"])                # it takes sound, not text
+        self.assertEqual(listing["text-a-colibri"]["input_modalities"], ["text"])
+        self.assertEqual(listing["hear-h-colibri"]["transcription"], {})
+        status, _, _, body = rig.call("POST", "/v1/audio/transcriptions", {"model": "hear-h", "file": "c3BlZWNo"})
+        self.assertEqual((status, body["model"]), (200, "hear-h-colibri"))
+        self.assertEqual(rig.states(), {"text-a-colibri": "idle", "hear-h-colibri": "ready"})
+        loaded = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}["hear-h-colibri"]
+        self.assertEqual((loaded["state"], loaded["transcription"]), ("loaded", {"sample_rate": 16000}))   # what its engine said
+
     def test_embeddings_are_routed_by_their_model_field_and_the_idle_card_says_what_it_does(self):
         rig = Rig(self, [entry("text-a"), entry("embed-e", "embedding")])
         listing = {m["id"]: m for m in rig.call("GET", "/v1/models")[3]["data"]}
