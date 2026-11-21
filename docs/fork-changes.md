@@ -526,7 +526,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   `setup_catalog.py`, `family_registry.py`, the family pages and the live `GET /v1/models`.
 - `docs.json` lists the pages the fork added since the navigation was written (models, router, model-install, zimage, embeddings, rerank).
 
-### 2.28 A small model gets the card when it frees up (`feat/promote-to-card`, 2026-11-20)
+### 2.28 A small model gets the card when it frees up (`feat/promote-to-card`, 2026-11-20; merged, pushed (`36788f74`) and live the same day)
 
 - **The gap**: the router chooses card or CPU when a model loads and never looks again. The 0.6B embedding model, loaded while the
   rerankers held the card, ran on the CPU (23.5 s for a batch the card does in 1.13 s) for as long as it stayed loaded.
@@ -538,6 +538,8 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Tests:** `tests/test_router_promote.py` (12: the move, a full card, a model too big for what is free, a model answering, too soon after
   use and after start, pinned or failed starts, a model on the card or demoted, chat models, the switches, `/health`, and the reaper doing
   it by itself); eleven mutations of `promote` and its hook each broke at least one.
+- **Live check** (router restarted at `36788f74`): with the 8B reranker and Qwen3-Coder on the card (1.2 GB free) the embedding model started on
+  the CPU; after both were stopped the router unloaded it 57 s later (`router.card_promote.stops` 1), and the next request ran it on the card.
 
 ## 3. Planned and open
 
