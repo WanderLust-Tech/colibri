@@ -1009,13 +1009,147 @@ static void qt_compare(const char *label, const float *a, const float *b, size_t
     printf("%-10s n=%zu  max abs diff %.3e  mean abs diff %.3e  (mean |ref| %.3e)\n", label, n, mx, sum / (double)(n ? n : 1), ref / (double)(n ? n : 1));
 }
 
+/* ------------------------------------------------------------------------------------------------ serving (T3) */
+
+#define QT_MAX_LINE ((size_t)1 << 20)
+
+static void qt_escape(const char *s){
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c < 0x20) printf("\\u%04x", c);
+        else putchar(c);
+    }
+}
+static void qt_error(const char *id, const char *message){
+    printf("ERROR {\"id\":\""); qt_escape(id ? id : "");
+    printf("\",\"message\":\""); qt_escape(message); printf("\"}\n");
+    fflush(stdout);
+}
+static char *qt_read_line(int *too_long){
+    size_t cap = 1 << 12, n = 0;
+    char *buf = (char *)malloc(cap);
+    int c, any = 0;
+    *too_long = 0;
+    if (!buf) exit(1);
+    while ((c = fgetc(stdin)) != EOF) {
+        any = 1;
+        if (c == '\n') break;
+        if (*too_long) continue;
+        if (n + 2 > cap) {
+            if (cap >= QT_MAX_LINE) { *too_long = 1; continue; }
+            cap *= 2; buf = (char *)realloc(buf, cap);
+            if (!buf) exit(1);
+        }
+        buf[n++] = (char)c;
+    }
+    if (!any) { free(buf); return NULL; }
+    if (n && buf[n - 1] == '\r') n--;
+    buf[n] = 0;
+    return buf;
+}
+
+typedef struct { int frames, samples, truncated; double gen_s, codec_s; } QtSpoken;
+
+/* One request end to end: text, speaker and language to a WAV file at `path`. 0 on success, else err set. */
+static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *language, const QtGen *gen, const char *path, QtSpoken *res, char *err, size_t errn){
+    int nids = 0, rows = 0;
+    int *ids = qt_text_ids(m, text, &nids);
+    float *prefill = qt_prefill(m, ids, nids, speaker, language, &rows, err, errn);
+    free(ids);
+    if (!prefill) return -1;
+    double t0 = qt_now();
+    int frames = 0;
+    int *codes = qt_generate(m, prefill, rows, gen, &frames, NULL, NULL);
+    free(prefill);
+    res->gen_s = qt_now() - t0;
+    res->frames = frames;
+    res->truncated = frames >= gen->max_frames;
+    if (frames <= 0) { free(codes); snprintf(err, errn, "the model produced no audio for this text"); return -1; }
+    t0 = qt_now();
+    int n = 0;
+    float *wav = qt_codec_decode(&m->codec, codes, frames, &n);
+    free(codes);
+    res->codec_s = qt_now() - t0;
+    res->samples = n;
+    const int bad = !wav || qt_write_wav(path, wav, n, QT_SR);
+    free(wav);
+    if (bad) { snprintf(err, errn, "cannot write %s", path); return -1; }
+    return 0;
+}
+
+static const char *qt_name_of(const char *dir){
+    const char *s = strrchr(dir, '/'), *b = strrchr(dir, '\\');
+    if (b && (!s || b > s)) s = b;
+    return s ? s + 1 : dir;
+}
+
+static void qt_names(jval *obj){
+    if (!obj || obj->t != J_OBJ) return;
+    for (int i = 0; i < obj->len; i++) { if (i) putchar(','); putchar('"'); qt_escape(obj->keys[i]); putchar('"'); }
+}
+
+/* READY, then SPEAK lines until stdin closes (docs/qwen3-tts.md has the protocol). */
+static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
+    jval *tc = json_get(m->cfg, "talker_config");
+    jval *kind = json_get(m->cfg, "tts_model_type");
+    printf("READY {\"model\":\""); qt_escape(name);
+    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", QT_SR, m->talker.nl);
+    qt_names(json_get(tc, "spk_id"));
+    printf("],\"languages\":[");
+    qt_names(json_get(tc, "codec_language_id"));
+    printf("],\"device\":\"cpu\"}\n");
+    fflush(stdout);
+    for (;;) {
+        int too_long;
+        char *line = qt_read_line(&too_long);
+        if (!line) break;
+        if (too_long) { qt_error("", "the request line is too long"); free(line); continue; }
+        if (!*line) { free(line); continue; }
+        if (strncmp(line, "SPEAK ", 6)) { qt_error("", "unknown message"); free(line); continue; }
+        jval *j = json_parse_checked(line + 6);
+        if (!j || j->t != J_OBJ) { qt_error("", "SPEAK needs a JSON object"); if (j) json_free(j); free(line); continue; }
+        jval *jid = json_get(j, "id"), *jt = json_get(j, "text"), *js = json_get(j, "speaker"), *jl = json_get(j, "language"), *jo = json_get(j, "out");
+        jval *jseed = json_get(j, "seed"), *jg = json_get(j, "greedy"), *jmf = json_get(j, "max_frames"), *jtemp = json_get(j, "temperature");
+        const char *id = jid && jid->t == J_STR ? jid->str : "";
+        char err[512] = "";
+        if (!jt || jt->t != J_STR || !*jt->str) qt_error(id, "text must be a non-empty string");
+        else if (!jo || jo->t != J_STR || !*jo->str) qt_error(id, "out must be the path of the WAV file to write");
+        else {
+            QtGen g = *base;
+            if (jseed && jseed->t == J_NUM && jseed->num > 0) g.seed = (uint64_t)jseed->num;
+            if (jg && jg->t == J_BOOL && jg->boolean) { g.greedy = 1; g.sub_greedy = 1; }
+            if (jmf && jmf->t == J_NUM && jmf->num >= 1 && jmf->num < g.max_frames) g.max_frames = (int)jmf->num;
+            if (jtemp && jtemp->t == J_NUM && jtemp->num > 0) { g.temperature = (float)jtemp->num; g.sub_temperature = (float)jtemp->num; }
+            QtSpoken r;
+            memset(&r, 0, sizeof r);
+            const double t0 = qt_now();
+            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err)) qt_error(id, err);
+            else {
+                printf("AUDIO {\"id\":\""); qt_escape(id);
+                printf("\",\"path\":\""); qt_escape(jo->str);
+                printf("\",\"samples\":%d,\"sample_rate\":%d,\"frames\":%d,\"audio_seconds\":%.3f,\"seconds\":%.3f,\"truncated\":%s}\n",
+                       r.samples, QT_SR, r.frames, (double)r.samples / QT_SR, qt_now() - t0, r.truncated ? "true" : "false");
+                fflush(stdout);
+                fprintf(stderr, "qwen3tts: %.2f s of audio: talker and predictor %.2f s (%.0f ms a frame), codec %.2f s\n", (double)r.samples / QT_SR, r.gen_s, 1000.0 * r.gen_s / (r.frames ? r.frames : 1), r.codec_s);
+            }
+        }
+        json_free(j);
+        free(line);
+    }
+    return 0;
+}
+
 static const char *QT_USAGE =
-    "usage: qwen3tts --model DIR --text TEXT [--speaker NAME] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
+    "usage: qwen3tts --model DIR --serve | --text TEXT [--speaker NAME] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
     "       qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n";
 
 int main(int argc, char **argv){
     const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *language = "Auto";
-    int teacher_forcing = 0;
+    int teacher_forcing = 0, serve = 0;
     QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0};
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
@@ -1028,6 +1162,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
         else if (!strcmp(argv[i], "--greedy")) { gen.greedy = 1; gen.sub_greedy = 1; }
         else if (!strcmp(argv[i], "--teacher")) teacher_forcing = 1;
+        else if (!strcmp(argv[i], "--serve")) serve = 1;
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) gen.seed = (uint64_t)strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--max-frames") && i + 1 < argc) gen.max_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--decode-threads") && i + 1 < argc) {
@@ -1071,11 +1206,12 @@ int main(int argc, char **argv){
         }
         return 0;
     }
-    if (!model_dir || !text) { fputs(QT_USAGE, stderr); return 2; }
+    if (!model_dir || (!text && !serve)) { fputs(QT_USAGE, stderr); return 2; }
     QtModel *m = (QtModel *)calloc(1, sizeof *m);
     double t0 = qt_now();
     if (qt_model_load(m, model_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
     fprintf(stderr, "qwen3tts: %d talker layers (d %d), %d predictor layers, %.2f GB resident, loaded in %.1f s\n", m->talker.nl, m->talker.D, m->pred.nl, (double)m->bytes / 1e9, qt_now() - t0);
+    if (serve) return qt_serve(m, qt_name_of(model_dir), &gen);
     int nids = 0, rows = 0;
     int *ids = qt_text_ids(m, text, &nids);
     float *prefill = qt_prefill(m, ids, nids, speaker, language, &rows, err, sizeof err);
