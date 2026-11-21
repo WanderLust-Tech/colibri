@@ -576,8 +576,12 @@ Status as of today (the file itself has been brought into line with this):
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
 - **Qwen-Image editing**: Linux, ASan and UBSan runs; a Vulkan check of the chain with an edit prefix; a real edit at the 1024
   reference; translated READMEs (it, ja, zh, id) for editing.
-- **Graphics card**: Qwen-Image on Vulkan (`make qwenimage VK=1`) is unmeasured; ACE-Step has no Vulkan path; unloading an idle model
-  that holds the card to make room for another is not built (the router only picks card or CPU at load time).
+- **Graphics card**: Qwen-Image on Vulkan (`make qwenimage VK=1`) is unmeasured; ACE-Step has no Vulkan path. Making room on the card **is
+  built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
+  card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
+  Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. What is
+  not built: putting a model back on the card when it is freed (a model that started on the CPU stays there until it unloads, 30 minutes
+  by default), and demoting engines other than `qwen36`.
 - **Context**: E4B and the 26B show no `context_length` until they have run once; a per-model window would need a per-model setting
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
