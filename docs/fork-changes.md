@@ -623,11 +623,14 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **On the card (T6, 2026-11-21)**: the talker's and the code predictor's steps as one frame each of the dense chain (`qt_vk_run`, as the embedding
   engine does it: KV cache on the device, matrices held as bf16), the prompt through the same chain, the CPU rerun on a failed step. 14 to 19 ms a
   frame (6 times faster than the CPU, 4 times faster than real time); 5 s of speech in 2.1 s, 56 s in 21 s (the codec is 11 of them). The speech is
-  byte for byte the CPU's; the real-engine tests pass on the card. Build `make qwen3tts VK=1`, run with `COLI_VULKAN=1` (the router sets it).
+  the CPU's, the real-engine tests pass on the card. Build `make qwen3tts VK=1`, run with `COLI_VULKAN=1` (the router sets it).
+  **The codec's vocoder too** (`qt_codec_vk`, a new shader `chain_codec.comp` with `vkc_codec` in `vk_chain.c`: causal-conv taps, SnakeBeta, the
+  transposed conv's overlap-add, a one-channel last layer; GEMMs over resident f32 weights in tiles of at most 32768 rows): the codec went from
+  1.05 s to 0.17 s for 5 s of speech, 56 s of speech from 21 s to 11 s in all; the waveform is the CPU's to one step of the 16-bit sample.
 - **Tests:** `tests/test_tts_gateway.py` (45, a stub engine), `tests/test_speech_cli.py` (+11 for `coli speak`), `tests/test_router.py` (one),
   `tests/test_qwen3tts_real.py` (10, against `tools/qwen3_tts_0.6b_reference.json`).
 - **Not done**: the 1.7B and style `instructions`, VoiceDesign, voice cloning (the Base models: the codec's encoder and a speaker encoder),
-  streaming, the codec on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
+  streaming, the codec's first half on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 

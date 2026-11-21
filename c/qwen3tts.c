@@ -396,6 +396,10 @@ static void qt_transformer(const QtCodec *m, float *x, int T){
     free(h); free(n); free(q); free(k); free(v); free(cx); free(o); free(g); free(u); free(cs); free(sn);
 }
 
+#ifdef COLI_VULKAN
+static float *qt_codec_vk(const QtCodec *m, const float *x, int len0, int *nsamples);
+#endif
+
 /* codes [T][16] -> wav [T * 1920] (one chunk; the caller keeps chunks within memory) */
 static float *qt_codec_chunk(const QtCodec *m, const int *codes, int T, int *nsamples){
     const int CB = m->cbdim / 2, C512 = m->cbdim;
@@ -427,6 +431,9 @@ static float *qt_codec_chunk(const QtCodec *m, const int *codes, int T, int *nsa
         x = y; len *= 2;
         qt_convnext(x, len, m->latent, &m->nx[i]);
     }
+#ifdef COLI_VULKAN
+    { float *wv = qt_codec_vk(m, x, len, nsamples); if (wv) { free(x); return wv; } }       /* the vocoder on the device */
+#endif
     float *w = (float *)malloc((size_t)len * m->ddim * sizeof(float));
     qt_conv_run(w, x, len, &m->d0);
     free(x);
@@ -1004,6 +1011,165 @@ static int qt_vk_run(QtVk *v, const float *xrows, int n, int pos0, int head, flo
 }
 
 static QtVk qt_vk_talker, qt_vk_pred;
+
+/* ------------------------------------------------------------------------------------------------ the codec's vocoder on the device
+ * The codec is two parts: the quantizer, the pre-conv, the transformer and the first two upsamplings (about a tenth of the time, on the
+ * CPU) and the vocoder, a convolutional stack that turns 4 rows a frame into 1920 samples: that is where the time goes (0.9 s of 1.05 s
+ * for 5 s of speech). On the card each causal convolution is an im2col (chain_codec, mode 0) and a GEMM over the resident weights,
+ * the SnakeBeta, the bias, the transposed convolution's overlap-add and the clamp are chain_codec modes, and a chunk is one submission. */
+typedef struct { ColiVkTensor *t; int off; } QcvW;               /* a convolution's resident weights and its bias (or parameters) in tab, -1: none */
+typedef struct {
+    int tried, ok;
+    QcvW d0, d_out, up[4], c1[4][3], c2[4][3];
+    int sn[4], a1[4][3], a2[4][3], sn_out, d_out_w;
+    VkcBuf *tab, *buf[3], *tmp, *col, *xu, *out;
+    size_t cap_act, cap_tmp, cap_in, cap_out;
+} QtCodecVk;
+static QtCodecVk qt_cvk;
+
+typedef struct { float *p; size_t n, cap; } QcvArena;
+static int qcv_add(QcvArena *a, const float *v, size_t n){
+    if (a->n + n > a->cap) {
+        size_t c = a->cap ? a->cap * 2 : 1 << 16;
+        while (c < a->n + n) c *= 2;
+        float *g = (float *)realloc(a->p, c * sizeof(float));
+        if (!g) return -1;
+        a->p = g; a->cap = c;
+    }
+    memcpy(a->p + a->n, v, n * sizeof(float));
+    a->n += n;
+    return (int)(a->n - n);
+}
+
+static int qcv_conv_w(QcvW *w, QcvArena *a, const QtConv *c){
+    w->t = qt_vk_tensor(&c->w);
+    w->off = c->b ? qcv_add(a, c->b, (size_t)c->cout) : -1;
+    return w->t != NULL && (!c->b || w->off >= 0);
+}
+static int qcv_snake_w(int *off, QcvArena *a, const QtSnake *s){
+    *off = qcv_add(a, s->ea, (size_t)s->c);
+    return *off >= 0 && qcv_add(a, s->ib, (size_t)s->c) >= 0;
+}
+
+static int qt_codec_vk_setup(const QtCodec *m){
+    QtCodecVk *v = &qt_cvk;
+    if (v->tried) return v->ok;
+    v->tried = 1;
+    if (!qt_vk.chain || !vkc_codec_ready()) return 0;
+    QcvArena a = {0};
+    int ok = qcv_conv_w(&v->d0, &a, &m->d0) && m->d_out.cout == 1 && m->d_out.b && qcv_snake_w(&v->sn_out, &a, &m->sn_out);
+    if (ok) {                                                      /* the last layer reads its taps straight from tab */
+        v->d_out.off = qcv_add(&a, m->d_out.b, 1);
+        v->d_out_w = qcv_add(&a, (const float *)m->d_out.w.m.w, (size_t)m->d_out.K * m->d_out.cin);
+        ok = v->d_out.off >= 0 && v->d_out_w >= 0;
+    }
+    for (int i = 0; ok && i < 4; i++) {
+        const QtBlock *b = &m->blk[i];
+        v->up[i].t = qt_vk_tensor(&b->up.w);
+        v->up[i].off = qcv_add(&a, b->up.b, (size_t)b->up.cout);
+        ok = v->up[i].t && v->up[i].off >= 0 && qcv_snake_w(&v->sn[i], &a, &b->sn);
+        for (int u = 0; ok && u < 3; u++)
+            ok = qcv_conv_w(&v->c1[i][u], &a, &b->r[u].c1) && qcv_conv_w(&v->c2[i][u], &a, &b->r[u].c2) &&
+                 qcv_snake_w(&v->a1[i][u], &a, &b->r[u].a1) && qcv_snake_w(&v->a2[i][u], &a, &b->r[u].a2);
+    }
+    if (ok) {
+        v->tab = vkc_buf(a.n * sizeof(float), VKC_DEV);
+        ok = v->tab && vkc_begin() && vkc_write(v->tab, 0, a.p, a.n * sizeof(float)) && vkc_submit(1);
+    }
+    free(a.p);
+    if (!ok) fprintf(stderr, "[VK] qwen3tts: the codec's weights did not reach the device; the CPU runs the vocoder\n");
+    v->ok = ok;
+    return ok;
+}
+
+/* y [T][cout] = causal conv of x [T][cin] (+ bias): im2col in tiles of at most 16M floats, each through the GEMM */
+static int qcv_conv(const QtCodecVk *v, const QcvW *w, const QtConv *c, VkcBuf *x, VkcBuf *y, int T){
+    const int K = c->K, cin = c->cin, cout = c->cout, kc = K * cin;
+    int ok = 1;
+    if (K == 1) {                                                   /* no taps to gather: the rows go straight in, in tiles of 32768 */
+        for (int t0 = 0; ok && t0 < T; t0 += 32768) {
+            const int tn = T - t0 < 32768 ? T - t0 : 32768;
+            ok = vkc_matmul(w->t, x, (size_t)t0 * cin, y, (size_t)t0 * cout, tn);
+        }
+    } else {
+        int tile = (int)((size_t)(16u << 20) / kc);
+        if (tile < 256) tile = 256;
+        if (tile > T) tile = T;
+        for (int t0 = 0; ok && t0 < T; t0 += tile) {
+            const int tn = T - t0 < tile ? T - t0 : tile;
+            VkcCodec im = {0, cin, K, c->dil, T, t0, 0, 0, tn * kc, 0, 0, 0};
+            ok = vkc_codec(x, v->col, v->tab, &im) && vkc_matmul(w->t, v->col, 0, y, (size_t)t0 * cout, tn);
+        }
+    }
+    if (ok && w->off >= 0) { VkcCodec bi = {3, cout, 0, 0, T, 0, 0, 0, T * cout, w->off, 0, 0}; ok = vkc_codec(v->tab, y, v->tab, &bi); }
+    return ok;
+}
+
+static int qcv_snake(const QtCodecVk *v, int off, VkcBuf *x, VkcBuf *y, int T, int C){
+    VkcCodec sn = {1, C, 0, 0, T, 0, 0, 0, T * C, off, 0, 0};
+    return vkc_codec(x, y, v->tab, &sn);
+}
+
+/* x [len][latent] (host, after the second ConvNeXt) -> the waveform [len * 480] (malloc'd), or NULL: the caller runs the CPU */
+static float *qt_codec_vk(const QtCodec *m, const float *x, int len0, int *nsamples){
+    if (!qt_codec_vk_setup(m)) return NULL;
+    QtCodecVk *v = &qt_cvk;
+    size_t act = (size_t)len0 * m->latent, tmp = 0;
+    int len = len0, ch = m->ddim;
+    if ((size_t)len * ch > act) act = (size_t)len * ch;
+    for (int i = 0; i < 4; i++) {
+        const int r = m->rates[i], cout = m->blk[i].up.cout;
+        if ((size_t)len * cout * 2 * r > tmp) tmp = (size_t)len * cout * 2 * r;
+        len *= r; ch = cout;
+        if ((size_t)len * ch > act) act = (size_t)len * ch;
+    }
+    const int total = len;
+    if (!vkc_reserve(&v->buf[0], act * 4, VKC_DEV) || !vkc_reserve(&v->buf[1], act * 4, VKC_DEV) || !vkc_reserve(&v->buf[2], act * 4, VKC_DEV) ||
+        !vkc_reserve(&v->tmp, tmp * 4, VKC_DEV) || !vkc_reserve(&v->col, (size_t)(16u << 20) * 4, VKC_DEV) ||
+        !vkc_reserve(&v->xu, (size_t)len0 * m->latent * 4, VKC_UP) || !vkc_reserve(&v->out, (size_t)total * 4, VKC_DOWN)) {
+        fprintf(stderr, "[VK] qwen3tts: device memory for the vocoder refused; the CPU runs it\n");
+        return NULL;
+    }
+    memcpy(vkc_ptr(v->xu), x, (size_t)len0 * m->latent * sizeof(float));
+    VkcBuf *A = v->buf[0], *B = v->buf[1], *C = v->buf[2], *cur, *s1, *s2;
+    len = len0;
+    int ok = vkc_begin() && vkc_copy(A, 0, v->xu, 0, (size_t)len0 * m->latent) && qcv_conv(v, &v->d0, &m->d0, A, B, len);
+    cur = B; s1 = A; s2 = C;
+    ch = m->ddim;
+    for (int i = 0; ok && i < 4; i++) {
+        const QtBlock *bk = &m->blk[i];
+        const int r = m->rates[i], cout = bk->up.cout, K = 2 * r;
+        ok = qcv_snake(v, v->sn[i], cur, s1, len, ch);
+        for (int t0 = 0; ok && t0 < len; t0 += 32768) {              /* the GEMM takes at most 32768 rows at a time */
+            const int tn = len - t0 < 32768 ? len - t0 : 32768;
+            ok = vkc_matmul(v->up[i].t, s1, (size_t)t0 * ch, v->tmp, (size_t)t0 * cout * K, tn);
+        }
+        VkcCodec ct = {2, len, K, 0, 0, 0, 0, 0, len * r * cout, v->up[i].off, r, cout};
+        ok = ok && vkc_codec(v->tmp, cur, v->tab, &ct);
+        len *= r; ch = cout;
+        VkcEw add = {VKC_EW_ADD, len * ch, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f};
+        for (int u = 0; ok && u < 3; u++)
+            ok = qcv_snake(v, v->a1[i][u], cur, s1, len, ch) && qcv_conv(v, &v->c1[i][u], &bk->r[u].c1, s1, s2, len) &&
+                 qcv_snake(v, v->a2[i][u], s2, s1, len, ch) && qcv_conv(v, &v->c2[i][u], &bk->r[u].c2, s1, s2, len) &&
+                 vkc_ew(cur, cur, s2, NULL, NULL, &add);
+    }
+    if (ok) {
+        VkcCodec cl = {5, m->d_out.cin, m->d_out.K, m->d_out.dil, len, 0, 0, 0, len, v->d_out.off, v->d_out_w, 1};
+        ok = qcv_snake(v, v->sn_out, cur, s1, len, ch) && vkc_codec(s1, v->out, v->tab, &cl);
+    }
+    ok = ok && vkc_submit(1);
+    if (!ok) {
+        fprintf(stderr, "[VK] qwen3tts: the vocoder's frame failed; the CPU runs it from here on\n");
+        v->ok = 0;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); qt_vk.ready = 0; qt_vk.chain = 0; }
+        return NULL;
+    }
+    float *wav = (float *)malloc((size_t)len * sizeof(float));
+    if (!wav) return NULL;
+    memcpy(wav, vkc_ptr(v->out), (size_t)len * sizeof(float));
+    *nsamples = len;
+    return wav;
+}
 #endif
 
 typedef struct { uint64_t s; } QtRng;
@@ -1383,6 +1549,9 @@ int main(int argc, char **argv){
         QtCodec *c = (QtCodec *)calloc(1, sizeof *c);
         double t0 = qt_now();
         if (qt_codec_load(c, codec_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+#ifdef COLI_VULKAN
+        qt_vk_open();
+#endif
         fprintf(stderr, "qwen3tts: codec decoder loaded: %.2f GB, %.1f s\n", (double)c->bytes / 1e9, qt_now() - t0);
         size_t nvals = 0;
         int *codes = (int *)qt_load_f32(codes_path, &nvals);

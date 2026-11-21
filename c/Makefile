@@ -746,6 +746,8 @@ VK_SPV   += shaders/chain_attn512.spv
 VK_SPV   += shaders/chain_attn_full.spv shaders/chain_attn_coop.spv
 # Qwen-Image's VAE decoder: a band's 3x3 taps and the DupUp3D shortcut (made on first use)
 VK_SPV   += shaders/chain_vae.spv
+# Qwen3-TTS's codec vocoder: causal-conv taps, SnakeBeta, the transposed conv's overlap-add (made on first use)
+VK_SPV   += shaders/chain_codec.spv
 endif
 
 # Optional AMD XDNA2 (Ryzen AI NPU) lane, Windows. Same opt-in shape as VK=1:

@@ -1519,6 +1519,30 @@ int vkc_vae(VkcBuf *x, VkcBuf *o, VkcBuf *tab, const VkcVae *p) {
     return record(KVA.pipe, bd, 3, p, sizeof *p, gx, gy, 1);
 }
 
+/* chain_codec.comp (Qwen3-TTS's codec vocoder: causal-conv taps, SnakeBeta, the transposed conv's overlap-add): made on first use */
+static struct { VkShaderModule mod; VkPipeline pipe; int tried; } g_kcd[2];
+#define KCD (g_kcd[g_kd])
+static void kcd_shutdown(void) {
+    if (KCD.pipe) vkDestroyPipeline(KC.dev, KCD.pipe, NULL);
+    if (KCD.mod) vkDestroyShaderModule(KC.dev, KCD.mod, NULL);
+    memset(&KCD, 0, sizeof KCD);
+}
+int vkc_codec_ready(void) {
+    if (!vkc_ready()) return 0;
+    if (!KCD.pipe && !KCD.tried) {
+        KCD.tried = 1;
+        if ((KCD.mod = load_module(KC.core.spv_path, "chain_codec.spv"))) KCD.pipe = make_pipe(KCD.mod, NULL);
+    }
+    return KCD.pipe != VK_NULL_HANDLE;
+}
+int vkc_codec(VkcBuf *x, VkcBuf *o, VkcBuf *tab, const VkcCodec *p) {
+    if (p->n < 1 || !x || !o || !tab || !vkc_codec_ready()) return 0;
+    KC.kind = PK_EW;
+    VkcBind bd[3] = {B(x, 0), B(o, 1), B(tab, 0)};
+    uint32_t gx, gy; grid(((uint64_t)p->n + 255) / 256, &gx, &gy);
+    return record(KCD.pipe, bd, 3, p, sizeof *p, gx, gy, 1);
+}
+
 static VkPipeline ke_pipe(void) {
     if (KE.pipe || KE.tried || !vkc_ready()) return KE.pipe;
     KE.tried = 1;
@@ -1815,6 +1839,7 @@ void vkc_shutdown(void) {
     ke_shutdown();
     kf_shutdown();
     kva_shutdown();
+    kcd_shutdown();
     for (int i = 0; i < P_NPIPE; i++) {
         if (KC.pipe[i]) vkDestroyPipeline(KC.dev, KC.pipe[i], NULL);
         if (KC.mod[i]) vkDestroyShaderModule(KC.dev, KC.mod[i], NULL);

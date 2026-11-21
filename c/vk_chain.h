@@ -705,6 +705,16 @@ typedef struct { int mode, C, H, W, up, Ho, Wo, y0, n, x_off, o_off, Co, dupC; }
 int vkc_vae(VkcBuf *x, VkcBuf *o, VkcBuf *tab, const VkcVae *p);
 int vkc_vae_ready(void);
 
+/* chain_codec.comp: the Qwen3-TTS codec's vocoder (qwen3tts.c), the steps of its convolutions that are not a GEMM; maps time-major
+ * [T][C], offsets in floats, n the elements made. mode 0: the taps of a causal convolution (K taps, dilation dil) of positions
+ * t0.. as an im2col row of K*C floats each, for vkc_matmul; 1: SnakeBeta of T*C values with exp(alpha) at tab[a_off + c] and
+ * 1/(exp(beta)+1e-9) at tab[a_off + C + c]; 2: a transposed convolution's overlap-add (x [C = Tin][cout*K], stride r, bias at
+ * tab[a_off]); 3: a bias per channel added in place; 4: clamp to [-1, 1]; 5: a causal convolution to one channel, clamped (taps at tab[r], bias at
+ * tab[a_off]). Made on first use. */
+typedef struct { int mode, C, K, dil, T, t0, x_off, o_off, n, a_off, r, cout; } VkcCodec;
+int vkc_codec(VkcBuf *x, VkcBuf *o, VkcBuf *tab, const VkcCodec *p);
+int vkc_codec_ready(void);
+
 /* counters, for the engines' [VK] lines */
 typedef struct {
     unsigned long long frames, waits, ops, matmuls, gemms, barriers, bytes_up, bytes_down;

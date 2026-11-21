@@ -146,7 +146,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | T3 protocol, gateway, catalogue, registry, router, `coli speak`, tests | done: [qwen3-tts.md](qwen3-tts.md); the speech comes back through Qwen3-ASR as the input text, word for word; on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
 | T4 1.7B, VoiceDesign (and style `instructions`) | open |
 | T5 cloning (codec encoder, speaker encoder) | open |
-| T6 speed | done for the language model: a frame is 14 to 19 ms on the card (111 ms on the CPU); the codec (0.2 s for each second of speech) is the part left |
+| T6 speed | done: a frame is 14 to 19 ms on the card (111 ms on the CPU), the codec's vocoder on the card too (1.05 s to 0.17 s for 5 s of speech); 56 s of speech in 11 s |
 
 Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend
 use; this engine implements the windows and can reproduce the stock behaviour (`AS_FULL_ATTN=1`).

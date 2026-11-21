@@ -75,14 +75,22 @@ stack without a floating-point tie able to fail it. `tests/test_qwen3tts_real.py
 Loading takes 1.6 s and 2.3 GB of RAM (the talker and the predictor as bf16, the codec as f32).
 
 **On the card** (a `VK=1` build with `COLI_VULKAN=1`, which the router sets when it puts the model on the card): a frame, the talker's step and
-the code predictor's sixteen, costs **14 to 19 ms** (the CPU: 111 ms), and the codec 0.2 s for each second of speech, which is now the larger
-part. 5 s of speech takes about 2.1 s (2.4 times faster than real time); 56 s of speech (680 characters) took 21 s. Each step is one
+the code predictor's sixteen, costs **14 to 19 ms** (the CPU: 111 ms), and the codec's vocoder
+(the convolutional stack that turns the frames into samples, nine tenths of the codec) on the card too: 0.17 s for 5 s of speech instead of
+1.05 s. 5 s of speech takes about 1.25 s (4 times faster than real time); 56 s of speech (680 characters) took 11 s (it took 21 s with the codec
+on the CPU). Each step is one
 submission of the dense chain (the same one the embedding and Gemma engines use: norms, q/k/v, head norms, RoPE, attention over a KV cache that
 lives on the card, o, SwiGLU, down), the matrices held as bf16 and computed in f32, and only the logits and the hidden row come back. The prompt's
-rows go through the same chain. The speech is the same as the CPU's: the 56 s speech from the card is byte for byte the CPU's WAV, and the
-real-engine tests (the codes teacher forced and free running) pass on the card. Without a card, or when a step fails (the whole request is then
+rows go through the same chain. The speech is the CPU's: the codes are the same, and the waveform differs from the CPU's by one step of the
+16-bit sample on a few thousand of its samples (the card's sums and its sine round differently); the real-engine tests (the codes teacher forced
+and free running, the loudness of each frame) pass on the card. Without a card, or when a step fails (the whole request is then
 run again on the CPU), the CPU path runs. About 1 GB of the card for the matrices and, while a request runs, 0.25 MB for each position of the speech.
 `READY` says `"device":"vulkan"` or `"cpu"`.
+
+The vocoder on the card: each causal convolution is an im2col (`chain_codec`, a shader beside the dense chain's) and a GEMM over the resident
+f32 weights, in tiles; SnakeBeta, the transposed convolution's overlap-add, the bias and the last one-channel layer (with the clamp) are
+`chain_codec` modes; a chunk of 300 frames is one submission. The quantizer, the pre-conv, the codec's transformer and the first two upsamplings
+(about 0.1 s for 5 s of speech) stay on the CPU.
 
 **On the CPU**: a frame costs 111 ms on a quiet machine (the predictor 81 of them: sixteen steps that each read the same five layers; the talker
 24) and up to 250 ms when the machine is busy, and the codec 0.2 s a second of speech: **5 s of speech in about 8 s, 1.6 times slower than real
@@ -112,4 +120,4 @@ ERROR {"id", "message"}                                             # the engine
 ## Not built yet
 
 The 1.7B CustomVoice (style `instructions`), VoiceDesign (a voice described in words), the Base models (a voice cloned from a few seconds of
-audio: needs the codec's encoder and a speaker encoder), streaming, and the codec on the card (it is now most of the time). See [qwen3-speech.md](qwen3-speech.md).
+audio: needs the codec's encoder and a speaker encoder), streaming, and the codec's first half on the card (the rest of it takes 0.02 s a second of speech). See [qwen3-speech.md](qwen3-speech.md).

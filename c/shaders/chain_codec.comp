@@ -1,0 +1,69 @@
+#version 450
+// The Qwen3-TTS codec's vocoder on the chain (vk_chain.c, vkc_codec; qwen3tts.c): the steps of its
+// convolutions that are not a GEMM. Maps are time-major, [T][C]. One thread per output element (i < n).
+// Buffers: x (read), o (written), tab (read: the snake and bias parameters). The push constants:
+//   mode, C, K, dil, T, t0, x_off, o_off, n, a_off, r, cout        (offsets in floats)
+// mode 0, the taps of a causal convolution (an im2col for vkc_matmul), positions t0 .. t0 + n/(K*C) - 1:
+//     o[o_off + (t - t0)*K*C + k*C + c] = x[x_off + (t - (K-1)*dil + k*dil)*C + c], 0 before the start
+// mode 1, SnakeBeta, T*C elements (n):   o[o_off + i] = v + ib[c] * sin(v * ea[c])^2,  v = x[x_off + i],
+//     c = i % C, ea = tab[a_off + c], ib = tab[a_off + C + c]
+// mode 2, a causal transposed convolution's overlap-add: x [C = Tin][cout*K] (a GEMM's output, K = kernel),
+//     o [Tin*r][cout]: o[o_off + pos*cout + co] = tab[a_off + co] + sum over t with 0 <= pos - t*r < K of
+//     x[x_off + t*cout*K + co*K + (pos - t*r)]; n = Tin*r*cout. (A gather, so no atomics; positions past Tin*r are not made.)
+// mode 3, a per-channel bias in place:   o[o_off + i] += tab[a_off + i % C]
+// mode 4, clamp to [-1, 1]:              o[o_off + i] = clamp(x[x_off + i], -1, 1)
+// mode 5, a causal convolution to ONE channel, clamped (the vocoder's last layer), T positions (n = T): the taps [k][c] at
+//     tab[r + k*C + c], the bias at tab[a_off]:  o[o_off + t] = clamp(bias + sum x[x_off + (t - (K-1)*dil + k*dil)*C + c] * w[k][c], -1, 1)
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer XB { float x[]; };
+layout(std430, binding = 1) buffer OB { float o[]; };
+layout(std430, binding = 2) readonly buffer TB { float tab[]; };
+layout(push_constant) uniform P {
+    int mode, C, K, dil, T, t0, x_off, o_off, n, a_off, r, cout;
+} p;
+
+// sin of a large argument: reduced to [-pi, pi] first (the driver's sin is exact only there)
+float sin_reduced(float a) {
+    const float TWO_PI_HI = 6.28125;                 // 6 + 9/32, exact in f32
+    const float TWO_PI_LO = 0.0019353071795864769;   // 2 pi - TWO_PI_HI
+    float k = floor(a * 0.15915494309189535 + 0.5);
+    return sin((a - k * TWO_PI_HI) - k * TWO_PI_LO);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u);
+    if (i >= p.n) return;
+    if (p.mode == 0) {
+        int KC = p.K * p.C;
+        int tl = i / KC, rem = i - tl * KC;
+        int k = rem / p.C, c = rem - k * p.C;
+        int s = p.t0 + tl - (p.K - 1) * p.dil + k * p.dil;
+        o[p.o_off + i] = s < 0 ? 0.0 : x[p.x_off + s * p.C + c];
+    } else if (p.mode == 1) {
+        int c = i % p.C;
+        float v = x[p.x_off + i];
+        float s = sin_reduced(v * tab[p.a_off + c]);
+        o[p.o_off + i] = v + tab[p.a_off + p.C + c] * s * s;
+    } else if (p.mode == 2) {
+        int pos = i / p.cout, co = i - pos * p.cout;
+        int K = p.K, rows = p.cout * K;
+        int tlo = pos >= K ? (pos - K) / p.r + 1 : 0;
+        int thi = min(p.C - 1, pos / p.r);
+        float sum = tab[p.a_off + co];
+        for (int t = tlo; t <= thi; t++) sum += x[p.x_off + t * rows + co * K + (pos - t * p.r)];
+        o[p.o_off + i] = sum;
+    } else if (p.mode == 3) {
+        o[p.o_off + i] += tab[p.a_off + i % p.C];
+    } else if (p.mode == 4) {
+        o[p.o_off + i] = clamp(x[p.x_off + i], -1.0, 1.0);
+    } else {
+        float sum = tab[p.a_off];
+        for (int k = 0; k < p.K; k++) {
+            int s = i - (p.K - 1) * p.dil + k * p.dil;
+            if (s < 0) continue;
+            for (int c = 0; c < p.C; c++) sum += x[p.x_off + s * p.C + c] * tab[p.r + k * p.C + c];
+        }
+        o[p.o_off + i] = clamp(sum, -1.0, 1.0);
+    }
+}
