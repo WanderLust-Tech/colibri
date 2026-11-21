@@ -70,14 +70,25 @@ stack without a floating-point tie able to fail it. `tests/test_qwen3tts_real.py
 (the prompt's ids, the 63 frames of codes, the loudness of each frame) and the real engine; the gateway's rules run against a stub engine
 (`tools/tts_stub.py`, `tests/test_tts_gateway.py`, 45 tests, no weights needed).
 
-## Speed and memory (24-core i9, CPU)
+## Speed and memory (24-core i9, RTX 5090)
 
-Loading takes 1.6 s and 2.3 GB of RAM (the talker and the predictor as bf16, the codec as f32). A frame costs 130 to 250 ms for the talker and
-the predictor together (the first dozen frames run at about half the cost of the rest, on one thread or many; not explained), and the codec 0.3 s for each second of speech: **5 s of speech in about 17 s, about three and a half times slower than real
+Loading takes 1.6 s and 2.3 GB of RAM (the talker and the predictor as bf16, the codec as f32).
+
+**On the card** (a `VK=1` build with `COLI_VULKAN=1`, which the router sets when it puts the model on the card): a frame, the talker's step and
+the code predictor's sixteen, costs **14 to 19 ms** (the CPU: 111 ms), and the codec 0.2 s for each second of speech, which is now the larger
+part. 5 s of speech takes about 2.1 s (2.4 times faster than real time); 56 s of speech (680 characters) took 21 s. Each step is one
+submission of the dense chain (the same one the embedding and Gemma engines use: norms, q/k/v, head norms, RoPE, attention over a KV cache that
+lives on the card, o, SwiGLU, down), the matrices held as bf16 and computed in f32, and only the logits and the hidden row come back. The prompt's
+rows go through the same chain. The speech is the same as the CPU's: the 56 s speech from the card is byte for byte the CPU's WAV, and the
+real-engine tests (the codes teacher forced and free running) pass on the card. Without a card, or when a step fails (the whole request is then
+run again on the CPU), the CPU path runs. About 1 GB of the card for the matrices and, while a request runs, 0.25 MB for each position of the speech.
+`READY` says `"device":"vulkan"` or `"cpu"`.
+
+**On the CPU**: a frame costs 111 ms on a quiet machine (the predictor 81 of them: sixteen steps that each read the same five layers; the talker
+24) and up to 250 ms when the machine is busy, and the codec 0.2 s a second of speech: **5 s of speech in about 8 s, 1.6 times slower than real
 time**. The decode loop uses a smaller thread team than the prefill and the codec (the physical cores, at most six: `--decode-threads N` or
-`QT_DECODE_THREADS`; at 32 threads the same loop takes 346 ms a frame, at six about 250): the steps are one row against each weight, and a big
-team gains nothing from them. Real time needs about 80 ms a frame; the way there is the Vulkan path the other engines have (open, see
-[qwen3-speech.md](qwen3-speech.md)).
+`QT_DECODE_THREADS`; at 32 threads the same loop takes 346 ms a frame): the steps are one row against each weight, and a big team gains nothing
+from them. Pinning the team to the performance cores changed nothing.
 
 ## The engine on its own
 
@@ -101,4 +112,4 @@ ERROR {"id", "message"}                                             # the engine
 ## Not built yet
 
 The 1.7B CustomVoice (style `instructions`), VoiceDesign (a voice described in words), the Base models (a voice cloned from a few seconds of
-audio: needs the codec's encoder and a speaker encoder), streaming, and the Vulkan path. See [qwen3-speech.md](qwen3-speech.md).
+audio: needs the codec's encoder and a speaker encoder), streaming, and the codec on the card (it is now most of the time). See [qwen3-speech.md](qwen3-speech.md).

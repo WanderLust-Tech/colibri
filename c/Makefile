@@ -1376,8 +1376,8 @@ ifneq ($(EXE),)
 .PHONY: qwen3tts
 qwen3tts: qwen3tts$(EXE)
 endif
-qwen3tts$(EXE): qwen3tts.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h omp_tune.h .build-config
-	$(CC) $(CFLAGS) qwen3tts.c -o qwen3tts$(EXE) $(LDFLAGS)
+qwen3tts$(EXE): qwen3tts.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h omp_tune.h $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) qwen3tts.c $(VK_OBJ) -o qwen3tts$(EXE) $(LDFLAGS)
 
 # Gemma 4 mixture of experts (gemma-4-26B-A4B-it) and the dense 31B, E4B and E2B, with pictures and audio (docs/gemma4.md): the chat engine, with the
 # routed experts streamed through expert_ffn.h and its own tokenizer header (gemma4_tok.h).

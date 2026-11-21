@@ -172,7 +172,7 @@ Gemma 4's E2B and E4B also transcribe on the same route, as a chat model asked t
 
 | Model | `--model` / install id | Gives | Download | RAM | Speed here (CPU) | Page |
 |---|---|---|---|---|---|---|
-| Qwen3-TTS-0.6B-CustomVoice | `qwen3-tts-0.6b-customvoice` | 24 kHz speech in 10 languages, nine named speakers (a dialect for two of them) | 2.5 GB | 4 / 6 GB | 5 s of speech in about 17 s (about 3.5 times slower than real time) | [qwen3-tts.md](qwen3-tts.md) |
+| Qwen3-TTS-0.6B-CustomVoice | `qwen3-tts-0.6b-customvoice` | 24 kHz speech in 10 languages, nine named speakers (a dialect for two of them) | 2.5 GB | 4 / 6 GB | 5 s of speech in about 2 s on the card (2.4 times faster than real time), 8 s on the CPU | [qwen3-tts.md](qwen3-tts.md) |
 
 Apache-2.0. `POST /v1/audio/speech` in OpenAI's shape (`input`, `voice`, `response_format`; OpenAI's voice names stand for speakers; `language`
 and `seed` are extensions), WAV by default, PCM, and MP3, Opus, AAC and FLAC with ffmpeg; `coli speak "text"` from the terminal. No style

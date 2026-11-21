@@ -99,6 +99,11 @@ class RealEngineTest(unittest.TestCase):
         self.assertIn("english", info["languages"])
         self.assertIn("beijing_dialect", info["languages"])
 
+    @unittest.skipUnless(os.environ.get("COLI_VULKAN") == "1", "the card runs only with COLI_VULKAN=1 and a VK=1 build")
+    def test_on_the_card_ready_says_so(self):
+        info = json.loads(self.engine.ready.partition(" ")[2])
+        self.assertEqual(info["device"], "vulkan")                              # the same tests below then hold the card to the reference
+
     def test_the_prompt_is_the_references_prompt(self):
         out = self.cli("--teacher", "--max-frames", "1")
         self.assertRegex(out, r"input ids: identical \(19 here, 19 in the reference\)")

@@ -618,13 +618,16 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   `qwen3_tts` family (the `talker_config` section, modality `speech`), the model card (`speech`), refusals on the other routes, a catalogue
   entry with `tools/qwen3_tokenizer.py` as the post-install step, the router card and route, `coli speak`, `coli info`, Makefile, CI and release
   lists, the READMEs and the site. The engine serves `SPEAK` lines and answers `AUDIO` ([qwen3-tts.md](qwen3-tts.md)).
-- **Measured** (24-core i9, CPU): 5.04 s of speech in 15.8 s of talker and predictor (about 250 ms a frame; the first dozen frames run at about
-  half that, not explained) and 1.4 s of codec; 2.3 GB resident. At 32 threads the decode loop took 346 ms a frame; the smaller team is the
-  fix, not a cure: real time needs about 80 ms.
+- **Measured** (24-core i9, CPU): 5.04 s of speech in 7 s of talker and predictor (111 ms a frame on a quiet machine, 250 when busy; the
+  predictor is 81 of them) and 1.0 s of codec; 2.3 GB resident. At 32 threads the decode loop took 346 ms a frame.
+- **On the card (T6, 2026-11-21)**: the talker's and the code predictor's steps as one frame each of the dense chain (`qt_vk_run`, as the embedding
+  engine does it: KV cache on the device, matrices held as bf16), the prompt through the same chain, the CPU rerun on a failed step. 14 to 19 ms a
+  frame (6 times faster than the CPU, 4 times faster than real time); 5 s of speech in 2.1 s, 56 s in 21 s (the codec is 11 of them). The speech is
+  byte for byte the CPU's; the real-engine tests pass on the card. Build `make qwen3tts VK=1`, run with `COLI_VULKAN=1` (the router sets it).
 - **Tests:** `tests/test_tts_gateway.py` (45, a stub engine), `tests/test_speech_cli.py` (+11 for `coli speak`), `tests/test_router.py` (one),
   `tests/test_qwen3tts_real.py` (10, against `tools/qwen3_tts_0.6b_reference.json`).
 - **Not done**: the 1.7B and style `instructions`, VoiceDesign, voice cloning (the Base models: the codec's encoder and a speaker encoder),
-  streaming, a Vulkan path; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
+  streaming, the codec on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 

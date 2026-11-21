@@ -36,6 +36,10 @@
 #include "qi_gemm.h"
 #include "acestep_text.h"
 #include "omp_tune.h"
+#ifdef COLI_VULKAN
+#include "backend_vulkan.h"
+#include "vk_chain.h"
+#endif
 
 #define QT_SR 24000
 #define QT_GROUPS 16
@@ -144,10 +148,10 @@ static int qt_codec_load(QtCodec *m, const char *dir, char *err, size_t errn){
     char path[4300];
     snprintf(path, sizeof path, "%s/config.json", dir);
     FILE *f = fopen(path, "rb");
-    if (!f) { snprintf(err, errn, "cannot open %s", path); return -1; }
+    if (!f) { snprintf(err, errn, "cannot open %.400s", path); return -1; }
     fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
     char *buf = (char *)malloc((size_t)fn + 1);
-    if (!buf || fread(buf, 1, (size_t)fn, f) != (size_t)fn) { fclose(f); free(buf); snprintf(err, errn, "cannot read %s", path); return -1; }
+    if (!buf || fread(buf, 1, (size_t)fn, f) != (size_t)fn) { fclose(f); free(buf); snprintf(err, errn, "cannot read %.400s", path); return -1; }
     fclose(f); buf[fn] = 0;
     jval *root = json_parse_checked(buf);
     free(buf);
@@ -604,10 +608,10 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     char path[4300];
     snprintf(path, sizeof path, "%s/config.json", dir);
     FILE *f = fopen(path, "rb");
-    if (!f) { snprintf(err, errn, "cannot open %s", path); return -1; }
+    if (!f) { snprintf(err, errn, "cannot open %.400s", path); return -1; }
     fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
     char *buf = (char *)malloc((size_t)fn + 1);
-    if (!buf || fread(buf, 1, (size_t)fn, f) != (size_t)fn) { fclose(f); free(buf); snprintf(err, errn, "cannot read %s", path); return -1; }
+    if (!buf || fread(buf, 1, (size_t)fn, f) != (size_t)fn) { fclose(f); free(buf); snprintf(err, errn, "cannot read %.400s", path); return -1; }
     fclose(f); buf[fn] = 0;
     m->cfg = json_parse_checked(buf);
     free(buf);
@@ -852,6 +856,156 @@ static void qt_dec_rows(const QtDec *d, QtCache *C, float *x, int n, int pos0, c
     free(nb); free(o); free(q); free(cx); free(kk); free(vv); free(g); free(u); free(sc_all);
 }
 
+#ifdef COLI_VULKAN
+/* ------------------------------------------------------------------------------------------------ the decode steps on a Vulkan device
+ * A frame is one talker step and sixteen code predictor steps, each a row against every weight. On the CPU that is memory-bound and
+ * spends its time at the barriers between small matrices; on the card each step is one submission of the dense chain (norms, q/k/v, head
+ * norms, RoPE, attention over a KV cache that lives on the device, o, SwiGLU, down) and only the logits and the hidden row come back.
+ * The prompt rows go through the same chain. The device holds the matrices as bf16 and computes in f32, so a logit differs from the
+ * CPU's in the last bits; a device that is missing, or a frame that fails, leaves the CPU's path in charge. */
+static struct { int ready, chain; } qt_vk;
+
+static void qt_vk_open(void){
+    memset(&qt_vk, 0, sizeof qt_vk);
+    if (!coli_vk_init_env("qwen3tts")) return;               /* COLI_VULKAN unset, or no device: the CPU */
+    qt_vk.ready = 1;
+    atexit(coli_vk_shutdown);
+    const char *c = getenv("COLI_VK_CHAIN");
+    if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { qt_vk.chain = 1; atexit(vkc_shutdown); }   /* registered after the backend's: runs before it */
+}
+
+typedef struct {
+    int tried, ok, nl, D, H, Hk, hd, I, nheads;
+    float eps;
+    ColiVkTensor **t;                       /* [nl][7]: q k v o gate up down */
+    ColiVkTensor **head;                    /* the output matrices (the talker's codec head; the predictor's fifteen) */
+    VkcBuf *prm;                            /* per layer: ln1 [D], ln2 [D], q norm [hd], k norm [hd]; then the final norm [D] */
+    VkcBuf *cs, *kc, *vc, *xu, *x, *nrm, *q, *k, *v, *ctx, *g, *u, *tmp, *lg, *out;
+    size_t cap, rows, nlog;
+    unsigned long long steps;
+} QtVk;
+
+static ColiVkTensor *qt_vk_tensor(const AcdLin *l){
+    const QiMat *W = &l->m;
+    if (l->b || W->ld || !W->w || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2) return NULL;
+    ColiVkTensor *t = NULL;
+    return coli_vk_tensor_ensure(&t, W->w, NULL, W->fmt == QI_BF16 ? 11 : 10, W->K, W->N, 0) ? t : NULL;
+}
+
+/* The matrices and norm weights of a stack go up once (the first call; 0 when anything would not). */
+static int qt_vk_setup(QtVk *v, const QtDec *d, const AcdLin *heads, int nheads){
+    if (v->tried) return v->ok;
+    v->tried = 1;
+    if (!qt_vk.chain || d->hd > 256 || d->H % d->Hk) return 0;
+    v->nl = d->nl; v->D = d->D; v->H = d->H; v->Hk = d->Hk; v->hd = d->hd; v->I = d->inter; v->eps = d->eps; v->nheads = nheads;
+    v->t = (ColiVkTensor **)calloc((size_t)d->nl * 7, sizeof(ColiVkTensor *));
+    v->head = (ColiVkTensor **)calloc((size_t)nheads, sizeof(ColiVkTensor *));
+    const size_t per = (size_t)2 * d->D + 2 * d->hd, total = (size_t)d->nl * per + d->D;
+    float *arena = (float *)calloc(total, sizeof(float));
+    if (!v->t || !v->head || !arena) { free(arena); return 0; }
+    for (int l = 0; l < d->nl; l++) {
+        const AcdEncLayer *L = &d->L[l];
+        const AcdLin *mats[7] = { &L->sa.q, &L->sa.k, &L->sa.v, &L->sa.o, &L->gate, &L->up, &L->down };
+        for (int i = 0; i < 7; i++) {
+            v->t[l * 7 + i] = qt_vk_tensor(mats[i]);
+            if (!v->t[l * 7 + i]) { fprintf(stderr, "[VK] qwen3tts: a matrix of layer %d did not reach the device; the CPU runs the steps\n", l); free(arena); return 0; }
+        }
+        memcpy(arena + l * per, L->ln1, (size_t)d->D * sizeof(float));
+        memcpy(arena + l * per + d->D, L->ln2, (size_t)d->D * sizeof(float));
+        memcpy(arena + l * per + 2 * d->D, L->sa.qn, (size_t)d->hd * sizeof(float));
+        memcpy(arena + l * per + 2 * d->D + d->hd, L->sa.kn, (size_t)d->hd * sizeof(float));
+    }
+    memcpy(arena + (size_t)d->nl * per, d->norm, (size_t)d->D * sizeof(float));
+    for (int i = 0; i < nheads; i++) {
+        v->head[i] = qt_vk_tensor(&heads[i]);
+        if (!v->head[i]) { fprintf(stderr, "[VK] qwen3tts: an output matrix did not reach the device; the CPU runs the steps\n"); free(arena); return 0; }
+        if ((size_t)heads[i].m.N > v->nlog) v->nlog = (size_t)heads[i].m.N;
+    }
+    v->prm = vkc_buf(total * sizeof(float), VKC_DEV);
+    int ok = v->prm && vkc_begin() && vkc_write(v->prm, 0, arena, total * sizeof(float)) && vkc_submit(1);
+    free(arena);
+    if (!ok) return 0;
+    v->ok = 1;
+    return 1;
+}
+
+/* The buffers for `rows` rows a step and `cap` positions of cache; the rope table (cos, sin pairs) goes up with them. */
+static int qt_vk_reserve(QtVk *v, size_t rows, size_t cap, const float *cs, const float *sn){
+    const size_t D = v->D, rq = (size_t)v->H * v->hd, rk = (size_t)v->Hk * v->hd, hd = v->hd;
+    if (!vkc_reserve(&v->xu, rows * D * 4, VKC_UP) || !vkc_reserve(&v->x, rows * D * 4, VKC_DEV) || !vkc_reserve(&v->nrm, rows * D * 4, VKC_DEV) ||
+        !vkc_reserve(&v->tmp, rows * D * 4, VKC_DEV) || !vkc_reserve(&v->q, rows * rq * 4, VKC_DEV) || !vkc_reserve(&v->ctx, rows * rq * 4, VKC_DEV) ||
+        !vkc_reserve(&v->k, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->v, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->g, rows * v->I * 4, VKC_DEV) ||
+        !vkc_reserve(&v->u, rows * v->I * 4, VKC_DEV) || !vkc_reserve(&v->lg, v->nlog * 4, VKC_DEV) || !vkc_reserve(&v->out, (D + v->nlog) * 4, VKC_DOWN) ||
+        !vkc_reserve(&v->kc, (size_t)v->nl * cap * rk * 4, VKC_DEV) || !vkc_reserve(&v->vc, (size_t)v->nl * cap * rk * 4, VKC_DEV) ||
+        !vkc_reserve(&v->cs, cap * hd * 4, VKC_DEV))
+        return 0;
+    float *tab = (float *)malloc(cap * hd * sizeof(float));
+    if (!tab) return 0;
+    for (size_t r = 0; r < cap; r++)
+        for (size_t j = 0; j < hd / 2; j++) { tab[r * hd + 2 * j] = cs[r * hd + j]; tab[r * hd + 2 * j + 1] = sn[r * hd + j]; }
+    const int ok = vkc_begin() && vkc_write(v->cs, 0, tab, cap * hd * sizeof(float)) && vkc_submit(1);
+    free(tab);
+    v->cap = cap; v->rows = rows;
+    return ok;
+}
+
+/* n rows (host, [n][D]) at positions pos0.. through every layer, their keys and values appended to the device cache; then the last row
+ * through the final norm (hn, [D], when asked) and the output matrix `head` (logits [N], when asked). 1 on success; 0 leaves the CPU to run it. */
+static int qt_vk_run(QtVk *v, const float *xrows, int n, int pos0, int head, float *hn, float *logits, int nlogits){
+    if (!v->ok || (size_t)n > v->rows || (size_t)(pos0 + n) > v->cap) return 0;
+    const int D = v->D, H = v->H, Hk = v->Hk, hd = v->hd, I = v->I;
+    const size_t rq = (size_t)H * hd, rk = (size_t)Hk * hd, per = (size_t)2 * D + 2 * hd;
+    const float scale = 1.f / sqrtf((float)hd);
+    memcpy(vkc_ptr(v->xu), xrows, (size_t)n * D * sizeof(float));
+    int ok = vkc_begin() && vkc_copy(v->x, 0, v->xu, 0, (size_t)n * D);
+    for (int l = 0; l < v->nl && ok; l++) {
+        ColiVkTensor **t = v->t + (size_t)l * 7;
+        const int wb = (int)(l * per);
+        const size_t kbase = (size_t)l * v->cap * rk;
+        VkcNorm n1 = {n, D, 1, 0, D, D, 0, D, D, wb, 0, 0, v->eps, 1.f};
+        VkcNorm qn = {n * H, hd, H, 0, H * hd, hd, 0, H * hd, hd, wb + 2 * D, 0, 0, v->eps, 1.f};
+        VkcNorm kn = {n * Hk, hd, Hk, 0, Hk * hd, hd, 0, Hk * hd, hd, wb + 2 * D + hd, 0, 0, v->eps, 1.f};
+        VkcRope rq_ = {n * H, H, 0, H * hd, hd, hd / 2, pos0 * hd, hd}, rk_ = {n * Hk, Hk, 0, Hk * hd, hd, hd / 2, pos0 * hd, hd};
+        ok = vkc_norm(v->x, v->prm, v->nrm, &n1) &&
+             vkc_matmul(t[0], v->nrm, 0, v->q, 0, n) && vkc_matmul(t[1], v->nrm, 0, v->k, 0, n) && vkc_matmul(t[2], v->nrm, 0, v->v, 0, n) &&
+             vkc_norm(v->q, v->prm, v->q, &qn) && vkc_norm(v->k, v->prm, v->k, &kn) && vkc_rope(v->q, v->cs, &rq_) && vkc_rope(v->k, v->cs, &rk_) &&
+             vkc_copy(v->kc, kbase + (size_t)pos0 * rk, v->k, 0, (size_t)n * rk) && vkc_copy(v->vc, kbase + (size_t)pos0 * rk, v->v, 0, (size_t)n * rk);
+        if (ok) {
+            VkcAttnW a;
+            memset(&a, 0, sizeof a);
+            a.a = (VkcAttn){.S = n, .H = H, .KVH = Hk, .hd = hd, .pos_base = pos0, .cap = pos0 + n, .q_off = 0, .q_row = (int)rq, .q_seg = hd,
+                            .o_off = 0, .o_row = (int)rq, .scale = scale, .k_off = (int)kbase, .v_off = (int)kbase};
+            a.vd = hd; a.kv_pm = 1;
+            ok = vkc_attn_w(v->q, v->kc, v->vc, v->ctx, NULL, NULL, NULL, &a);
+        }
+        VkcNorm n2 = {n, D, 1, 0, D, D, 0, D, D, wb + D, 0, 0, v->eps, 1.f};
+        VkcEw add = {VKC_EW_ADD, n * D, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f}, act = {VKC_EW_SWIGLU, n * I, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1.f};
+        ok = ok && vkc_matmul(t[3], v->ctx, 0, v->tmp, 0, n) && vkc_ew(v->x, v->x, v->tmp, NULL, NULL, &add) &&
+             vkc_norm(v->x, v->prm, v->nrm, &n2) && vkc_matmul(t[4], v->nrm, 0, v->g, 0, n) && vkc_matmul(t[5], v->nrm, 0, v->u, 0, n) &&
+             vkc_ew(v->g, v->g, v->u, NULL, NULL, &act) && vkc_matmul(t[6], v->g, 0, v->tmp, 0, n) && vkc_ew(v->x, v->x, v->tmp, NULL, NULL, &add);
+    }
+    if (ok) {                                                           /* the last row: final norm, then the output matrix */
+        VkcNorm fn = {1, D, 1, (n - 1) * D, D, D, 0, D, D, (int)(v->nl * per), 0, 0, v->eps, 1.f};
+        ok = vkc_norm(v->x, v->prm, v->nrm, &fn) && vkc_copy(v->out, 0, v->nrm, 0, (size_t)D);
+        if (ok && logits) ok = vkc_matmul(v->head[head], v->nrm, 0, v->lg, 0, 1) && vkc_copy(v->out, (size_t)D, v->lg, 0, (size_t)nlogits);
+    }
+    ok = ok && vkc_submit(1);
+    if (!ok) {
+        fprintf(stderr, "[VK] qwen3tts: a frame failed; the CPU runs the steps from here on\n");
+        v->ok = 0;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); qt_vk.ready = 0; qt_vk.chain = 0; }
+        return 0;
+    }
+    const float *o = (const float *)vkc_ptr(v->out);
+    if (hn) memcpy(hn, o, (size_t)D * sizeof(float));
+    if (logits) memcpy(logits, o + D, (size_t)nlogits * sizeof(float));
+    v->steps++;
+    return 1;
+}
+
+static QtVk qt_vk_talker, qt_vk_pred;
+#endif
+
 typedef struct { uint64_t s; } QtRng;
 static double qt_rand(QtRng *r){                                   /* xorshift64*: uniform in [0, 1) */
     r->s ^= r->s >> 12; r->s ^= r->s << 25; r->s ^= r->s >> 27;
@@ -921,7 +1075,7 @@ static void qt_teach_note(QtTeacher *t, const float *logits, int n, int taught, 
 }
 
 /* The frames of codes [frames][16] (malloc'd) for a prefill [L][D]. logits0, when not NULL, gets the first step's raw logits [vocab]. */
-static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtGen *g, int *frames, float *logits0, QtTeacher *teach){
+static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const QtGen *g, int *frames, float *logits0, QtTeacher *teach, int allow_dev, int *dev_failed){
     const QtDec *T = &m->talker, *P = &m->pred;
     const int D = T->D, maxf = g->max_frames;
     const int cap = L + maxf + 1;
@@ -932,10 +1086,18 @@ static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtG
     acd_rope_table(pcs, psn, QT_GROUPS + 1, P->hd, P->theta);
     float *x = (float *)malloc((size_t)L * D * sizeof(float));
     memcpy(x, prefill, (size_t)L * D * sizeof(float));
-    qt_dec_rows(T, tc, x, L, 0, tcs, tsn);
     float *hn = (float *)malloc((size_t)D * sizeof(float)), *logits = (float *)malloc((size_t)m->vocab * sizeof(float)), *raw = (float *)malloc((size_t)m->vocab * sizeof(float));
-    acd_rmsnorm(hn, x + (size_t)(L - 1) * D, 1, D, T->norm, T->eps);
-    qt_mv(logits, hn, &m->codec_head);
+    int dev = 0;
+#ifdef COLI_VULKAN
+    if (allow_dev && qt_vk.chain && qt_vk_setup(&qt_vk_talker, T, &m->codec_head, 1) && qt_vk_setup(&qt_vk_pred, P, m->pred_head, QT_GROUPS - 1))
+        dev = qt_vk_reserve(&qt_vk_talker, (size_t)L, (size_t)cap, tcs, tsn) && qt_vk_reserve(&qt_vk_pred, 2, QT_GROUPS + 1, pcs, psn) &&
+              qt_vk_run(&qt_vk_talker, x, L, 0, 0, hn, logits, m->vocab);
+#endif
+    if (!dev) {
+        qt_dec_rows(T, tc, x, L, 0, tcs, tsn);
+        acd_rmsnorm(hn, x + (size_t)(L - 1) * D, 1, D, T->norm, T->eps);
+        qt_mv(logits, hn, &m->codec_head);
+    }
 #ifdef _OPENMP
     const int team_before = omp_get_max_threads();
     omp_set_num_threads(qt_decode_threads());
@@ -969,19 +1131,30 @@ static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtG
         memcpy(prow, hn, (size_t)D * sizeof(float));
         qt_row(m->codec_emb, c0, D, prow + D);
         pcache->len = 0;
-        qt_dec_rows(P, pcache, prow, 2, 0, pcs, psn);
-        acd_rmsnorm(ph, prow + D, 1, D, P->norm, P->eps);
-        qt_mv(pl, ph, &m->pred_head[0]);
+#ifdef COLI_VULKAN
+        if (dev && !qt_vk_run(&qt_vk_pred, prow, 2, 0, 0, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
+#endif
+        if (!dev) {
+            qt_dec_rows(P, pcache, prow, 2, 0, pcs, psn);
+            acd_rmsnorm(ph, prow + D, 1, D, P->norm, P->eps);
+            qt_mv(pl, ph, &m->pred_head[0]);
+        }
         if (teach) { code[1] = teach->codes[(size_t)f * QT_GROUPS + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[1], f); }
         else code[1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
         for (int i = 1; i < QT_GROUPS - 1; i++) {
             qt_row(m->pred_emb[i - 1], code[i], D, emb);
-            qt_dec_rows(P, pcache, emb, 1, i + 1, pcs, psn);
-            acd_rmsnorm(ph, emb, 1, D, P->norm, P->eps);
-            qt_mv(pl, ph, &m->pred_head[i]);
+#ifdef COLI_VULKAN
+            if (dev && !qt_vk_run(&qt_vk_pred, emb, 1, i + 1, i, NULL, pl, m->cb_vocab)) { *dev_failed = 1; break; }
+#endif
+            if (!dev) {
+                qt_dec_rows(P, pcache, emb, 1, i + 1, pcs, psn);
+                acd_rmsnorm(ph, emb, 1, D, P->norm, P->eps);
+                qt_mv(pl, ph, &m->pred_head[i]);
+            }
             if (teach) { code[i + 1] = teach->codes[(size_t)f * QT_GROUPS + i + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[i + 1], f); }
             else code[i + 1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
         }
+        if (*dev_failed) break;
         /* the next talker input: the sum of the 16 embeddings + tts_pad (the text is all in the prefill) */
         qt_row(m->codec_emb, c0, D, sum);
         for (int gi = 1; gi < QT_GROUPS; gi++) {
@@ -989,9 +1162,11 @@ static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtG
             for (int j = 0; j < D; j++) sum[j] += emb[j];
         }
         for (int j = 0; j < D; j++) next[j] = sum[j] + pad[j];
-        qt_dec_rows(T, tc, next, 1, L + f, tcs, tsn);
-        acd_rmsnorm(hn, next, 1, D, T->norm, T->eps);
-        qt_mv(logits, hn, &m->codec_head);
+#ifdef COLI_VULKAN
+        if (dev && !qt_vk_run(&qt_vk_talker, next, 1, L + f, 0, hn, logits, m->vocab)) { *dev_failed = 1; break; }
+#endif
+        if (!dev) qt_dec_rows(T, tc, next, 1, L + f, tcs, tsn);
+        if (!dev) { acd_rmsnorm(hn, next, 1, D, T->norm, T->eps); qt_mv(logits, hn, &m->codec_head); }
 
     }
     *frames = f;
@@ -1000,7 +1175,20 @@ static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtG
 #endif
     qt_cache_free(T, tc); qt_cache_free(P, pcache);
     free(tcs); free(tsn); free(pcs); free(psn); free(x); free(hn); free(logits); free(raw); free(seen); free(pad); free(prow); free(ph); free(pl); free(emb); free(sum); free(next);
+    if (*dev_failed) { free(codes); return NULL; }
     return codes;
+}
+
+/* On the device when there is one; if it fails part way, the whole generation again on the CPU (its caches were never filled). */
+static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtGen *g, int *frames, float *logits0, QtTeacher *teach){
+    int failed = 0;
+    QtTeacher saved;
+    if (teach) saved = *teach;
+    int *codes = qt_generate_on(m, prefill, L, g, frames, logits0, teach, 1, &failed);
+    if (!failed) return codes;
+    if (teach) *teach = saved;
+    failed = 0;
+    return qt_generate_on(m, prefill, L, g, frames, logits0, teach, 0, &failed);
 }
 
 static void qt_compare(const char *label, const float *a, const float *b, size_t n){
@@ -1092,6 +1280,13 @@ static void qt_names(jval *obj){
     for (int i = 0; i < obj->len; i++) { if (i) putchar(','); putchar('"'); qt_escape(obj->keys[i]); putchar('"'); }
 }
 
+static const char *qt_device(void){
+#ifdef COLI_VULKAN
+    if (qt_vk.ready && qt_vk.chain) return "vulkan";
+#endif
+    return "cpu";
+}
+
 /* READY, then SPEAK lines until stdin closes (docs/qwen3-tts.md has the protocol). */
 static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     jval *tc = json_get(m->cfg, "talker_config");
@@ -1101,7 +1296,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     qt_names(json_get(tc, "spk_id"));
     printf("],\"languages\":[");
     qt_names(json_get(tc, "codec_language_id"));
-    printf("],\"device\":\"cpu\"}\n");
+    printf("],\"device\":\"%s\"}\n", qt_device());
     fflush(stdout);
     for (;;) {
         int too_long;
@@ -1211,6 +1406,9 @@ int main(int argc, char **argv){
     double t0 = qt_now();
     if (qt_model_load(m, model_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
     fprintf(stderr, "qwen3tts: %d talker layers (d %d), %d predictor layers, %.2f GB resident, loaded in %.1f s\n", m->talker.nl, m->talker.D, m->pred.nl, (double)m->bytes / 1e9, qt_now() - t0);
+#ifdef COLI_VULKAN
+    qt_vk_open();                      /* once the weights are loaded: the device opens, and each matrix goes up on the first request */
+#endif
     if (serve) return qt_serve(m, qt_name_of(model_dir), &gen);
     int nids = 0, rows = 0;
     int *ids = qt_text_ids(m, text, &nids);
