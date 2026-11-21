@@ -718,9 +718,229 @@ static void as_compare(const char *label, const float *a, const float *b, size_t
     printf("%-10s n=%zu  max abs diff %.3e  mean abs diff %.3e  (mean |ref| %.3e)\n", label, n, mx, sum / (double)(n ? n : 1), ref / (double)(n ? n : 1));
 }
 
+/* ------------------------------------------------------------------------------------------------ long audio, one request */
+
+#define AS_MAX_PIECE_S 1200.0       /* the reference takes up to 20 minutes in one piece (QWEN3ASR_MAX_PIECE_S: a smaller limit, for tests) */
+static double as_max_piece(void){ const char *e = getenv("QWEN3ASR_MAX_PIECE_S"); const double v = e ? atof(e) : 0; return v >= 2.0 ? v : AS_MAX_PIECE_S; }
+#define AS_MIN_PIECE_S 0.5
+
+/* split_audio_into_chunks: pieces close to AS_MAX_PIECE_S, cut at the quietest 100 ms within 5 s either side of the limit. Returns the number of
+ * pieces; start[i] and len[i] are in samples (the pieces tile the audio exactly; a short last piece is padded by the caller). */
+static int as_split(const float *w, int n, int **start, int **len){
+    const double lim = as_max_piece();
+    const int maxlen = (int)(lim * AS_SR), expand = (lim / 2 < 5.0 ? lim / 2 : 5.0) * AS_SR, win = AS_SR / 10;
+    int cap = n / maxlen + 2, np = 0;
+    *start = (int *)malloc((size_t)cap * sizeof(int)); *len = (int *)malloc((size_t)cap * sizeof(int));
+    int at = 0;
+    while (n - at > maxlen) {
+        const int cut = at + maxlen, left = cut - expand > at ? cut - expand : at, right = cut + expand < n ? cut + expand : n;
+        int boundary = cut;
+        if (right - left > win) {
+            double best = 1e300, run = 0;
+            int bestpos = 0;
+            for (int i = 0; i < win; i++) run += fabsf(w[left + i]);
+            best = run;
+            for (int p = 1; p + win <= right - left; p++) {
+                run += fabsf(w[left + p + win - 1]) - fabsf(w[left + p - 1]);
+                if (run < best) { best = run; bestpos = p; }
+            }
+            int inner = 0;
+            float lo = 1e30f;
+            for (int i = 0; i < win; i++) { const float a = fabsf(w[left + bestpos + i]); if (a < lo) { lo = a; inner = i; } }
+            boundary = left + bestpos + inner;
+        }
+        if (boundary < at + 1) boundary = at + 1;
+        if (boundary > n) boundary = n;
+        (*start)[np] = at; (*len)[np] = boundary - at; np++;
+        at = boundary;
+    }
+    (*start)[np] = at; (*len)[np] = n - at; np++;
+    return np;
+}
+
+typedef struct { char *language, *text; int tokens, pieces, truncated; double audio_s, mel_s, enc_s, gen_s; } AsResult;
+
+static void as_free_result(AsResult *r){ free(r->language); free(r->text); memset(r, 0, sizeof *r); }
+
+/* Transcribes `n` samples at 16 kHz: pieces of up to 20 minutes, each through the encoder and the decoder; the texts are joined and the
+ * languages merged (consecutive repeats dropped). Returns 0, or -1 with a message in err. */
+static int as_transcribe(const Asr *m, const float *pcm, int n, const char *language, const char *context, int max_new, AsResult *res,
+                         char *err, size_t errn){
+    memset(res, 0, sizeof *res);
+    res->audio_s = (double)n / AS_SR;
+    if (n < AS_HOP) { res->language = strdup(""); res->text = strdup(""); return 0; }
+    int *st = NULL, *ln = NULL;
+    const int np = as_split(pcm, n, &st, &ln);
+    res->pieces = np;
+    size_t cap = 1024, used = 0;
+    char *all = (char *)malloc(cap);
+    char langs[512] = "", last[128] = "";
+    all[0] = 0;
+    for (int pi = 0; pi < np; pi++) {
+        const float *w = pcm + st[pi];
+        int wn = ln[pi];
+        float *padded = NULL;
+        if (np > 1 && wn < (int)(AS_MIN_PIECE_S * AS_SR)) {
+            const int want = (int)(AS_MIN_PIECE_S * AS_SR);
+            padded = (float *)calloc((size_t)want, sizeof(float));
+            memcpy(padded, w, (size_t)wn * sizeof(float));
+            w = padded; wn = want;
+        }
+        double t0 = as_now();
+        int T = 0;
+        float *mel = as_mel(w, wn, &T);
+        free(padded);
+        if (!mel) continue;
+        res->mel_s += as_now() - t0;
+        t0 = as_now();
+        int nf = 0;
+        float *enc = as_encode(m, mel, T, &nf, NULL);
+        free(mel);
+        res->enc_s += as_now() - t0;
+        t0 = as_now();
+        int mn = max_new > 0 ? max_new : 256 + (int)((double)wn / AS_SR * 8.0);
+        if (mn > 8192) mn = 8192;
+        int ng = 0;
+        int *gen = as_generate(m, enc, nf, context, language, mn, &ng, NULL, NULL);
+        free(enc);
+        res->gen_s += as_now() - t0;
+        res->tokens += ng;
+        if (ng >= mn && gen[ng - 1] != m->im_end && gen[ng - 1] != m->eos2) res->truncated = 1;
+        char *raw = (char *)malloc((size_t)ng * 16 + 16);
+        int rl = tok_decode((Tok *)&m->tok, gen, ng, raw, ng * 16);
+        raw[rl] = 0;
+        free(gen);
+        char *p;
+        while ((p = strstr(raw, "<|im_end|>"))) memmove(p, p + 10, strlen(p + 10) + 1);
+        while ((p = strstr(raw, "<|endoftext|>"))) memmove(p, p + 13, strlen(p + 13) + 1);
+        char *lang = NULL, *text = NULL;
+        as_parse(raw, language, &lang, &text);
+        free(raw);
+        const size_t need = used + strlen(text) + 1;
+        if (need + 1 > cap) { while (need + 1 > cap) cap *= 2; all = (char *)realloc(all, cap); }
+        /* the reference joins the pieces with nothing; a word that ends one piece and one that starts the next need a space */
+        if (used > 0 && *text && (unsigned char)all[used - 1] < 0x80 && (unsigned char)*text < 0x80 && all[used - 1] != ' ' && *text != ' ' &&
+            all[used - 1] != '\n') {
+            if (used + 2 > cap) { cap *= 2; all = (char *)realloc(all, cap); }
+            all[used++] = ' '; all[used] = 0;
+        }
+        memcpy(all + used, text, strlen(text)); used += strlen(text); all[used] = 0;
+        if (*lang && strcmp(lang, last)) {
+            if (*langs && strlen(langs) + strlen(lang) + 2 < sizeof langs) strcat(langs, ",");
+            if (strlen(langs) + strlen(lang) + 1 < sizeof langs) strcat(langs, lang);
+            snprintf(last, sizeof last, "%s", lang);
+        }
+        free(lang); free(text);
+    }
+    free(st); free(ln);
+    res->language = strdup(langs);
+    res->text = all;
+    (void)err; (void)errn;
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------------ the serve loop */
+
+#define AS_MAX_LINE ((size_t)8 << 20)
+
+static void as_escape(const char *s){
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c < 0x20) printf("\\u%04x", c);
+        else putchar(c);
+    }
+}
+
+static void as_error(const char *id, const char *message){
+    printf("ERROR {\"id\":\""); as_escape(id ? id : "");
+    printf("\",\"message\":\""); as_escape(message); printf("\"}\n");
+    fflush(stdout);
+}
+
+static char *as_read_line(int *too_long){
+    size_t cap = 1 << 12, n = 0;
+    char *buf = (char *)malloc(cap);
+    int c, any = 0;
+    *too_long = 0;
+    if (!buf) exit(1);
+    while ((c = fgetc(stdin)) != EOF) {
+        any = 1;
+        if (c == '\n') break;
+        if (*too_long) continue;
+        if (n + 2 > cap) {
+            if (cap >= AS_MAX_LINE) { *too_long = 1; continue; }
+            cap *= 2; buf = (char *)realloc(buf, cap);
+            if (!buf) exit(1);
+        }
+        buf[n++] = (char)c;
+    }
+    if (!any) { free(buf); return NULL; }
+    if (n && buf[n - 1] == '\r') n--;
+    buf[n] = 0;
+    return buf;
+}
+
+/*   READY {"model","task":"transcribe","sample_rate":16000,"max_seconds":..,"layers":..}
+ *   TRANSCRIBE {"id","wav":PATH,"language":NAME|"","context":TEXT,"max_new":N}
+ *   TEXT {"id","language","text","tokens","pieces","audio_seconds","seconds","truncated"}      ERROR {"id","message"} */
+static int as_serve(const Asr *m, const char *name){
+    printf("READY {\"model\":\""); as_escape(name);
+    printf("\",\"task\":\"transcribe\",\"sample_rate\":%d,\"piece_seconds\":%d,\"layers\":%d,\"encoder_layers\":%d,\"device\":\"cpu\"}\n", AS_SR, (int)as_max_piece(), m->nl, m->el);
+    fflush(stdout);
+    for (;;) {
+        int too_long;
+        char *line = as_read_line(&too_long);
+        if (!line) break;
+        if (too_long) { as_error("", "the request line is too long"); free(line); continue; }
+        if (!*line) { free(line); continue; }
+        if (strncmp(line, "TRANSCRIBE ", 11)) { as_error("", "unknown message"); free(line); continue; }
+        jval *j = json_parse_checked(line + 11);
+        if (!j || j->t != J_OBJ) { as_error("", "TRANSCRIBE needs a JSON object"); if (j) json_free(j); free(line); continue; }
+        jval *jid = json_get(j, "id"), *jw = json_get(j, "wav"), *jl = json_get(j, "language"), *jc = json_get(j, "context"), *jm = json_get(j, "max_new");
+        const char *id = jid && jid->t == J_STR ? jid->str : "";
+        char err[512] = "";
+        int n = 0;
+        float *pcm = NULL;
+        if (!jw || jw->t != J_STR) as_error(id, "wav must be the path of a 16 kHz WAV file");
+        else if (!(pcm = as_read_wav(jw->str, &n, err, sizeof err))) as_error(id, err);
+        else {
+            AsResult r;
+            const double t0 = as_now();
+            if (as_transcribe(m, pcm, n, jl && jl->t == J_STR ? jl->str : NULL, jc && jc->t == J_STR ? jc->str : "", jm && jm->t == J_NUM ? (int)jm->num : 0, &r, err, sizeof err)) as_error(id, err);
+            else {
+                printf("TEXT {\"id\":\""); as_escape(id);
+                printf("\",\"language\":\""); as_escape(r.language);
+                printf("\",\"text\":\""); as_escape(r.text);
+                printf("\",\"tokens\":%d,\"pieces\":%d,\"audio_seconds\":%.3f,\"seconds\":%.3f,\"truncated\":%s}\n", r.tokens, r.pieces, r.audio_s, as_now() - t0, r.truncated ? "true" : "false");
+                fflush(stdout);
+                fprintf(stderr, "qwen3asr: %.1f s of audio: mel %.2f s, encoder %.2f s, %d tokens in %.2f s\n", r.audio_s, r.mel_s, r.enc_s, r.tokens, r.gen_s);
+            }
+            as_free_result(&r);
+        }
+        free(pcm);
+        json_free(j);
+        free(line);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------------ the command line */
+
+static const char *as_name_of(const char *dir){
+    const char *s = strrchr(dir, '/'), *b = strrchr(dir, '\\');
+    if (b && (!s || b > s)) s = b;
+    return s ? s + 1 : dir;
+}
+
+static const char *USAGE = "usage: qwen3asr --model DIR (--wav FILE [--language NAME] [--context TEXT] [--max-new N] [--ref REFDIR] | --serve) [--threads N]\n";
+
 int main(int argc, char **argv){
     const char *dir = NULL, *wav = NULL, *language = NULL, *context = "", *ref = NULL;
-    int max_new = 512;
+    int max_new = 0, serve = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
@@ -728,75 +948,67 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--context") && i + 1 < argc) context = argv[++i];
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
+        else if (!strcmp(argv[i], "--serve")) serve = 1;
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
 #ifdef _OPENMP
             omp_set_num_threads(atoi(argv[++i]));
 #else
             ++i;
 #endif
-        } else { fprintf(stderr, "usage: qwen3asr --model DIR --wav FILE [--language NAME] [--context TEXT] [--max-new N] [--ref REFDIR]\n"); return 2; }
+        } else { fputs(USAGE, stderr); return 2; }
     }
-    if (!dir || !wav) { fprintf(stderr, "usage: qwen3asr --model DIR --wav FILE [--language NAME] [--context TEXT] [--max-new N] [--ref REFDIR]\n"); return 2; }
+    if (!dir || (!wav && !serve)) { fputs(USAGE, stderr); return 2; }
     char err[512] = "";
+    Asr *m = (Asr *)calloc(1, sizeof *m);
+    double t0 = as_now();
+    if (as_load(m, dir, err, sizeof err)) {
+        if (serve) { as_error("", err); return 1; }
+        fprintf(stderr, "qwen3asr: %s\n", err);
+        return 1;
+    }
+    fprintf(stderr, "qwen3asr: %d encoder layers (d %d), %d decoder layers (d %d), %.2f GB resident, loaded in %.1f s\n", m->el, m->ed, m->nl, m->D, (double)m->wbytes / 1e9, as_now() - t0);
+    if (serve) return as_serve(m, as_name_of(dir));
     int n = 0;
     float *pcm = as_read_wav(wav, &n, err, sizeof err);
     if (!pcm) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }
-    Asr *m = (Asr *)calloc(1, sizeof *m);
-    double t0 = as_now();
-    if (as_load(m, dir, err, sizeof err)) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }
-    fprintf(stderr, "qwen3asr: %d encoder layers (d %d), %d decoder layers (d %d), %.2f GB resident, loaded in %.1f s\n", m->el, m->ed, m->nl, m->D, (double)m->wbytes / 1e9, as_now() - t0);
+    if (!ref) {
+        AsResult r;
+        if (as_transcribe(m, pcm, n, language, context, max_new, &r, err, sizeof err)) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }
+        printf("language: %s\ntext: %s\n", r.language, r.text);
+        fprintf(stderr, "qwen3asr: %.1f s of audio in %d piece(s): mel %.2f s, encoder %.2f s, %d tokens in %.2f s%s\n", r.audio_s, r.pieces, r.mel_s, r.enc_s, r.tokens, r.gen_s,
+                r.truncated ? " (stopped at the token limit)" : "");
+        return 0;
+    }
+    /* --ref: each stage held to the reference tensors */
     char path[4300];
     size_t got = 0;
-    t0 = as_now();
     int T = 0;
     float *mel = as_mel(pcm, n, &T);
     if (!mel) { fprintf(stderr, "qwen3asr: the audio is shorter than one frame\n"); return 1; }
-    double t_mel = as_now() - t0;
-    if (ref) {
-        snprintf(path, sizeof path, "%s/features.f32", ref);
-        float *r = as_load_f32(path, 0, &got);
-        if (r) { if (got == (size_t)AS_NMEL * T) as_compare("features", mel, r, got); else printf("features: reference has %zu values, here %d\n", got, AS_NMEL * T); free(r); }
-    }
-    t0 = as_now();
+    snprintf(path, sizeof path, "%s/features.f32", ref);
+    float *r = as_load_f32(path, 0, &got);
+    if (r) { if (got == (size_t)AS_NMEL * T) as_compare("features", mel, r, got); else printf("features: reference has %zu values, here %d\n", got, AS_NMEL * T); free(r); }
     int nf = 0;
     float *conv = NULL;
-    float *enc = as_encode(m, mel, T, &nf, ref ? &conv : NULL);
-    double t_enc = as_now() - t0;
-    if (ref) {
-        snprintf(path, sizeof path, "%s/conv.f32", ref);
-        float *r = as_load_f32(path, 0, &got);
-        if (r) { if (got == (size_t)nf * m->ed) as_compare("conv", conv, r, got); else printf("conv: reference has %zu values, here %d\n", got, nf * m->ed); free(r); }
-        snprintf(path, sizeof path, "%s/encoder.f32", ref);
-        r = as_load_f32(path, 0, &got);
-        if (r) { if (got == (size_t)nf * m->D) as_compare("encoder", enc, r, got); else printf("encoder: reference has %zu values, here %d\n", got, nf * m->D); free(r); }
-    }
-    t0 = as_now();
+    float *enc = as_encode(m, mel, T, &nf, &conv);
+    snprintf(path, sizeof path, "%s/conv.f32", ref);
+    r = as_load_f32(path, 0, &got);
+    if (r) { if (got == (size_t)nf * m->ed) as_compare("conv", conv, r, got); else printf("conv: reference has %zu values, here %d\n", got, nf * m->ed); free(r); }
+    snprintf(path, sizeof path, "%s/encoder.f32", ref);
+    r = as_load_f32(path, 0, &got);
+    if (r) { if (got == (size_t)nf * m->D) as_compare("encoder", enc, r, got); else printf("encoder: reference has %zu values, here %d\n", got, nf * m->D); free(r); }
     int ng = 0, pl = 0, *prompt = NULL;
-    int *gen = as_generate(m, enc, nf, context, language, max_new, &ng, &pl, &prompt);
-    double t_gen = as_now() - t0;
-    if (ref) {
-        snprintf(path, sizeof path, "%s/prompt_ids.i32", ref);
-        int *r = as_load_i32(path, &got);
-        if (r) { int same = got == (size_t)pl && !memcmp(r, prompt, got * 4); printf("prompt ids: %s (%d here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", pl, got); free(r); }
-        snprintf(path, sizeof path, "%s/generated.i32", ref);
-        r = as_load_i32(path, &got);
-        if (r) {
-            int same = got == (size_t)ng && !memcmp(r, gen, got * 4);
-            printf("generated ids: %s (%d here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", ng, got);
-            if (!same) { printf(" here:"); for (int i = 0; i < ng && i < 40; i++) printf(" %d", gen[i]); printf("\n ref: "); for (size_t i = 0; i < got && i < 40; i++) printf(" %d", r[i]); printf("\n"); }
-            free(r);
-        }
+    int *gen = as_generate(m, enc, nf, context, language, max_new > 0 ? max_new : 256, &ng, &pl, &prompt);
+    snprintf(path, sizeof path, "%s/prompt_ids.i32", ref);
+    int *ri = as_load_i32(path, &got);
+    if (ri) { int same = got == (size_t)pl && !memcmp(ri, prompt, got * 4); printf("prompt ids: %s (%d here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", pl, got); free(ri); }
+    snprintf(path, sizeof path, "%s/generated.i32", ref);
+    ri = as_load_i32(path, &got);
+    if (ri) {
+        int same = got == (size_t)ng && !memcmp(ri, gen, got * 4);
+        printf("generated ids: %s (%d here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", ng, got);
+        if (!same) { printf(" here:"); for (int i = 0; i < ng && i < 40; i++) printf(" %d", gen[i]); printf("\n ref: "); for (size_t i = 0; i < got && i < 40; i++) printf(" %d", ri[i]); printf("\n"); }
+        free(ri);
     }
-    char *raw = (char *)malloc((size_t)ng * 16 + 16);
-    int rl = tok_decode(&m->tok, gen, ng, raw, ng * 16);
-    raw[rl] = 0;
-    /* skip_special_tokens: drop <|im_end|> and <|endoftext|> (the added tokens are written literally by tok_decode) */
-    char *p;
-    while ((p = strstr(raw, "<|im_end|>"))) memmove(p, p + 10, strlen(p + 10) + 1);
-    while ((p = strstr(raw, "<|endoftext|>"))) memmove(p, p + 13, strlen(p + 13) + 1);
-    char *lang = NULL, *text = NULL;
-    as_parse(raw, language, &lang, &text);
-    printf("language: %s\ntext: %s\n", lang, text);
-    fprintf(stderr, "qwen3asr: %d samples (%.1f s): mel %.2f s, encoder %.2f s (%d frames), %d tokens in %.2f s\n", n, (double)n / AS_SR, t_mel, t_enc, nf, ng, t_gen);
     return 0;
 }
