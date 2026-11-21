@@ -651,6 +651,8 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   `coli voice list|add|remove` (the words are written down by Qwen3-ASR when `--text` is not given), `coli speak --reference/--reference-text/
   --x-vector`, the engine's one-shot `--clone-wav` with `--check`, `tools/qwen3_tts_clone_ref.py`, `tests/test_qwen3tts_clone_real.py` (11 + 3),
   `tests/test_tts_clone.py` (23).
+- **Dashboard: Settings → Voices** (`web/src/components/VoicesPanel.tsx`, `lib/voices.ts`, the router's pages list): the saved voices, a form from a
+  clip, Try (speaks a phrase in the voice through the first installed Base model and plays it) and Remove; the page exists only on a router.
 - **The encoders on the card** (`qc_gemm_hook`): the Mimi convolutions' im2col products (in tiles of up to 32768 rows) and the encoder transformer's
   matrices go to the Vulkan device (`qc_vk_gemm` in `qwen3tts.c`), and its attention is a parallel loop instead of the acestep kernel (15 ms a
   layer): an 11 s clip's codes in 0.34 s instead of 0.67 s; same codes (0 of 2208 differ).

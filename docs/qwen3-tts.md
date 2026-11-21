@@ -162,7 +162,9 @@ speakers. Two ways to give the voice:
 - **A saved voice**: `coli voice add ana clip.wav --text "what the clip says"` (without `--text` the server's speech recognition model writes the
   words down; `--no-text` skips that), then `voice` names it: `coli speak "Hello." --voice ana`, or `{"voice": "ana"}`. Voices live in
   `~/colibri-voices/<name>/` (`ref.wav` at 24 kHz mono and `voice.json`; `COLI_VOICES` moves them). `coli voice list`, `coli voice remove ana`; over
-  HTTP `GET /v1/audio/voices`, `POST /v1/audio/voices` (`{"name", "audio" (base64), "text"}`) and `POST /v1/audio/voices/delete` on the router.
+  HTTP `GET /v1/audio/voices`, `POST /v1/audio/voices` (`{"name", "audio" (base64), "text"}`) and `POST /v1/audio/voices/delete` on the router, and
+  the dashboard's **Settings → Voices** page: the saved voices with their length and words, a form that makes one from a clip (a file picker, the
+  words optional), a Try button that speaks a phrase in it (with the first Base model installed) and plays it, and Remove.
 - **A clip with the request**: `reference_audio` (the base64 of an audio file, or a `data:` URL: WAV, MP3, and with ffmpeg more; 1 to 60 seconds,
   3 to 30 is best; the body limit is 4 MB) and `reference_text`; `coli speak "Hello." --reference clip.wav --reference-text "what it says"`.
 

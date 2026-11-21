@@ -536,6 +536,48 @@ export async function deletePreset(baseUrl: string, apiKey: string, name: string
   if (!response.ok) throw new Error(await responseError(response))
 }
 
+/* One saved voice of the cloning speech models (GET /v1/audio/voices): what it says, and whether the clone uses it (in-context) or only the
+   speaker embedding (x-vector). */
+export interface SavedVoice {
+  name: string
+  text: string
+  seconds: number
+  created: number
+  mode: "in-context" | "x-vector"
+}
+
+export interface VoiceList {
+  /* False on a plain `coli serve`: the saved voices are a router's. */
+  supported: boolean
+  voices: SavedVoice[]
+}
+
+export async function listVoices(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<VoiceList> {
+  const response = await fetch(endpoint(baseUrl, "audio/voices"), { headers: headers(apiKey), signal })
+  if (response.status === 404) return { supported: false, voices: [] }
+  if (!response.ok) throw new Error(await responseError(response))
+  return { supported: true, voices: ((await response.json()) as { data?: SavedVoice[] }).data ?? [] }
+}
+
+/* Saves a voice from a reference clip (the base64 of an audio file) and what it says (may be empty: the speaker embedding alone is used). */
+export async function saveVoice(baseUrl: string, apiKey: string, name: string, audio: string, text: string, signal?: AbortSignal): Promise<SavedVoice & { status: "created" | "replaced" }> {
+  const response = await fetch(endpoint(baseUrl, "audio/voices"), { method: "POST", headers: headers(apiKey), body: JSON.stringify({ name, audio, text }), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+  return (await response.json()) as SavedVoice & { status: "created" | "replaced" }
+}
+
+export async function deleteVoice(baseUrl: string, apiKey: string, name: string, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(endpoint(baseUrl, "audio/voices/delete"), { method: "POST", headers: headers(apiKey), body: JSON.stringify({ name }), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+}
+
+/* Speech in a saved voice, as the WAV the server answers with. */
+export async function speakInVoice(baseUrl: string, apiKey: string, model: string, voice: string, input: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(endpoint(baseUrl, "audio/speech"), { method: "POST", headers: computeHeaders(apiKey), body: JSON.stringify({ model, voice, input }), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+  return await response.blob()
+}
+
 /* One request of the router's request log (docs/request-log.md): the router's line with the worker's tokens joined on. */
 export interface LoggedRequest {
   ts: string

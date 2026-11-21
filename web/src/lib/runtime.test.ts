@@ -48,7 +48,7 @@ describe("runtime capability normalization", () => {
   })
 
   it("offers the router's pages only where there is a router", () => {
-    const all = ["general", "model", "presets", "requests", "log", "connection", "system"]
+    const all = ["general", "model", "presets", "voices", "requests", "log", "connection", "system"]
     expect(settingsPages(null)).toEqual(all)
     expect(settingsPages({ status: "ok" })).toEqual(all)
     expect(settingsPages({ status: "ok", features: { router: true, request_log: false, presets: false, server_log: true } })).toEqual(all)
@@ -57,7 +57,7 @@ describe("runtime capability normalization", () => {
 
   it("offers the Library only where the server says it has one: an older server would answer 404", () => {
     expect(settingsPages({ status: "ok", features: { router: true, server_log: true, library: true } }))
-      .toEqual(["general", "model", "presets", "requests", "library", "log", "connection", "system"])
+      .toEqual(["general", "model", "presets", "voices", "requests", "library", "log", "connection", "system"])
     expect(settingsPages({ status: "ok", features: { router: false, server_log: false, library: true } }))
       .toEqual(["general", "model", "library", "connection", "system"])
     expect(settingsPages({ status: "ok", features: { router: true, library: false } })).not.toContain("library")

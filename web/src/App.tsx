@@ -60,6 +60,7 @@ import { explainError } from "@/lib/explainError"
 import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
+import VoicesPanel from "@/components/VoicesPanel"
 import LibraryPanel from "@/components/LibraryPanel"
 import LogPanel from "@/components/LogPanel"
 import RequestsPanel from "@/components/RequestsPanel"
@@ -763,6 +764,7 @@ export default function App() {
             <PresetsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} onChanged={() => void connect()}
               onUse={(name) => { startFromPreset(name); setModel(name); setView("chat") }} />
           </section>}
+          {activePage === "voices" && <section className="settings-card"><VoicesPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "library" && <section className="settings-card wide"><LibraryPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} jobsAvailable={canBackground}

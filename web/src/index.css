@@ -226,6 +226,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* Settings -> Presets and Requests. */
 .preset-panel { gap: 12px; }
 .preset-row .model-info small.preset-system { font-style: italic; overflow-wrap: anywhere; }
+.voice-try { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.voice-try input[type="text"], .voice-try .ui-input { flex: 1 1 220px; min-width: 0; }
+.voice-try audio { flex: 1 1 100%; max-width: 100%; }
 .preset-form { display: flex; flex-direction: column; gap: 16px; }
 .preset-form h3 { margin: 0; font-size: 14px; font-weight: 500; }
 .preset-form label { display: flex; flex-direction: column; gap: 7px; }
