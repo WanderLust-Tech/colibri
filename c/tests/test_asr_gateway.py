@@ -385,15 +385,14 @@ class FamilyTest(unittest.TestCase):
                 self.assertEqual(display_for(resolved), ("Qwen3-ASR", scale))
                 self.assertEqual(resolved.family_config["hidden_size"], hidden)
 
-    def test_a_config_without_the_thinker_text_config_is_refused_with_a_reason(self):
-        from family_registry import FamilyConfigError
+    def test_a_config_without_the_thinker_text_config_is_read_as_it_stands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "m"
             root.mkdir()
             (root / "config.json").write_text(json.dumps({"model_type": "qwen3_asr", "thinker_config": {}}))
-            with self.assertRaises(FamilyConfigError) as caught:
-                resolve_model(root)
-            self.assertIn("thinker_config.text_config", str(caught.exception))
+            resolved = resolve_model(root)
+            self.assertEqual((resolved.descriptor.id, default_model_id(resolved)), ("qwen3_asr", "qwen3-asr"))
+            self.assertEqual(resolved.family_config, resolved.config)
 
 
 if __name__ == "__main__":

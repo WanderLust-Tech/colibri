@@ -2321,10 +2321,11 @@ def resolve_model(model_dir):
         if not isinstance(family_config, dict):
             raise FamilyConfigError(f"{family.id}: text_config is not an object")
     elif family.config_section == "thinker_text_config":
+        # Qwen3-ASR keeps the decoder's sizes in thinker_config.text_config; a config without it is read as it stands, as the
+        # text_config families' are (the display variants then match nothing and the family's own model id is used).
         thinker = config.get("thinker_config")
-        family_config = thinker.get("text_config") if isinstance(thinker, dict) else None
-        if not isinstance(family_config, dict):
-            raise FamilyConfigError(f"{family.id}: thinker_config.text_config is not an object")
+        inner = thinker.get("text_config") if isinstance(thinker, dict) else None
+        family_config = inner if isinstance(inner, dict) else config
     head = ""
     for candidate in DECISION_HEADS:
         present = [name for name in candidate.files if (model / name).is_file()]

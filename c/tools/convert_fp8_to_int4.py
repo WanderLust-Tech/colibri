@@ -80,6 +80,16 @@ OTHER_FAMILY_PATHS = {
                        "as downloaded; see docs/laya.md",
     "gliner2_span_deberta-v2": "GLiNER2.5-Decide is NOT converted: the decision engine reads "
                                "the release as downloaded; see docs/gliner_decide.md",
+    "gemma4":          "Gemma 4: use tools/convert_gemma4.py, see docs/gemma4.md",
+    "gemma4_text":     "Gemma 4: use tools/convert_gemma4.py, see docs/gemma4.md",
+    "zimagepipeline":  "Z-Image is NOT converted: the image engine reads the diffusers "
+                       "checkpoint as downloaded; see docs/zimage.md",
+    "qwen3_embedding": "Qwen3-Embedding is NOT converted: the embedding engine reads the "
+                       "release as downloaded (bf16 safetensors); see docs/embeddings.md",
+    "qwen3_reranker":  "Qwen3-Reranker is NOT converted: the reranking engine reads the "
+                       "release as downloaded (bf16 safetensors); see docs/rerank.md",
+    "qwen3_asr":       "Qwen3-ASR is NOT converted: the speech recognition engine reads the "
+                       "release as downloaded (bf16 safetensors); see docs/qwen3-asr.md",
 }
 # A config.json whose model_type is not the registry's key for its family: a
 # GLiNER2 checkpoint says "extractor" for every architecture and encoder, and
