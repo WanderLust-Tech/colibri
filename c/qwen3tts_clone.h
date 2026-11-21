@@ -14,6 +14,25 @@
 
 /* ------------------------------------------------------------------------------------------------ small helpers */
 
+/* The encoders' convolutions are im2col GEMMs. With a device the engine sets this hook (qc_vk_gemm in qwen3tts.c): the rows go up, the product
+ * comes back, the bias is added here; it returns 0 when it cannot (no device, an odd width, a small product) and the CPU's qi_gemm does it. */
+static int (*qc_gemm_hook)(float *Y, const float *X, int M, const QiMat *W, const float *bias);
+
+static void qc_gemm(float *Y, const float *X, int M, const QiMat *W, const float *bias){
+    if (qc_gemm_hook && qc_gemm_hook(Y, X, M, W, bias)) return;
+    qi_gemm(Y, X, M, W, bias);
+}
+
+/* rows per im2col tile: QT_TILE on the CPU; with a device as many as fit in 8M floats (at most 32768, the device product's limit) */
+static int qc_tile(int kc){
+    if (!qc_gemm_hook) return QT_TILE;
+    int t = (8 << 20) / (kc > 0 ? kc : 1);
+    return t < QT_TILE ? QT_TILE : t > 32768 ? 32768 : t;
+}
+
+/* a linear layer on rows: the device when there is one */
+static void qc_lin(float *Y, const float *X, int M, const AcdLin *l){ qc_gemm(Y, X, M, &l->m, l->b); }
+
 static inline float qc_elu(float x){ return x > 0.f ? x : expm1f(x); }
 
 static void qc_layernorm(float *dst, const float *src, int rows, int n, const float *w, const float *b, float eps){
@@ -37,10 +56,11 @@ static int qc_conv(float *y, const float *x, int T, const QtConv *c, int stride,
     const int K = c->K, cin = c->cin, kc = K * cin;
     const int ek = (K - 1) * c->dil + 1, pt = ek - stride;
     const int Ty = (T + stride - 1) / stride;
-    float *col = (float *)malloc((size_t)QT_TILE * kc * sizeof(float));
+    const int TILE = qc_tile(kc);
+    float *col = (float *)malloc((size_t)TILE * kc * sizeof(float));
     if (!col) qt_die("out of memory");
-    for (int t0 = 0; t0 < Ty; t0 += QT_TILE) {
-        const int tn = Ty - t0 < QT_TILE ? Ty - t0 : QT_TILE;
+    for (int t0 = 0; t0 < Ty; t0 += TILE) {
+        const int tn = Ty - t0 < TILE ? Ty - t0 : TILE;
         #pragma omp parallel for schedule(static)
         for (int t = 0; t < tn; t++) {
             float *row = col + (size_t)t * kc;
@@ -53,7 +73,7 @@ static int qc_conv(float *y, const float *x, int T, const QtConv *c, int stride,
                 memcpy(row + (size_t)k * cin, x + (size_t)s * cin, (size_t)cin * sizeof(float));
             }
         }
-        qi_gemm(y + (size_t)t0 * c->cout, col, tn, &c->w.m, c->b);
+        qc_gemm(y + (size_t)t0 * c->cout, col, tn, &c->w.m, c->b);
     }
     free(col);
     return Ty;
@@ -63,10 +83,11 @@ static int qc_conv(float *y, const float *x, int T, const QtConv *c, int stride,
 static void qc_conv_same(float *y, const float *x, int T, const QtConv *c, int relu){
     const int K = c->K, cin = c->cin, kc = K * cin;
     const int left = c->dil * (K - 1) / 2;
-    float *col = (float *)malloc((size_t)QT_TILE * kc * sizeof(float));
+    const int TILE = qc_tile(kc);
+    float *col = (float *)malloc((size_t)TILE * kc * sizeof(float));
     if (!col) qt_die("out of memory");
-    for (int t0 = 0; t0 < T; t0 += QT_TILE) {
-        const int tn = T - t0 < QT_TILE ? T - t0 : QT_TILE;
+    for (int t0 = 0; t0 < T; t0 += TILE) {
+        const int tn = T - t0 < TILE ? T - t0 : TILE;
         #pragma omp parallel for schedule(static)
         for (int t = 0; t < tn; t++) {
             float *row = col + (size_t)t * kc;
@@ -76,7 +97,7 @@ static void qc_conv_same(float *y, const float *x, int T, const QtConv *c, int r
                 memcpy(row + (size_t)k * cin, x + (size_t)s * cin, (size_t)cin * sizeof(float));
             }
         }
-        qi_gemm(y + (size_t)t0 * c->cout, col, tn, &c->w.m, c->b);
+        qc_gemm(y + (size_t)t0 * c->cout, col, tn, &c->w.m, c->b);
     }
     free(col);
     if (relu) {
@@ -374,6 +395,41 @@ static int qc_mimi_load(QcMimi *m, const char *dir, char *err, size_t errn){
     return 0;
 }
 
+/* causal attention over T rows, H heads of hd, rows [T][H*hd] (q, k, v, out), the window (when > 0) the last `window` positions: parallel over
+ * (row, head); the acestep kernel's own is slow for a few hundred rows */
+static void qc_attn(float *out, const float *q, const float *k, const float *v, int T, int H, int hd, int window){
+    const int D = H * hd;
+    const float scale = 1.0f / sqrtf((float)hd);
+    #pragma omp parallel
+    {
+        float *sc = (float *)malloc((size_t)T * sizeof(float));
+        #pragma omp for schedule(static)
+        for (int idx = 0; idx < T * H; idx++) {
+            const int i = idx / H, h = idx % H;
+            const int lo = window > 0 && i - window + 1 > 0 ? i - window + 1 : 0;
+            const float *qh = q + (size_t)i * D + (size_t)h * hd;
+            float mx = -1e30f;
+            for (int j = lo; j <= i; j++) {
+                const float *kj = k + (size_t)j * D + (size_t)h * hd;
+                float a = 0;
+                for (int d = 0; d < hd; d++) a += qh[d] * kj[d];
+                sc[j] = a * scale;
+                if (sc[j] > mx) mx = sc[j];
+            }
+            float den = 0;
+            for (int j = lo; j <= i; j++) { sc[j] = expf(sc[j] - mx); den += sc[j]; }
+            float *oh = out + (size_t)i * D + (size_t)h * hd;
+            for (int d = 0; d < hd; d++) oh[d] = 0.f;
+            for (int j = lo; j <= i; j++) {
+                const float w = sc[j] / den;
+                const float *vj = v + (size_t)j * D + (size_t)h * hd;
+                for (int d = 0; d < hd; d++) oh[d] += w * vj[d];
+            }
+        }
+        free(sc);
+    }
+}
+
 /* the 8-layer transformer of the encoder on x [T][512] in place: pre-LayerNorm, rotary attention (causal, over the last `window` positions),
  * layer scales, GELU feed-forward */
 static void qc_mimi_transformer(const QcMimi *m, float *x, int T){
@@ -386,17 +442,17 @@ static void qc_mimi_transformer(const QcMimi *m, float *x, int T){
     for (int li = 0; li < m->nl; li++) {
         const QcMimiLayer *l = &m->L[li];
         qc_layernorm(n, x, T, D, l->ln1w, l->ln1b, 1e-5f);
-        acd_lin(q, n, T, &l->q); acd_lin(k, n, T, &l->k); acd_lin(v, n, T, &l->v);
+        qc_lin(q, n, T, &l->q); qc_lin(k, n, T, &l->k); qc_lin(v, n, T, &l->v);
         acd_rope(q, T, H, hd, cs, sn);
         acd_rope(k, T, H, hd, cs, sn);
-        acd_attention_ex(cx, D, q, D, T, k, v, D, T, H, H, hd, m->window > 0 ? m->window - 1 : -1, 1);
-        acd_lin(o, cx, T, &l->o);
+        qc_attn(cx, q, k, v, T, H, hd, m->window);
+        qc_lin(o, cx, T, &l->o);
         for (int64_t i = 0; i < (int64_t)T * D; i++) x[i] += l->s1[i % D] * o[i];
         qc_layernorm(n, x, T, D, l->ln2w, l->ln2b, 1e-5f);
-        acd_lin(g, n, T, &l->fc1);
+        qc_lin(g, n, T, &l->fc1);
         #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < (int64_t)T * I; i++) g[i] = qt_gelu(g[i]);
-        acd_lin(o, g, T, &l->fc2);
+        qc_lin(o, g, T, &l->fc2);
         for (int64_t i = 0; i < (int64_t)T * D; i++) x[i] += l->s2[i % D] * o[i];
     }
     free(n); free(q); free(k); free(v); free(cx); free(o); free(g); free(cs); free(sn);

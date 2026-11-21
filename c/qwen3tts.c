@@ -1083,13 +1083,46 @@ static void qt_dec_rows(const QtDec *d, QtCache *C, float *x, int n, int pos0, c
  * CPU's in the last bits; a device that is missing, or a frame that fails, leaves the CPU's path in charge. */
 static struct { int ready, chain; } qt_vk;
 
+/* qc_gemm_hook (qwen3tts_clone.h): a product of a resident f32 matrix with the rows of an im2col tile, on the device. Worth it from 64 rows. */
+static ColiVkTensor *qc_dev_t[96];
+static const void *qc_dev_w[96];
+static int qc_dev_n, qc_dev_off;
+static VkcBuf *qc_dev_up, *qc_dev_in, *qc_dev_out, *qc_dev_down;
+
+static int qc_vk_gemm(float *Y, const float *X, int M, const QiMat *W, const float *bias){
+    if (qc_dev_off || !qt_vk.chain || M < 64 || M > 32768 || W->fmt != QI_F32 || W->ld || W->K % 2 || (size_t)M * W->K > (size_t)64 << 20) return 0;
+    ColiVkTensor *t = NULL;
+    for (int i = 0; i < qc_dev_n; i++) if (qc_dev_w[i] == W->w) t = qc_dev_t[i];
+    if (!t) {
+        if (qc_dev_n >= 96 || !coli_vk_tensor_ensure(&t, W->w, NULL, 10, W->K, W->N, 0)) return 0;
+        qc_dev_w[qc_dev_n] = W->w; qc_dev_t[qc_dev_n++] = t;
+    }
+    const size_t K = W->K, N = W->N;
+    if (!vkc_reserve(&qc_dev_up, (size_t)M * K * 4, VKC_UP) || !vkc_reserve(&qc_dev_in, (size_t)M * K * 4, VKC_DEV) ||
+        !vkc_reserve(&qc_dev_out, (size_t)M * N * 4, VKC_DEV) || !vkc_reserve(&qc_dev_down, (size_t)M * N * 4, VKC_DOWN)) return 0;
+    memcpy(vkc_ptr(qc_dev_up), X, (size_t)M * K * sizeof(float));
+    if (!(vkc_begin() && vkc_copy(qc_dev_in, 0, qc_dev_up, 0, (size_t)M * K) && vkc_matmul(t, qc_dev_in, 0, qc_dev_out, 0, M) &&
+          vkc_copy(qc_dev_down, 0, qc_dev_out, 0, (size_t)M * N) && vkc_submit(1))) {
+        fprintf(stderr, "[VK] qwen3tts: an encoder product failed; the CPU runs the codec encoder\n");
+        qc_dev_off = 1;
+        if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); qt_vk.ready = 0; qt_vk.chain = 0; }
+        return 0;
+    }
+    memcpy(Y, vkc_ptr(qc_dev_down), (size_t)M * N * sizeof(float));
+    if (bias) {
+        #pragma omp parallel for schedule(static)
+        for (int r = 0; r < M; r++) for (size_t j = 0; j < N; j++) Y[(size_t)r * N + j] += bias[j];
+    }
+    return 1;
+}
+
 static void qt_vk_open(void){
     memset(&qt_vk, 0, sizeof qt_vk);
     if (!coli_vk_init_env("qwen3tts")) return;               /* COLI_VULKAN unset, or no device: the CPU */
     qt_vk.ready = 1;
     atexit(coli_vk_shutdown);
     const char *c = getenv("COLI_VK_CHAIN");
-    if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { qt_vk.chain = 1; atexit(vkc_shutdown); }   /* registered after the backend's: runs before it */
+    if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { qt_vk.chain = 1; atexit(vkc_shutdown); qc_gemm_hook = qc_vk_gemm; }   /* registered after the backend's: runs before it */
 }
 
 typedef struct {

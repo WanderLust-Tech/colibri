@@ -193,7 +193,9 @@ speech = the generated frames decoded together with the reference's, the referen
 ```
 
 The speaker embedding and the codes of a clip are made once and kept (the last four clips), so a request that repeats a clip pays for them once:
-a clip of 11 s takes 0.1 s for the embedding and 0.7 s for the codes (CPU; the codec encoder is not on the card).
+a clip of 11 s takes 0.1 s for the embedding and 0.35 s for the codes (0.7 s on the CPU alone): the encoders' convolutions and the codec
+transformer's matrices are im2col products that go to the card in tiles when there is one (`qc_vk_gemm`), the rest (the elementwise layers, the
+attention, the quantizer's nearest-code search) stays on the CPU.
 
 **Checked against the package** (fp32, greedy, the 11 s JFK clip; `tools/qwen3_tts_clone_ref.py`, `tests/test_qwen3tts_clone_real.py`): the log-mel
 features 2e-3 (the log of small energies), the speaker embedding 7e-7, the codec encoder's convolutions 4e-4 and transformer 5e-4, the 138 reference
@@ -207,5 +209,5 @@ identical, prompt 1.9e-6, 48 and 69 generated frames identical, waveform 4e-6 an
 
 ## Not built yet
 
-Streaming; the codec's first half on the card (the rest of it takes 0.02 s a second of speech) and the codec's *encoder* (cloning, 0.7 s for 11 s of clip
-on the CPU). See [qwen3-speech.md](qwen3-speech.md).
+Streaming; the codec's first half on the card (the rest of it takes 0.02 s a second of speech) and a fully resident codec encoder (the products are
+on the card, the rest of its 0.35 s is not). See [qwen3-speech.md](qwen3-speech.md).
