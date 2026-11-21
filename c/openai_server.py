@@ -6777,6 +6777,7 @@ class APIServer(ThreadingHTTPServer):
             entry["speech"]["kind"] = info.get("kind") or "custom_voice"
             entry["speech"]["instructions"] = bool(info.get("instruct"))        # a style (CustomVoice 1.7B) or the voice's description (VoiceDesign)
             entry["speech"]["clone"] = bool(info.get("clone"))                  # a Base model: speaks in a saved voice or a reference clip
+            entry["speech"]["stream"] = bool(info.get("stream"))                # the audio can go out as it is made (stream_format "sse", or stream: true)
             if info.get("clone"):
                 entry["speech"]["voices"] = {}                                  # no OpenAI names: `voice` is a saved voice's name
                 entry["speech"]["saved_voices"] = [voice["name"] for voice in voices.list_voices()]
@@ -8499,6 +8500,68 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, asr_engine.transcription_payload(request, result, seconds, self.server.model_id), request_id, headers)
 
+    def speech_stream(self, engine, request, reference, queue_wait, request_id):
+        """The speech as it is made (POST /v1/audio/speech with `stream_format` "sse" or `stream`: true): server-sent events whose `audio` is base64 raw
+        PCM, or the WAV (an open-ended header, then the samples) or raw PCM as they come. Nothing goes out until the engine has made the first piece, so
+        a request it refuses is still an ordinary JSON error; after that a failure can only end the stream (an `error` event for SSE)."""
+        import base64
+        import contextlib
+        import struct
+        sse = request["stream"] == "sse"
+        wav = not sse and request["format"] == "wav"
+        started = False
+
+        def start():
+            nonlocal started
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream" if sse else ("audio/wav" if wav else "audio/pcm"))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")                  # no length and no framing: the end of the body is the close
+            self.close_connection = True
+            self.send_header("x-request-id", request_id)
+            self.send_header("x-colibri-queue-wait-ms", str(round(queue_wait * 1000)))
+            self.send_header("x-colibri-sample-rate", "24000")
+            self.send_cors_headers()
+            self.end_headers()
+            started = True
+            if wav:
+                self.wfile.write(b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 24000, 48000, 2, 16)
+                                 + b"data" + struct.pack("<I", 0xFFFFFFFF))
+                self.wfile.flush()
+
+        def event(payload):
+            self.wfile.write(b"data: " + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n\n")
+            self.wfile.flush()
+
+        generator = engine.speak_stream(request["input"], speaker=request["speaker"], language=request["language"], seed=request["seed"],
+                                        instruct=request["instruct"], reference=reference)
+        try:
+            with contextlib.closing(generator):
+                for kind, value in generator:
+                    if not started:
+                        start()
+                    if kind == "part":
+                        if sse:
+                            event({"type": "speech.audio.delta", "audio": base64.b64encode(value).decode("ascii")})
+                        else:
+                            self.wfile.write(value)
+                            self.wfile.flush()
+                    elif sse:
+                        event({"type": "speech.audio.done", "audio_seconds": round(value["audio_seconds"], 3), "frames": value["frames"],
+                               "sample_rate": value["sample_rate"], "truncated": value["truncated"]})
+        except speech_engine.EmbeddingEngineError as error:
+            if not started:
+                raise APIError(500, f"The speech synthesis engine failed: {error}", None, "engine_error", "server_error") from None
+            self.close_connection = True
+            if sse:
+                try:
+                    event({"type": "error", "error": {"message": f"The speech synthesis engine failed: {error}", "type": "server_error"}})
+                except OSError:
+                    pass
+        except OSError:
+            self.close_connection = True                              # the client left: the generator's close lets the engine finish in step
+
     def speech_reference(self, engine, request):
         """The reference a cloning (Base) model speaks from, or None for the other speech models: the clip sent with the request
         (`reference_audio`, converted to the engine's 24 kHz mono) or the saved voice `voice` names."""
@@ -8543,6 +8606,8 @@ class APIHandler(BaseHTTPRequestHandler):
             if not engine.alive:
                 raise APIError(503, f"The speech synthesis engine is not running ({engine.dead or 'exited'}).",
                                None, "engine_unavailable", "server_error")
+            if request["stream"]:
+                return self.speech_stream(engine, request, reference, queue_wait, request_id)
             try:
                 result = engine.speak(request["input"], speaker=request["speaker"], language=request["language"], seed=request["seed"],
                                       greedy=request["greedy"], instruct=request["instruct"], reference=reference)

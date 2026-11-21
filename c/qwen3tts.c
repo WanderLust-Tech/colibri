@@ -1461,7 +1461,15 @@ static int qt_decode_threads(void){
 }
 
 typedef struct { int greedy; float temperature; int top_k; float rep_penalty; int sub_greedy; float sub_temperature; int sub_top_k; int max_frames; uint64_t seed;
-                 const float *trail; int ntrail; } QtGen;   /* trail: text rows still to be read, one added to the input of each step (streaming prompts) */
+                 const float *trail; int ntrail;            /* trail: text rows still to be read, one added to the input of each step (streaming prompts) */
+                 void (*on_frame)(void *ctx, const int *code, int f); void *ctx; } QtGen;   /* on_frame: called with each frame's 16 codes as it is made */
+
+/* A request whose audio goes out as it is made (SPEAK "stream": true): the frames so far (the reference's first, for a cloned voice), how many
+ * have gone out, and the numbers of the PART lines. Each PART is decoded from the frames before it (the codec's left context) and keeps only its own. */
+typedef struct { const QtModel *m; const char *id; int *all; int base, nframes, done, seq; long samples; } QtStream;
+#define QT_STREAM_FIRST 6                      /* frames in the first part: 0.48 s of speech, so the sound starts early */
+#define QT_STREAM_PART 24                      /* frames in each later part: 1.9 s */
+#define QT_STREAM_CTX 96                       /* frames of context a part is decoded with (the codec reaches back further than its attention: 96 keeps a part within 6e-4 of the whole decode) */
 
 /* Teacher forcing (a test of the whole stack against reference codes that does not trip on ties): the given codes drive the generation, and
  * at each choice the engine says whether the given code is its own argmax, and if not by how much (in logits) the argmax beat it. */
@@ -1569,6 +1577,7 @@ static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const 
             else code[i + 1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
         }
         if (*dev_failed) break;
+        if (g->on_frame) g->on_frame(g->ctx, code, f);
         /* the next talker input: the sum of the 16 embeddings + tts_pad (the text is all in the prefill) */
         qt_row(m->codec_emb, c0, D, sum);
         for (int gi = 1; gi < QT_GROUPS; gi++) {
@@ -1601,6 +1610,7 @@ static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtG
     if (teach) saved = *teach;
     int *codes = qt_generate_on(m, prefill, L, g, frames, logits0, teach, 1, &failed);
     if (!failed) return codes;
+    if (g->on_frame && ((QtStream *)g->ctx)->nframes > 0) { *frames = -1; return NULL; }       /* part of the speech has gone out: it cannot be made again */
     if (teach) *teach = saved;
     failed = 0;
     return qt_generate_on(m, prefill, L, g, frames, logits0, teach, 0, &failed);
@@ -1656,10 +1666,49 @@ static char *qt_read_line(int *too_long){
 }
 
 typedef struct { int frames, samples, truncated; double gen_s, codec_s; } QtSpoken;
+/* base64 of n bytes: out must hold 4 * ceil(n / 3) + 1 */
+static void qt_b64(char *out, const unsigned char *in, size_t n){
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const unsigned v = (unsigned)in[i] << 16 | (i + 1 < n ? (unsigned)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0u);
+        out[o++] = T[v >> 18 & 63]; out[o++] = T[v >> 12 & 63];
+        out[o++] = i + 1 < n ? T[v >> 6 & 63] : '='; out[o++] = i + 2 < n ? T[v & 63] : '=';
+    }
+    out[o] = 0;
+}
+
+/* Frames a .. b of the speech (the reference's not counted) out as one PART line: 16-bit mono PCM at 24 kHz, base64. */
+static void qt_stream_emit(QtStream *st, int a, int b){
+    if (b <= a) return;
+    const int ga = st->base + a, gb = st->base + b, from = ga - QT_STREAM_CTX > 0 ? ga - QT_STREAM_CTX : 0;
+    int n = 0;
+    float *w = qt_codec_chunk(&st->m->codec, st->all + (size_t)from * QT_GROUPS, gb - from, &n);
+    const int skip = (ga - from) * 1920, keep = n - skip;
+    int16_t *pcm = (int16_t *)malloc((size_t)(keep > 0 ? keep : 1) * sizeof(int16_t));
+    for (int i = 0; i < keep; i++) {
+        float x = w[skip + i] * 32767.0f;
+        pcm[i] = (int16_t)(x > 32767.f ? 32767 : x < -32768.f ? -32768 : (int)lrintf(x));
+    }
+    char *text = (char *)malloc((size_t)keep * 2 / 3 * 4 + 16);
+    qt_b64(text, (const unsigned char *)pcm, (size_t)keep * 2);
+    printf("PART {\"id\":\""); qt_escape(st->id);
+    printf("\",\"seq\":%d,\"samples\":%d,\"pcm\":\"%s\"}\n", st->seq++, keep, text);
+    fflush(stdout);
+    st->samples += keep;
+    free(w); free(pcm); free(text);
+}
+
+static void qt_stream_frame(void *ctx, const int *code, int f){
+    QtStream *st = (QtStream *)ctx;
+    memcpy(st->all + (size_t)(st->base + f) * QT_GROUPS, code, QT_GROUPS * sizeof(int));
+    st->nframes = f + 1;
+    if (st->nframes - st->done >= (st->done == 0 ? QT_STREAM_FIRST : QT_STREAM_PART)) { qt_stream_emit(st, st->done, st->nframes); st->done = st->nframes; }
+}
 typedef struct { const char *wav, *text; int xvec; } QtCloneReq;                 /* reference audio (24 kHz WAV), what it says, x-vector only */
 
 /* One request end to end: text, speaker and language to a WAV file at `path`. 0 on success, else err set. A Base model takes `clone`. */
-static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *instruct, const char *language, const QtGen *gen_in, const char *path, QtSpoken *res, char *err, size_t errn, const QtCloneReq *clone){
+static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *instruct, const char *language, const QtGen *gen_in, const char *path, QtSpoken *res, char *err, size_t errn, const QtCloneReq *clone, QtStream *st){
     int nids = 0, rows = 0, ntrail = 0, nref = 0;
     QtGen gen_c = *gen_in;
     const QtGen *gen = &gen_c;
@@ -1683,10 +1732,29 @@ static int qt_speak(const QtModel *m, const char *text, const char *speaker, con
     }
     free(ids);
     if (!prefill) { free(trail); return -1; }
+    if (st) {                                              /* the audio goes out as it is made */
+        st->m = m; st->base = nref; st->nframes = st->done = st->seq = 0; st->samples = 0;
+        st->all = (int *)malloc((size_t)(nref + gen->max_frames + 1) * QT_GROUPS * sizeof(int));
+        if (nref > 0) memcpy(st->all, ref_codes, (size_t)nref * QT_GROUPS * sizeof(int));
+        gen_c.on_frame = qt_stream_frame; gen_c.ctx = st;
+    }
     double t0 = qt_now();
     int frames = 0;
     int *codes = qt_generate(m, prefill, rows, gen, &frames, NULL, NULL);
     free(prefill); free(trail);
+    if (st) {
+        const int broke = frames < 0;
+        if (!broke) qt_stream_emit(st, st->done, frames);
+        free(st->all); st->all = NULL;
+        free(codes);
+        res->gen_s = qt_now() - t0;
+        res->frames = frames;
+        res->samples = (int)st->samples;
+        res->truncated = frames >= gen->max_frames;
+        if (broke) { snprintf(err, errn, "the graphics card failed while the speech was going out: ask again"); return -1; }
+        if (frames <= 0) { snprintf(err, errn, "the model produced no audio for this text"); return -1; }
+        return 0;
+    }
     res->gen_s = qt_now() - t0;
     res->frames = frames;
     res->truncated = frames >= gen->max_frames;
@@ -1741,7 +1809,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     jval *tc = json_get(m->cfg, "talker_config");
     jval *kind = json_get(m->cfg, "tts_model_type");
     printf("READY {\"model\":\""); qt_escape(name);
-    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"clone\":%s,\"instruct\":%s,\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", m->base ? "true" : "false", m->instruct_ok ? "true" : "false", QT_SR, m->talker.nl);
+    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"clone\":%s,\"stream\":true,\"instruct\":%s,\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", m->base ? "true" : "false", m->instruct_ok ? "true" : "false", QT_SR, m->talker.nl);
     qt_names(json_get(tc, "spk_id"));
     printf("],\"languages\":[");
     qt_names(json_get(tc, "codec_language_id"));
@@ -1757,12 +1825,12 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
         jval *j = json_parse_checked(line + 6);
         if (!j || j->t != J_OBJ) { qt_error("", "SPEAK needs a JSON object"); if (j) json_free(j); free(line); continue; }
         jval *jid = json_get(j, "id"), *jt = json_get(j, "text"), *js = json_get(j, "speaker"), *jl = json_get(j, "language"), *jo = json_get(j, "out");
-        jval *jrw = json_get(j, "ref_wav"), *jrt = json_get(j, "ref_text"), *jxv = json_get(j, "x_vector_only");
+        jval *jstr = json_get(j, "stream"), *jrw = json_get(j, "ref_wav"), *jrt = json_get(j, "ref_text"), *jxv = json_get(j, "x_vector_only");
         jval *jin = json_get(j, "instruct"), *jseed = json_get(j, "seed"), *jg = json_get(j, "greedy"), *jmf = json_get(j, "max_frames"), *jtemp = json_get(j, "temperature");
         const char *id = jid && jid->t == J_STR ? jid->str : "";
         char err[512] = "";
         if (!jt || jt->t != J_STR || !*jt->str) qt_error(id, "text must be a non-empty string");
-        else if (!jo || jo->t != J_STR || !*jo->str) qt_error(id, "out must be the path of the WAV file to write");
+        else if (!(jstr && jstr->t == J_BOOL && jstr->boolean) && (!jo || jo->t != J_STR || !*jo->str)) qt_error(id, "out must be the path of the WAV file to write");
         else {
             QtGen g = *base;
             if (jseed && jseed->t == J_NUM && jseed->num > 0) g.seed = (uint64_t)jseed->num;
@@ -1771,12 +1839,16 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
             if (jtemp && jtemp->t == J_NUM && jtemp->num > 0) { g.temperature = (float)jtemp->num; g.sub_temperature = (float)jtemp->num; }
             QtSpoken r;
             memset(&r, 0, sizeof r);
+            QtStream stream;
+            memset(&stream, 0, sizeof stream);
+            stream.id = id;
+            const int streaming = jstr && jstr->t == J_BOOL && jstr->boolean;
             const double t0 = qt_now();
             QtCloneReq cr = {jrw && jrw->t == J_STR ? jrw->str : NULL, jrt && jrt->t == J_STR ? jrt->str : NULL, jxv && jxv->t == J_BOOL && jxv->boolean};
-            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jin && jin->t == J_STR ? jin->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err, &cr)) qt_error(id, err);
+            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jin && jin->t == J_STR ? jin->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, streaming ? NULL : jo->str, &r, err, sizeof err, &cr, streaming ? &stream : NULL)) qt_error(id, err);
             else {
                 printf("AUDIO {\"id\":\""); qt_escape(id);
-                printf("\",\"path\":\""); qt_escape(jo->str);
+                printf("\",\"path\":\""); qt_escape(jo && jo->t == J_STR ? jo->str : "");
                 printf("\",\"samples\":%d,\"sample_rate\":%d,\"frames\":%d,\"audio_seconds\":%.3f,\"seconds\":%.3f,\"truncated\":%s}\n",
                        r.samples, QT_SR, r.frames, (double)r.samples / QT_SR, qt_now() - t0, r.truncated ? "true" : "false");
                 fflush(stdout);
@@ -1925,7 +1997,7 @@ int main(int argc, char **argv){
     const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *instruct = NULL, *language = "Auto";
     int teacher_forcing = 0, serve = 0, xvec = 0;
     const char *clone_wav = NULL, *clone_text = NULL, *check = NULL;
-    QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0, NULL, 0};
+    QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0, NULL, 0, NULL, NULL};
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
         else if (!strcmp(argv[i], "--codec") && i + 1 < argc) codec_dir = argv[++i];

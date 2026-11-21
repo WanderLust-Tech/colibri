@@ -11,6 +11,9 @@ TTS_STUB_TRUNCATE (say every answer was cut at the frame limit), TTS_STUB_NOFILE
 TTS_STUB_INSTRUCT (a model that takes a style instruction: READY says so, and the echo ends with `|instruct`), TTS_STUB_KIND=voice_design
 (no speakers: the instruction makes the voice), TTS_STUB_KIND=base (a cloning model: READY says `clone`, there are no speakers, SPEAK needs
 `ref_wav` (the stub reads the file) and the echo ends with `|ref=<bytes of the file>|<ref_text>|<x_vector_only as 0 or 1>`).
+Streaming (SPEAK "stream": true; READY says `stream`, unless TTS_STUB_NOSTREAM): the samples that would have gone to the file go out as three PART
+lines (`seq`, `samples`, `pcm`: base64 of 16-bit little-endian), then AUDIO; TTS_STUB_PART_DELAY (seconds between parts), TTS_STUB_FAIL_AFTER_PARTS
+(answer ERROR after that many parts).
 """
 import json
 import os
@@ -26,6 +29,9 @@ TRUNCATE = bool(os.environ.get("TTS_STUB_TRUNCATE"))
 NOFILE = bool(os.environ.get("TTS_STUB_NOFILE"))
 INSTRUCT = bool(os.environ.get("TTS_STUB_INSTRUCT"))
 KIND = os.environ.get("TTS_STUB_KIND", "custom_voice")
+NOSTREAM = bool(os.environ.get("TTS_STUB_NOSTREAM"))
+PART_DELAY = float(os.environ.get("TTS_STUB_PART_DELAY", "0"))
+FAIL_AFTER_PARTS = int(os.environ.get("TTS_STUB_FAIL_AFTER_PARTS", "0"))
 RATE = 24000
 SPEAKERS = ["serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric", "dylan"]
 LANGUAGES = ["chinese", "english", "german", "italian", "portuguese", "spanish", "japanese", "korean", "french", "russian",
@@ -40,7 +46,7 @@ def send(keyword, body):
 def main():
     if "--serve" not in sys.argv:
         sys.exit("tts_stub: --serve only")
-    send("READY", {"model": "tts-stub", "task": "speech", "kind": KIND, "clone": KIND == "base", "instruct": INSTRUCT or KIND == "voice_design",
+    send("READY", {"model": "tts-stub", "task": "speech", "kind": KIND, "clone": KIND == "base", "stream": not NOSTREAM, "instruct": INSTRUCT or KIND == "voice_design",
                    "sample_rate": RATE, "layers": 1, "speakers": [] if KIND in ("voice_design", "base") else SPEAKERS, "languages": LANGUAGES,
                    "device": "cpu"})
     for line in sys.stdin:
@@ -58,7 +64,11 @@ def main():
         if not isinstance(text, str) or not text:
             send("ERROR", {"id": rid, "message": "text must be a non-empty string"})
             continue
-        if not isinstance(out, str) or not out:
+        stream = bool(request.get("stream"))
+        if stream and NOSTREAM:
+            send("ERROR", {"id": rid, "message": "unknown field stream"})
+            continue
+        if not stream and (not isinstance(out, str) or not out):
             send("ERROR", {"id": rid, "message": "out must be the path of the WAV file to write"})
             continue
         if DELAY:
@@ -92,6 +102,22 @@ def main():
             echo += f"|ref={size}|{request.get('ref_text', '')}|{int(bool(request.get('x_vector_only')))}".encode()
         samples = max(int(len(text) * 0.05 * RATE), len(echo) + 2)
         pcm = [len(echo)] + list(echo) + [0] * (samples - len(echo) - 1)
+        if stream:
+            import base64
+            raw = struct.pack(f"<{len(pcm)}h", *pcm)
+            cuts = [0, len(raw) // 3 // 2 * 2, len(raw) * 2 // 3 // 2 * 2, len(raw)]
+            for seq in range(3):
+                piece = raw[cuts[seq]:cuts[seq + 1]]
+                send("PART", {"id": rid, "seq": seq, "samples": len(piece) // 2, "pcm": base64.b64encode(piece).decode()})
+                if FAIL_AFTER_PARTS and seq + 1 >= FAIL_AFTER_PARTS:
+                    send("ERROR", {"id": rid, "message": "the graphics card failed while the speech was going out: ask again"})
+                    break
+                if PART_DELAY:
+                    time.sleep(PART_DELAY)
+            else:
+                send("AUDIO", {"id": rid, "path": "", "samples": samples, "sample_rate": RATE, "frames": samples // 1920,
+                               "audio_seconds": samples / RATE, "seconds": 0.01, "truncated": TRUNCATE})
+            continue
         if not NOFILE:
             with wave.open(out, "wb") as clip:
                 clip.setnchannels(1)

@@ -611,8 +611,9 @@ When the served model is a **Qwen3-TTS** (`qwen3-tts-0.6b`), `POST /v1/audio/spe
 speakers; `language` and `seed` are extensions. `instructions` is taken by the 1.7B models: a style for the CustomVoice, the voice itself for
 VoiceDesign (which has no named speakers; `voice` is then ignored). The **Base** models clone a voice: `voice` names a saved voice (`GET`, `POST
 /v1/audio/voices` and `POST /v1/audio/voices/delete` on the router; `coli voice`), or the request carries `reference_audio` (base64 of an audio file)
-with `reference_text`, what it says (`x_vector_only` skips the text's use). `speed` other than 1, `instructions` on the 0.6B and `stream_format`
-`sse` are refused with the field named.
+with `reference_text`, what it says (`x_vector_only` skips the text's use). `stream_format` `"sse"` (or `stream: true`, which sends a WAV or raw PCM
+as chunks) sends the audio as it is made, the first piece after about half a second of speech. `speed` other than 1 and `instructions` on the 0.6B are
+refused with the field named.
 
 ```sh
 curl http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \

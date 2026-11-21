@@ -45,7 +45,21 @@ curl http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "C
 - **`reference_audio`, `reference_text`, `x_vector_only`, and a saved `voice`** (extensions, for the Base models only): see
   [Voice cloning](#voice-cloning-the-base-models). On a Base model `voice` names a saved voice and there is no default speaker.
 - **Refused, with the field named:** `speed` other than 1 (the model has no control over the pace), `instructions` on the 0.6B (it speaks as a
-  named speaker and takes no style description), `stream_format` `sse` (the audio comes in one piece).
+  named speaker and takes no style description), `stream` with `mp3`, `opus`, `aac` or `flac` (only WAV and PCM can be cut into pieces as they are made).
+- **Streaming** (`stream_format: "sse"`, OpenAI's, or `stream: true`, an extension): the audio goes out as the frames are made, the first piece after
+  about half a second of speech (6 frames; then 24 at a time) is ready: about 0.35 s after the request on the card for a speech that takes 2 s
+  whole. `"stream_format": "sse"` answers with server-sent events, `{"type": "speech.audio.delta", "audio": <base64 raw 16-bit mono PCM at 24 kHz>}` for
+  each piece and `{"type": "speech.audio.done", "audio_seconds", "frames", "sample_rate", "truncated"}` at the end (`response_format` is left out or
+  `pcm`); `"stream": true` sends a WAV (an open-ended header, as a live stream has) or, with `"response_format": "pcm"`, raw samples, as chunks of
+  one HTTP response. A request the engine refuses is an ordinary JSON error, since nothing goes out before the first piece; a failure after that ends
+  the stream (an `error` event for SSE). A client that hangs up leaves the engine to finish its request, then the next one starts in step. Each piece
+  is decoded with the 96 frames before it as context (the codec's attention reaches 72 frames in each of 8 layers; the official chunked decode uses 25),
+  so the stream is the one-piece speech to a few percent of its level, with no step at the joins:
+  ```sh
+  curl -N http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+       -d '{"model": "qwen3-tts-0.6b", "input": "Hello there.", "stream_format": "sse"}'
+  curl -N ... -d '{"model": "qwen3-tts-0.6b", "input": "Hello there.", "stream": true, "response_format": "pcm"}' | ffplay -f s16le -ar 24000 -ac 1 -
+  ```
 - **The answer** is the audio itself, with `x-colibri-audio-seconds`, `x-colibri-sample-rate` and `x-colibri-queue-wait-ms` headers, and
   `x-colibri-truncated: true` when the text was longer than one piece of speech could hold (4096 frames, five and a half minutes).
 - `GET /v1/models` marks the model `"speech"` with a `speech` block (`speakers` (empty for VoiceDesign), `languages`, `formats`, `voices`,
@@ -211,5 +225,5 @@ identical, prompt 1.9e-6, 48 and 69 generated frames identical, waveform 4e-6 an
 
 ## Not built yet
 
-Streaming; the codec's first half on the card (the rest of it takes 0.02 s a second of speech) and a fully resident codec encoder (the products are
+The codec's first half on the card (the rest of it takes 0.02 s a second of speech) and a fully resident codec encoder (the products are
 on the card, the rest of its 0.35 s is not). See [qwen3-speech.md](qwen3-speech.md).

@@ -14,6 +14,7 @@ protocol is the header of c/qwen3tts.c, the other engines' shape (lines of a key
 The sound reaches the gateway as a file on this machine (the engine runs on loopback beside it); the gateway turns the WAV into the
 format the client asked for.
 """
+import json
 import os
 import struct
 import subprocess
@@ -21,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from embedding_engine import EmbeddingEngine, EmbeddingEngineError, EmbeddingRequestError
+from embedding_engine import EmbeddingEngine, EmbeddingEngineError, EmbeddingRequestError, _parse_line, describe_exit
 
 DEFAULT_INFO = {"model": "speech", "task": "speech", "sample_rate": 24000, "speakers": [], "languages": [], "clone": False}
 MAX_REFERENCE_B64 = 6 << 20                 # an inline reference_audio, as base64 (the body limit is 4 MB anyway)
@@ -102,9 +103,106 @@ class SpeechEngine(EmbeddingEngine):
                         pass
 
 
+    def speak_stream(self, text, speaker="", language="auto", seed=None, instruct=None, reference=None):
+        """Run one SPEAK with "stream": true and yield what comes back as it is made: ("part", the PCM bytes of one piece (16-bit mono, 24 kHz))
+        for each PART line, then one ("done", {"sample_rate", "frames", "audio_seconds", "seconds", "truncated", "samples"}). Raises
+        EmbeddingEngineError for an ERROR line, a process that is gone, and a request the engine could not finish. The engine works on one request at
+        a time and this one is its: if the caller stops early (closing the generator) the rest of the request is read and dropped, so the next
+        request starts in step."""
+        import base64
+        ref_path = None
+        request = {"text": text, "speaker": speaker, "language": language, "stream": True}
+        if instruct:
+            request["instruct"] = instruct
+        if seed:
+            request["seed"] = int(seed)
+        if reference:
+            if reference.get("path"):
+                request["ref_wav"] = str(reference["path"]).replace("\\", "/")
+            else:
+                rhandle, ref_path = tempfile.mkstemp(prefix="coli-ref-", suffix=".wav")
+                with os.fdopen(rhandle, "wb") as out:
+                    out.write(reference["wav"])
+                request["ref_wav"] = ref_path.replace("\\", "/")
+            if reference.get("text") and not reference.get("x_vector_only"):
+                request["ref_text"] = reference["text"]
+            if reference.get("x_vector_only"):
+                request["x_vector_only"] = True
+        finished = False
+        try:
+            with self.lock:
+                if self.dead:
+                    raise EmbeddingEngineError(self.dead)
+                self._seq += 1
+                rid = f"e{self._seq}"
+                data = f"SPEAK {json.dumps({'id': rid, **request}, ensure_ascii=False, separators=(',', ':'))}\n".encode("utf-8")
+                try:
+                    self.process.stdin.write(data)
+                    self.process.stdin.flush()
+                except (OSError, ValueError) as error:
+                    self.dead = f"cannot send SPEAK to the {self.label} ({error})"
+                    raise EmbeddingEngineError(self.dead) from error
+                try:
+                    while True:
+                        raw = self.process.stdout.readline()
+                        if not raw:
+                            try:
+                                code = self.process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                code = None
+                            self.dead = f"the {self.label} exited ({describe_exit(code)})"
+                            finished = True
+                            raise EmbeddingEngineError(self.dead)
+                        keyword, body = _parse_line(raw)
+                        mine = body is not None and (body.get("id") == rid or (keyword == "ERROR" and body.get("id") in ("", None)))
+                        if not mine or keyword not in ("PART", "AUDIO", "ERROR"):
+                            self.on_log("ignoring stray engine output: " + raw.decode("utf-8", "replace").strip()[:200])
+                            continue
+                        if keyword == "ERROR":
+                            finished = True
+                            raise EmbeddingEngineError(str(body.get("message") or "the engine refused the request"))
+                        if keyword == "PART":
+                            try:
+                                yield "part", base64.b64decode(body.get("pcm") or "")
+                            except GeneratorExit:
+                                self._drain(rid)                      # the caller left: let the engine finish this request, keep in step
+                                finished = True
+                                raise
+                            continue
+                        finished = True
+                        yield "done", {"sample_rate": int(body.get("sample_rate") or 24000), "frames": int(body.get("frames") or 0),
+                                       "audio_seconds": float(body.get("audio_seconds") or 0.0), "seconds": float(body.get("seconds") or 0.0),
+                                       "truncated": bool(body.get("truncated")), "samples": int(body.get("samples") or 0)}
+                        return
+                finally:
+                    if not finished and not self.dead:
+                        self._drain(rid)
+        finally:
+            if ref_path:
+                try:
+                    os.unlink(ref_path)
+                except OSError:
+                    pass
+
+    def _drain(self, rid):
+        """Reads and drops the engine's lines until its answer to request `rid` (AUDIO or ERROR), or until it is gone."""
+        while True:
+            raw = self.process.stdout.readline()
+            if not raw:
+                self.dead = f"the {self.label} exited"
+                return
+            keyword, body = _parse_line(raw)
+            if keyword in ("AUDIO", "ERROR") and body is not None and (body.get("id") == rid or body.get("id") in ("", None)):
+                return
+
+
 def speech_request(body, info=None):
     """The checked fields of POST /v1/audio/speech: {"input", "speaker", "language", "format", "seed", "greedy", "instruct"}, or
     EmbeddingRequestError (the gateway answers 400 with its `param`).
+
+    `stream_format` "sse" (OpenAI's) answers with server-sent events, `speech.audio.delta` carrying base64 raw PCM (16-bit mono, 24 kHz) as it is
+    made and `speech.audio.done` at the end; `stream: true` (an extension) sends a WAV (an open-ended header) or raw PCM as chunks. The first
+    sound is out after about half a second of speech has been made. The checked fields' `stream` is None, "sse" or "audio".
 
     `input` is the text (up to 4096 characters). `voice` is a speaker of the model (the READY line lists them) or one of OpenAI's names
     (alloy, echo, ...), which stand for speakers; left out it is Ryan. `language` is an extension: a name or ISO code, "auto" (the
@@ -164,8 +262,22 @@ def speech_request(body, info=None):
     if not isinstance(x_vector_only, bool):
         raise EmbeddingRequestError("`x_vector_only` must be true or false.", "x_vector_only")
     stream_format = body.get("stream_format")
-    if stream_format not in (None, "", "audio"):
-        raise EmbeddingRequestError("`stream_format` \"sse\" is not supported: the audio comes in one piece.", "stream_format")
+    if stream_format not in (None, "", "audio", "sse"):
+        raise EmbeddingRequestError("`stream_format` must be \"audio\" or \"sse\".", "stream_format")
+    want_stream = body.get("stream", False)
+    if not isinstance(want_stream, bool):
+        raise EmbeddingRequestError("`stream` must be true or false.", "stream")
+    stream = None
+    if stream_format == "sse":
+        if body.get("response_format") not in (None, "", "pcm", "wav"):
+            raise EmbeddingRequestError("`stream_format` \"sse\" sends raw 16-bit PCM in its events: leave `response_format` out, or ask for pcm.", "response_format")
+        stream = "sse"
+    elif want_stream:
+        if fmt not in ("wav", "pcm"):
+            raise EmbeddingRequestError(f"`stream` sends the audio as it is made: only wav and pcm can be cut into pieces, not {fmt}.", "response_format")
+        stream = "audio"
+    if stream and info and not info.get("stream"):
+        raise EmbeddingRequestError("this speech engine cannot stream: the audio comes in one piece.", "stream")
     speakers = [str(name).lower() for name in info.get("speakers") or ()]
     voice = body.get("voice", None if clone else DEFAULT_SPEAKER)
     if isinstance(voice, dict):
@@ -192,7 +304,7 @@ def speech_request(body, info=None):
     seed = body.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
         raise EmbeddingRequestError("`seed` must be a non-negative integer.", "seed")
-    return {"input": text, "speaker": "" if clone else speaker, "language": language, "format": fmt, "seed": seed or None, "greedy": False,
+    return {"input": text, "speaker": "" if clone else speaker, "language": language, "format": fmt, "stream": stream, "seed": seed or None, "greedy": False,
             "instruct": instructions if isinstance(instructions, str) and instructions.strip() else None,
             "voice": saved_name if clone and saved_name else None, "reference": reference,
             "reference_text": ref_text.strip() if isinstance(ref_text, str) and ref_text.strip() else None, "x_vector_only": x_vector_only}

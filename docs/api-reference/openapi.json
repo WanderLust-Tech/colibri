@@ -708,7 +708,7 @@
       "post": {
         "tags": ["Speech"],
         "summary": "Turn text into speech",
-        "description": "OpenAI's text-to-speech request, answered by a speech synthesis model (Qwen3-TTS CustomVoice; `GET /v1/models` lists `speech.speakers`, `speech.languages`, `speech.formats` and `speech.voices`). The text is spoken in a named speaker's voice and the audio is the body of the answer: a WAV by default, raw 16-bit PCM, or with ffmpeg on the server MP3, Opus, AAC or FLAC. OpenAI's voice names (`alloy`, `nova`, ...) stand for speakers. `speed` other than 1, `instructions` (for a model that takes no style description) and `stream_format` `sse` are refused with 400. Any other model answers 400 `unsupported_endpoint`.",
+        "description": "OpenAI's text-to-speech request, answered by a speech synthesis model (Qwen3-TTS CustomVoice; `GET /v1/models` lists `speech.speakers`, `speech.languages`, `speech.formats` and `speech.voices`). The text is spoken in a named speaker's voice and the audio is the body of the answer: a WAV by default, raw 16-bit PCM, or with ffmpeg on the server MP3, Opus, AAC or FLAC. OpenAI's voice names (`alloy`, `nova`, ...) stand for speakers. `speed` other than 1 and `instructions` (for a model that takes no style description) are refused with 400. `stream_format` `sse` answers with server-sent events (`speech.audio.delta` with base64 raw 16-bit PCM at 24 kHz, then `speech.audio.done`) and `stream: true` sends a WAV or raw PCM as chunks, both as the frames are made. Any other model answers 400 `unsupported_endpoint`.",
         "operationId": "createSpeech",
         "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
         "requestBody": {
@@ -3058,7 +3058,8 @@
           "response_format": { "type": "string", "enum": ["wav", "pcm", "mp3", "opus", "aac", "flac"], "default": "wav", "description": "`mp3`, `opus`, `aac` and `flac` need ffmpeg on the server. `pcm` is 16-bit little-endian mono at 24 kHz." },
           "speed": { "type": "number", "minimum": 0.25, "maximum": 4, "default": 1, "description": "Only 1 is accepted." },
           "instructions": { "type": "string", "description": "For the 1.7B models: a style for the CustomVoice (\"Speak slowly and sadly.\"), the voice itself for VoiceDesign (\"A warm, deep male voice.\"; `voice` is then ignored). Refused by the 0.6B." },
-          "stream_format": { "type": "string", "enum": ["audio"], "description": "`sse` is refused: the audio comes in one piece." },
+          "stream_format": { "type": "string", "enum": ["audio", "sse"], "description": "`sse`: server-sent events, `speech.audio.delta` (base64 raw 16-bit mono PCM at 24 kHz) as the audio is made and `speech.audio.done` at the end; `response_format` is left out or `pcm`." },
+          "stream": { "type": "boolean", "default": false, "description": "An extension: send the audio as chunks as it is made (WAV with an open-ended header, or raw PCM). Only wav and pcm." },
           "seed": { "type": "integer", "minimum": 0, "description": "The same text, voice and seed give the same speech." },
           "reference_audio": { "type": "string", "description": "A Base (voice-cloning) model only: the base64 of a reference clip (or a `data:` URL), 1 to 60 s of speech (3 to 30 is best), up to a few megabytes. The voice is cloned from it; `voice` then need not name anyone." },
           "reference_text": { "type": "string", "maxLength": 2000, "description": "What the reference clip says. With it the voice is cloned in context (the closer likeness); without it only the clip's speaker embedding is used. For a saved voice, overrides its stored text for this request." },

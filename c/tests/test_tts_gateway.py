@@ -64,7 +64,7 @@ class RequestRulesTest(unittest.TestCase):
 
     def test_the_defaults(self):
         self.assertEqual(speech_request({"input": "hello"}, INFO),
-                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "seed": None, "greedy": False, "instruct": None,
+                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "stream": None, "seed": None, "greedy": False, "instruct": None,
                           "voice": None, "reference": None, "reference_text": None, "x_vector_only": False})
 
     def test_input_is_required_and_limited(self):
@@ -111,7 +111,8 @@ class RequestRulesTest(unittest.TestCase):
         self.refused({"input": "x", "instructions": "cheerful"}, "instructions", "not supported")
         self.refused({"input": "x", "instructions": 4}, "instructions")
         self.assertEqual(speech_request({"input": "x", "instructions": ""}, INFO)["format"], "wav")
-        self.refused({"input": "x", "stream_format": "sse"}, "stream_format")
+        self.refused({"input": "x", "stream_format": "sse"}, "stream", "cannot stream")           # INFO is an engine that does not say it streams
+        self.refused({"input": "x", "stream_format": "bogus"}, "stream_format")
         self.assertEqual(speech_request({"input": "x", "stream_format": "audio"}, INFO)["format"], "wav")
 
     def test_a_model_that_takes_instructions_gets_them_through_the_check(self):
@@ -374,7 +375,7 @@ class EndpointTest(unittest.TestCase):
     def test_refusals_carry_the_field(self):
         cases = [({"voice": "morgan"}, "voice"), ({"language": "xx"}, "language"), ({"response_format": "ogg"}, "response_format"),
                  ({"speed": 2}, "speed"), ({"instructions": "gently"}, "instructions"), ({"seed": -3}, "seed"),
-                 ({"stream_format": "sse"}, "stream_format")]
+                 ({"stream_format": "bogus"}, "stream_format")]
         for fields, param in cases:
             with self.subTest(fields=fields):
                 status, error = self.error(self.gw.speak("hello", **fields))

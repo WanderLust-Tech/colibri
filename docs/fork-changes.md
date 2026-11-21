@@ -651,12 +651,18 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   `coli voice list|add|remove` (the words are written down by Qwen3-ASR when `--text` is not given), `coli speak --reference/--reference-text/
   --x-vector`, the engine's one-shot `--clone-wav` with `--check`, `tools/qwen3_tts_clone_ref.py`, `tests/test_qwen3tts_clone_real.py` (11 + 3),
   `tests/test_tts_clone.py` (23).
+- **Streaming speech** (`stream_format: "sse"` or `stream: true` on `POST /v1/audio/speech`; `SPEAK` `"stream": true`, `PART` lines): the engine
+  calls a per-frame hook and decodes each piece of 6 (then 24) frames with 96 frames of context, so the first sound is out after about 0.35 s; the
+  gateway's `speech_stream` sends SSE (`speech.audio.delta` / `.done` / `error`) or chunked WAV/PCM after the first piece (an early refusal is still
+  JSON), the engine wrapper's `speak_stream` generator keeps the engine in step when a client hangs up, the router relays it unchanged. The stream
+  is the one-piece speech to a few percent of its level (the codec's attention reaches 8 x 72 frames, a part sees 96), no step at the joins.
+  `tests/test_tts_stream.py` (13), `StreamingTest` in `tests/test_qwen3tts_real.py` (4, CPU and card).
 - **Dashboard: Settings → Voices** (`web/src/components/VoicesPanel.tsx`, `lib/voices.ts`, the router's pages list): the saved voices, a form from a
   clip, Try (speaks a phrase in the voice through the first installed Base model and plays it) and Remove; the page exists only on a router.
 - **The encoders on the card** (`qc_gemm_hook`): the Mimi convolutions' im2col products (in tiles of up to 32768 rows) and the encoder transformer's
   matrices go to the Vulkan device (`qc_vk_gemm` in `qwen3tts.c`), and its attention is a parallel loop instead of the acestep kernel (15 ms a
   layer): an 11 s clip's codes in 0.34 s instead of 0.67 s; same codes (0 of 2208 differ).
-- **Not done**: streaming, the codec's first half and a fully resident encoder on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
+- **Not done**: the codec's first half and a fully resident encoder on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 

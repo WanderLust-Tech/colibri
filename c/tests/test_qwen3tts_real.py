@@ -171,5 +171,73 @@ class RealEngineTest(unittest.TestCase):
         self.assertEqual(keyword, "AUDIO", body)
 
 
+@unittest.skipUnless(READY, "needs the built qwen3tts and QWEN3TTS_MODEL (the 0.6B CustomVoice with tokenizer.json and speech_tokenizer/)")
+class StreamingTest(unittest.TestCase):
+    """SPEAK with "stream": true: the audio goes out in PART lines as the frames are made, and is the speech the one-piece answer is."""
+
+    TEXT = ("The quick brown fox jumps over the lazy dog. And then it ran away into the forest, where it met a very old owl who asked it many "
+            "questions about the river, the mountains, the weather, and the long road that leads to the sea.")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.engine = Engine()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.engine.close()
+        cls.tmp.cleanup()
+
+    def stream(self, **fields):
+        engine = self.engine
+        engine.seq += 1
+        engine.process.stdin.write("SPEAK " + json.dumps({"id": f"s{engine.seq}", "stream": True, **fields}) + "\n")
+        engine.process.stdin.flush()
+        parts, last = [], None
+        while True:
+            keyword, _, body = engine.process.stdout.readline().partition(" ")
+            body = json.loads(body)
+            if keyword == "PART":
+                parts.append(body)
+            else:
+                last = (keyword, body)
+                return parts, last
+
+    def test_the_ready_line_says_it_streams(self):
+        self.assertIn('"stream":true', self.engine.ready)
+
+    def test_the_parts_are_the_speech_the_one_piece_answer_is(self):
+        import base64
+        fields = {"text": self.TEXT, "speaker": "ryan", "language": "English", "seed": 4}
+        parts, (keyword, done) = self.stream(**fields)
+        self.assertEqual(keyword, "AUDIO", done)
+        self.assertEqual([p["seq"] for p in parts], list(range(len(parts))))
+        self.assertGreater(len(parts), 3)
+        self.assertEqual(parts[0]["samples"], 6 * 1920)                          # the first part is short, so the sound starts early
+        pcm = b"".join(base64.b64decode(p["pcm"]) for p in parts)
+        self.assertEqual(len(pcm), done["samples"] * 2)
+        streamed = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+        out = os.path.join(self.tmp.name, "whole.wav")
+        keyword, whole_done = self.engine.speak(out, **fields)
+        self.assertEqual((keyword, whole_done["samples"], whole_done["frames"]), ("AUDIO", done["samples"], done["frames"]))
+        _rate, _channels, whole = read_wav(out)
+        diffs = [abs(a - b) for a, b in zip(streamed, whole)]
+        self.assertLess(max(diffs), 500)                                           # a part is decoded with 96 frames of context: a few steps of 16 bits off
+        self.assertLess(sum(diffs) / len(diffs), 12)
+
+    def test_a_stream_needs_no_out_and_a_plain_request_still_does(self):
+        parts, (keyword, _done) = self.stream(text="Short one.", speaker="ryan", language="English", seed=1)
+        self.assertEqual(keyword, "AUDIO")
+        self.assertTrue(parts)
+        keyword, body = self.engine.send("SPEAK", text="No file named.", speaker="ryan")
+        self.assertEqual(keyword, "ERROR")
+        self.assertIn("out", body["message"])
+
+    def test_a_refused_stream_is_an_error_and_no_part(self):
+        parts, (keyword, body) = self.stream(text="Hello.", speaker="nobody")
+        self.assertEqual((parts, keyword), ([], "ERROR"))
+        self.assertIn("nobody", body["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
