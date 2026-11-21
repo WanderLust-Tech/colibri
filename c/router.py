@@ -66,6 +66,11 @@ PEAK_SAMPLE_S = 5.0                 # how often a busy worker's memory is read, 
 CARD_MIN_IDLE = 60.0                # seconds a model must have been idle before it is stopped to give the card to another
 DEMOTE_TIMEOUT_S = 300.0            # how long a worker has to give the card back (it reads its dense weights back into RAM first)
 CARD_SETTLE_S = 10.0                # how long to wait for the card to show its memory free again after a stop
+# A model that started on the CPU only because the card was full is stopped once the card has room, to load there next time (Pool.promote).
+PROMOTE_MIN_IDLE = 20.0             # seconds it must have been idle (a model in a burst of requests is left alone)
+PROMOTE_MIN_AGE = 60.0              # seconds it must have been running, so a model is not stopped soon after it loaded
+PROMOTE_MARGIN = 1.25               # the card must have this much of the model's size free, beyond the reserve
+PROMOTE_MODALITIES = ("embedding", "rerank")   # only models that load in a few seconds: a big one costs more to reload than the card saves
 RELOAD_BYTES_PER_S = 150e6          # what a model never timed is assumed to load at (a slow disk): only used to compare
 STOP_GRACE = 25.0                   # seconds a worker gets to save its state before it is killed
 CARD_FALLBACK_S = 1800.0            # after a start on the graphics card failed, the model starts on the CPU for this long
@@ -710,7 +715,8 @@ class Pool:
                  grace=STOP_GRACE, make_job=None, queue_timeout=300.0, gpu=None, settings=None,
                  fallback_memory=CARD_FALLBACK_S, pressure_floor=None, pressure_min_idle=PRESSURE_MIN_IDLE,
                  pressure_cooldown=PRESSURE_COOLDOWN, peak_sample=PEAK_SAMPLE_S, watch_pressure=True,
-                 card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S, card_demote=True):
+                 card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S, card_demote=True,
+                 card_promote=True, promote_min_idle=PROMOTE_MIN_IDLE, promote_min_age=PROMOTE_MIN_AGE):
         self.catalog = catalog
         self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
         self.settings = settings                         # model_settings.ModelSettings, or None
@@ -728,6 +734,8 @@ class Pool:
         self.pressure_floor, self.pressure_min_idle, self.pressure_cooldown = pressure_floor, pressure_min_idle, pressure_cooldown
         self.card_evict, self.card_min_idle, self.card_settle = card_evict, card_min_idle, card_settle
         self.card_demote = card_demote                # give the card back and keep the model running, where its engine can
+        self.card_promote, self.promote_min_idle, self.promote_min_age = card_promote, promote_min_idle, promote_min_age
+        self.promotions = {"stops": 0, "last": None}
         self.watch_pressure = watch_pressure              # the reaper's loop calls relieve(); a test that calls it itself turns this off
         self.pressure = {"stops": 0, "last": None}
         self._relief_until = 0.0
@@ -1096,6 +1104,7 @@ class Pool:
                 self.sample_peaks()
                 if self.watch_pressure:
                     self.relieve()
+                    self.promote()
             except Exception as error:                    # the reaper must not die
                 log(f"reaper: {error}")
 
@@ -1169,6 +1178,45 @@ class Pool:
         self._stop(victim, f"memory is low: {free / 2**30:.1f} GB free, under {floor / 2**30:.1f} GB; it was idle for "
                            f"{now - victim.last_used:.0f} s and held {victim.resident / 2**30:.1f} GB")
         return victim.entry["id"]
+
+    def promote(self, now=None):
+        """Give a model back the card it could not have. A model that started on the CPU only because the card was full (its
+        decision says so: not pinned, not a failed start) stays there until it unloads, which is half an hour by default. When the
+        card has room for it now (what the policy asks of a new model, and its size with some margin) and it is idle, it is
+        stopped, and the next request loads it on the card. Only the models in PROMOTE_MODALITIES (they load in seconds), only
+        when `--gpu auto`, and never one that has not run for promote_min_age seconds or has been used within promote_min_idle,
+        so a model does not bounce. Returns the model stopped, or None."""
+        policy = self.gpu
+        if not self.card_promote or self.closed or policy is None or policy.mode != "auto":
+            return None
+        now = time.monotonic() if now is None else now
+        seen = policy.memory()
+        if seen is None:
+            return None
+        usable = seen[0] - policy.reserve_gb
+        with self.cv:
+            chosen = None
+            for w in self.workers.values():
+                decision = w.gpu
+                if (w.state != "ready" or w.inflight or not w.alive() or w.card or w.demoted
+                        or w.entry.get("modality") not in PROMOTE_MODALITIES
+                        or decision is None or not decision.room
+                        or now - w.last_used < self.promote_min_idle or now - w.started < self.promote_min_age):
+                    continue
+                size = max(w.resident, w.entry.get("size_bytes") or 0) / 2**30
+                if usable < max(policy.min_gb, size * PROMOTE_MARGIN):
+                    continue
+                if chosen is None or w.last_used < chosen.last_used:
+                    chosen = w
+            if chosen is None:
+                return None
+            chosen.state = "stopping"
+            chosen.settled.clear()
+        self.promotions["stops"] += 1
+        self.promotions["last"] = {"model": chosen.entry["id"], "free_gb": round(seen[0], 1), "at": int(time.time())}
+        self._stop(chosen, f"the graphics card has room for it now ({seen[0]:.1f} GB free) and it started on the CPU because "
+                           f"the card was full; it loads on the card when it is next asked for")
+        return chosen.entry["id"]
 
     def close(self):
         self.closed = True
@@ -2108,6 +2156,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "gate": self.server.gate.stats(),
             "free_memory": pool.memory(),
             "memory_pressure": {"floor_bytes": pool.pressure_floor, **pool.pressure},
+            "card_promote": {"on": pool.card_promote, **pool.promotions},
         }
         if pool.gpu is not None:
             payload["router"]["gpu"] = pool.gpu.public()
@@ -2625,7 +2674,8 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
                 state=State(default_state_path()), queue_timeout=queue_timeout,
                 make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings,
                 pressure_floor=pressure_floor(), card_evict=os.environ.get("COLI_CARD_EVICT", "1").strip().lower() not in ("0", "false", "no", "off"),
-                card_demote=os.environ.get("COLI_CARD_DEMOTE", "1").strip().lower() not in ("0", "false", "no", "off"))
+                card_demote=os.environ.get("COLI_CARD_DEMOTE", "1").strip().lower() not in ("0", "false", "no", "off"),
+                card_promote=os.environ.get("COLI_CARD_PROMOTE", "1").strip().lower() not in ("0", "false", "no", "off"))
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
     presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
     if request_log_path:

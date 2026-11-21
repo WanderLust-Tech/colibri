@@ -153,6 +153,16 @@ it is stopped (the idle timer, `coli model`, or a restart): in a short test of Q
 same as one started on the CPU, against about 18 on the card. `/health` marks it (`demoted`, and `gpu` says why it is on the CPU).
 `COLI_CARD_DEMOTE=0` makes the router stop such a model instead; `COLI_CARD_EVICT=0` turns the whole thing off.
 
+**A small model that started on the CPU gets the card when it frees up.** A model that went to the CPU only because the card was full
+(its decision says so; one pinned to the CPU, or one whose start on the card failed, does not count) used to stay there until it unloaded,
+half an hour by default. With `--gpu auto` the router now looks each second: if such a model is an embedding or reranking model (they
+load in a few seconds, so a reload costs less than the card saves; a chat model is left alone), has been idle for 20 s and has been
+running for a minute, and the card has room for it (the usual free-minus-reserve rule, and its size with a quarter more), it is
+stopped, and the next request loads it on the card. `/health` shows what it did under `router.card_promote` (`on`, `stops`, `last`).
+`COLI_CARD_PROMOTE=0` turns it off. Measured here: with the 4B and 8B rerankers holding the card the 0.6B embedding model started on
+the CPU (23.5 s for 64 texts of 230 tokens, against 1.13 s on the card); once the card had room the router unloaded it and the next
+request loaded it there.
+
 ## Background jobs
 
 `Prefer: respond-async` on a picture or song request makes it a job: the router answers `202` with an id and makes the render apart from the

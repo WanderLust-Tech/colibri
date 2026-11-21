@@ -127,7 +127,9 @@ after the demotion ("Hello there everyone!"), as a card and a CPU can at tempera
 `COLI_CARD_DEMOTE=0` makes the router stop such a model instead; `COLI_CARD_EVICT=0` turns off making room altogether. `/health` shows
 `demoted` and a `gpu` that says why the model is on the CPU. A model asked for while the router demotes it waits the few seconds and then
 runs on the CPU. Not done: putting a demoted model back on the card when the card is free again (it needs the engine to take its tier and
-chain up a second time, which it does only at start).
+chain up a second time, which it does only at start). The small embedding and reranking models are the exception to the
+waiting: one that started on the CPU because the card was full is unloaded when the card has room, and reloads there
+([router.md](router.md)); a demoted model is not in that set.
 
 ## Building it
 

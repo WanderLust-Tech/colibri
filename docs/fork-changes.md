@@ -526,6 +526,19 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   `setup_catalog.py`, `family_registry.py`, the family pages and the live `GET /v1/models`.
 - `docs.json` lists the pages the fork added since the navigation was written (models, router, model-install, zimage, embeddings, rerank).
 
+### 2.28 A small model gets the card when it frees up (`feat/promote-to-card`, 2026-11-20)
+
+- **The gap**: the router chooses card or CPU when a model loads and never looks again. The 0.6B embedding model, loaded while the
+  rerankers held the card, ran on the CPU (23.5 s for a batch the card does in 1.13 s) for as long as it stayed loaded.
+- **`Pool.promote`** (`c/router.py`, called by the reaper beside `relieve`): an idle embedding or reranking model whose start on the CPU was
+  because the card was full (`gpu.Decision.room`, set by the `auto` policy only) is stopped when the card has room for it, so the next
+  request loads it on the card. It must have been idle 20 s and running 60 s, and the card must have the policy's reserve plus its size
+  with a quarter more. Chat models, pinned models, failed starts, models on the card and demoted ones are never touched. `/health`:
+  `router.card_promote`; `COLI_CARD_PROMOTE=0` turns it off.
+- **Tests:** `tests/test_router_promote.py` (12: the move, a full card, a model too big for what is free, a model answering, too soon after
+  use and after start, pinned or failed starts, a model on the card or demoted, chat models, the switches, `/health`, and the reaper doing
+  it by itself); eleven mutations of `promote` and its hook each broke at least one.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -579,9 +592,9 @@ Status as of today (the file itself has been brought into line with this):
 - **Graphics card**: Qwen-Image on Vulkan (`make qwenimage VK=1`) is unmeasured; ACE-Step has no Vulkan path. Making room on the card **is
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
-  Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. What is
-  not built: putting a model back on the card when it is freed (a model that started on the CPU stays there until it unloads, 30 minutes
-  by default), and demoting engines other than `qwen36`.
+  Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small
+  model that started on the CPU gets the card when it frees up (2.28). What is not built: putting a demoted model or a chat model back on
+  the card when it is freed (they stay where they are until they unload, 30 minutes by default), and demoting engines other than `qwen36`.
 - **Context**: E4B and the 26B show no `context_length` until they have run once; a per-model window would need a per-model setting
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video

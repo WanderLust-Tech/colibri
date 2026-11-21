@@ -57,11 +57,12 @@ def read_memory():
 class Decision:
     """What a worker is told about the card, and why."""
 
-    def __init__(self, mode, why, free_gb=None, env=None):
+    def __init__(self, mode, why, free_gb=None, env=None, room=False):
         self.mode = mode                         # "vulkan", "cpu", or "unchanged" (the environment is left as it was)
         self.why = why
         self.free_gb = free_gb
         self.env = dict(env or {})
+        self.room = room                         # "cpu" only because the card had too little free: the router may move it later
 
     def summary(self):
         where = {"vulkan": "on the graphics card", "cpu": "on the CPU", "unchanged": "as the environment says"}[self.mode]
@@ -118,7 +119,7 @@ class GpuPolicy:
         if usable >= self.min_gb:
             return Decision("vulkan", f"{free:.1f} GB free, {self.reserve_gb:g} kept back", free, self._vulkan_env())
         return Decision("cpu", f"only {free:.1f} GB free, {self.reserve_gb:g} kept back and {self.min_gb:g} needed", free,
-                        {"COLI_VULKAN": "0"})
+                        {"COLI_VULKAN": "0"}, room=True)
 
     def public(self):
         seen = self.memory()
