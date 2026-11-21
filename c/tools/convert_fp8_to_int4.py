@@ -90,6 +90,8 @@ OTHER_FAMILY_PATHS = {
                        "release as downloaded (bf16 safetensors); see docs/rerank.md",
     "qwen3_asr":       "Qwen3-ASR is NOT converted: the speech recognition engine reads the "
                        "release as downloaded (bf16 safetensors); see docs/qwen3-asr.md",
+    "qwen3_tts":       "Qwen3-TTS is NOT converted: the speech synthesis engine reads the "
+                       "release as downloaded (bf16 safetensors); see docs/qwen3-tts.md",
 }
 # A config.json whose model_type is not the registry's key for its family: a
 # GLiNER2 checkpoint says "extractor" for every architecture and encoder, and
