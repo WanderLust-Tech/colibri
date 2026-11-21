@@ -9,9 +9,13 @@
  *         transposed conv by 8, 5, 4, 3, three residual units of dilation 1, 3, 9), SnakeBeta, a causal conv to 1 channel, clamp.
  *         Long streams are decoded in chunks of 300 frames with 25 frames of left context, as the reference does.
  *
+ *   T2  the talker (a Qwen3 decoder over 1024) and the code predictor (5 layers): the prompt becomes embeddings, the talker writes
+ *         the first code of each frame, the predictor the other 15; greedy or sampled (top-k 50, temperature 0.9, repetition penalty 1.05).
+ *
  * The kernels and the Qwen3 layer helpers are the ones the ACE-Step and Qwen3-ASR engines use (qi_gemm.h, acestep_dit.h).
  *
  * Usage:
+ *   qwen3tts --model DIR --text TEXT [--speaker Ryan] [--language English] [--out FILE.wav] [--greedy] [--ref REFDIR]
  *   qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]
  *       FILE.i32 is [frames][16] little-endian int32 codes; DIR is the codec's folder (speech_tokenizer/ of a TTS checkpoint, or
  *       Qwen3-TTS-Tokenizer-12Hz); --ref holds the reference's wav.f32 to compare with.
@@ -31,6 +35,7 @@
 #include "json.h"
 #include "qi_gemm.h"
 #include "acestep_text.h"
+#include "omp_tune.h"
 
 #define QT_SR 24000
 #define QT_GROUPS 16
@@ -505,53 +510,629 @@ static int qt_write_wav(const char *path, const float *w, int n, int rate){
     return 0;
 }
 
+/* ------------------------------------------------------------------------------------------------ one row at a time */
+
+/* y [N] = W x (+ bias) for one input row: the decode steps of the talker and the code predictor read every weight once per token, so this is
+ * memory-bound; the batch GEMM's panel packing costs more than it saves for M = 1. bf16 weights are widened a vector at a time. */
+static void qt_mv(float *y, const float *x, const AcdLin *l){
+    const QiMat *W = &l->m;
+    const int N = W->N, K = W->K;
+    if (W->fmt != QI_BF16) { qi_gemm(y, x, 1, W, l->b); return; }
+    const int ld = W->ld ? W->ld : K;
+    #pragma omp parallel for schedule(static)
+    for (int n = 0; n < N; n++) {
+        const uint16_t *w = (const uint16_t *)W->w + (size_t)n * ld;
+        float s = 0.f;
+        int k = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        for (; k + 16 <= K; k += 16) {
+            const __m256i r0 = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(w + k)));
+            const __m256i r1 = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(w + k + 8)));
+            a0 = _mm256_fmadd_ps(_mm256_castsi256_ps(_mm256_slli_epi32(r0, 16)), _mm256_loadu_ps(x + k), a0);
+            a1 = _mm256_fmadd_ps(_mm256_castsi256_ps(_mm256_slli_epi32(r1, 16)), _mm256_loadu_ps(x + k + 8), a1);
+        }
+        a0 = _mm256_add_ps(a0, a1);
+        __m128 lo = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+        lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
+        lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 1));
+        s = _mm_cvtss_f32(lo);
+#endif
+        for (; k < K; k++) s += qi_bf16(w[k]) * x[k];
+        y[n] = s + (l->b ? l->b[n] : 0.f);
+    }
+}
+
+/* y [M][N] = x W^T: one row through qt_mv, more through the GEMM */
+static void qt_lin_any(float *y, const float *x, int M, const AcdLin *l){
+    if (M == 1) qt_mv(y, x, l); else acd_lin(y, x, M, l);
+}
+
+/* ------------------------------------------------------------------------------------------------ the language model side (T2) */
+
+/* A plain Qwen3 stack (the talker, the code predictor): layers, final norm and the sizes. */
+typedef struct { int nl, D, H, Hk, hd, inter; float eps, theta; AcdEncLayer *L; float *norm; } QtDec;
+
+typedef struct {
+    QtDec talker, pred;
+    uint16_t *codec_emb, *text_emb, *pred_emb[QT_GROUPS - 1];     /* bf16 [3072][D], [151936][2048], 15 x [2048][D] */
+    AcdLin fc1, fc2, codec_head, pred_head[QT_GROUPS - 1];
+    int vocab, text_vocab, text_hidden, cb_vocab;
+    int tts_bos, tts_eos, tts_pad, im_start, im_end;
+    int codec_bos, codec_eos, codec_pad, codec_think, codec_nothink, codec_think_bos, codec_think_eos;
+    jval *cfg;                                                     /* kept for the speaker and language tables */
+    Tok tok;
+    QtCodec codec;
+    size_t bytes;
+} QtModel;
+
+static int qt_dec_load(shards *S, const char *pfx, jval *c, int exp_nl, QtDec *d, size_t *bytes, char *err, size_t errn){
+    d->nl = acd_json_int(c, "num_hidden_layers", 0); d->D = acd_json_int(c, "hidden_size", 0); d->H = acd_json_int(c, "num_attention_heads", 0);
+    d->Hk = acd_json_int(c, "num_key_value_heads", 0); d->hd = acd_json_int(c, "head_dim", 128); d->inter = acd_json_int(c, "intermediate_size", 0);
+    d->eps = (float)acd_json_num(c, "rms_norm_eps", 1e-6); d->theta = (float)acd_json_num(c, "rope_theta", 1e6);
+    if (!d->nl || !d->D || !d->H || !d->Hk || !d->inter || (exp_nl && d->nl != exp_nl)) { snprintf(err, errn, "unsupported %s geometry in config.json", pfx); return -1; }
+    char n[300];
+    int64_t shd[1] = {d->D};
+    d->L = (AcdEncLayer *)calloc((size_t)d->nl, sizeof *d->L);
+    for (int i = 0; i < d->nl; i++) {
+        char p[300];
+        snprintf(p, sizeof p, "%s.layers.%d.self_attn", pfx, i);
+        if (acd_load_attn(S, p, d->D, d->H, d->Hk, d->hd, &d->L[i].sa, bytes, err, errn)) return -1;
+        snprintf(n, sizeof n, "%s.layers.%d.input_layernorm.weight", pfx, i);          if (!(d->L[i].ln1 = acd_read_f32(S, n, 1, shd, err, errn))) return -1;
+        snprintf(n, sizeof n, "%s.layers.%d.post_attention_layernorm.weight", pfx, i); if (!(d->L[i].ln2 = acd_read_f32(S, n, 1, shd, err, errn))) return -1;
+        snprintf(p, sizeof p, "%s.layers.%d.mlp", pfx, i);
+        if (acd_load_mlp(S, p, d->D, d->inter, &d->L[i].gate, &d->L[i].up, &d->L[i].down, bytes, err, errn)) return -1;
+    }
+    snprintf(n, sizeof n, "%s.norm.weight", pfx);
+    return (d->norm = acd_read_f32(S, n, 1, shd, err, errn)) ? 0 : -1;
+}
+
+static uint16_t *qt_bf16_table(shards *S, const char *name, int64_t numel, size_t *bytes, char *err, size_t errn){
+    st_tensor *t = st_find(S, name);
+    if (!t || t->dtype != 0 || t->numel != numel) { snprintf(err, errn, "tensor %s is missing or not bf16 of %lld values", name, (long long)numel); return NULL; }
+    uint16_t *p = (uint16_t *)malloc((size_t)numel * 2);
+    if (!p) { snprintf(err, errn, "out of memory reading %s", name); return NULL; }
+    st_read_raw(S, name, p, 1);
+    *bytes += (size_t)numel * 2;
+    return p;
+}
+
+static int qt_json_id(jval *c, const char *key){ return acd_json_int(c, key, -1); }
+
+static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
+    memset(m, 0, sizeof *m);
+    char path[4300];
+    snprintf(path, sizeof path, "%s/config.json", dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(err, errn, "cannot open %s", path); return -1; }
+    fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = (char *)malloc((size_t)fn + 1);
+    if (!buf || fread(buf, 1, (size_t)fn, f) != (size_t)fn) { fclose(f); free(buf); snprintf(err, errn, "cannot read %s", path); return -1; }
+    fclose(f); buf[fn] = 0;
+    m->cfg = json_parse_checked(buf);
+    free(buf);
+    jval *tc = m->cfg ? json_get(m->cfg, "talker_config") : NULL, *pc = tc ? json_get(tc, "code_predictor_config") : NULL;
+    if (!tc || !pc) { snprintf(err, errn, "config.json has no talker_config.code_predictor_config: not a Qwen3-TTS checkpoint"); return -1; }
+    jval *type = json_get(m->cfg, "tts_model_type");
+    if (!type || type->t != J_STR || strcmp(type->str, "custom_voice")) { snprintf(err, errn, "only the CustomVoice checkpoints are supported so far (this one is %s)", type && type->t == J_STR ? type->str : "unknown"); return -1; }
+    m->tts_bos = qt_json_id(m->cfg, "tts_bos_token_id"); m->tts_eos = qt_json_id(m->cfg, "tts_eos_token_id"); m->tts_pad = qt_json_id(m->cfg, "tts_pad_token_id");
+    m->codec_bos = qt_json_id(tc, "codec_bos_id"); m->codec_eos = qt_json_id(tc, "codec_eos_token_id"); m->codec_pad = qt_json_id(tc, "codec_pad_id");
+    m->codec_think = qt_json_id(tc, "codec_think_id"); m->codec_nothink = qt_json_id(tc, "codec_nothink_id");
+    m->codec_think_bos = qt_json_id(tc, "codec_think_bos_id"); m->codec_think_eos = qt_json_id(tc, "codec_think_eos_id");
+    m->vocab = acd_json_int(tc, "vocab_size", 0); m->text_vocab = acd_json_int(tc, "text_vocab_size", 0); m->text_hidden = acd_json_int(tc, "text_hidden_size", 0);
+    if (m->tts_bos < 0 || m->tts_eos < 0 || m->tts_pad < 0 || m->codec_bos < 0 || m->codec_eos < 0 || m->codec_pad < 0 || !m->vocab || !m->text_vocab || !m->text_hidden ||
+        acd_json_int(tc, "num_code_groups", 0) != QT_GROUPS) { snprintf(err, errn, "unsupported Qwen3-TTS geometry in config.json"); return -1; }
+    shards S;
+    st_init(&S, dir);
+    if (qt_dec_load(&S, "talker.model", tc, 0, &m->talker, &m->bytes, err, errn)) return -1;
+    if (qt_dec_load(&S, "talker.code_predictor.model", pc, 0, &m->pred, &m->bytes, err, errn)) return -1;
+    if (m->pred.D != m->talker.D) { snprintf(err, errn, "a code predictor of another width than the talker (the 1.7B) is not supported yet"); return -1; }
+    const int D = m->talker.D;
+    if (!(m->codec_emb = qt_bf16_table(&S, "talker.model.codec_embedding.weight", (int64_t)m->vocab * D, &m->bytes, err, errn))) return -1;
+    if (!(m->text_emb = qt_bf16_table(&S, "talker.model.text_embedding.weight", (int64_t)m->text_vocab * m->text_hidden, &m->bytes, err, errn))) return -1;
+    char n[300], b[300];
+    int64_t s1[2] = {m->text_hidden, m->text_hidden}, s2[2] = {D, m->text_hidden};
+    if (acd_load_lin(&S, "talker.text_projection.linear_fc1.weight", "talker.text_projection.linear_fc1.bias", m->text_hidden, m->text_hidden, 2, s1, NULL, 0, 0, &m->fc1, &m->bytes, err, errn)) return -1;
+    if (acd_load_lin(&S, "talker.text_projection.linear_fc2.weight", "talker.text_projection.linear_fc2.bias", D, m->text_hidden, 2, s2, NULL, 0, 0, &m->fc2, &m->bytes, err, errn)) return -1;
+    int64_t sh[2] = {m->vocab, D};
+    if (acd_load_lin(&S, "talker.codec_head.weight", NULL, m->vocab, D, 2, sh, NULL, 0, 0, &m->codec_head, &m->bytes, err, errn)) return -1;
+    const int pv = acd_json_int(pc, "vocab_size", 2048);
+    m->cb_vocab = pv;
+    int64_t sp[2] = {pv, D};
+    for (int g = 0; g < QT_GROUPS - 1; g++) {
+        snprintf(n, sizeof n, "talker.code_predictor.model.codec_embedding.%d.weight", g);
+        if (!(m->pred_emb[g] = qt_bf16_table(&S, n, (int64_t)pv * D, &m->bytes, err, errn))) return -1;
+        snprintf(n, sizeof n, "talker.code_predictor.lm_head.%d.weight", g); (void)b;
+        if (acd_load_lin(&S, n, NULL, pv, D, 2, sp, NULL, 0, 0, &m->pred_head[g], &m->bytes, err, errn)) return -1;
+    }
+    st_destroy(&S);
+    snprintf(path, sizeof path, "%s/tokenizer.json", dir);
+    FILE *tf = fopen(path, "rb");
+    if (!tf) { snprintf(err, errn, "no tokenizer.json in the model folder (python tools/qwen3_tokenizer.py DIR makes it from vocab.json and merges.txt)"); return -1; }
+    fclose(tf);
+    tok_load(&m->tok, path);
+    m->im_start = tok_id_of(&m->tok, "<|im_start|>"); m->im_end = tok_id_of(&m->tok, "<|im_end|>");
+    if (m->im_start < 0 || m->im_end < 0) { snprintf(err, errn, "the tokenizer lacks the chat tokens"); return -1; }
+    snprintf(path, sizeof path, "%s/speech_tokenizer", dir);
+    if (qt_codec_load(&m->codec, path, err, errn)) return -1;
+    m->bytes += m->codec.bytes;
+    return 0;
+}
+
+static inline void qt_row(const uint16_t *tab, int id, int n, float *dst){
+    const uint16_t *r = tab + (size_t)id * n;
+    for (int i = 0; i < n; i++) { uint32_t u = (uint32_t)r[i] << 16; memcpy(&dst[i], &u, 4); }
+}
+
+/* text rows through text_projection: x [n][text_hidden] -> out [n][D] (fc1, SiLU, fc2) */
+static void qt_text_proj(const QtModel *m, const float *x, int n, float *out){
+    float *h = (float *)malloc((size_t)n * m->text_hidden * sizeof(float));
+    acd_lin(h, x, n, &m->fc1);
+    for (int64_t i = 0; i < (int64_t)n * m->text_hidden; i++) h[i] = acd_silu(h[i]);
+    acd_lin(out, h, n, &m->fc2);
+    free(h);
+}
+
+/* the projected embeddings of text token ids: [n][D] */
+static float *qt_text_embed(const QtModel *m, const int *ids, int n){
+    float *x = (float *)malloc((size_t)(n ? n : 1) * m->text_hidden * sizeof(float)), *out = (float *)malloc((size_t)(n ? n : 1) * m->talker.D * sizeof(float));
+    for (int i = 0; i < n; i++) qt_row(m->text_emb, ids[i], m->text_hidden, x + (size_t)i * m->text_hidden);
+    qt_text_proj(m, x, n, out);
+    free(x);
+    return out;
+}
+
+static int qt_lookup(jval *obj, const char *key, int fallback){
+    jval *v = obj ? json_get(obj, key) : NULL;
+    return v && v->t == J_NUM ? (int)v->num : fallback;
+}
+
+static void qt_lower(char *s){ for (; *s; s++) if (*s >= 'A' && *s <= 'Z') *s += 32; }
+
+/* The text prompt's token ids: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n, malloc'd, count in *n. */
+static int *qt_text_ids(const QtModel *m_, const char *text, int *n){
+    QtModel *m = (QtModel *)m_;
+    const size_t len = strlen(text) + 96;
+    char *s = (char *)malloc(len);
+    snprintf(s, len, "<|im_start|>assistant\n%s<|im_end|>\n<|im_start|>assistant\n", text);
+    char *nrm = NULL; size_t nl = 0;
+    if (q38_nfc_normalize(s, strlen(s), &nrm, &nl) != 0) { nrm = strdup(s); nl = strlen(s); }
+    free(s);
+    int cap = (int)nl + 16;
+    int *ids = (int *)malloc((size_t)cap * sizeof(int));
+    *n = tok_encode(&m->tok, nrm, (int)nl, ids, cap);
+    free(nrm);
+    return ids;
+}
+
+/* The talker's prefill input for a CustomVoice request in the reference's non-streaming mode: [L][D] malloc'd, L in *rows. Returns NULL with err
+ * set for an unknown speaker or language. */
+static float *qt_prefill(const QtModel *m, const int *ids, int nids, const char *speaker, const char *language, int *rows, char *err, size_t errn){
+    const int D = m->talker.D;
+    jval *tc = json_get(m->cfg, "talker_config");
+    int spk = -1, lang = -1;
+    char name[64] = "", lg[64] = "";
+    snprintf(name, sizeof name, "%s", speaker ? speaker : "");
+    snprintf(lg, sizeof lg, "%s", language && *language ? language : "auto");
+    qt_lower(name); qt_lower(lg);
+    if (*name) {
+        spk = qt_lookup(json_get(tc, "spk_id"), name, -1);
+        if (spk < 0) { snprintf(err, errn, "the speaker `%s` is not one this model has", speaker); return NULL; }
+    }
+    if (strcmp(lg, "auto")) {
+        lang = qt_lookup(json_get(tc, "codec_language_id"), lg, -1);
+        if (lang < 0) { snprintf(err, errn, "the language `%s` is not one this model speaks", language); return NULL; }
+    }
+    if (*name && (!strcmp(lg, "chinese") || !strcmp(lg, "auto"))) {                  /* a dialect speaker (Dylan, Eric) swaps in the dialect's language id */
+        jval *dia = json_get(json_get(tc, "spk_is_dialect"), name);
+        if (dia && dia->t == J_STR) { const int d = qt_lookup(json_get(tc, "codec_language_id"), dia->str, -1); if (d >= 0) lang = d; }
+    }
+    if (nids < 9) { snprintf(err, errn, "the prompt is too short"); return NULL; }
+    int prefix[8], np = 0;
+    if (lang < 0) { prefix[np++] = m->codec_nothink; prefix[np++] = m->codec_think_bos; prefix[np++] = m->codec_think_eos; }
+    else { prefix[np++] = m->codec_think; prefix[np++] = m->codec_think_bos; prefix[np++] = lang; prefix[np++] = m->codec_think_eos; }
+    const int ntext = nids - 8;                                                       /* ids[3 .. nids - 5) */
+    const int total = 3 + (np + (spk >= 0) + 2 - 1) + (ntext + 1) + 1;
+    float *out = (float *)calloc((size_t)total * D, sizeof(float));
+    float *tmp = (float *)malloc((size_t)D * sizeof(float));
+    const int sp[3] = {m->tts_bos, m->tts_eos, m->tts_pad};
+    float *sv = qt_text_embed(m, sp, 3);                                              /* tts_bos, tts_eos, tts_pad, projected */
+    const float *bos = sv, *eos = sv + D, *pad = sv + 2 * D;
+    int at = 0;
+    float *role = qt_text_embed(m, ids, 3);
+    memcpy(out, role, (size_t)3 * D * sizeof(float)); at = 3;
+    free(role);
+    int codec[12], nc = 0;                                                            /* the codec ids of the prefix, the speaker and [pad, bos] */
+    for (int i = 0; i < np; i++) codec[nc++] = prefix[i];
+    if (spk >= 0) codec[nc++] = spk;
+    codec[nc++] = m->codec_pad; codec[nc++] = m->codec_bos;
+    for (int i = 0; i < nc - 1; i++) {                                                /* (tts_pad x (nc - 2), tts_bos) + codec[:-1] */
+        const float *t = i < nc - 2 ? pad : bos;
+        qt_row(m->codec_emb, codec[i], D, tmp);
+        float *dst = out + (size_t)at * D;
+        for (int j = 0; j < D; j++) dst[j] = t[j] + tmp[j];
+        at++;
+    }
+    float *txt = qt_text_embed(m, ids + 3, ntext);                                    /* the text, then tts_eos, each + codec_pad */
+    qt_row(m->codec_emb, m->codec_pad, D, tmp);
+    for (int i = 0; i < ntext + 1; i++) {
+        const float *t = i < ntext ? txt + (size_t)i * D : eos;
+        float *dst = out + (size_t)at * D;
+        for (int j = 0; j < D; j++) dst[j] = t[j] + tmp[j];
+        at++;
+    }
+    qt_row(m->codec_emb, m->codec_bos, D, tmp);                                       /* tts_pad + codec_bos */
+    {
+        float *dst = out + (size_t)at * D;
+        for (int j = 0; j < D; j++) dst[j] = pad[j] + tmp[j];
+        at++;
+    }
+    free(txt); free(sv); free(tmp);
+    if (at != total) { snprintf(err, errn, "internal: prefill length %d, expected %d", at, total); free(out); return NULL; }
+    *rows = total;
+    return out;
+}
+
+typedef struct { float **k, **v; int cap, len; } QtCache;
+
+static QtCache *qt_cache_new(const QtDec *d, int cap){
+    QtCache *c = (QtCache *)calloc(1, sizeof *c);
+    c->cap = cap; c->len = 0;
+    c->k = (float **)calloc((size_t)d->nl, sizeof(float *)); c->v = (float **)calloc((size_t)d->nl, sizeof(float *));
+    for (int i = 0; i < d->nl; i++) { c->k[i] = (float *)malloc((size_t)cap * d->Hk * d->hd * sizeof(float)); c->v[i] = (float *)malloc((size_t)cap * d->Hk * d->hd * sizeof(float)); }
+    return c;
+}
+static void qt_cache_free(const QtDec *d, QtCache *c){
+    for (int i = 0; i < d->nl; i++) { free(c->k[i]); free(c->v[i]); }
+    free(c->k); free(c->v); free(c);
+}
+
+/* n rows x [n][D] at positions pos0.. through every layer (no final norm), keys and values appended to the cache; causal, seeing the cache first */
+static void qt_dec_rows(const QtDec *d, QtCache *C, float *x, int n, int pos0, const float *cs, const float *sn){
+    const int D = d->D, H = d->H, Hk = d->Hk, hd = d->hd, I = d->inter, group = H / Hk;
+    float *nb = (float *)malloc((size_t)n * D * sizeof(float)), *o = (float *)malloc((size_t)n * D * sizeof(float));
+    float *q = (float *)malloc((size_t)n * H * hd * sizeof(float)), *cx = (float *)malloc((size_t)n * H * hd * sizeof(float));
+    float *kk = (float *)malloc((size_t)n * Hk * hd * sizeof(float)), *vv = (float *)malloc((size_t)n * Hk * hd * sizeof(float));
+    float *g = (float *)malloc((size_t)n * I * sizeof(float)), *u = (float *)malloc((size_t)n * I * sizeof(float));
+    const size_t scn = (size_t)(C->cap > 1 ? C->cap : 1);
+    float *sc_all = (float *)malloc((size_t)H * scn * sizeof(float));                  /* one score row per head, so the heads run side by side */
+    for (int li = 0; li < d->nl; li++) {
+        const AcdEncLayer *l = &d->L[li];
+        acd_rmsnorm(nb, x, n, D, l->ln1, d->eps);
+        qt_lin_any(q, nb, n, &l->sa.q); qt_lin_any(kk, nb, n, &l->sa.k); qt_lin_any(vv, nb, n, &l->sa.v);
+        acd_head_norm(q, n, H, hd, l->sa.qn, d->eps);
+        acd_head_norm(kk, n, Hk, hd, l->sa.kn, d->eps);
+        acd_rope(q, n, H, hd, cs + (size_t)pos0 * hd, sn + (size_t)pos0 * hd);
+        acd_rope(kk, n, Hk, hd, cs + (size_t)pos0 * hd, sn + (size_t)pos0 * hd);
+        memcpy(C->k[li] + (size_t)pos0 * Hk * hd, kk, (size_t)n * Hk * hd * sizeof(float));
+        memcpy(C->v[li] + (size_t)pos0 * Hk * hd, vv, (size_t)n * Hk * hd * sizeof(float));
+        if (pos0 == 0 && n > 1) {
+            acd_attention_ex(cx, H * hd, q, H * hd, n, C->k[li], C->v[li], Hk * hd, n, H, Hk, hd, -1, 1);
+        } else {
+            const float scale = 1.0f / sqrtf((float)hd);
+            for (int r = 0; r < n; r++) {
+                const int upto = pos0 + r + 1;
+                #pragma omp parallel for schedule(static)
+                for (int h = 0; h < H; h++) {
+                    float *sc = sc_all + (size_t)h * scn;
+                    const float *qh = q + (size_t)r * H * hd + (size_t)h * hd;
+                    const float *K = C->k[li] + (size_t)(h / group) * hd, *V = C->v[li] + (size_t)(h / group) * hd;
+                    float mx = -1e30f;
+                    for (int j = 0; j < upto; j++) {
+                        const float *kj = K + (size_t)j * Hk * hd;
+                        float s = 0;
+                        for (int e = 0; e < hd; e++) s += qh[e] * kj[e];
+                        sc[j] = s * scale;
+                        if (sc[j] > mx) mx = sc[j];
+                    }
+                    float den = 0;
+                    /* a weight under 1e-30 changes nothing, and as a denormal it slows every multiply after it by a hundredfold */
+                    for (int j = 0; j < upto; j++) { const float e = expf(sc[j] - mx); sc[j] = e < 1e-30f ? 0.f : e; den += sc[j]; }
+                    float *oh = cx + (size_t)r * H * hd + (size_t)h * hd;
+                    for (int e = 0; e < hd; e++) oh[e] = 0;
+                    for (int j = 0; j < upto; j++) {
+                        if (sc[j] == 0.f) continue;
+                        const float w = sc[j] / den;
+                        const float *vj = V + (size_t)j * Hk * hd;
+                        for (int e = 0; e < hd; e++) oh[e] += w * vj[e];
+                    }
+                }
+            }
+        }
+        qt_lin_any(o, cx, n, &l->sa.o);
+        for (int64_t i = 0; i < (int64_t)n * D; i++) x[i] += o[i];
+        acd_rmsnorm(nb, x, n, D, l->ln2, d->eps);
+        qt_lin_any(g, nb, n, &l->gate); qt_lin_any(u, nb, n, &l->up);
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < (int64_t)n * I; i++) g[i] = acd_silu(g[i]) * u[i];
+        qt_lin_any(o, g, n, &l->down);
+        for (int64_t i = 0; i < (int64_t)n * D; i++) x[i] += o[i];
+    }
+    C->len = pos0 + n;
+    free(nb); free(o); free(q); free(cx); free(kk); free(vv); free(g); free(u); free(sc_all);
+}
+
+typedef struct { uint64_t s; } QtRng;
+static double qt_rand(QtRng *r){                                   /* xorshift64*: uniform in [0, 1) */
+    r->s ^= r->s >> 12; r->s ^= r->s << 25; r->s ^= r->s >> 27;
+    return (double)((r->s * 0x2545F4914F6CDD1DULL) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+/* the next id from logits [n]: greedy, or temperature then top-k then a draw */
+static int qt_pick(const float *logits, int n, int greedy, float temp, int topk, QtRng *rng){
+    int best = 0;
+    for (int i = 1; i < n; i++) if (logits[i] > logits[best]) best = i;
+    if (greedy) return best;
+    const int k = topk > 0 && topk < n ? topk : n;
+    int *idx = (int *)malloc((size_t)n * sizeof(int));
+    for (int i = 0; i < n; i++) idx[i] = i;
+    for (int a = 0; a < k; a++) {                                  /* the k largest, by partial selection */
+        int b = a;
+        for (int j = a + 1; j < n; j++) if (logits[idx[j]] > logits[idx[b]]) b = j;
+        const int t = idx[a]; idx[a] = idx[b]; idx[b] = t;
+    }
+    double mx = logits[idx[0]], sum = 0;
+    double *p = (double *)malloc((size_t)k * sizeof(double));
+    for (int a = 0; a < k; a++) { p[a] = exp(((double)logits[idx[a]] - mx) / (double)temp); sum += p[a]; }
+    double r = qt_rand(rng) * sum;
+    int pick = idx[k - 1];
+    for (int a = 0; a < k; a++) { r -= p[a]; if (r <= 0) { pick = idx[a]; break; } }
+    free(idx); free(p);
+    return pick;
+}
+
+/* The decode steps are one row against every weight: memory-bound, with a barrier after each small matrix. A team of every logical CPU
+ * spends its time at the barriers (32 threads: 346 ms a frame; 6: 115 ms on the same machine), so the frame loop runs on a smaller team:
+ * --decode-threads N, or QT_DECODE_THREADS, or by default the physical cores capped at 6. The prefill and the codec keep the full team. */
+static int qt_decode_threads(void){
+#ifdef _OPENMP
+    const char *e = getenv("QT_DECODE_THREADS");
+    if (e && atoi(e) > 0) return atoi(e);
+    int phys = coli_physical_cores();
+    int n = phys > 0 ? phys : omp_get_max_threads();
+    return n > 6 ? 6 : n;
+#else
+    return 1;
+#endif
+}
+
+typedef struct { int greedy; float temperature; int top_k; float rep_penalty; int sub_greedy; float sub_temperature; int sub_top_k; int max_frames; uint64_t seed; } QtGen;
+
+/* Teacher forcing (a test of the whole stack against reference codes that does not trip on ties): the given codes drive the generation, and
+ * at each choice the engine says whether the given code is its own argmax, and if not by how much (in logits) the argmax beat it. */
+typedef struct { const int *codes; int frames; int choices, flips; double worst_gap; int eos_ok; int *first_flip; } QtTeacher;
+
+static double qt_argmax_gap(const float *logits, int n, int taught, int *best_out){
+    int best = 0;
+    for (int i = 1; i < n; i++) if (logits[i] > logits[best]) best = i;
+    *best_out = best;
+    return (double)logits[best] - (double)logits[taught];
+}
+
+static void qt_teach_note(QtTeacher *t, const float *logits, int n, int taught, int frame){
+    int best = 0;
+    const double gap = qt_argmax_gap(logits, n, taught, &best);
+    t->choices++;
+    if (best != taught) {
+        t->flips++;
+        if (gap > t->worst_gap) t->worst_gap = gap;
+        if (t->first_flip && *t->first_flip < 0) *t->first_flip = frame;
+    }
+}
+
+/* The frames of codes [frames][16] (malloc'd) for a prefill [L][D]. logits0, when not NULL, gets the first step's raw logits [vocab]. */
+static int *qt_generate(const QtModel *m, const float *prefill, int L, const QtGen *g, int *frames, float *logits0, QtTeacher *teach){
+    const QtDec *T = &m->talker, *P = &m->pred;
+    const int D = T->D, maxf = g->max_frames;
+    const int cap = L + maxf + 1;
+    QtCache *tc = qt_cache_new(T, cap), *pcache = qt_cache_new(P, QT_GROUPS + 1);
+    float *tcs = (float *)malloc((size_t)cap * T->hd * sizeof(float)), *tsn = (float *)malloc((size_t)cap * T->hd * sizeof(float));
+    float *pcs = (float *)malloc((size_t)(QT_GROUPS + 1) * P->hd * sizeof(float)), *psn = (float *)malloc((size_t)(QT_GROUPS + 1) * P->hd * sizeof(float));
+    acd_rope_table(tcs, tsn, cap, T->hd, T->theta);
+    acd_rope_table(pcs, psn, QT_GROUPS + 1, P->hd, P->theta);
+    float *x = (float *)malloc((size_t)L * D * sizeof(float));
+    memcpy(x, prefill, (size_t)L * D * sizeof(float));
+    qt_dec_rows(T, tc, x, L, 0, tcs, tsn);
+    float *hn = (float *)malloc((size_t)D * sizeof(float)), *logits = (float *)malloc((size_t)m->vocab * sizeof(float)), *raw = (float *)malloc((size_t)m->vocab * sizeof(float));
+    acd_rmsnorm(hn, x + (size_t)(L - 1) * D, 1, D, T->norm, T->eps);
+    qt_mv(logits, hn, &m->codec_head);
+#ifdef _OPENMP
+    const int team_before = omp_get_max_threads();
+    omp_set_num_threads(qt_decode_threads());
+#endif
+    int *codes = (int *)malloc((size_t)(maxf > 0 ? maxf : 1) * QT_GROUPS * sizeof(int));
+    int *seen = (int *)calloc((size_t)m->vocab, sizeof(int));
+    QtRng rng = {g->seed ? g->seed : 0x9E3779B97F4A7C15ULL};
+    float *pad = qt_text_embed(m, &m->tts_pad, 1);
+    float *prow = (float *)malloc((size_t)2 * D * sizeof(float)), *ph = (float *)malloc((size_t)D * sizeof(float)), *pl = (float *)malloc((size_t)m->cb_vocab * sizeof(float));
+    float *emb = (float *)malloc((size_t)D * sizeof(float)), *sum = (float *)malloc((size_t)D * sizeof(float)), *next = (float *)malloc((size_t)D * sizeof(float));
+    int f = 0;
+    for (; f < maxf; f++) {
+        if (f == 0 && logits0) memcpy(logits0, logits, (size_t)m->vocab * sizeof(float));
+        memcpy(raw, logits, (size_t)m->vocab * sizeof(float));
+        for (int i = m->vocab - 1024; i < m->vocab; i++) if (i != m->codec_eos) raw[i] = -INFINITY;     /* suppress_tokens */
+        if (f < 2) raw[m->codec_eos] = -INFINITY;                                                       /* min_new_tokens */
+        if (g->rep_penalty != 1.0f)
+            for (int i = 0; i < m->vocab; i++)
+                if (seen[i] && raw[i] != -INFINITY) raw[i] = raw[i] < 0 ? raw[i] * g->rep_penalty : raw[i] / g->rep_penalty;
+        int c0;
+        if (teach) {
+            if (f >= teach->frames) { int b = 0; qt_argmax_gap(raw, m->vocab, m->codec_eos, &b); teach->eos_ok = b == m->codec_eos; break; }
+            c0 = teach->codes[(size_t)f * QT_GROUPS];
+            qt_teach_note(teach, raw, m->vocab, c0, f);
+        } else c0 = qt_pick(raw, m->vocab, g->greedy, g->temperature, g->top_k, &rng);
+        if (c0 == m->codec_eos) break;
+        seen[c0] = 1;
+        int *code = codes + (size_t)f * QT_GROUPS;
+        code[0] = c0;
+        /* the code predictor: [the talker's hidden state, embedding of c0], then one code at a time */
+        memcpy(prow, hn, (size_t)D * sizeof(float));
+        qt_row(m->codec_emb, c0, D, prow + D);
+        pcache->len = 0;
+        qt_dec_rows(P, pcache, prow, 2, 0, pcs, psn);
+        acd_rmsnorm(ph, prow + D, 1, D, P->norm, P->eps);
+        qt_mv(pl, ph, &m->pred_head[0]);
+        if (teach) { code[1] = teach->codes[(size_t)f * QT_GROUPS + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[1], f); }
+        else code[1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
+        for (int i = 1; i < QT_GROUPS - 1; i++) {
+            qt_row(m->pred_emb[i - 1], code[i], D, emb);
+            qt_dec_rows(P, pcache, emb, 1, i + 1, pcs, psn);
+            acd_rmsnorm(ph, emb, 1, D, P->norm, P->eps);
+            qt_mv(pl, ph, &m->pred_head[i]);
+            if (teach) { code[i + 1] = teach->codes[(size_t)f * QT_GROUPS + i + 1]; qt_teach_note(teach, pl, m->cb_vocab, code[i + 1], f); }
+            else code[i + 1] = qt_pick(pl, m->cb_vocab, g->sub_greedy, g->sub_temperature, g->sub_top_k, &rng);
+        }
+        /* the next talker input: the sum of the 16 embeddings + tts_pad (the text is all in the prefill) */
+        qt_row(m->codec_emb, c0, D, sum);
+        for (int gi = 1; gi < QT_GROUPS; gi++) {
+            qt_row(m->pred_emb[gi - 1], code[gi], D, emb);
+            for (int j = 0; j < D; j++) sum[j] += emb[j];
+        }
+        for (int j = 0; j < D; j++) next[j] = sum[j] + pad[j];
+        qt_dec_rows(T, tc, next, 1, L + f, tcs, tsn);
+        acd_rmsnorm(hn, next, 1, D, T->norm, T->eps);
+        qt_mv(logits, hn, &m->codec_head);
+
+    }
+    *frames = f;
+#ifdef _OPENMP
+    omp_set_num_threads(team_before);
+#endif
+    qt_cache_free(T, tc); qt_cache_free(P, pcache);
+    free(tcs); free(tsn); free(pcs); free(psn); free(x); free(hn); free(logits); free(raw); free(seen); free(pad); free(prow); free(ph); free(pl); free(emb); free(sum); free(next);
+    return codes;
+}
+
+static void qt_compare(const char *label, const float *a, const float *b, size_t n){
+    double mx = 0, sum = 0, ref = 0;
+    for (size_t i = 0; i < n; i++) { const double d = fabs((double)a[i] - b[i]); if (d > mx) mx = d; sum += d; ref += fabs(b[i]); }
+    printf("%-10s n=%zu  max abs diff %.3e  mean abs diff %.3e  (mean |ref| %.3e)\n", label, n, mx, sum / (double)(n ? n : 1), ref / (double)(n ? n : 1));
+}
+
+static const char *QT_USAGE =
+    "usage: qwen3tts --model DIR --text TEXT [--speaker NAME] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
+    "       qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n";
+
 int main(int argc, char **argv){
-    const char *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL;
+    const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *language = "Auto";
+    int teacher_forcing = 0;
+    QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0};
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--codec") && i + 1 < argc) codec_dir = argv[++i];
+        if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
+        else if (!strcmp(argv[i], "--codec") && i + 1 < argc) codec_dir = argv[++i];
         else if (!strcmp(argv[i], "--decode-codes") && i + 1 < argc) codes_path = argv[++i];
+        else if (!strcmp(argv[i], "--text") && i + 1 < argc) text = argv[++i];
+        else if (!strcmp(argv[i], "--speaker") && i + 1 < argc) speaker = argv[++i];
+        else if (!strcmp(argv[i], "--language") && i + 1 < argc) language = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
+        else if (!strcmp(argv[i], "--greedy")) { gen.greedy = 1; gen.sub_greedy = 1; }
+        else if (!strcmp(argv[i], "--teacher")) teacher_forcing = 1;
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) gen.seed = (uint64_t)strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--max-frames") && i + 1 < argc) gen.max_frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--decode-threads") && i + 1 < argc) {
+#ifdef _OPENMP
+            static char env[32];
+            snprintf(env, sizeof env, "QT_DECODE_THREADS=%d", atoi(argv[++i]));
+            putenv(env);
+#else
+            ++i;
+#endif
+        }
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
 #ifdef _OPENMP
             omp_set_num_threads(atoi(argv[++i]));
 #else
             ++i;
 #endif
-        } else { fprintf(stderr, "usage: qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n"); return 2; }
+        } else { fputs(QT_USAGE, stderr); return 2; }
     }
-    if (!codec_dir || !codes_path) { fprintf(stderr, "usage: qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n"); return 2; }
     char err[512] = "";
-    QtCodec *m = (QtCodec *)calloc(1, sizeof *m);
+    char path[4300];
+    if (codec_dir && codes_path) {                                   /* the codec alone: codes in, audio out */
+        QtCodec *c = (QtCodec *)calloc(1, sizeof *c);
+        double t0 = qt_now();
+        if (qt_codec_load(c, codec_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+        fprintf(stderr, "qwen3tts: codec decoder loaded: %.2f GB, %.1f s\n", (double)c->bytes / 1e9, qt_now() - t0);
+        size_t nvals = 0;
+        int *codes = (int *)qt_load_f32(codes_path, &nvals);
+        if (!codes || nvals % QT_GROUPS) { fprintf(stderr, "qwen3tts: cannot read codes from %s\n", codes_path); return 1; }
+        for (size_t i = 0; i < nvals; i++) if (codes[i] < 0 || codes[i] >= c->cbsize) { fprintf(stderr, "qwen3tts: code %d out of range\n", codes[i]); return 1; }
+        t0 = qt_now();
+        int n = 0;
+        float *wav = qt_codec_decode(c, codes, (int)(nvals / QT_GROUPS), &n);
+        fprintf(stderr, "qwen3tts: %d frames -> %d samples (%.2f s of audio) in %.2f s\n", (int)(nvals / QT_GROUPS), n, (double)n / QT_SR, qt_now() - t0);
+        if (out && qt_write_wav(out, wav, n, QT_SR)) { fprintf(stderr, "qwen3tts: cannot write %s\n", out); return 1; }
+        if (ref) {
+            snprintf(path, sizeof path, "%s/wav.f32", ref);
+            size_t got = 0;
+            float *r = qt_load_f32(path, &got);
+            if (r) qt_compare("waveform", wav, r, got < (size_t)n ? got : (size_t)n);
+        }
+        return 0;
+    }
+    if (!model_dir || !text) { fputs(QT_USAGE, stderr); return 2; }
+    QtModel *m = (QtModel *)calloc(1, sizeof *m);
     double t0 = qt_now();
-    if (qt_codec_load(m, codec_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
-    fprintf(stderr, "qwen3tts: codec decoder loaded: %.2f GB, %.1f s\n", (double)m->bytes / 1e9, qt_now() - t0);
-    size_t nvals = 0;
-    int *codes = (int *)qt_load_f32(codes_path, &nvals);
-    if (!codes || nvals % QT_GROUPS) { fprintf(stderr, "qwen3tts: cannot read codes from %s\n", codes_path); return 1; }
-    const int T = (int)(nvals / QT_GROUPS);
-    for (size_t i = 0; i < nvals; i++) if (codes[i] < 0 || codes[i] >= m->cbsize) { fprintf(stderr, "qwen3tts: code %d out of range\n", codes[i]); return 1; }
+    if (qt_model_load(m, model_dir, err, sizeof err)) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+    fprintf(stderr, "qwen3tts: %d talker layers (d %d), %d predictor layers, %.2f GB resident, loaded in %.1f s\n", m->talker.nl, m->talker.D, m->pred.nl, (double)m->bytes / 1e9, qt_now() - t0);
+    int nids = 0, rows = 0;
+    int *ids = qt_text_ids(m, text, &nids);
+    float *prefill = qt_prefill(m, ids, nids, speaker, language, &rows, err, sizeof err);
+    if (!prefill) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+    float *logits0 = (float *)malloc((size_t)m->vocab * sizeof(float));
+    t0 = qt_now();
+    int frames = 0;
+    QtTeacher teach;
+    int first_flip = -1;
+    memset(&teach, 0, sizeof teach);
+    teach.first_flip = &first_flip;
+    if (teacher_forcing) {                                           /* the reference's codes drive the run (needs --ref) */
+        size_t got = 0;
+        char tp[4300];
+        snprintf(tp, sizeof tp, "%s/codes.i32", ref ? ref : ".");
+        teach.codes = (const int *)qt_load_f32(tp, &got);
+        if (!ref || !teach.codes || got % QT_GROUPS) { fprintf(stderr, "qwen3tts: --teacher needs --ref with codes.i32\n"); return 1; }
+        teach.frames = (int)(got / QT_GROUPS);
+    }
+    int *codes = qt_generate(m, prefill, rows, &gen, &frames, logits0, teacher_forcing ? &teach : NULL);
+    const double t_gen = qt_now() - t0;
     t0 = qt_now();
     int n = 0;
-    float *wav = qt_codec_decode(m, codes, T, &n);
-    fprintf(stderr, "qwen3tts: %d frames -> %d samples (%.2f s of audio) in %.2f s\n", T, n, (double)n / QT_SR, qt_now() - t0);
+    float *wav = frames > 0 ? qt_codec_decode(&m->codec, codes, frames, &n) : (float *)calloc(1, sizeof(float));
+    fprintf(stderr, "qwen3tts: %d frames (%.2f s of audio): talker and predictor %.2f s (%.0f ms a frame), codec %.2f s\n", frames, (double)n / QT_SR, t_gen,
+            frames ? 1000.0 * t_gen / frames : 0.0, qt_now() - t0);
     if (out && qt_write_wav(out, wav, n, QT_SR)) { fprintf(stderr, "qwen3tts: cannot write %s\n", out); return 1; }
+    if (teacher_forcing)
+        printf("teacher: %d choices over %d frames; %d of the reference's codes were not my argmax (largest margin %.2e logits, first at frame %d); ends with the end token: %s\n",
+               teach.choices, teach.frames, teach.flips, teach.worst_gap, first_flip, teach.eos_ok ? "yes" : "NO");
     if (ref) {
-        char path[4300];
-        snprintf(path, sizeof path, "%s/wav.f32", ref);
         size_t got = 0;
-        float *r = qt_load_f32(path, &got);
-        if (!r) { printf("no reference waveform in %s\n", ref); return 0; }
-        if (got != (size_t)n) printf("waveform: reference has %zu samples, here %d\n", got, n);
-        const size_t cmp = got < (size_t)n ? got : (size_t)n;
-        double mx = 0, sum = 0, ref_abs = 0, err2 = 0, sig2 = 0;
-        for (size_t i = 0; i < cmp; i++) {
-            const double d = fabs((double)wav[i] - r[i]);
-            if (d > mx) mx = d;
-            sum += d; ref_abs += fabs(r[i]); err2 += d * d; sig2 += (double)r[i] * r[i];
+        snprintf(path, sizeof path, "%s/input_ids.i32", ref);
+        int *r = (int *)qt_load_f32(path, &got);
+        if (r) { printf("input ids: %s (%d here, %zu in the reference)\n", got == (size_t)nids && !memcmp(r, ids, got * 4) ? "identical" : "DIFFERENT", nids, got); free(r); }
+        snprintf(path, sizeof path, "%s/prefill.f32", ref);
+        float *f = qt_load_f32(path, &got);
+        if (f) { if (got == (size_t)rows * m->talker.D) qt_compare("prefill", prefill, f, got); else printf("prefill: reference has %zu values, here %d\n", got, rows * m->talker.D); free(f); }
+        snprintf(path, sizeof path, "%s/logits0.f32", ref);
+        f = qt_load_f32(path, &got);
+        if (f) { if (got == (size_t)m->vocab) qt_compare("logits0", logits0, f, got); else printf("logits0: reference has %zu values, here %d\n", got, m->vocab); free(f); }
+        snprintf(path, sizeof path, "%s/codes.i32", ref);
+        r = (int *)qt_load_f32(path, &got);
+        if (r) {
+            const int same = got == (size_t)frames * QT_GROUPS && !memcmp(r, codes, got * 4);
+            printf("codes: %s (%d frames here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", frames, got / QT_GROUPS);
+            if (!same) {
+                size_t first = 0;
+                const size_t cmp = got < (size_t)frames * QT_GROUPS ? got : (size_t)frames * QT_GROUPS;
+                while (first < cmp && r[first] == codes[first]) first++;
+                printf("  first difference at frame %zu, group %zu\n", first / QT_GROUPS, first % QT_GROUPS);
+            }
+            free(r);
         }
-        printf("waveform   n=%zu  max abs diff %.3e  mean abs diff %.3e  (mean |ref| %.3e)  SNR %.1f dB\n", cmp, mx, sum / (double)(cmp ? cmp : 1), ref_abs / (double)(cmp ? cmp : 1),
-               err2 > 0 ? 10.0 * log10(sig2 / err2) : 999.0);
+        snprintf(path, sizeof path, "%s/wav.f32", ref);
+        f = qt_load_f32(path, &got);
+        if (f) { if (got == (size_t)n) qt_compare("waveform", wav, f, got); else printf("waveform: reference has %zu samples, here %d\n", got, n); free(f); }
     }
     return 0;
 }
