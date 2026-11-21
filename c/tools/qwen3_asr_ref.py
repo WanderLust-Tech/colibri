@@ -28,6 +28,22 @@ from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
 
 
+def windowed_attention_forward(self, hidden_states, cu_seqlens=None, attention_mask=None, **kwargs):
+    """Qwen3ASRAudioAttention.forward with the windows honoured: each [cu_seqlens[i], cu_seqlens[i+1]) block attends only to itself."""
+    seq = hidden_states.shape[0]
+    q = self.q_proj(hidden_states).reshape(seq, self.num_heads, -1)
+    k = self.k_proj(hidden_states).reshape(seq, self.num_heads, -1)
+    v = self.v_proj(hidden_states).reshape(seq, self.num_heads, -1)
+    out = torch.empty_like(q)
+    bounds = cu_seqlens.tolist()
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        o = torch.nn.functional.scaled_dot_product_attention(
+            q[lo:hi].transpose(0, 1).unsqueeze(0), k[lo:hi].transpose(0, 1).unsqueeze(0), v[lo:hi].transpose(0, 1).unsqueeze(0))
+        out[lo:hi] = o.squeeze(0).transpose(0, 1)
+    return self.out_proj(out.reshape(seq, -1).contiguous())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model")
@@ -36,6 +52,9 @@ def main():
     ap.add_argument("--language", default=None)
     ap.add_argument("--max-new", type=int, default=256)
     ap.add_argument("--context", default="")
+    ap.add_argument("--windowed", action="store_true",
+                    help="attend inside the 800-frame windows (cu_seqlens), as the vLLM backend does; the stock transformers path (sdpa) ignores "
+                         "them and attends over the whole audio, which is the same up to 8 s of audio")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -47,6 +66,9 @@ def main():
         wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
     wav = wav.astype(np.float32)
 
+    if a.windowed:
+        from qwen_asr.core.transformers_backend import modeling_qwen3_asr as modeling
+        modeling.Qwen3ASRAudioAttention.forward = windowed_attention_forward
     asr = Qwen3ASRModel.from_pretrained(a.model, dtype=torch.float32, device_map="cpu", max_inference_batch_size=1, max_new_tokens=a.max_new)
     model, processor = asr.model, asr.processor
     prompt = asr._build_text_prompt(context=a.context, force_language=a.language)
@@ -82,7 +104,7 @@ def main():
         "model": os.path.basename(os.path.normpath(a.model)), "clip": os.path.basename(a.clip), "samples": int(wav.shape[0]),
         "mel_frames": n, "mel_bins": int(feats.shape[0]), "conv_shape": list(captured["pre_layers"].shape), "encoder_shape": list(enc.shape),
         "prompt_tokens": int(ids.shape[0]), "generated_tokens": int(gen.shape[0]), "generated": gen.tolist(),
-        "raw": raw, "language": lang, "text": text, "forced_language": a.language, "prompt": prompt,
+        "raw": raw, "language": lang, "text": text, "forced_language": a.language, "prompt": prompt, "windowed": bool(a.windowed),
     }
     with open(os.path.join(a.out, "meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, ensure_ascii=False, indent=1)
