@@ -202,7 +202,8 @@ the generated codes identical and the waveform 6e-6 away, in both modes, on the 
 the chain as for the other models). Two findings: the Mimi config says `sliding_window` 250, but the transformers code the package runs applies a plain
 causal mask and so does this (a clip over 10 s differs otherwise); and greedy decoding of an in-context request can fail to end (the 89-frame
 reference is the 90-token cap), where sampling, which the gateway always does, ends normally: 55 frames for the fox sentence, read back by Qwen3-ASR
-as exactly that sentence.
+as exactly that sentence. The **1.7B Base** is held to the package the same way (2048-wide speaker embedding 1.9e-6, the 2208 reference codes
+identical, prompt 1.9e-6, 48 and 69 generated frames identical, waveform 4e-6 and 2e-5, CPU and card).
 
 ## Not built yet
 

@@ -645,7 +645,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   in-context prompt of `generate_voice_clone` with its trailing text; the reference's frames are decoded with the new ones and cut off. Held to the
   package (fp32, greedy, the 11 s JFK clip): the speaker embedding 7e-7, the 2208 reference codes identical, the prompt 7e-7, every code of the
   package's 89-frame speech the engine's own argmax, the codes identical and the waveform 6e-6, in both modes (in-context, x-vector only), CPU and
-  card (16 ms a frame); the Mimi config's `sliding_window` is not applied by the package's transformers, so not here. Around it: `qwen3-tts-0.6b-base`
+  card (16 ms a frame; the 1.7B Base the same: 2048-wide embedding 1.9e-6, codes identical); the Mimi config's `sliding_window` is not applied by the package's transformers, so not here. Around it: `qwen3-tts-0.6b-base`
   and `-1.7b-base` (catalogue, display variants, API ids), `voices.py` (saved voices in `~/colibri-voices`), `reference_audio` / `reference_text` /
   `x_vector_only` and a saved `voice` on `POST /v1/audio/speech`, `GET/POST /v1/audio/voices` and `POST /v1/audio/voices/delete` on the router,
   `coli voice list|add|remove` (the words are written down by Qwen3-ASR when `--text` is not given), `coli speak --reference/--reference-text/
