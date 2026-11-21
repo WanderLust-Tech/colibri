@@ -33,6 +33,9 @@ when it loads (card when it fits, otherwise the CPU); the embedding model is the
 | `qwen3-reranker-0.6b` | reranking | query and documents | 8192 a pair | card | 20 passages in 0.37 s (5.9 s on the CPU) |
 | `qwen3-reranker-4b` | reranking | query and documents | 8192 a pair | card | 20 passages in 1.2 s (24.8 s on the CPU) |
 | `qwen3-reranker-8b` | reranking | query and documents | 8192 a pair | card | 20 passages in 1.96 s (40.8 s on the CPU) |
+| `qwen3-asr-0.6b` | speech to text | audio (WAV, MP3 and others with ffmpeg) | | CPU | an 11 s clip in about 4 s |
+| `qwen3-asr-1.7b` | speech to text | audio | | CPU | an 11 s clip in about 8 s |
+| `qwen3-tts-0.6b` | text to speech | text | 4096 characters | CPU | 3.9 s of speech in 8 s through the router (2026-11-21) |
 
 Through the router, 20 passages of about 400 tokens ranked in 0.9 s (0.6B), 3.0 s (4B) and 4.6 s (8B) with the model already loaded.
 
@@ -163,7 +166,7 @@ from the terminal.
 
 Both Apache-2.0. `POST /v1/audio/transcriptions` in the shape Whisper clients send (`language`, `prompt` as context, `json`, `text` and
 `verbose_json`), up to 15 minutes and 25 MB a request (the engine takes 20 minutes in one piece); `coli transcribe FILE` from the terminal.
-Gemma 4's E2B and E4B also transcribe on the same route, as a chat model asked to write down what it hears. Not installed here yet.
+Gemma 4's E2B and E4B also transcribe on the same route, as a chat model asked to write down what it hears.
 
 ## 8. Text to speech
 
@@ -173,7 +176,7 @@ Gemma 4's E2B and E4B also transcribe on the same route, as a chat model asked t
 
 Apache-2.0. `POST /v1/audio/speech` in OpenAI's shape (`input`, `voice`, `response_format`; OpenAI's voice names stand for speakers; `language`
 and `seed` are extensions), WAV by default, PCM, and MP3, Opus, AAC and FLAC with ffmpeg; `coli speak "text"` from the terminal. No style
-instructions, voice design or cloning yet (the 1.7B and the Base models are not built). Not installed here yet.
+instructions, voice design or cloning yet (the 1.7B and the Base models are not built). Installed and live here.
 
 ## 9. Decision models
 

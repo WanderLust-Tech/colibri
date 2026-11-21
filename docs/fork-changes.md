@@ -582,7 +582,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   lost device while the start is made falls back; of ten mutations of the C seven broke a test, one is equivalent (every path sets the
   kept row count before using it), one is a bounds guard no input can show, and one is the failed-frame branch no injected fault reaches.
 
-### 2.31 Qwen3-ASR: speech to text (`feat/qwen3-speech`, 2026-11-21; on the branch only: not merged, pushed or deployed)
+### 2.31 Qwen3-ASR: speech to text (`feat/qwen3-speech`, 2026-11-21; merged, pushed and deployed 2026-11-21)
 
 - **The engine** (`c/qwen3asr.c`): Qwen3-ASR 0.6B and 1.7B in C, on the kernels and layer code ACE-Step and `qwen3embed` use: the Whisper-style
   log-mel front end, the audio encoder (three stride-2 convolutions over 100-frame chunks, windowed attention, projections), a Qwen3 decoder
@@ -599,10 +599,10 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   1.7B (225 ms a token); 1.9 GB and 4.7 GB resident.
 - **Tests:** `tests/test_asr_gateway.py` (32, a stub engine), `tests/test_speech_cli.py` (14), `tests/test_qwen3asr_real.py` (8, against the stored
   transformers answer and, with `QWEN3ASR_REF`, the stage tensors).
-- **Not done**: a Vulkan path, timestamps (the forced aligner), streaming; the models are not installed in `colibri-models` yet. Qwen3-TTS
+- **Not done**: a Vulkan path, timestamps (the forced aligner), streaming; the 0.6B and 1.7B are installed in `colibri-models` and live. Qwen3-TTS
   (text to speech) is the other half of [qwen3-speech.md](qwen3-speech.md): section 2.32.
 
-### 2.32 Qwen3-TTS: text to speech (`feat/qwen3-speech`, 2026-11-21; on the branch only: not merged, pushed or deployed)
+### 2.32 Qwen3-TTS: text to speech (`feat/qwen3-speech`, 2026-11-21; merged, pushed and deployed 2026-11-21)
 
 - **The engine** (`c/qwen3tts.c`): the 0.6B CustomVoice in C, on the kernels and layer code ACE-Step uses: the prompt (role, language, speaker,
   text through the text embedding and its projection), the talker (a 28-layer Qwen3 decoder that writes the first of 16 codes for each frame at
@@ -624,7 +624,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **Tests:** `tests/test_tts_gateway.py` (45, a stub engine), `tests/test_speech_cli.py` (+11 for `coli speak`), `tests/test_router.py` (one),
   `tests/test_qwen3tts_real.py` (10, against `tools/qwen3_tts_0.6b_reference.json`).
 - **Not done**: the 1.7B and style `instructions`, VoiceDesign, voice cloning (the Base models: the codec's encoder and a speaker encoder),
-  streaming, a Vulkan path; the model is not installed in `colibri-models` yet.
+  streaming, a Vulkan path; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 
