@@ -9,6 +9,7 @@ transformers in fp32 (the model card's recipe), so these tests need neither torc
 import json
 import math
 import os
+import re
 import subprocess
 import unittest
 
@@ -19,10 +20,12 @@ REFERENCE = os.path.join(C_DIR, "tools", "qwen3_reranker_0.6b_reference.json")
 
 
 class Engine:
-    def __init__(self, model=MODEL, extra=(), env=None):
+    def __init__(self, model=MODEL, extra=(), env=None, capture=False):
         self.process = subprocess.Popen([EXE, "--model", model, "--serve", *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        text=True, encoding="utf-8", bufsize=1, env=dict(os.environ, **env) if env else None)
+                                        stderr=subprocess.PIPE if capture else None, text=True, encoding="utf-8", bufsize=1,
+                                        env=dict(os.environ, **env) if env else None)
         self.ready = self.process.stdout.readline()
+        self.stderr = ""                                   # what the engine said, when capture is on: set by close()
 
     def send(self, line):
         self.process.stdin.write(line + "\n")
@@ -36,6 +39,9 @@ class Engine:
     def close(self):
         self.process.stdin.close()
         self.process.wait(timeout=60)
+        if self.process.stderr is not None:
+            self.stderr = self.process.stderr.read()
+            self.process.stderr.close()
         self.process.stdout.close()
 
 
@@ -129,6 +135,110 @@ class RealEngineTest(unittest.TestCase):
                 cpu.close()
         finally:
             card.close()
+
+    SEQUENCE = [                      # requests one after another to one engine: the second reuses the first's start, the third part of it
+        ("What is the capital of France?", ["Paris is the capital of France.", "Berlin is in Germany.", "Madrid", "Paris"], {}),
+        ("What is the capital of France?", ["The capital of France is Paris, a city on the Seine.", "Lyon is a city in France."], {}),
+        ("Who wrote Hamlet?", ["Shakespeare wrote Hamlet around 1600.", "Marlowe wrote Doctor Faustus.", "William Shakespeare"], {}),
+        ("Who wrote Hamlet?", ["Shakespeare wrote Hamlet around 1600."], {}),                                  # one pair: its start is kept too
+        ("What is the capital of France?", ["Paris."], {}),
+        ("What is the capital of France?", ["Paris is the capital of France.", "Berlin is in Germany."], {"instruction": "Judge by tone"}),
+        ("Who wrote Hamlet?", ["x " * 400, "short"], {"truncate": True}),
+        ("What is the capital of France?", ["", " ", "Paris"], {}),
+    ]
+
+    def run_sequence(self, env, capture=True):
+        engine = Engine(env=env, capture=capture)
+        try:
+            answers = []
+            for query, docs, fields in self.SEQUENCE:
+                keyword, body = engine.rerank(query, docs, **fields)
+                self.assertEqual(keyword, "SCORES", body)
+                answers.append(body)
+        finally:
+            engine.close()
+        return answers, engine
+
+    @staticmethod
+    def kept_counts(engine):
+        found = re.search(r"kept start: (\d+) requests used it whole, (\d+) in part, (\d+) made a new one; (\d+) rows", engine.stderr)
+        return tuple(int(x) for x in found.groups()) if found else None
+
+    def test_a_start_kept_between_requests_changes_no_score(self):
+        # The host keeps the start of a request (the fixed prompt, the instruction, the query) for the next one: the same query
+        # again, a new query under the same instruction, one pair at a time. A fresh engine without the cache is the reference,
+        # and the scores must be the same to the last digit.
+        kept, engine = self.run_sequence({"COLI_VULKAN": "0"})
+        fresh, quiet = self.run_sequence({"COLI_VULKAN": "0", "COLI_RERANK_CACHE": "0"})
+        for (query, docs, _), a, b in zip(self.SEQUENCE, kept, fresh):
+            self.assertEqual(a["tokens"], b["tokens"], query)
+            self.assertEqual(a["logits"], b["logits"], query)
+        whole, part, new, rows = self.kept_counts(engine)
+        self.assertGreaterEqual(whole, 1)                               # the same start again
+        self.assertGreaterEqual(part, 1)                                # only the fixed prompt and instruction in common
+        self.assertGreaterEqual(new, 1)
+        self.assertGreater(rows, 100)                                   # rows that did not go through the layers again
+        self.assertIsNone(self.kept_counts(quiet))                      # COLI_RERANK_CACHE=0 keeps nothing
+
+    def test_the_graphics_card_makes_the_start_for_each_request(self):
+        # On the device chain a kept start gave scores that were now and then wrong (cause not found), so there the start is made
+        # again for each request: the scores match the CPU's and the engine reports nothing kept.
+        card = Engine(env={"COLI_VULKAN": "1"})
+        try:
+            if json.loads(card.ready.partition(" ")[2]).get("device") != "vulkan":
+                self.skipTest("this build or machine has no Vulkan device")
+        finally:
+            card.close()
+        kept, engine = self.run_sequence({"COLI_VULKAN": "1"})
+        cpu, _ = self.run_sequence({"COLI_VULKAN": "0", "COLI_RERANK_CACHE": "0"})
+        for (query, docs, _), a, b in zip(self.SEQUENCE, kept, cpu):
+            self.assertEqual(a["tokens"], b["tokens"], query)
+            for x, y in zip(a["logits"], b["logits"]):
+                self.assertAlmostEqual(x, y, places=3, msg=query)
+        self.assertIsNone(self.kept_counts(engine))
+        # many requests of one pair each, which is where the kept start used to go wrong
+        card = Engine(env={"COLI_VULKAN": "1"})
+        cpu = Engine(env={"COLI_VULKAN": "0", "COLI_RERANK_CACHE": "0"})
+        try:
+            query = "which planet is known as the red planet and why does it look red from the earth?"
+            for i in range(40):
+                doc = f"Passage {i}: Mars is the fourth planet from the Sun; iron oxide on its surface gives it a reddish colour ({i})."
+                got, want = card.rerank(query, [doc])[1]["logits"][0], cpu.rerank(query, [doc])[1]["logits"][0]
+                self.assertAlmostEqual(got, want, places=3, msg=f"request {i}")
+        finally:
+            card.close()
+            cpu.close()
+
+    def test_a_frame_that_fails_while_the_start_is_made_falls_back_to_the_cpu(self):
+        # COLI_VK_CHAIN_FAULT=n makes the n-th device submission fail as a lost device would. A request's first forward makes the shared
+        # start and keeps its keys and values for the pairs; when the device is lost while its buffers are made the CPU must redo it with the
+        # host copies (the engine once freed them there and died with an access violation).
+        card = Engine(env={"COLI_VULKAN": "1"})
+        try:
+            if json.loads(card.ready.partition(" ")[2]).get("device") != "vulkan":
+                self.skipTest("this build or machine has no Vulkan device")
+        finally:
+            card.close()
+        docs = ["Paris is the capital of France.", "Paris is the capital of Spain, said nobody.", "Berlin is in Germany.", "Madrid", "Paris",
+                "Bananas are yellow fruit."]
+        cpu = Engine(env={"COLI_VULKAN": "0"})
+        try:
+            want = cpu.rerank("what is the capital of France?", docs)[1]["logits"]
+        finally:
+            cpu.close()
+        lost = 0
+        for n in (24, 26, 30):
+            engine = Engine(env={"COLI_VULKAN": "1", "COLI_VK_CHAIN_FAULT": str(n)}, capture=True)
+            try:
+                keyword, body = engine.rerank("what is the capital of France?", docs)
+            finally:
+                engine.close()
+            self.assertEqual(engine.process.returncode, 0, f"fault {n}")
+            self.assertEqual(keyword, "SCORES", body)
+            for x, y in zip(body["logits"], want):
+                self.assertAlmostEqual(x, y, places=3, msg=f"fault {n}")
+            lost += "device is lost" in engine.stderr
+        self.assertGreaterEqual(lost, 1)                                # at least one of them did reach a frame of this request
 
     def test_the_right_document_wins_and_a_score_is_a_probability(self):
         keyword, body = self.engine.rerank("What is the capital of China?", [

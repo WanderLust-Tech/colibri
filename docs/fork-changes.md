@@ -557,6 +557,31 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   gives a different picture (28.8 dB against both: the 768x512 fox drawn as two foxes against one), so the card is the more faithful
   of the two. The first run through the router also edited a generated lighthouse into a sunset.
 
+### 2.30 Rerank: the start kept between requests, and a crash fixed (`feat/rerank-cross-request`, 2026-11-21)
+
+- **Kept start (CPU only)**: `qe_start` in `c/qwen3embed.c` keeps the token ids of the last request's shared start and its keys and values,
+  reuses them as far as the ids agree (all of it, or the first rows with only the extra tokens run on top and joined), and keeps the
+  result (up to 512 tokens). A single pair gets a start too (the template, the instruction and the query before its document). Exact
+  against a fresh start (a mixed sequence of 12 requests, and 360 documents at one, two and five a request, all equal to the last digit);
+  0.6B on the CPU: 40 single-pair requests 11.4 s to 5.35 s, five-pair requests 4.87 s to 3.45 s. `COLI_RERANK_CACHE=0` turns it off; the
+  engine says `kept start: N requests used it whole, N in part, N made a new one; N rows not run again` when it ends.
+- **Not on the card, and why**: with the start kept on the device chain about one document in seven came back wrong (up to 5 logits off) in
+  a stress run of single and small requests, sporadically and differently each run. The same work with the start made again every request
+  was right (several hundred documents), the per-matrix path was right, the CPU was right, and every instrumented build (hashes of frame inputs and
+  outputs, a CPU recomputation of the start, forced `vkc_finish`, sleeps, padding, freeing each part of the kept start) hid the fault. So the
+  card makes the start for each request. The cause is open: it may be in the device layer's buffer handling (`vk_chain.c`), which the
+  live path (start made and freed within a request) has never shown a fault in.
+- **A crash fixed**: when the device was lost while the buffers for a request's shared start were being made (a new buffer is zeroed
+  with a submission, so a lost device makes the allocation fail), the failure branch freed the start's host arrays along with the device
+  ones, and the CPU redo then wrote through null pointers: the engine died with 0xC0000005 instead of falling back. Found with
+  `COLI_VK_CHAIN_FAULT=n` for n from 22 up on a request of six pairs (the original build died at every one, the fixed one answers like the
+  CPU). The fault test of 2026-11-20 missed it because its faults landed in other frames. Now only the device copies are freed (the
+  failed-frame branch got the same change; no injected fault reaches that one). In the engine deployed live from 2026-11-20, reachable
+  only with a device failure.
+- **Tests:** `tests/test_qwen3rerank_real.py` (11 now): a mixed run to one engine against fresh engines, the card makes its own start, a
+  lost device while the start is made falls back; of ten mutations of the C seven broke a test, one is equivalent (every path sets the
+  kept row count before using it), one is a bounds guard no input can show, and one is the failed-frame branch no injected fault reaches.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision

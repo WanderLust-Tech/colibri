@@ -118,6 +118,20 @@ a pair of over 2048 tokens makes the request use the old path. The share is wort
 64 pairs of 107 tokens: 11.3 s to 4.6 s) and least for long ones, whose own tokens dominate (32 pairs of 290 tokens: 14.2 s to
 11.0 s). `COLI_RERANK_SHARE=0` in the engine's environment turns it off, to compare.
 
+**Kept between requests (the CPU).** The engine also keeps the start of the last request (its token ids and their keys and values) for
+the next one, and reuses it as far as the ids agree: the same query against a new list of documents reuses all of it; a new query
+under the same instruction and system prompt reuses that part and runs only the query's tokens on top. One pair at a time gets a start
+too (what comes before its document), so a client that asks about one passage per request, as many retrieval loops do, no longer runs
+the fixed prompt and the query for every passage. Only exact token ids are matched, so a kept row is the row a fresh run would make:
+a test sends a mixed run of requests to one engine and to a fresh engine each, and the scores are equal to the last digit. Measured on
+the 0.6B (24-core i9, CPU): 40 requests of one pair each 11.4 s to 5.35 s (2.1 times), 8 requests of five pairs 4.87 s to 3.45 s
+(1.4 times). A start longer than 512 tokens is not kept; `COLI_RERANK_CACHE=0` turns it off. **Not on the graphics card:** with the
+device chain a kept start gave scores that were wrong now and then (about one document in seven in a run of single and small requests,
+off by up to five logits; the same work with the start made again for each request was right every time, and so was the CPU), and
+the cause was not found, since every instrumented build (hashes of each frame's inputs and outputs, a CPU recomputation of the start,
+forced waits) hid it. So the card makes the start for each request, as before (the first version that kept it there would have gained
+1.05 to 1.2 times for single pairs and 1.4 to 1.5 times for five).
+
 **On the graphics card.** With a `VK=1` build and `COLI_VULKAN=1` (the router sets it when the card has room) the whole forward runs
 on the device in one frame, so the numbers above fall by an order of magnitude: the 4B ranks 20 passages in 1.2 s (24.8 s on the
 CPU) and the 0.6B in 0.37 s (5.9 s), the 8B in 1.96 s (40.8 s). [vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc) has the table and the
@@ -150,4 +164,6 @@ then for each `RERANK {id, query, documents, instruction, truncate}` exactly one
 
 ## Not done
 
-* Sharing the start across requests (the same query against a new list of documents): each request still computes it once.
+* Keeping the start across requests on the graphics card (see above: it went wrong now and then, cause unknown). The stress run that shows it
+  is 60 to 120 documents sent one, two or five at a time to one engine, compared with the CPU: with the start kept on the device about 15% of
+  the documents came back wrong; with it made again for each request, none of several hundred.

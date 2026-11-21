@@ -75,6 +75,8 @@
 #define QE_RERANK_SUFFIX "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 static int qe_share = 1;            /* COLI_RERANK_SHARE=0 turns the shared start off (to compare the two paths) */
+#define QE_CACHE_MAX 512            /* a shared start longer than this is not kept for the next request */
+static int qe_cache_on = 1;         /* COLI_RERANK_CACHE=0 keeps nothing between requests (to compare) */
 
 typedef struct {
     AceText *m;
@@ -352,6 +354,20 @@ typedef struct { int P; float **k, **v;
 #endif
 } QePast;
 
+/* Only the device copies of a past (its host arrays stay): when a device buffer could not be made or a frame failed (a lost device),
+ * the host keys and values must survive, since the CPU then runs the forward again and fills them. */
+static void qe_past_free_dev(QePast *p, int layers){
+#ifdef COLI_VULKAN
+    if (!p) return;
+    for (int i = 0; p->dk && i < layers; i++) vkc_free((VkcBuf *)p->dk[i]);
+    for (int i = 0; p->dv && i < layers; i++) vkc_free((VkcBuf *)p->dv[i]);
+    free(p->dk); free(p->dv);
+    p->dk = p->dv = NULL;
+#else
+    (void)p; (void)layers;
+#endif
+}
+
 static void qe_past_free(QePast *p, int layers){
     if (!p) return;
 #ifdef COLI_VULKAN
@@ -498,14 +514,14 @@ static float *qe_chain_run(const AceText *m, const float *xh, int total, const i
                  vkc_write((VkcBuf *)past->dv[l], 0, past->v[l], (size_t)P * rk * 4);
         }
         ok = ok && vkc_submit(1);
-        if (!ok) { qe_chain_off("the shared start would not go up"); return NULL; }
+        if (!ok) { qe_past_free_dev(past, nl); qe_chain_off("the shared start would not go up"); return NULL; }
     }
     if (capture) {
         capture->dk = (void **)calloc((size_t)nl, sizeof(void *)); capture->dv = (void **)calloc((size_t)nl, sizeof(void *));
         if (!capture->dk || !capture->dv) return NULL;
         for (int l = 0; l < nl; l++) {
             capture->dk[l] = vkc_buf(T * rk * 4, VKC_DEV); capture->dv[l] = vkc_buf(T * rk * 4, VKC_DEV);
-            if (!capture->dk[l] || !capture->dv[l]) { qe_past_free(capture, nl); capture->dk = capture->dv = NULL; return NULL; }
+            if (!capture->dk[l] || !capture->dv[l]) { qe_past_free_dev(capture, nl); return NULL; }
         }
     }
     memcpy(vkc_ptr(c->xu), xh, T * D * sizeof(float));
@@ -564,7 +580,7 @@ static float *qe_chain_run(const AceText *m, const float *xh, int total, const i
     ok = ok && vkc_copy_regions(c->xd, c->x, last, nseq) && vkc_submit(1);
     free(pre); free(own); free(last);
     if (!ok) {
-        if (capture) { qe_past_free(capture, nl); capture->dk = capture->dv = NULL; }
+        if (capture) qe_past_free_dev(capture, nl);                 /* the host keys and values stay: the CPU makes them now */
         qe_chain_off("a frame failed");
         return NULL;
     }
@@ -720,6 +736,82 @@ static int qe_hidden_free(const QeEngine *e, const int *ids, const int *len, QeP
     return 1;
 }
 
+/* The start the pairs of a request share, as a past: ids[0..P). What the previous request left (its ids and their keys and values)
+ * is reused as far as the ids agree, the rest goes through the layers on top of it, and the result is kept for the next request.
+ * A server asked about one query in several requests, or about many queries under the same instruction, runs the common start
+ * once. Only exact token ids are matched, so a kept row is always the row a fresh run would make. Returns the past to score with
+ * (the kept one, with P set to the rows this request uses: qe_start_done puts it back; or `own`, which the caller frees, when the
+ * start is too long to keep or the cache is off), or NULL on failure. */
+static struct { int n; int *ids; QePast past; } qe_pc;
+
+/* Whether a start is kept between requests: on the host path only. With the device chain a kept start gave scores that were wrong
+ * now and then (roughly one document in seven in a stress run of single and small requests; the same work with the start made
+ * again for each request, as without the cache, never was), and the cause was not found: any instrumentation that looked at the
+ * run hid it. So the card makes the start for each request, as before, and the host keeps it (exact against a fresh start over
+ * 360 documents in 204 requests, and 2.1 times faster for one pair at a time). */
+static int qe_cache_ok(void){
+#ifdef COLI_VULKAN
+    if (qe_vk.chain) return 0;
+#endif
+    return qe_cache_on;
+}
+static unsigned long long qe_pc_full, qe_pc_part, qe_pc_miss, qe_pc_rows;
+
+static void qe_start_done(QePast *p){ if (p == &qe_pc.past) p->P = qe_pc.n; }
+
+static QePast *qe_start(const QeEngine *e, const int *ids, int P, QePast *own){
+    const int nl = e->m->nl;
+    const size_t row = (size_t)e->m->kv * e->m->hd;
+    if (!qe_cache_ok() || P > QE_CACHE_MAX) return qe_hidden_free(e, ids, &P, own) ? own : NULL;
+    int L = 0;
+    const int lim = qe_pc.n < P ? qe_pc.n : P;
+    while (L < lim && qe_pc.ids[L] == ids[L]) L++;
+    if (L >= P) {                                                    /* all of it is kept */
+        qe_pc.past.P = P;
+        qe_pc_full++; qe_pc_rows += (unsigned)P;
+        return &qe_pc.past;
+    }
+    if (L >= QE_SHARE_MIN) {                                         /* the first L rows are kept: the rest goes on top of them */
+        QePast ext;
+        memset(&ext, 0, sizeof ext);
+        int E = P - L;
+        qe_pc.past.P = L;
+        float *x = qe_hidden(e, ids + L, &E, 1, &qe_pc.past, &ext);
+        qe_pc.past.P = qe_pc.n;
+        if (!x) { qe_past_free(&ext, nl); return NULL; }
+        free(x);
+        QePast join;
+        memset(&join, 0, sizeof join);
+        join.P = P;
+        join.k = (float **)calloc((size_t)nl, sizeof(float *)); join.v = (float **)calloc((size_t)nl, sizeof(float *));
+        int *keep = (int *)malloc((size_t)P * sizeof(int));
+        if (!join.k || !join.v || !keep) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+        for (int l = 0; l < nl; l++) {
+            join.k[l] = (float *)malloc((size_t)P * row * sizeof(float)); join.v[l] = (float *)malloc((size_t)P * row * sizeof(float));
+            if (!join.k[l] || !join.v[l]) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+            memcpy(join.k[l], qe_pc.past.k[l], (size_t)L * row * sizeof(float));
+            memcpy(join.k[l] + (size_t)L * row, ext.k[l], (size_t)E * row * sizeof(float));
+            memcpy(join.v[l], qe_pc.past.v[l], (size_t)L * row * sizeof(float));
+            memcpy(join.v[l] + (size_t)L * row, ext.v[l], (size_t)E * row * sizeof(float));
+        }
+        memcpy(keep, ids, (size_t)P * sizeof(int));
+        qe_past_free(&ext, nl);
+        qe_past_free(&qe_pc.past, nl); free(qe_pc.ids);
+        qe_pc.past = join; qe_pc.ids = keep; qe_pc.n = P;
+        qe_pc_part++; qe_pc_rows += (unsigned)L;
+        return &qe_pc.past;
+    }
+    qe_past_free(&qe_pc.past, nl); free(qe_pc.ids);                  /* nothing in common worth keeping: a fresh start replaces it */
+    qe_pc.ids = NULL; qe_pc.n = 0;
+    if (!qe_hidden_free(e, ids, &P, &qe_pc.past)) { qe_past_free(&qe_pc.past, nl); return NULL; }
+    qe_pc.ids = (int *)malloc((size_t)P * sizeof(int));
+    if (!qe_pc.ids) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+    memcpy(qe_pc.ids, ids, (size_t)P * sizeof(int));
+    qe_pc.n = P;
+    qe_pc_miss++;
+    return &qe_pc.past;
+}
+
 /* The logit difference (yes minus no) of nseq pairs (ids concatenated, lens each): out[nseq]; 0 on failure. The head is two
  * rows of the output matrix, so a pair costs the layers and then two dot products over the last row. */
 static int qe_score(const QeEngine *e, const int *ids, const int *lens, int nseq, double *out, QePast *past){
@@ -779,19 +871,36 @@ static int qe_rerank(QeEngine *e, const char *id, const char *query, const char 
      * document): it goes through the layers once. One token at least is left to each pair, since the score is read from
      * its last row; the pairs must still fit the one-region attention with the start in front of them. */
     int P = 0;
-    if (!rc && count >= 2 && qe_share) {
+    if (!rc && (count >= 2 || qe_cache_ok()) && qe_share) {
         int small = 1, lim = toks[0] - 1;
         for (int i = 0; i < count; i++) { if (toks[i] > QE_SMALL) small = 0; if (toks[i] - 1 < lim) lim = toks[i] - 1; }
         if (small) {
             P = lim;
             for (int i = 1; i < count && P > 0; i++) { int j = 0; while (j < P && ids[i][j] == ids[0][j]) j++; P = j; }
+            if (count == 1) {            /* one pair shares nothing with itself: what comes before its document is the start worth keeping */
+                size_t n = strlen(instruction) + strlen(query) + 64;
+                char *head = (char *)malloc(n);
+                if (!head) { fprintf(stderr, "qwen3embed: out of memory\n"); exit(1); }
+                snprintf(head, n, "<Instruct>: %s\n<Query>: %s\n<Document>:", instruction, query);
+                int kh;
+                int *hid = qe_bpe(e, head, &kh);
+                free(head);
+                int cap = e->nprefix + kh;
+                if (cap > P) cap = P;
+                int j = 0;
+                while (j < cap && (j < e->nprefix ? ids[0][j] == e->prefix[j] : ids[0][j] == hid[j - e->nprefix])) j++;
+                free(hid);
+                P = j;
+            }
         }
         if (P < QE_SHARE_MIN) P = 0;
     }
-    QePast past; memset(&past, 0, sizeof past);
-    if (P > 0) {
-        int *pi = ids[0], pl = P;
-        if (!qe_hidden_free(e, pi, &pl, &past)) { qe_error(id, "the pair could not be scored"); rc = 1; }
+    QePast own;
+    memset(&own, 0, sizeof own);
+    QePast *past = NULL;
+    if (!rc && P > 0) {
+        past = qe_start(e, ids[0], P, &own);
+        if (!past) { qe_error(id, "the pair could not be scored"); rc = 1; }
     }
     for (int from = 0; from < count && !rc; ) {
         int to = from, rows = 0;
@@ -802,11 +911,12 @@ static int qe_rerank(QeEngine *e, const char *id, const char *query, const char 
             lens[i - from] = toks[i] - P;
             memcpy(flat + at, ids[i] + P, (size_t)(toks[i] - P) * sizeof(int)); at += toks[i] - P;
         }
-        if (!qe_score(e, flat, lens, to - from, logits + from, P > 0 ? &past : NULL)) { qe_error(id, "the pair could not be scored"); rc = 1; }
+        if (!qe_score(e, flat, lens, to - from, logits + from, past)) { qe_error(id, "the pair could not be scored"); rc = 1; }
         free(flat); free(lens);
         from = to;
     }
-    qe_past_free(&past, e->m->nl);
+    qe_past_free(&own, e->m->nl);
+    qe_start_done(past);
     if (!rc) {
         printf("SCORES {\"id\":\""); qe_escape(id);
         printf("\",\"scores\":[");
@@ -932,6 +1042,7 @@ int main(int argc, char **argv){
     const char *model = NULL, *text = NULL, *instruction = NULL, *query = NULL;
     int serve = 0, dims = 0, max_tokens = 0;
     { const char *sh = getenv("COLI_RERANK_SHARE"); if (sh && !strcmp(sh, "0")) qe_share = 0; }
+    { const char *ca = getenv("COLI_RERANK_CACHE"); if (ca && !strcmp(ca, "0")) qe_cache_on = 0; }
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--model") && v) { model = v; i++; }
@@ -968,6 +1079,7 @@ int main(int argc, char **argv){
     if (qe_vk.ready) fprintf(stderr, "[VK] qwen3embed: %llu forwards as one frame (%.2f s); %llu products on the device, %llu on the CPU; layers %.2f s, of it products %.2f s, attention %.2f s\n",
                              qe_ch.forwards, qe_ch.ms / 1e3, qe_vk.dev, qe_vk.cpu, qe_vk.hid_s, qe_vk.dev_s, qe_vk.att_s);
 #endif
+    if (qe_pc_full + qe_pc_part + qe_pc_miss) fprintf(stderr, "qwen3embed: kept start: %llu requests used it whole, %llu in part, %llu made a new one; %llu rows not run again\n", qe_pc_full, qe_pc_part, qe_pc_miss, qe_pc_rows);
     qe_close(e);
     return rc;
 }

@@ -664,6 +664,7 @@ Read **only** by `c/qwen3embed.c` ([embeddings.md](embeddings.md), [rerank.md](r
 |---|---|---|
 | `COLI_VULKAN` | unset | `1` runs the layers on a Vulkan device, one frame a forward, in a `make qwen3embed VK=1` build ([vulkan.md](vulkan.md#embeddings-and-reranking-on-the-chain-qwen3embedc)); the `READY` line says `"device":"vulkan"` or `"cpu"`. With no device the engine runs on the CPU. |
 | `COLI_VK_CHAIN` | on with the device | `0`: every matrix product through the device on its own (activations cross PCIe each time: about 3x faster than the CPU, not 20x) instead of the one-frame forward. |
+| `COLI_RERANK_CACHE` | on | Reranker, CPU: `0` keeps nothing between requests, so each request runs its own start (the system prompt, instruction and query) through the layers. The scores are the same; it is slower for small requests. The graphics card never keeps a start ([rerank.md](rerank.md)). |
 | `COLI_RERANK_SHARE` | on | Reranker: `0` makes every pair of a request run in full instead of running the start all the pairs share (the system prompt, the instruction, the query) once. The scores are the same; it is slower, and exists to compare the two paths. |
 
 ## Server / CLI (`openai_server.py`, `coli`)
