@@ -1988,6 +1988,9 @@ FAMILIES = (
         display_name="Qwen3-TTS",
         display_scale="",
         display_variants=(
+            # base: 1 is made by resolve_model the same way (tts_model_type "base": the checkpoints that clone a voice from reference audio)
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28), ("base", 1)), "Qwen3-TTS", "0.6B Base", model_id="qwen3-tts-0.6b-base"),
+            DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28), ("base", 1)), "Qwen3-TTS", "1.7B Base", model_id="qwen3-tts-1.7b-base"),
             DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-TTS", "0.6B", model_id="qwen3-tts-0.6b"),
             # voice_design: 1 is made by resolve_model from the top of config.json (tts_model_type "voice_design"), for the talker's section
             DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28), ("voice_design", 1)), "Qwen3-TTS", "1.7B VoiceDesign",
@@ -2368,7 +2371,8 @@ def resolve_model(model_dir):
     elif family.config_section == "talker_config":
         # Qwen3-TTS keeps the talker's sizes in talker_config; read as it stands when the section is missing (see above)
         inner = config.get("talker_config")
-        family_config = (dict(inner, voice_design=1) if config.get("tts_model_type") == "voice_design" else inner) if isinstance(inner, dict) else config
+        marker = {"voice_design": {"voice_design": 1}, "base": {"base": 1}}.get(config.get("tts_model_type"), {})
+        family_config = dict(inner, **marker) if isinstance(inner, dict) else config
     head = ""
     for candidate in DECISION_HEADS:
         present = [name for name in candidate.files if (model / name).is_file()]

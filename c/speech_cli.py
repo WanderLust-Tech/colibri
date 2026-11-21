@@ -94,12 +94,23 @@ def speak(a, api, fetch, C):
         return 1
     out = a.out or "speech" + SUFFIX_OF_FORMAT.get(a.format or "wav", ".wav")
     fmt = a.format or FORMAT_OF_SUFFIX.get(os.path.splitext(out)[1].lower(), "wav")
+    reference = getattr(a, "reference", None)
+    cloning = bool(reference)
+    if not cloning and a.voice and not a.model:                      # a saved voice is a cloning model's: ask it
+        status, saved = api("GET", "/v1/audio/voices")
+        cloning = status == 200 and any(item.get("name") == a.voice.strip().lower() for item in (saved or {}).get("data") or [])
     try:
-        model = choose_model(api, "speech", a.model, "speaks text")
+        model = clone_model(api, a) if cloning else choose_model(api, "speech", a.model, "speaks text")
+        body = {"model": model, "input": words, "response_format": fmt}
+        if reference:
+            body["reference_audio"] = encode_reference(reference)
+            if getattr(a, "reference_text", None):
+                body["reference_text"] = a.reference_text
+            if getattr(a, "x_vector", False):
+                body["x_vector_only"] = True
     except Refused as why:
         print(f"  {C.yel}{why}{C.r}")
         return 1
-    body = {"model": model, "input": words, "response_format": fmt}
     if a.voice:
         body["voice"] = a.voice
     if getattr(a, "instruct", None):
@@ -134,3 +145,106 @@ def speak(a, api, fetch, C):
     said = f"{float(seconds):.1f} s of speech, " if seconds else ""
     print(f"  {out}  ({said}{len(data) / 1e3:.0f} kB, {fmt}){C.dim}{'  [cut short: the text was longer than one piece]' if (headers or {}).get('x-colibri-truncated') else ''}{C.r}")
     return 0
+
+
+MAX_REFERENCE_BYTES = 3 << 20      # an inline reference rides in the request as base64: the server takes 4 MB a request
+
+
+def clone_model(api, a):
+    """The model to ask for a cloned voice: --model, else the first speech model that is a Base (cloning) checkpoint, else any speech model."""
+    if a.model:
+        return a.model
+    status, body = api("GET", "/v1/models")
+    if status is not None and status != 401:
+        for item in (body or {}).get("data") or []:
+            if "speech" in (item.get("capabilities") or []) and "base" in str(item.get("id", "")).lower():
+                return item["id"]
+    return choose_model(api, "speech", None, "speaks text")
+
+
+def encode_reference(path):
+    """The base64 of a reference clip, or Refused with a reason."""
+    import base64
+    try:
+        size = os.path.getsize(path)
+    except OSError as error:
+        raise Refused(f"cannot read {path}: {error.strerror or error}")
+    if size > MAX_REFERENCE_BYTES:
+        raise Refused(f"{path} is {size / 1e6:.1f} MB; send at most {MAX_REFERENCE_BYTES >> 20} MB (a clip of 3 to 30 s: trim it, or make it an mp3)")
+    with open(path, "rb") as handle:
+        return base64.b64encode(handle.read()).decode("ascii")
+
+
+def voice(a, api, upload, C):
+    """coli voice list | add NAME FILE [--text WORDS] [--no-text] | remove NAME: the saved voices of the cloning speech models.
+
+    A voice is a few seconds of reference speech and what it says; `coli speak --voice NAME` then speaks in it. Without --text the server's
+    speech recognition model writes the words down (--no-text skips that: the voice is then the speaker's embedding alone, a looser likeness)."""
+    action = a.action
+    if action == "list":
+        status, body = api("GET", "/v1/audio/voices")
+        if status is None:
+            print(f"  {C.yel}nothing answers on that host and port: start the server (coli service start, or coli router){C.r}")
+            return 1
+        if status == 401:
+            print(f"  {C.yel}the server wants an API key: --api-key, or COLI_API_KEY{C.r}")
+            return 1
+        if status != 200:
+            print(f"  {C.yel}the server said {status}: it has no saved voices (a router keeps them){C.r}")
+            return 1
+        found = (body or {}).get("data") or []
+        if getattr(a, "json", False):
+            print(json.dumps(body))
+            return 0
+        if not found:
+            print(f"  {C.dim}no saved voices: coli voice add NAME clip.wav --text \"what the clip says\"{C.r}")
+            return 0
+        for item in found:
+            print(f"  {item['name']:<20} {item.get('seconds', 0):>5.1f} s  {item.get('mode', ''):<10} {C.dim}{excerpt(item.get('text') or '', 60)}{C.r}")
+        return 0
+    if action == "remove":
+        if not a.name:
+            print(f"  {C.yel}usage: coli voice remove NAME{C.r}")
+            return 1
+        status, body = api("POST", "/v1/audio/voices/delete", {"name": a.name})
+        if status == 200:
+            print(f"  removed {a.name}")
+            return 0
+        error = (body or {}).get("error") if isinstance(body, dict) else None
+        print(f"  {C.yel}{(error or {}).get('message') if isinstance(error, dict) else 'the server said ' + str(status)}{C.r}")
+        return 1
+    if action == "add":
+        if not a.name or not a.file:
+            print(f"  {C.yel}usage: coli voice add NAME FILE [--text \"what the clip says\"] [--no-text]{C.r}")
+            return 1
+        try:
+            data = encode_reference(a.file)
+            words = (a.text or "").strip()
+            if not words and not a.no_text:
+                fields = {"model": "", "response_format": "json"}
+                try:
+                    model = choose_model(api, "transcription", None, "turns speech into text")
+                    fields["model"] = model
+                    status, answer = upload("/v1/audio/transcriptions", fields, os.path.basename(a.file), read_audio(a.file))
+                    if status == 200:
+                        words = str((answer or {}).get("text", "")).strip()
+                        print(f"  {C.dim}heard: {excerpt(words, 100)}{C.r}")
+                    else:
+                        print(f"  {C.yel}the words could not be written down (the server said {status}); saving the voice without them{C.r}")
+                except Refused as why:
+                    print(f"  {C.yel}{why}; saving the voice without the words (--text gives them){C.r}")
+        except Refused as why:
+            print(f"  {C.yel}{why}{C.r}")
+            return 1
+        status, body = api("POST", "/v1/audio/voices", {"name": a.name, "audio": data, "text": words})
+        if status is None:
+            print(f"  {C.yel}nothing answers on that host and port: start the server (coli service start, or coli router){C.r}")
+            return 1
+        if status != 200:
+            error = (body or {}).get("error") if isinstance(body, dict) else None
+            print(f"  {C.yel}{(error or {}).get('message') if isinstance(error, dict) else 'the server said ' + str(status)}{C.r}")
+            return 1
+        print(f"  {body.get('status', 'saved')} {body.get('name')}: {body.get('seconds', 0):.1f} s, {body.get('mode')}")
+        return 0
+    print(f"  {C.yel}usage: coli voice list | add NAME FILE [--text WORDS] | remove NAME{C.r}")
+    return 1

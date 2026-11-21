@@ -45,6 +45,7 @@ import features
 import gpu as gpu_mod
 import model_settings as settings_mod
 import presets as presets_mod
+import voices as voices_mod
 import web_headers
 import log_tail
 import request_log
@@ -1878,6 +1879,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.install_job(unquote(path[len("/v1/models/installs/"):])))
             if path == "/v1/presets":
                 return self.send_json(200, self.presets_list())
+            if path == "/v1/audio/voices":
+                return self.send_json(200, self.voices_list())
             if path == "/v1/requests":
                 return self.send_json(200, self.requests_list(query))
             if path == "/v1/logs":
@@ -1923,6 +1926,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.preset_save()
             if path == "/v1/presets/delete":
                 return self.preset_delete()
+            if path == "/v1/audio/voices":
+                return self.voice_save()
+            if path == "/v1/audio/voices/delete":
+                return self.voice_delete()
             if path == "/v1/jobs/cancel":
                 return self.job_cancel()
             if path not in COMPUTE_PATHS:
@@ -2616,6 +2623,42 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(500, f"The presets file could not be changed: {error}", "presets_file_error")
         self.server.presets.reload()
         self.send_json(200, {"status": "replaced" if replaced else "created", "name": name})
+
+    def voices_list(self):
+        """GET /v1/audio/voices: the saved voices of the cloning speech models (voices.py), by name."""
+        return {"object": "list", "path": str(voices_mod.directory()), "data": [voices_mod.payload(v) for v in voices_mod.list_voices()]}
+
+    def voice_save(self):
+        """POST /v1/audio/voices: save a voice from a reference clip: {"name", "audio" (base64 of an audio file, or a data: URL), "text" (what
+        the clip says; without it the voice is the speaker's embedding alone)}. `coli voice add` makes the same files."""
+        body = self.management_json("/v1/audio/voices")
+        audio, text = body.get("audio"), body.get("text", "")
+        if not isinstance(audio, str) or not audio:
+            raise ApiError(400, "`audio` must be the base64 of an audio file (or a data: URL).", "invalid_request_error", "audio")
+        if not isinstance(text, str):
+            raise ApiError(400, "`text` must be text: what the clip says.", "invalid_request_error", "text")
+        import base64
+        try:
+            raw = base64.b64decode(audio.split(",", 1)[1] if audio.startswith("data:") and "," in audio else audio, validate=True)
+        except Exception:
+            raise ApiError(400, "`audio` is not valid base64.", "invalid_request_error", "audio")
+        try:
+            info = voices_mod.add(body.get("name"), raw, text)
+        except voices_mod.VoiceError as error:
+            raise ApiError(400, str(error), "invalid_request_error", error.param)
+        except OSError as error:
+            raise ApiError(500, f"The voice could not be saved: {error}", "voices_error")
+        self.send_json(200, {"status": "replaced" if info.pop("replaced") else "created", **voices_mod.payload(info)})
+
+    def voice_delete(self):
+        """POST /v1/audio/voices/delete: forget a saved voice."""
+        body = self.management_json("/v1/audio/voices/delete")
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ApiError(400, "`name` must be text.", "invalid_request_error", "name")
+        if not voices_mod.delete(name):
+            raise ApiError(404, f"No voice is saved as `{name.strip()}`.", "voice_not_found", "name")
+        self.send_json(200, {"status": "deleted", "name": name.strip().lower()})
 
     def preset_delete(self):
         """Remove a preset from the file."""

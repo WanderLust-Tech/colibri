@@ -1,13 +1,15 @@
 # Text to speech: Qwen3-TTS
 
 `c/qwen3tts` turns text into speech with [Qwen3-TTS-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice) (Apache-2.0): ten
-languages, in three models:
+languages, in five models:
 
 | Model | `coli model install` | Voice | Style `instructions` | Download | RAM |
 |---|---|---|---|---|---|
 | Qwen3-TTS-0.6B-CustomVoice | `qwen3-tts-0.6b-customvoice` (API id `qwen3-tts-0.6b`) | nine named speakers | no | 2.5 GB | 4 / 6 GB |
 | Qwen3-TTS-1.7B-CustomVoice | `qwen3-tts-1.7b-customvoice` (`qwen3-tts-1.7b`) | the same nine speakers, in a wider model | yes: how to say it ("speak slowly and sadly") | 4.5 GB | 7 / 10 GB |
 | Qwen3-TTS-1.7B-VoiceDesign | `qwen3-tts-1.7b-voicedesign` (`qwen3-tts-1.7b-voicedesign`) | none named: **the voice is described in words** ("a warm, deep male voice") | yes: it is the voice | 4.5 GB | 7 / 10 GB |
+| Qwen3-TTS-0.6B-Base | `qwen3-tts-0.6b-base` (`qwen3-tts-0.6b-base`) | **cloned from a few seconds of reference audio** ([below](#voice-cloning-the-base-models)) | no | 2.4 GB | 4 / 6 GB |
+| Qwen3-TTS-1.7B-Base | `qwen3-tts-1.7b-base` (`qwen3-tts-1.7b-base`) | the same, in the wider model | no | 4.5 GB | 7 / 10 GB |
 
 It answers OpenAI's `POST /v1/audio/speech`, so the clients written for it work with a model name and a base URL changed, and
 `coli speak "text"` does the same from the terminal. Plan and background: [qwen3-speech.md](qwen3-speech.md). The other direction, speech to
@@ -40,15 +42,18 @@ curl http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "C
   delivery of the named speaker ("Speak slowly, in a calm and sad voice."); on **VoiceDesign** the voice itself ("A warm, deep male voice,
   speaking slowly and calmly."), and `voice` then names no one (it is accepted and ignored, so a client that always sends one still works).
   The words go to the model as a user turn before the text (`<|im_start|>user\n{instructions}<|im_end|>`). The 0.6B refuses it.
+- **`reference_audio`, `reference_text`, `x_vector_only`, and a saved `voice`** (extensions, for the Base models only): see
+  [Voice cloning](#voice-cloning-the-base-models). On a Base model `voice` names a saved voice and there is no default speaker.
 - **Refused, with the field named:** `speed` other than 1 (the model has no control over the pace), `instructions` on the 0.6B (it speaks as a
   named speaker and takes no style description), `stream_format` `sse` (the audio comes in one piece).
 - **The answer** is the audio itself, with `x-colibri-audio-seconds`, `x-colibri-sample-rate` and `x-colibri-queue-wait-ms` headers, and
   `x-colibri-truncated: true` when the text was longer than one piece of speech could hold (4096 frames, five and a half minutes).
 - `GET /v1/models` marks the model `"speech"` with a `speech` block (`speakers` (empty for VoiceDesign), `languages`, `formats`, `voices`,
-  `sample_rate`, `max_input_chars`, `device`, `kind` (`custom_voice` or `voice_design`), `instructions` (true when it takes them)); `/health` carries the engine's own READY line. The chat routes, pictures, music, embeddings, reranking and
+  `sample_rate`, `max_input_chars`, `device`, `kind` (`custom_voice`, `voice_design` or `base`), `instructions` (true when it takes them), `clone` (true for
+  a Base model, which also lists its `saved_voices`)); `/health` carries the engine's own READY line. The chat routes, pictures, music, embeddings, reranking and
   transcription answer 400 with a pointer to the speech route.
 
-## How it works
+## How it works (the speakers' models)
 
 ```
 text -> <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n -> Qwen tokenizer
@@ -149,6 +154,57 @@ AUDIO {"id", "path", "samples", "sample_rate", "frames", "audio_seconds", "secon
 ERROR {"id", "message"}                                             # the engine goes on
 ```
 
+## Voice cloning (the Base models)
+
+The two **Base** checkpoints speak in a voice they are given: a few seconds of reference speech, and ideally what it says. They have no named
+speakers. Two ways to give the voice:
+
+- **A saved voice**: `coli voice add ana clip.wav --text "what the clip says"` (without `--text` the server's speech recognition model writes the
+  words down; `--no-text` skips that), then `voice` names it: `coli speak "Hello." --voice ana`, or `{"voice": "ana"}`. Voices live in
+  `~/colibri-voices/<name>/` (`ref.wav` at 24 kHz mono and `voice.json`; `COLI_VOICES` moves them). `coli voice list`, `coli voice remove ana`; over
+  HTTP `GET /v1/audio/voices`, `POST /v1/audio/voices` (`{"name", "audio" (base64), "text"}`) and `POST /v1/audio/voices/delete` on the router.
+- **A clip with the request**: `reference_audio` (the base64 of an audio file, or a `data:` URL: WAV, MP3, and with ffmpeg more; 1 to 60 seconds,
+  3 to 30 is best; the body limit is 4 MB) and `reference_text`; `coli speak "Hello." --reference clip.wav --reference-text "what it says"`.
+
+With the reference's text the voice is cloned **in context**: the model reads the clip's transcript and its codes in front of the new text and
+carries on from them (the closer likeness: the clip's delivery, pace and room come with it). Without the text only the clip's **speaker embedding**
+is used (`x_vector_only`, which also forces this mode: a looser likeness, and no cost for the codes). A request that names neither a saved voice
+nor a clip is a 400 that says what is saved. `instructions` and the named speakers do not apply to a Base model; a model that is not a Base one
+refuses `reference_audio`.
+
+```sh
+coli model install qwen3-tts-0.6b-base                             # 2.4 GB
+coli voice add jfk jfk.wav                                          # the words are written down by qwen3-asr, if it is installed
+coli speak "The quick brown fox jumps over the lazy dog." --voice jfk --out fox.wav
+coli speak "Hello there." --reference me.wav --reference-text "the words I said in me.wav"
+```
+
+How it works, as `Qwen3TTSModel.generate_voice_clone` does it (`c/qwen3tts_clone.h`):
+
+```
+reference audio (24 kHz mono)
+  -> log-mel (n_fft 1024, hop 256, 128 mels to 12 kHz, Slaney) -> the speaker encoder (ECAPA-TDNN: a TDNN, three SE-Res2Net blocks, a feature
+     aggregation, attentive statistics pooling, a linear) -> one vector the width of the talker, put where a named speaker's codec row goes
+  -> (in context) the codec's encoder, which is Kyutai's Mimi: a SEANet convolutional stack (strides 4, 5, 6, 8), an 8-layer transformer,
+     a stride-2 downsampling to 12.5 Hz, a split residual quantizer (one semantic, fifteen acoustic codebooks) -> 16 codes a frame
+prompt = role, codec prefix with the speaker vector, then (in context) [reference text + text + tts_eos] summed with [codec_bos + the reference's frames],
+         the text that does not fit riding along one row to each generation step; x-vector only: the first text token, the rest riding along
+speech = the generated frames decoded together with the reference's, the reference's share of the samples cut off
+```
+
+The speaker embedding and the codes of a clip are made once and kept (the last four clips), so a request that repeats a clip pays for them once:
+a clip of 11 s takes 0.1 s for the embedding and 0.7 s for the codes (CPU; the codec encoder is not on the card).
+
+**Checked against the package** (fp32, greedy, the 11 s JFK clip; `tools/qwen3_tts_clone_ref.py`, `tests/test_qwen3tts_clone_real.py`): the log-mel
+features 2e-3 (the log of small energies), the speaker embedding 7e-7, the codec encoder's convolutions 4e-4 and transformer 5e-4, the 138 reference
+frames' 2208 codes identical (0 differ), the prompt ids and rows 7e-7, every one of the 1424 codes of the package's speech the engine's own argmax,
+the generated codes identical and the waveform 6e-6 away, in both modes, on the CPU and on the card (16 ms a frame; the talker and the predictor run on
+the chain as for the other models). Two findings: the Mimi config says `sliding_window` 250, but the transformers code the package runs applies a plain
+causal mask and so does this (a clip over 10 s differs otherwise); and greedy decoding of an in-context request can fail to end (the 89-frame
+reference is the 90-token cap), where sampling, which the gateway always does, ends normally: 55 frames for the fox sentence, read back by Qwen3-ASR
+as exactly that sentence.
+
 ## Not built yet
 
-The Base models (a voice cloned from a few seconds of audio: needs the codec's encoder and a speaker encoder), streaming, and the codec's first half on the card (the rest of it takes 0.02 s a second of speech). See [qwen3-speech.md](qwen3-speech.md).
+Streaming; the codec's first half on the card (the rest of it takes 0.02 s a second of speech) and the codec's *encoder* (cloning, 0.7 s for 11 s of clip
+on the CPU). See [qwen3-speech.md](qwen3-speech.md).

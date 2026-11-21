@@ -268,6 +268,23 @@ CATALOG = (
         post_install=(("qwen3_tokenizer", "tokenizer.json"),),
         doc="docs/qwen3-tts.md"),
     CatalogModel(
+        id="qwen3-tts-0.6b-base", family="qwen3_tts", name="Qwen3-TTS-0.6B-Base",
+        repo="Qwen/Qwen3-TTS-12Hz-0.6B-Base", disk_gb=2.4,
+        # no named speakers: it speaks in the voice of a reference clip (a few seconds of speech; what the clip says makes it closer)
+        ram_min_gb=4, ram_good_gb=6, dense_gb=2.4, rank=4, size_class="small",
+        modality="speech", summary="text to speech in a voice cloned from a few seconds of reference audio (saved voices, or the clip with each request)",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-tts.md"),
+    CatalogModel(
+        id="qwen3-tts-1.7b-base", family="qwen3_tts", name="Qwen3-TTS-1.7B-Base",
+        repo="Qwen/Qwen3-TTS-12Hz-1.7B-Base", disk_gb=4.5,
+        ram_min_gb=7, ram_good_gb=10, dense_gb=4.5, rank=5, size_class="small",
+        modality="speech", summary="the larger voice-cloning Qwen3-TTS: speech in the voice of a reference clip",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-tts.md"),
+    CatalogModel(
         id="qwen3-tts-1.7b-voicedesign", family="qwen3_tts", name="Qwen3-TTS-1.7B-VoiceDesign",
         repo="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", disk_gb=4.5,
         # no named speakers: the voice is described in words (`instructions`)

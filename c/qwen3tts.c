@@ -562,6 +562,8 @@ static void qt_lin_any(float *y, const float *x, int M, const AcdLin *l){
 /* ------------------------------------------------------------------------------------------------ the language model side (T2) */
 
 /* A plain Qwen3 stack (the talker, the code predictor): layers, final norm and the sizes. */
+#include "qwen3tts_clone.h"
+
 typedef struct { int nl, D, H, Hk, hd, inter; float eps, theta; AcdEncLayer *L; float *norm; } QtDec;
 
 typedef struct {
@@ -570,6 +572,9 @@ typedef struct {
     AcdLin fc1, fc2, codec_head, pred_head[QT_GROUPS - 1];
     AcdLin mtp;                                                   /* small_to_mtp_projection: talker width -> predictor width (the 1.7B) */
     int has_mtp, design, instruct_ok;                              /* the projection is there; VoiceDesign checkpoint; the model takes a style instruction */
+    int base;                                                      /* a Base checkpoint: speaks in a voice cloned from reference audio */
+    QcSpk spk;                                                     /* the speaker encoder (Base) */
+    QcMimi mimi;                                                   /* the codec's encoder (Base; needed for in-context cloning) */
     int vocab, text_vocab, text_hidden, cb_vocab;
     int tts_bos, tts_eos, tts_pad, im_start, im_end;
     int codec_bos, codec_eos, codec_pad, codec_think, codec_nothink, codec_think_bos, codec_think_eos;
@@ -627,12 +632,13 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     jval *tc = m->cfg ? json_get(m->cfg, "talker_config") : NULL, *pc = tc ? json_get(tc, "code_predictor_config") : NULL;
     if (!tc || !pc) { snprintf(err, errn, "config.json has no talker_config.code_predictor_config: not a Qwen3-TTS checkpoint"); return -1; }
     jval *type = json_get(m->cfg, "tts_model_type");
-    if (!type || type->t != J_STR || (strcmp(type->str, "custom_voice") && strcmp(type->str, "voice_design"))) {
-        snprintf(err, errn, "only the CustomVoice and VoiceDesign checkpoints are supported so far (this one is %s)", type && type->t == J_STR ? type->str : "unknown"); return -1;
+    if (!type || type->t != J_STR || (strcmp(type->str, "custom_voice") && strcmp(type->str, "voice_design") && strcmp(type->str, "base"))) {
+        snprintf(err, errn, "only the CustomVoice, VoiceDesign and Base checkpoints are supported (this one is %s)", type && type->t == J_STR ? type->str : "unknown"); return -1;
     }
     m->design = !strcmp(type->str, "voice_design");
+    m->base = !strcmp(type->str, "base");
     jval *msize = json_get(m->cfg, "tts_model_size");
-    m->instruct_ok = m->design || (msize && msize->t == J_STR && strcmp(msize->str, "0b6"));                  /* the 0.6B ignores `instruct` */
+    m->instruct_ok = !m->base && (m->design || (msize && msize->t == J_STR && strcmp(msize->str, "0b6")));      /* the 0.6B ignores `instruct`; the Base models take none */
     m->tts_bos = qt_json_id(m->cfg, "tts_bos_token_id"); m->tts_eos = qt_json_id(m->cfg, "tts_eos_token_id"); m->tts_pad = qt_json_id(m->cfg, "tts_pad_token_id");
     m->codec_bos = qt_json_id(tc, "codec_bos_id"); m->codec_eos = qt_json_id(tc, "codec_eos_token_id"); m->codec_pad = qt_json_id(tc, "codec_pad_id");
     m->codec_think = qt_json_id(tc, "codec_think_id"); m->codec_nothink = qt_json_id(tc, "codec_nothink_id");
@@ -667,6 +673,11 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
         snprintf(n, sizeof n, "talker.code_predictor.lm_head.%d.weight", g); (void)b;
         if (acd_load_lin(&S, n, NULL, pv, m->pred.D, 2, sp, NULL, 0, 0, &m->pred_head[g], &m->bytes, err, errn)) return -1;
     }
+    if (m->base) {
+        if (qc_spk_load(&m->spk, &S, m->cfg, err, errn)) return -1;
+        if (!m->spk.ok) { snprintf(err, errn, "this Base checkpoint has no speaker_encoder"); return -1; }
+        if (m->spk.dim != D) { snprintf(err, errn, "the speaker embedding is %d wide, the talker %d", m->spk.dim, D); return -1; }
+    }
     st_destroy(&S);
     snprintf(path, sizeof path, "%s/tokenizer.json", dir);
     FILE *tf = fopen(path, "rb");
@@ -678,6 +689,7 @@ static int qt_model_load(QtModel *m, const char *dir, char *err, size_t errn){
     snprintf(path, sizeof path, "%s/speech_tokenizer", dir);
     if (qt_codec_load(&m->codec, path, err, errn)) return -1;
     m->bytes += m->codec.bytes;
+    if (m->base && qc_mimi_load(&m->mimi, path, err, errn)) return -1;
     return 0;
 }
 
@@ -807,6 +819,179 @@ static float *qt_prefill(const QtModel *m, const int *ids, int nids, const char 
     free(txt); free(sv); free(tmp);
     if (at != total) { snprintf(err, errn, "internal: prefill length %d, expected %d", at, total); free(out); return NULL; }
     *rows = total;
+    return out;
+}
+
+/* ------------------------------------------------------------------------------------------------ voice cloning (Base checkpoints)
+ * A request names reference audio (a 24 kHz mono WAV, the gateway's conversion) and, for in-context mode, what it says. The speaker
+ * embedding and the reference's codes are made once per clip and kept (the last four clips). The prompt is the reference's streaming
+ * layout: the codec prefix with the speaker's vector in the speaker's place, then, in-context, the reference text and the text to speak as
+ * rows summed with the reference's codes (what does not fit rides along as `trail`, one row added to each step's input); x-vector only: the
+ * first text token, the rest as `trail`. */
+
+typedef struct { float *spk; int *codes; int nref; uint64_t hash; int used; } QtCloneEntry;
+static QtCloneEntry qt_clone_cache[4];
+static int qt_clone_tick;
+
+/* A 24 kHz mono WAV (16-bit PCM or 32-bit float) as floats in [-1, 1]; malloc'd, count in *n. */
+static float *qt_read_wav24(const char *path, int *n, char *err, size_t errn){
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(err, errn, "cannot open the reference audio %.300s", path); return NULL; }
+    unsigned char hdr[12];
+    if (fread(hdr, 1, 12, f) != 12 || memcmp(hdr, "RIFF", 4) || memcmp(hdr + 8, "WAVE", 4)) { fclose(f); snprintf(err, errn, "the reference audio is not a WAV file"); return NULL; }
+    int fmt = 0, ch = 0, rate = 0, bits = 0;
+    float *out = NULL;
+    for (;;) {
+        unsigned char ck[8];
+        if (fread(ck, 1, 8, f) != 8) break;
+        const uint32_t len = (uint32_t)ck[4] | ((uint32_t)ck[5] << 8) | ((uint32_t)ck[6] << 16) | ((uint32_t)ck[7] << 24);
+        if (!memcmp(ck, "fmt ", 4)) {
+            unsigned char b[16];
+            if (len < 16 || fread(b, 1, 16, f) != 16) break;
+            fmt = b[0] | (b[1] << 8); ch = b[2] | (b[3] << 8); rate = b[4] | (b[5] << 8) | (b[6] << 16) | ((int)b[7] << 24); bits = b[14] | (b[15] << 8);
+            if (len > 16) fseek(f, (long)len - 16, SEEK_CUR);
+        } else if (!memcmp(ck, "data", 4)) {
+            if (ch != 1 || rate != 24000 || !((fmt == 1 && bits == 16) || (fmt == 3 && bits == 32))) { fclose(f); snprintf(err, errn, "the reference audio must be a 24 kHz mono WAV of 16-bit integers or 32-bit floats"); return NULL; }
+            const size_t bps = bits / 8, cnt = len / bps;
+            unsigned char *raw = (unsigned char *)malloc(len ? len : 1);
+            if (!raw || fread(raw, 1, len, f) != len) { free(raw); fclose(f); snprintf(err, errn, "the reference audio is cut short"); return NULL; }
+            out = (float *)malloc((cnt ? cnt : 1) * sizeof(float));
+            for (size_t i = 0; i < cnt; i++) {
+                if (bits == 16) out[i] = (float)(int16_t)(raw[2 * i] | (raw[2 * i + 1] << 8)) / 32768.0f;
+                else { uint32_t u = (uint32_t)raw[4 * i] | ((uint32_t)raw[4 * i + 1] << 8) | ((uint32_t)raw[4 * i + 2] << 16) | ((uint32_t)raw[4 * i + 3] << 24); memcpy(&out[i], &u, 4); }
+            }
+            free(raw);
+            *n = (int)cnt;
+            break;
+        } else fseek(f, (long)len + (len & 1), SEEK_CUR);
+    }
+    fclose(f);
+    if (!out) snprintf(err, errn, "the reference audio has no data");
+    return out;
+}
+
+static uint64_t qt_hash(const float *x, int n){
+    uint64_t h = 1469598103934665603ULL;
+    const unsigned char *p = (const unsigned char *)x;
+    for (size_t i = 0; i < (size_t)n * sizeof(float); i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h ^ (uint64_t)n;
+}
+
+/* The speaker embedding (and, with `codes`, the reference's codes) of a clip: from the cache or made now. 0 on success. */
+static int qt_clone_prepare(const QtModel *m, const char *path, int want_codes, const QtCloneEntry **out, char *err, size_t errn){
+    int n = 0;
+    float *wav = qt_read_wav24(path, &n, err, errn);
+    if (!wav) return -1;
+    if (n < 24000 / 2) { free(wav); snprintf(err, errn, "the reference audio is shorter than half a second"); return -1; }
+    const uint64_t h = qt_hash(wav, n);
+    QtCloneEntry *e = NULL;
+    for (int i = 0; i < 4; i++) if (qt_clone_cache[i].spk && qt_clone_cache[i].hash == h) e = &qt_clone_cache[i];
+    if (!e) {
+        int pick = 0;
+        for (int i = 0; i < 4; i++) { if (!qt_clone_cache[i].spk) { pick = i; break; } if (qt_clone_cache[i].used < qt_clone_cache[pick].used) pick = i; }
+        e = &qt_clone_cache[pick];
+        free(e->spk); free(e->codes);
+        memset(e, 0, sizeof *e);
+        int frames = 0;
+        float *mel = qc_mel(wav, n, &frames);
+        if (!mel) { free(wav); snprintf(err, errn, "the reference audio is too short for the speaker encoder"); return -1; }
+        e->spk = qc_spk_embed(&m->spk, mel, frames);
+        free(mel);
+        e->hash = h;
+    }
+    if (want_codes && !e->codes) {
+        if (!m->mimi.ok) { free(wav); snprintf(err, errn, "this model folder has no codec encoder (speech_tokenizer/model.safetensors with the encoder): in-context cloning needs it; use x_vector_only"); return -1; }
+        e->codes = qc_mimi_encode(&m->mimi, wav, n, &e->nref, NULL);
+    }
+    e->used = ++qt_clone_tick;
+    free(wav);
+    *out = e;
+    return 0;
+}
+
+/* The talker's prefill for a cloned voice (the layout in the comment above): [L][D] malloc'd, L in *rows; *trail ([ntrail][D], malloc'd) the rows
+ * the generation adds to its steps. ref_ids/nref_ids: the reference text's prompt ids (NULL: x-vector only); ref_codes [nref][16]. */
+static float *qt_prefill_clone(const QtModel *m, const int *ids, int nids, const float *spk, const int *ref_ids, int nref_ids, const int *ref_codes, int nref,
+                               const char *language, int *rows, float **trail, int *ntrail, char *err, size_t errn){
+    const int D = m->talker.D;
+    jval *tc = json_get(m->cfg, "talker_config");
+    int lang = -1;
+    char lg[64] = "";
+    snprintf(lg, sizeof lg, "%s", language && *language ? language : "auto");
+    qt_lower(lg);
+    if (strcmp(lg, "auto")) {
+        lang = qt_lookup(json_get(tc, "codec_language_id"), lg, -1);
+        if (lang < 0) { snprintf(err, errn, "the language `%s` is not one this model speaks", language); return NULL; }
+    }
+    if (nids < 9) { snprintf(err, errn, "the prompt is too short"); return NULL; }
+    const int icl = ref_codes != NULL && nref > 0 && ref_ids != NULL && nref_ids > 5;
+    int prefix[8], np = 0;
+    if (lang < 0) { prefix[np++] = m->codec_nothink; prefix[np++] = m->codec_think_bos; prefix[np++] = m->codec_think_eos; }
+    else { prefix[np++] = m->codec_think; prefix[np++] = m->codec_think_bos; prefix[np++] = lang; prefix[np++] = m->codec_think_eos; }
+    const int ntext = nids - 8;                                                       /* the text's ids: ids[3 .. nids - 5) */
+    const int nrt = icl ? nref_ids - 5 : 0;                                           /* the reference text's ids: ref_ids[3 .. nref_ids - 2) */
+    const int Tt = icl ? nrt + ntext + 1 : 0, Tc = icl ? nref + 1 : 0;
+    const int nc = np + 1 + 2;                                                        /* codec rows: prefix, the speaker's vector, pad, bos */
+    const int total = 3 + (nc - 1) + (icl ? Tc : 1);
+    float *out = (float *)calloc((size_t)total * D, sizeof(float));
+    float *tmp = (float *)malloc((size_t)D * sizeof(float)), *emb = (float *)malloc((size_t)D * sizeof(float));
+    const int sp[3] = {m->tts_bos, m->tts_eos, m->tts_pad};
+    float *sv = qt_text_embed(m, sp, 3);
+    const float *bos = sv, *eos = sv + D, *pad = sv + 2 * D;
+    int at = 0;
+    float *role = qt_text_embed(m, ids, 3);
+    memcpy(out, role, (size_t)3 * D * sizeof(float)); at = 3;
+    free(role);
+    for (int i = 0; i < nc - 1; i++) {                                                /* (tts_pad x (nc - 2), tts_bos) + codec[:-1] */
+        const float *t = i < nc - 2 ? pad : bos;
+        if (i == np) memcpy(tmp, spk, (size_t)D * sizeof(float));
+        else qt_row(m->codec_emb, i < np ? prefix[i] : m->codec_pad, D, tmp);
+        float *dst = out + (size_t)at * D;
+        for (int j = 0; j < D; j++) dst[j] = t[j] + tmp[j];
+        at++;
+    }
+    float *tr = NULL;
+    int nt = 0;
+    if (icl) {
+        int *tids = (int *)malloc((size_t)(nrt + ntext) * sizeof(int));
+        memcpy(tids, ref_ids + 3, (size_t)nrt * sizeof(int));
+        memcpy(tids + nrt, ids + 3, (size_t)ntext * sizeof(int));
+        float *te = qt_text_embed(m, tids, nrt + ntext);
+        free(tids);
+        float *text = (float *)malloc((size_t)Tt * D * sizeof(float));                /* the texts' rows, then tts_eos */
+        memcpy(text, te, (size_t)(nrt + ntext) * D * sizeof(float));
+        memcpy(text + (size_t)(nrt + ntext) * D, eos, (size_t)D * sizeof(float));
+        free(te);
+        for (int r = 0; r < Tc; r++) {                                                /* the codec rows: bos, then the reference's frames summed over the 16 groups */
+            if (r == 0) qt_row(m->codec_emb, m->codec_bos, D, tmp);
+            else {
+                const int *c = ref_codes + (size_t)(r - 1) * QT_GROUPS;
+                qt_row(m->codec_emb, c[0], D, tmp);
+                for (int g = 1; g < QT_GROUPS; g++) { qt_row(m->pred_emb[g - 1], c[g], D, emb); for (int j = 0; j < D; j++) tmp[j] += emb[j]; }
+            }
+            const float *t = r < Tt ? text + (size_t)r * D : pad;
+            float *dst = out + (size_t)at * D;
+            for (int j = 0; j < D; j++) dst[j] = t[j] + tmp[j];
+            at++;
+        }
+        if (Tt > Tc) { nt = Tt - Tc; tr = (float *)malloc((size_t)nt * D * sizeof(float)); memcpy(tr, text + (size_t)Tc * D, (size_t)nt * D * sizeof(float)); }
+        else { nt = 1; tr = (float *)malloc((size_t)D * sizeof(float)); memcpy(tr, pad, (size_t)D * sizeof(float)); }
+        free(text);
+    } else {
+        float *first = qt_text_embed(m, ids + 3, 1);                                  /* the first text token + codec_bos */
+        qt_row(m->codec_emb, m->codec_bos, D, tmp);
+        float *dst = out + (size_t)at * D;
+        for (int j = 0; j < D; j++) dst[j] = first[j] + tmp[j];
+        at++;
+        free(first);
+        nt = ntext;                                                                   /* the rest of the text (ids 4 .. nids - 5) and tts_eos */
+        tr = (float *)malloc((size_t)nt * D * sizeof(float));
+        if (ntext > 1) { float *rest = qt_text_embed(m, ids + 4, ntext - 1); memcpy(tr, rest, (size_t)(ntext - 1) * D * sizeof(float)); free(rest); }
+        memcpy(tr + (size_t)(ntext - 1) * D, eos, (size_t)D * sizeof(float));
+    }
+    free(sv); free(tmp); free(emb);
+    if (at != total) { snprintf(err, errn, "internal: clone prefill length %d, expected %d", at, total); free(out); free(tr); return NULL; }
+    *rows = total; *trail = tr; *ntrail = nt;
     return out;
 }
 
@@ -1242,7 +1427,8 @@ static int qt_decode_threads(void){
 #endif
 }
 
-typedef struct { int greedy; float temperature; int top_k; float rep_penalty; int sub_greedy; float sub_temperature; int sub_top_k; int max_frames; uint64_t seed; } QtGen;
+typedef struct { int greedy; float temperature; int top_k; float rep_penalty; int sub_greedy; float sub_temperature; int sub_top_k; int max_frames; uint64_t seed;
+                 const float *trail; int ntrail; } QtGen;   /* trail: text rows still to be read, one added to the input of each step (streaming prompts) */
 
 /* Teacher forcing (a test of the whole stack against reference codes that does not trip on ties): the given codes drive the generation, and
  * at each choice the engine says whether the given code is its own argmax, and if not by how much (in logits) the argmax beat it. */
@@ -1356,7 +1542,8 @@ static int *qt_generate_on(const QtModel *m, const float *prefill, int L, const 
             qt_row(m->pred_emb[gi - 1], code[gi], D, emb);
             for (int j = 0; j < D; j++) sum[j] += emb[j];
         }
-        for (int j = 0; j < D; j++) next[j] = sum[j] + pad[j];
+        const float *tr = f < g->ntrail ? g->trail + (size_t)f * D : pad;
+        for (int j = 0; j < D; j++) next[j] = sum[j] + tr[j];
 #ifdef COLI_VULKAN
         if (dev && !qt_vk_run(&qt_vk_talker, next, 1, L + f, 0, hn, logits, m->vocab)) { *dev_failed = 1; break; }
 #endif
@@ -1436,25 +1623,59 @@ static char *qt_read_line(int *too_long){
 }
 
 typedef struct { int frames, samples, truncated; double gen_s, codec_s; } QtSpoken;
+typedef struct { const char *wav, *text; int xvec; } QtCloneReq;                 /* reference audio (24 kHz WAV), what it says, x-vector only */
 
-/* One request end to end: text, speaker and language to a WAV file at `path`. 0 on success, else err set. */
-static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *instruct, const char *language, const QtGen *gen, const char *path, QtSpoken *res, char *err, size_t errn){
-    int nids = 0, rows = 0;
+/* One request end to end: text, speaker and language to a WAV file at `path`. 0 on success, else err set. A Base model takes `clone`. */
+static int qt_speak(const QtModel *m, const char *text, const char *speaker, const char *instruct, const char *language, const QtGen *gen_in, const char *path, QtSpoken *res, char *err, size_t errn, const QtCloneReq *clone){
+    int nids = 0, rows = 0, ntrail = 0, nref = 0;
+    QtGen gen_c = *gen_in;
+    const QtGen *gen = &gen_c;
+    float *trail = NULL, *prefill = NULL;
+    const int *ref_codes = NULL;
     int *ids = qt_text_ids(m, text, &nids);
-    float *prefill = qt_prefill(m, ids, nids, speaker, instruct, language, &rows, err, errn);
+    if (m->base) {
+        if (!clone || !clone->wav || !*clone->wav) { free(ids); snprintf(err, errn, "this is a Base model: it speaks in a cloned voice and needs reference audio (ref_wav)"); return -1; }
+        const int icl = !clone->xvec && clone->text && *clone->text;
+        const QtCloneEntry *e = NULL;
+        if (qt_clone_prepare(m, clone->wav, icl, &e, err, errn)) { free(ids); return -1; }
+        int nrid = 0, *rid = NULL;
+        if (icl) rid = qt_frame_ids(m, "<|im_start|>assistant\n%s<|im_end|>\n", clone->text, &nrid);
+        if (icl) { ref_codes = e->codes; nref = e->nref; }
+        prefill = qt_prefill_clone(m, ids, nids, e->spk, rid, nrid, ref_codes, nref, language, &rows, &trail, &ntrail, err, errn);
+        free(rid);
+        gen_c.trail = trail; gen_c.ntrail = ntrail;
+    } else {
+        if (clone && clone->wav && *clone->wav) { free(ids); snprintf(err, errn, "this model does not clone voices (a Base checkpoint does)"); return -1; }
+        prefill = qt_prefill(m, ids, nids, speaker, instruct, language, &rows, err, errn);
+    }
     free(ids);
-    if (!prefill) return -1;
+    if (!prefill) { free(trail); return -1; }
     double t0 = qt_now();
     int frames = 0;
     int *codes = qt_generate(m, prefill, rows, gen, &frames, NULL, NULL);
-    free(prefill);
+    free(prefill); free(trail);
     res->gen_s = qt_now() - t0;
     res->frames = frames;
     res->truncated = frames >= gen->max_frames;
     if (frames <= 0) { free(codes); snprintf(err, errn, "the model produced no audio for this text"); return -1; }
     t0 = qt_now();
     int n = 0;
-    float *wav = qt_codec_decode(&m->codec, codes, frames, &n);
+    float *wav;
+    if (nref > 0) {                                      /* decode the reference's frames and the new ones together, then cut the reference's share off */
+        int *all = (int *)malloc((size_t)(nref + frames) * QT_GROUPS * sizeof(int));
+        memcpy(all, ref_codes, (size_t)nref * QT_GROUPS * sizeof(int));
+        memcpy(all + (size_t)nref * QT_GROUPS, codes, (size_t)frames * QT_GROUPS * sizeof(int));
+        int total = 0;
+        float *full = qt_codec_decode(&m->codec, all, nref + frames, &total);
+        free(all);
+        if (full) {
+            const int cut = (int)((double)nref / (double)(nref + frames) * (double)total);
+            n = total - cut;
+            wav = (float *)malloc((size_t)(n ? n : 1) * sizeof(float));
+            memcpy(wav, full + cut, (size_t)n * sizeof(float));
+            free(full);
+        } else wav = NULL;
+    } else wav = qt_codec_decode(&m->codec, codes, frames, &n);
     free(codes);
     res->codec_s = qt_now() - t0;
     res->samples = n;
@@ -1487,7 +1708,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     jval *tc = json_get(m->cfg, "talker_config");
     jval *kind = json_get(m->cfg, "tts_model_type");
     printf("READY {\"model\":\""); qt_escape(name);
-    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"instruct\":%s,\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", m->instruct_ok ? "true" : "false", QT_SR, m->talker.nl);
+    printf("\",\"task\":\"speech\",\"kind\":\"%s\",\"clone\":%s,\"instruct\":%s,\"sample_rate\":%d,\"layers\":%d,\"speakers\":[", kind && kind->t == J_STR ? kind->str : "custom_voice", m->base ? "true" : "false", m->instruct_ok ? "true" : "false", QT_SR, m->talker.nl);
     qt_names(json_get(tc, "spk_id"));
     printf("],\"languages\":[");
     qt_names(json_get(tc, "codec_language_id"));
@@ -1503,6 +1724,7 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
         jval *j = json_parse_checked(line + 6);
         if (!j || j->t != J_OBJ) { qt_error("", "SPEAK needs a JSON object"); if (j) json_free(j); free(line); continue; }
         jval *jid = json_get(j, "id"), *jt = json_get(j, "text"), *js = json_get(j, "speaker"), *jl = json_get(j, "language"), *jo = json_get(j, "out");
+        jval *jrw = json_get(j, "ref_wav"), *jrt = json_get(j, "ref_text"), *jxv = json_get(j, "x_vector_only");
         jval *jin = json_get(j, "instruct"), *jseed = json_get(j, "seed"), *jg = json_get(j, "greedy"), *jmf = json_get(j, "max_frames"), *jtemp = json_get(j, "temperature");
         const char *id = jid && jid->t == J_STR ? jid->str : "";
         char err[512] = "";
@@ -1517,7 +1739,8 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
             QtSpoken r;
             memset(&r, 0, sizeof r);
             const double t0 = qt_now();
-            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jin && jin->t == J_STR ? jin->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err)) qt_error(id, err);
+            QtCloneReq cr = {jrw && jrw->t == J_STR ? jrw->str : NULL, jrt && jrt->t == J_STR ? jrt->str : NULL, jxv && jxv->t == J_BOOL && jxv->boolean};
+            if (qt_speak(m, jt->str, js && js->t == J_STR ? js->str : "", jin && jin->t == J_STR ? jin->str : "", jl && jl->t == J_STR ? jl->str : "auto", &g, jo->str, &r, err, sizeof err, &cr)) qt_error(id, err);
             else {
                 printf("AUDIO {\"id\":\""); qt_escape(id);
                 printf("\",\"path\":\""); qt_escape(jo->str);
@@ -1533,14 +1756,143 @@ static int qt_serve(const QtModel *m, const char *name, const QtGen *base){
     return 0;
 }
 
+/* One cloned request from the command line; with `check` (a folder made by tools/qwen3_tts_clone_ref.py) each stage is held to the package's. */
+static int qt_clone_cli(const QtModel *m, const char *text, const char *language, const char *wavpath, const char *reftext, int xvec, const QtGen *gen_in,
+                        const char *out, const char *check){
+    char err[512] = "", path[4300];
+    int n = 0;
+    float *wav = qt_read_wav24(wavpath, &n, err, sizeof err);
+    if (!wav) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+    size_t got = 0;
+    double t0 = qt_now();
+    int mf = 0;
+    float *mel = qc_mel(wav, n, &mf);
+    if (!mel) { fprintf(stderr, "qwen3tts: the reference audio is too short\n"); return 1; }
+    float *spk = qc_spk_embed(&m->spk, mel, mf);
+    fprintf(stderr, "qwen3tts: speaker embedding of %.1f s of audio in %.2f s\n", (double)n / QT_SR, qt_now() - t0);
+    if (check) {
+        float *r;
+        snprintf(path, sizeof path, "%s/mel.f32", check); r = qt_load_f32(path, &got);
+        if (r) { if (got == (size_t)mf * 128) qt_compare("mel", mel, r, got); else printf("mel: reference has %zu values, here %d\n", got, mf * 128); free(r); }
+        snprintf(path, sizeof path, "%s/spk.f32", check); r = qt_load_f32(path, &got);
+        if (r) { if (got == (size_t)m->spk.dim) qt_compare("speaker embedding", spk, r, got); else printf("speaker embedding: reference has %zu values, here %d\n", got, m->spk.dim); free(r); }
+    }
+    int *rc = NULL, nref = 0;
+    const int icl = !xvec && reftext && *reftext;
+    if (icl) {
+        if (!m->mimi.ok) { fprintf(stderr, "qwen3tts: no codec encoder in this model folder\n"); return 1; }
+        QcMimiDump d;
+        memset(&d, 0, sizeof d);
+        t0 = qt_now();
+        rc = qc_mimi_encode(&m->mimi, wav, n, &nref, &d);
+        fprintf(stderr, "qwen3tts: %d reference frames encoded in %.2f s\n", nref, qt_now() - t0);
+        if (check) {
+            float *r;
+            snprintf(path, sizeof path, "%s/codec_conv.f32", check); r = qt_load_f32(path, &got);
+            if (r) { if (got == (size_t)d.t25 * 512) qt_compare("codec conv stack", d.conv, r, got); else printf("codec conv stack: reference has %zu values, here %d\n", got, d.t25 * 512); free(r); }
+            snprintf(path, sizeof path, "%s/codec_tr.f32", check); r = qt_load_f32(path, &got);
+            if (r) { if (got == (size_t)d.t25 * 512) qt_compare("codec transformer", d.tr, r, got); else printf("codec transformer: reference has %zu values\n", got); free(r); }
+            snprintf(path, sizeof path, "%s/codec_emb.f32", check); r = qt_load_f32(path, &got);
+            if (r) { if (got == (size_t)d.t12 * 512) qt_compare("codec embeddings", d.emb, r, got); else printf("codec embeddings: reference has %zu values, here %d\n", got, d.t12 * 512); free(r); }
+            snprintf(path, sizeof path, "%s/ref_codes.i32", check);
+            int *ri = (int *)qt_load_f32(path, &got);
+            if (ri) {
+                int diff = 0;
+                const size_t cmp = got < (size_t)nref * QT_GROUPS ? got : (size_t)nref * QT_GROUPS;
+                for (size_t i = 0; i < cmp; i++) diff += ri[i] != rc[i];
+                printf("reference codes: %zu frames in the reference, %d here; %d of %zu codes differ\n", got / QT_GROUPS, nref, diff, cmp);
+                free(ri);
+            }
+        }
+    }
+    int nids = 0, nrid = 0, rows = 0, ntrail = 0;
+    int *ids = qt_text_ids(m, text, &nids);
+    int *rid = icl ? qt_frame_ids(m, "<|im_start|>assistant\n%s<|im_end|>\n", reftext, &nrid) : NULL;
+    float *trail = NULL;
+    float *prefill = qt_prefill_clone(m, ids, nids, spk, rid, nrid, rc, nref, language, &rows, &trail, &ntrail, err, sizeof err);
+    if (!prefill) { fprintf(stderr, "qwen3tts: %s\n", err); return 1; }
+    const char *mode = icl ? "icl" : "xvec";
+    if (check) {
+        float *f;
+        snprintf(path, sizeof path, "%s/%s/input_ids.i32", check, mode);
+        int *r = (int *)qt_load_f32(path, &got);
+        if (r) { printf("input ids: %s (%d here, %zu in the reference)\n", got == (size_t)nids && !memcmp(r, ids, got * 4) ? "identical" : "DIFFERENT", nids, got); free(r); }
+        if (icl) {
+            snprintf(path, sizeof path, "%s/%s/ref_ids.i32", check, mode);
+            r = (int *)qt_load_f32(path, &got);
+            if (r) { printf("reference text ids: %s (%d here, %zu in the reference)\n", got == (size_t)nrid && !memcmp(r, rid, got * 4) ? "identical" : "DIFFERENT", nrid, got); free(r); }
+        }
+        snprintf(path, sizeof path, "%s/%s/prefill.f32", check, mode);
+        f = qt_load_f32(path, &got);
+        if (f) { if (got == (size_t)rows * m->talker.D) qt_compare("prefill", prefill, f, got); else printf("prefill: reference has %zu values, here %d\n", got, rows * m->talker.D); free(f); }
+    }
+    QtGen g = *gen_in;
+    g.trail = trail; g.ntrail = ntrail;
+    t0 = qt_now();
+    int frames = 0;
+    QtTeacher teach;
+    int first_flip = -1;
+    memset(&teach, 0, sizeof teach);
+    teach.first_flip = &first_flip;
+    const int teaching = check && getenv("QT_TEACH");                  /* the reference's codes drive the run: every one must be the engine's own argmax */
+    if (teaching) {
+        snprintf(path, sizeof path, "%s/%s/codes.i32", check, mode);
+        teach.codes = (const int *)qt_load_f32(path, &got);
+        if (!teach.codes || got % QT_GROUPS) { fprintf(stderr, "qwen3tts: no codes.i32 to teach with\n"); return 1; }
+        teach.frames = (int)(got / QT_GROUPS);
+    }
+    int *codes = qt_generate(m, prefill, rows, &g, &frames, NULL, teaching ? &teach : NULL);
+    const double t_gen = qt_now() - t0;
+    if (teaching)
+        printf("teacher: %d choices over %d frames; %d of the reference's codes were not my argmax (largest margin %.2e logits, first at frame %d); ends with the end token: %s\n",
+               teach.choices, teach.frames, teach.flips, teach.worst_gap, first_flip, teach.eos_ok ? "yes" : "NO");
+    if (frames <= 0) { fprintf(stderr, "qwen3tts: no audio\n"); return 1; }
+    int tn = 0;
+    float *wavout;
+    if (nref > 0) {
+        int *all = (int *)malloc((size_t)(nref + frames) * QT_GROUPS * sizeof(int));
+        memcpy(all, rc, (size_t)nref * QT_GROUPS * sizeof(int));
+        memcpy(all + (size_t)nref * QT_GROUPS, codes, (size_t)frames * QT_GROUPS * sizeof(int));
+        float *full = qt_codec_decode(&m->codec, all, nref + frames, &tn);
+        const int cut = (int)((double)nref / (double)(nref + frames) * (double)tn);
+        const int nn = tn - cut;
+        wavout = (float *)malloc((size_t)nn * sizeof(float));
+        memcpy(wavout, full + cut, (size_t)nn * sizeof(float));
+        tn = nn;
+    } else wavout = qt_codec_decode(&m->codec, codes, frames, &tn);
+    fprintf(stderr, "qwen3tts: %d frames (%.2f s of audio): %.2f s (%.0f ms a frame)\n", frames, (double)tn / QT_SR, t_gen, 1000.0 * t_gen / frames);
+    if (out && qt_write_wav(out, wavout, tn, QT_SR)) { fprintf(stderr, "qwen3tts: cannot write %s\n", out); return 1; }
+    if (check) {
+        snprintf(path, sizeof path, "%s/%s/codes.i32", check, mode);
+        int *r = (int *)qt_load_f32(path, &got);
+        if (r) {
+            const int same = got == (size_t)frames * QT_GROUPS && !memcmp(r, codes, got * 4);
+            printf("codes: %s (%d frames here, %zu in the reference)\n", same ? "identical" : "DIFFERENT", frames, got / QT_GROUPS);
+            if (!same) {
+                size_t first = 0;
+                const size_t cmp = got < (size_t)frames * QT_GROUPS ? got : (size_t)frames * QT_GROUPS;
+                while (first < cmp && r[first] == codes[first]) first++;
+                printf("  first difference at frame %zu, group %zu\n", first / QT_GROUPS, first % QT_GROUPS);
+            }
+            free(r);
+        }
+        snprintf(path, sizeof path, "%s/%s/wav.f32", check, mode);
+        float *f = qt_load_f32(path, &got);
+        if (f) { if (got == (size_t)tn) qt_compare("waveform", wavout, f, got); else printf("waveform: reference has %zu samples, here %d\n", got, tn); free(f); }
+    }
+    return 0;
+}
+
 static const char *QT_USAGE =
     "usage: qwen3tts --model DIR --serve | --text TEXT [--speaker NAME] [--instruct STYLE] [--language NAME] [--out FILE.wav] [--greedy] [--seed N] [--max-frames N] [--ref REFDIR]\n"
+    "       qwen3tts --model BASE_DIR --text TEXT --clone-wav REF.wav [--clone-text WHAT-IT-SAYS | --xvector] [--language NAME] [--out FILE.wav] [--check CLONE_REFDIR]\n"
     "       qwen3tts --codec DIR --decode-codes FILE.i32 [--out FILE.wav] [--ref REFDIR]\n";
 
 int main(int argc, char **argv){
     const char *model_dir = NULL, *codec_dir = NULL, *codes_path = NULL, *out = NULL, *ref = NULL, *text = NULL, *speaker = "Ryan", *instruct = NULL, *language = "Auto";
-    int teacher_forcing = 0, serve = 0;
-    QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0};
+    int teacher_forcing = 0, serve = 0, xvec = 0;
+    const char *clone_wav = NULL, *clone_text = NULL, *check = NULL;
+    QtGen gen = {0, 0.9f, 50, 1.05f, 0, 0.9f, 50, 4096, 0, NULL, 0};
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
         else if (!strcmp(argv[i], "--codec") && i + 1 < argc) codec_dir = argv[++i];
@@ -1551,6 +1903,10 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--language") && i + 1 < argc) language = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
+        else if (!strcmp(argv[i], "--clone-wav") && i + 1 < argc) clone_wav = argv[++i];
+        else if (!strcmp(argv[i], "--clone-text") && i + 1 < argc) clone_text = argv[++i];
+        else if (!strcmp(argv[i], "--check") && i + 1 < argc) check = argv[++i];
+        else if (!strcmp(argv[i], "--xvector")) xvec = 1;
         else if (!strcmp(argv[i], "--greedy")) { gen.greedy = 1; gen.sub_greedy = 1; }
         else if (!strcmp(argv[i], "--teacher")) teacher_forcing = 1;
         else if (!strcmp(argv[i], "--serve")) serve = 1;
@@ -1609,6 +1965,10 @@ int main(int argc, char **argv){
     qt_vk_open();                      /* once the weights are loaded: the device opens, and each matrix goes up on the first request */
 #endif
     if (serve) return qt_serve(m, qt_name_of(model_dir), &gen);
+    if (m->base) {
+        if (!clone_wav) { fprintf(stderr, "qwen3tts: a Base model needs --clone-wav FILE.wav (24 kHz mono) [--clone-text WHAT-IT-SAYS | --xvector]\n"); return 2; }
+        return qt_clone_cli(m, text, language, clone_wav, clone_text, xvec, &gen, out, check);
+    }
     int nids = 0, rows = 0;
     int *ids = qt_text_ids(m, text, &nids);
     float *prefill = qt_prefill(m, ids, nids, speaker, instruct, language, &rows, err, sizeof err);

@@ -2088,6 +2088,37 @@
         }
       }
     },
+    "/v1/audio/voices": {
+      "get": {
+        "tags": ["Router"],
+        "summary": "List the saved voices",
+        "description": "The saved voices of the voice-cloning speech models (Qwen3-TTS Base): a name, a reference clip and what it says. `mode` is `in-context` with the text, `x-vector` without. Only `coli router` has this route.",
+        "operationId": "listVoices",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "responses": { "200": { "description": "The voices.", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      },
+      "post": {
+        "tags": ["Router"],
+        "summary": "Save a voice from a reference clip",
+        "description": "Creates or replaces a voice. `audio` is the base64 of an audio file (or a `data:` URL), 1 to 60 s of speech; `text` is what it says (optional). `coli voice add` does the same.",
+        "operationId": "saveVoice",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "audio"], "properties": {
+          "name": { "type": "string", "description": "Lower-case letters, digits, `-` and `_`, up to 64 characters." },
+          "audio": { "type": "string" }, "text": { "type": "string", "maxLength": 2000 } } } } } },
+        "responses": { "200": { "description": "`created` or `replaced`, with the voice.", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      }
+    },
+    "/v1/audio/voices/delete": {
+      "post": {
+        "tags": ["Router"],
+        "summary": "Remove a saved voice",
+        "operationId": "deleteVoice",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "`deleted`.", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      }
+    },
     "/v1/presets/delete": {
       "post": {
         "tags": [
@@ -3022,13 +3053,16 @@
         "properties": {
           "model": { "type": "string" },
           "input": { "type": "string", "maxLength": 4096, "description": "The text to speak." },
-          "voice": { "type": "string", "default": "ryan", "description": "A speaker of the model (`serena vivian uncle_fu ryan aiden ono_anna sohee eric dylan`) or one of OpenAI's names (`alloy echo fable onyx nova shimmer ash coral sage`), which stand for speakers." },
+          "voice": { "type": "string", "default": "ryan", "description": "For a Base model: the name of a saved voice (`GET /v1/audio/voices`), no default. Otherwise: a speaker of the model (`serena vivian uncle_fu ryan aiden ono_anna sohee eric dylan`) or one of OpenAI's names (`alloy echo fable onyx nova shimmer ash coral sage`), which stand for speakers." },
           "language": { "type": "string", "default": "auto", "description": "A language name or ISO-639-1 code (`zh en de it pt es ja ko fr ru`), or `auto`: the model decides from the text." },
           "response_format": { "type": "string", "enum": ["wav", "pcm", "mp3", "opus", "aac", "flac"], "default": "wav", "description": "`mp3`, `opus`, `aac` and `flac` need ffmpeg on the server. `pcm` is 16-bit little-endian mono at 24 kHz." },
           "speed": { "type": "number", "minimum": 0.25, "maximum": 4, "default": 1, "description": "Only 1 is accepted." },
           "instructions": { "type": "string", "description": "For the 1.7B models: a style for the CustomVoice (\"Speak slowly and sadly.\"), the voice itself for VoiceDesign (\"A warm, deep male voice.\"; `voice` is then ignored). Refused by the 0.6B." },
           "stream_format": { "type": "string", "enum": ["audio"], "description": "`sse` is refused: the audio comes in one piece." },
-          "seed": { "type": "integer", "minimum": 0, "description": "The same text, voice and seed give the same speech." }
+          "seed": { "type": "integer", "minimum": 0, "description": "The same text, voice and seed give the same speech." },
+          "reference_audio": { "type": "string", "description": "A Base (voice-cloning) model only: the base64 of a reference clip (or a `data:` URL), 1 to 60 s of speech (3 to 30 is best), up to a few megabytes. The voice is cloned from it; `voice` then need not name anyone." },
+          "reference_text": { "type": "string", "maxLength": 2000, "description": "What the reference clip says. With it the voice is cloned in context (the closer likeness); without it only the clip's speaker embedding is used. For a saved voice, overrides its stored text for this request." },
+          "x_vector_only": { "type": "boolean", "default": false, "description": "Use the speaker embedding alone, even when the reference text is known." }
         }
       },
       "MusicRequest": {

@@ -28,6 +28,7 @@ import music_engine                 # the acestep serve protocol, WAV and reques
 import embedding_engine             # the qwen3embed serve protocol and the request rules of POST /v1/embeddings and /v1/rerank
 import asr_engine                   # the qwen3asr serve protocol and POST /v1/audio/transcriptions rules for it
 import speech_engine                # the qwen3tts serve protocol and POST /v1/audio/speech rules for it
+import voices                       # saved voices for the cloning (Base) speech models
 import media_meta                   # the settings written inside a finished picture or song
 import library                     # the kept pictures and songs, listed and served
 import gemma4_chat                  # Gemma 4's chat template, tool-call syntax and thinking channel
@@ -6775,6 +6776,10 @@ class APIServer(ThreadingHTTPServer):
                 entry["speech"]["device"] = info["device"]
             entry["speech"]["kind"] = info.get("kind") or "custom_voice"
             entry["speech"]["instructions"] = bool(info.get("instruct"))        # a style (CustomVoice 1.7B) or the voice's description (VoiceDesign)
+            entry["speech"]["clone"] = bool(info.get("clone"))                  # a Base model: speaks in a saved voice or a reference clip
+            if info.get("clone"):
+                entry["speech"]["voices"] = {}                                  # no OpenAI names: `voice` is a saved voice's name
+                entry["speech"]["saved_voices"] = [voice["name"] for voice in voices.list_voices()]
         if is_image_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["image"] = {key: info.get(key) for key in IMAGE_OPTION_KEYS}
@@ -8494,6 +8499,32 @@ class APIHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(200, asr_engine.transcription_payload(request, result, seconds, self.server.model_id), request_id, headers)
 
+    def speech_reference(self, engine, request):
+        """The reference a cloning (Base) model speaks from, or None for the other speech models: the clip sent with the request
+        (`reference_audio`, converted to the engine's 24 kHz mono) or the saved voice `voice` names."""
+        info = getattr(engine, "info", None) or {}
+        if not info.get("clone"):
+            return None
+        x_vector_only = request["x_vector_only"]
+        if request["reference"] is not None:
+            try:
+                wav, _seconds = voices.prepare_reference(request["reference"])
+            except voices.VoiceError as error:
+                raise APIError(400, str(error), "reference_audio", "invalid_audio")
+            text = request["reference_text"]
+            return {"wav": wav, "text": text, "x_vector_only": x_vector_only or not text}
+        name = request["voice"]
+        saved = voices.get(name) if name else None
+        if saved is None:
+            have = ", ".join(voice["name"] for voice in voices.list_voices()) or "none yet"
+            if name:
+                raise APIError(400, f"There is no saved voice called {name!r} (saved voices: {have}); send `reference_audio` (and `reference_text`) "
+                                    "to clone a voice from a clip.", "voice", "invalid_value")
+            raise APIError(400, f"This model speaks in a cloned voice: name a saved `voice` (saved voices: {have}) or send `reference_audio` "
+                                "(and `reference_text`, what the clip says).", "voice", "missing_required_parameter")
+        text = request["reference_text"] or saved["text"]
+        return {"path": saved["path"], "text": text, "x_vector_only": x_vector_only or not text}
+
     # POST /v1/audio/speech: OpenAI's text-to-speech request, answered by a speech engine (Qwen3-TTS CustomVoice). The text is spoken in a
     # named speaker's voice; the answer is the audio itself (wav, or raw pcm, or with ffmpeg mp3, opus, aac, flac). One request at a
     # time under the scheduler's admission, like every engine: the speech takes a few times its own length on the CPU.
@@ -8507,13 +8538,14 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, str(error), error.param, "invalid_value")
         if request["format"] in speech_engine.NEEDS_FFMPEG and not speech_engine.ffmpeg_path():     # refuse before the work, not after it
             raise APIError(400, speech_engine.FFMPEG_MISSING.format(fmt=request["format"]), "response_format", "invalid_value")
+        reference = self.speech_reference(engine, request)
         with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
             if not engine.alive:
                 raise APIError(503, f"The speech synthesis engine is not running ({engine.dead or 'exited'}).",
                                None, "engine_unavailable", "server_error")
             try:
                 result = engine.speak(request["input"], speaker=request["speaker"], language=request["language"], seed=request["seed"],
-                                      greedy=request["greedy"], instruct=request["instruct"])
+                                      greedy=request["greedy"], instruct=request["instruct"], reference=reference)
             except speech_engine.EmbeddingEngineError as error:
                 raise APIError(500, f"The speech synthesis engine failed: {error}", None, "engine_error", "server_error") from None
         try:

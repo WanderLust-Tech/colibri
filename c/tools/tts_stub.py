@@ -9,7 +9,8 @@ string being `speaker|language|seed|greedy|max_frames` (the fields as the engine
 request takes), TTS_STUB_DIE_ON (a text that makes the stub exit without answering), TTS_STUB_FAIL_ON (a text it answers with ERROR),
 TTS_STUB_TRUNCATE (say every answer was cut at the frame limit), TTS_STUB_NOFILE (answer AUDIO without writing the file),
 TTS_STUB_INSTRUCT (a model that takes a style instruction: READY says so, and the echo ends with `|instruct`), TTS_STUB_KIND=voice_design
-(no speakers: the instruction makes the voice).
+(no speakers: the instruction makes the voice), TTS_STUB_KIND=base (a cloning model: READY says `clone`, there are no speakers, SPEAK needs
+`ref_wav` (the stub reads the file) and the echo ends with `|ref=<bytes of the file>|<ref_text>|<x_vector_only as 0 or 1>`).
 """
 import json
 import os
@@ -39,8 +40,9 @@ def send(keyword, body):
 def main():
     if "--serve" not in sys.argv:
         sys.exit("tts_stub: --serve only")
-    send("READY", {"model": "tts-stub", "task": "speech", "kind": KIND, "instruct": INSTRUCT or KIND == "voice_design", "sample_rate": RATE,
-                   "layers": 1, "speakers": [] if KIND == "voice_design" else SPEAKERS, "languages": LANGUAGES, "device": "cpu"})
+    send("READY", {"model": "tts-stub", "task": "speech", "kind": KIND, "clone": KIND == "base", "instruct": INSTRUCT or KIND == "voice_design",
+                   "sample_rate": RATE, "layers": 1, "speakers": [] if KIND in ("voice_design", "base") else SPEAKERS, "languages": LANGUAGES,
+                   "device": "cpu"})
     for line in sys.stdin:
         keyword, _, rest = line.rstrip("\r\n").partition(" ")
         if keyword != "SPEAK":
@@ -67,13 +69,27 @@ def main():
             send("ERROR", {"id": rid, "message": "the speaker is not one this model has"})
             continue
         speaker = request.get("speaker") or ""
-        if speaker and speaker not in SPEAKERS:
+        ref_wav = request.get("ref_wav")
+        if KIND == "base" and not ref_wav:
+            send("ERROR", {"id": rid, "message": "this is a Base model: it speaks in a cloned voice and needs reference audio (ref_wav)"})
+            continue
+        if KIND != "base" and ref_wav:
+            send("ERROR", {"id": rid, "message": "this model does not clone voices (a Base checkpoint does)"})
+            continue
+        if speaker and speaker not in SPEAKERS and KIND != "base":
             send("ERROR", {"id": rid, "message": f"the speaker `{speaker}` is not one this model has"})
             continue
         echo = "|".join(str(x) for x in (speaker, request.get("language", ""), request.get("seed", 0), int(bool(request.get("greedy"))),
                                          request.get("max_frames", 0))).encode()
         if request.get("instruct"):
             echo += b"|" + request["instruct"].encode()
+        if ref_wav:
+            try:
+                size = os.path.getsize(ref_wav)
+            except OSError:
+                send("ERROR", {"id": rid, "message": f"cannot open the reference audio {ref_wav}"})
+                continue
+            echo += f"|ref={size}|{request.get('ref_text', '')}|{int(bool(request.get('x_vector_only')))}".encode()
         samples = max(int(len(text) * 0.05 * RATE), len(echo) + 2)
         pcm = [len(echo)] + list(echo) + [0] * (samples - len(echo) - 1)
         if not NOFILE:

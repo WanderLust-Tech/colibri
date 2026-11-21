@@ -178,7 +178,9 @@ Apache-2.0. `POST /v1/audio/speech` in OpenAI's shape (`input`, `voice`, `respon
 and `seed` are extensions), WAV by default, PCM, and MP3, Opus, AAC and FLAC with ffmpeg; `coli speak "text"` from the terminal. No style
 instructions on this one. The 1.7B CustomVoice (`qwen3-tts-1.7b-customvoice`, 4.5 GB) takes a style (`instructions`: "speak slowly and sadly"),
 and the 1.7B VoiceDesign (`qwen3-tts-1.7b-voicedesign`, 4.5 GB) makes the voice from the description alone; on the card 21 to 27 ms a frame (5 s of
-speech in about 1.8 s). No cloning yet (the Base models are not built). The 0.6B is installed and live here.
+speech in about 1.8 s). The **Base** models (`qwen3-tts-0.6b-base`, 2.4 GB; `qwen3-tts-1.7b-base`, 4.5 GB) clone a voice from a few seconds of reference
+speech: saved with `coli voice add NAME clip.wav` and named in `voice`, or sent with the request (`reference_audio`, `reference_text`); the codes match
+the official implementation. The 0.6B is installed and live here.
 
 ## 9. Decision models
 
@@ -197,7 +199,7 @@ write text. Reached through `POST /v1/systemone` ([systemone.md](systemone.md)).
 |---|---|
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/messages` | every chat model (section 3) |
 | `POST /v1/audio/transcriptions` | Qwen3-ASR 0.6B and 1.7B (a dedicated recogniser); Gemma 4 E2B and E4B (a chat model asked to transcribe) |
-| `POST /v1/audio/speech` | Qwen3-TTS-0.6B-CustomVoice, 1.7B-CustomVoice, 1.7B-VoiceDesign |
+| `POST /v1/audio/speech` | Qwen3-TTS-0.6B-CustomVoice, 1.7B-CustomVoice, 1.7B-VoiceDesign, and the Base models (a cloned voice) |
 | `POST /v1/images/generations` | Qwen-Image-2.1, Z-Image-Turbo |
 | `POST /v1/images/edits` | Qwen-Image-2.1 |
 | `POST /v1/audio/music` | ACE-Step 1.5 |

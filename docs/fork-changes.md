@@ -640,8 +640,18 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   Around it: the `instructions` field of `POST /v1/audio/speech` reaches the engine (`instruct` in `SPEAK`; the model card says `kind` and
   `instructions`), `coli speak --instruct`, `qwen3-tts-1.7b-customvoice` and `qwen3-tts-1.7b-voicedesign` in the catalogue, a VoiceDesign display
   variant (`qwen3-tts-1.7b-voicedesign` as its API id), `tests/test_qwen3tts_17_real.py` (14 tests), the stub engine and gateway tests.
-- **Not done**: voice cloning (the Base models: the codec's encoder and a speaker encoder), streaming, the codec's first half on the card;
-  the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
+- **T5 (2026-11-21): voice cloning, the Base models.** `c/qwen3tts_clone.h`: the log-mel front end, the ECAPA-TDNN speaker encoder and the
+  codec's *encoder* (Kyutai's Mimi: SEANet, an 8-layer transformer, the stride-2 downsampling, a split residual quantizer), and the streaming
+  in-context prompt of `generate_voice_clone` with its trailing text; the reference's frames are decoded with the new ones and cut off. Held to the
+  package (fp32, greedy, the 11 s JFK clip): the speaker embedding 7e-7, the 2208 reference codes identical, the prompt 7e-7, every code of the
+  package's 89-frame speech the engine's own argmax, the codes identical and the waveform 6e-6, in both modes (in-context, x-vector only), CPU and
+  card (16 ms a frame); the Mimi config's `sliding_window` is not applied by the package's transformers, so not here. Around it: `qwen3-tts-0.6b-base`
+  and `-1.7b-base` (catalogue, display variants, API ids), `voices.py` (saved voices in `~/colibri-voices`), `reference_audio` / `reference_text` /
+  `x_vector_only` and a saved `voice` on `POST /v1/audio/speech`, `GET/POST /v1/audio/voices` and `POST /v1/audio/voices/delete` on the router,
+  `coli voice list|add|remove` (the words are written down by Qwen3-ASR when `--text` is not given), `coli speak --reference/--reference-text/
+  --x-vector`, the engine's one-shot `--clone-wav` with `--check`, `tools/qwen3_tts_clone_ref.py`, `tests/test_qwen3tts_clone_real.py` (11 + 3),
+  `tests/test_tts_clone.py` (23).
+- **Not done**: streaming, the codec's first half and its encoder on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
 ## 3. Planned and open
 

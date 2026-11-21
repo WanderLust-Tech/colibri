@@ -609,8 +609,10 @@ When the served model is a **Qwen3-TTS** (`qwen3-tts-0.6b`), `POST /v1/audio/spe
 `input` (up to 4096 characters), `voice`, `response_format`. The answer is the audio itself: a WAV by default, `pcm` (16-bit mono, 24 kHz), and
 `mp3`, `opus`, `aac` or `flac` when the server has ffmpeg. `voice` is one of the model's nine speakers or one of OpenAI's names, which stand for
 speakers; `language` and `seed` are extensions. `instructions` is taken by the 1.7B models: a style for the CustomVoice, the voice itself for
-VoiceDesign (which has no named speakers; `voice` is then ignored). `speed` other than 1, `instructions` on the 0.6B and `stream_format` `sse` are
-refused with the field named.
+VoiceDesign (which has no named speakers; `voice` is then ignored). The **Base** models clone a voice: `voice` names a saved voice (`GET`, `POST
+/v1/audio/voices` and `POST /v1/audio/voices/delete` on the router; `coli voice`), or the request carries `reference_audio` (base64 of an audio file)
+with `reference_text`, what it says (`x_vector_only` skips the text's use). `speed` other than 1, `instructions` on the 0.6B and `stream_format`
+`sse` are refused with the field named.
 
 ```sh
 curl http://127.0.0.1:8000/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \

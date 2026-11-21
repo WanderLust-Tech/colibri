@@ -6,7 +6,8 @@ protocol is the header of c/qwen3tts.c, the other engines' shape (lines of a key
 
     READY {...}                      once, after the weights are loaded: model, task "speech", kind, sample_rate, speakers, languages
     SPEAK {...}                      client, one request at a time: id, text, speaker, language, out (the path of the WAV file to write),
-                                     seed, greedy, max_frames, temperature
+                                     seed, greedy, max_frames, temperature; instruct (a style, or VoiceDesign's description of the voice);
+                                     a Base (cloning) model: ref_wav (a 24 kHz mono WAV on this machine), ref_text, x_vector_only
     AUDIO {...}                      id, path, samples, sample_rate, frames, audio_seconds, seconds, truncated
     ERROR {...}                      the engine stays alive for the next SPEAK
 
@@ -22,7 +23,8 @@ from pathlib import Path
 
 from embedding_engine import EmbeddingEngine, EmbeddingEngineError, EmbeddingRequestError
 
-DEFAULT_INFO = {"model": "speech", "task": "speech", "sample_rate": 24000, "speakers": [], "languages": []}
+DEFAULT_INFO = {"model": "speech", "task": "speech", "sample_rate": 24000, "speakers": [], "languages": [], "clone": False}
+MAX_REFERENCE_B64 = 6 << 20                 # an inline reference_audio, as base64 (the body limit is 4 MB anyway)
 MAX_INPUT_CHARS = 4096                       # OpenAI's own limit on `input`
 FORMATS = ("wav", "pcm", "mp3", "opus", "aac", "flac")
 NEEDS_FFMPEG = ("mp3", "opus", "aac", "flac")
@@ -50,14 +52,29 @@ class SpeechEngine(EmbeddingEngine):
     log_tag = "tts"
     default_info = DEFAULT_INFO
 
-    def speak(self, text, speaker="", language="auto", seed=None, greedy=False, max_frames=None, temperature=None, instruct=None):
-        """Run one SPEAK and return {"wav": the WAV file's bytes, "sample_rate", "frames", "audio_seconds", "seconds", "truncated"}."""
+    def speak(self, text, speaker="", language="auto", seed=None, greedy=False, max_frames=None, temperature=None, instruct=None, reference=None):
+        """Run one SPEAK and return {"wav": the WAV file's bytes, "sample_rate", "frames", "audio_seconds", "seconds", "truncated"}.
+        `reference` (a Base model): {"wav": the bytes of a 24 kHz mono WAV, or "path": one on disk, "text": what it says, "x_vector_only": bool}."""
         handle, path = tempfile.mkstemp(prefix="coli-tts-", suffix=".wav")
         os.close(handle)
+        ref_path = None
         try:
             request = {"text": text, "speaker": speaker, "language": language, "out": path.replace("\\", "/")}
             if instruct:
                 request["instruct"] = instruct
+            if reference:
+                if reference.get("path"):
+                    ref_path = None
+                    request["ref_wav"] = str(reference["path"]).replace("\\", "/")
+                else:
+                    rhandle, ref_path = tempfile.mkstemp(prefix="coli-ref-", suffix=".wav")
+                    with os.fdopen(rhandle, "wb") as out:
+                        out.write(reference["wav"])
+                    request["ref_wav"] = ref_path.replace("\\", "/")
+                if reference.get("text") and not reference.get("x_vector_only"):
+                    request["ref_text"] = reference["text"]
+                if reference.get("x_vector_only"):
+                    request["x_vector_only"] = True
             if seed:
                 request["seed"] = int(seed)
             if greedy:
@@ -77,10 +94,12 @@ class SpeechEngine(EmbeddingEngine):
                     "audio_seconds": float(body.get("audio_seconds") or 0.0), "seconds": float(body.get("seconds") or 0.0),
                     "truncated": bool(body.get("truncated"))}
         finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            for leftover in (path, ref_path):
+                if leftover:
+                    try:
+                        os.unlink(leftover)
+                    except OSError:
+                        pass
 
 
 def speech_request(body, info=None):
@@ -92,7 +111,12 @@ def speech_request(body, info=None):
     default) lets the model decide. `response_format` is wav (the default), pcm (raw 16-bit little-endian mono, 24 kHz), and mp3, opus,
     aac and flac when the server has ffmpeg. `speed` other than 1 is refused (the model has no rate control), and so is `instructions`
     for a model that does not take them (the 1.7B CustomVoice takes a style, VoiceDesign the description of the voice: both go to the engine
-    as `instruct`; VoiceDesign has no speakers, so `voice` names no one there). `seed` is an extension (a given seed repeats the same speech)."""
+    as `instruct`; VoiceDesign has no speakers, so `voice` names no one there). `seed` is an extension (a given seed repeats the same speech).
+
+    A Base model (the READY line says `clone`) speaks in a cloned voice: `voice` names a saved voice (voices.py; `POST /v1/audio/voices`), or the
+    request carries its own reference: `reference_audio` (base64 of an audio file, or a data: URL) with `reference_text`, what the clip says
+    (without it only the speaker's embedding is used: a looser likeness); `x_vector_only` asks for that even with the text. The checked
+    fields come back as `voice` (the saved name, or None), `reference` (the audio's bytes, or None), `reference_text`, `x_vector_only`."""
     info = info or {}
     if not isinstance(body, dict):
         raise EmbeddingRequestError("The request body must be a JSON object.")
@@ -116,15 +140,41 @@ def speech_request(body, info=None):
         if not info.get("instruct"):
             raise EmbeddingRequestError("`instructions` is not supported by this model: it speaks in the voice of a named speaker "
                                         "and takes no style description.", "instructions")
+    clone = bool(info.get("clone"))
+    ref_audio = body.get("reference_audio")
+    ref_text = body.get("reference_text")
+    x_vector_only = body.get("x_vector_only", False)
+    reference = None
+    if ref_audio not in (None, ""):
+        if not clone:
+            raise EmbeddingRequestError("`reference_audio` is for a voice-cloning model (a Qwen3-TTS Base checkpoint): this one speaks in its own voices.",
+                                        "reference_audio")
+        if not isinstance(ref_audio, str) or len(ref_audio) > MAX_REFERENCE_B64:
+            raise EmbeddingRequestError("`reference_audio` must be the base64 of an audio file (or a data: URL), at most a few megabytes.", "reference_audio")
+        import base64
+        data = ref_audio.split(",", 1)[1] if ref_audio.startswith("data:") and "," in ref_audio else ref_audio
+        try:
+            reference = base64.b64decode(data, validate=True)
+        except Exception:
+            raise EmbeddingRequestError("`reference_audio` is not valid base64.", "reference_audio")
+        if not reference:
+            raise EmbeddingRequestError("`reference_audio` is empty.", "reference_audio")
+    if ref_text is not None and (not isinstance(ref_text, str) or len(ref_text) > 2000):
+        raise EmbeddingRequestError("`reference_text` must be text of at most 2000 characters: what the reference audio says.", "reference_text")
+    if not isinstance(x_vector_only, bool):
+        raise EmbeddingRequestError("`x_vector_only` must be true or false.", "x_vector_only")
     stream_format = body.get("stream_format")
     if stream_format not in (None, "", "audio"):
         raise EmbeddingRequestError("`stream_format` \"sse\" is not supported: the audio comes in one piece.", "stream_format")
     speakers = [str(name).lower() for name in info.get("speakers") or ()]
-    voice = body.get("voice", DEFAULT_SPEAKER)
+    voice = body.get("voice", None if clone else DEFAULT_SPEAKER)
     if isinstance(voice, dict):
         voice = voice.get("id")
-    if not isinstance(voice, str) or not voice.strip():
-        raise EmbeddingRequestError("`voice` must be the name of a speaker.", "voice")
+    if clone and voice in (None, ""):
+        voice = ""
+    elif not isinstance(voice, str) or not voice.strip():
+        raise EmbeddingRequestError("`voice` must be the name of a " + ("saved voice." if clone else "speaker."), "voice")
+    saved_name = voice.strip().lower()
     speaker = voice.strip().lower().replace(" ", "_").replace("-", "_")
     speaker = OPENAI_VOICES.get(speaker, speaker) if speaker not in speakers else speaker
     if speakers and speaker not in speakers:
@@ -142,8 +192,10 @@ def speech_request(body, info=None):
     seed = body.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
         raise EmbeddingRequestError("`seed` must be a non-negative integer.", "seed")
-    return {"input": text, "speaker": speaker, "language": language, "format": fmt, "seed": seed or None, "greedy": False,
-            "instruct": instructions if isinstance(instructions, str) and instructions.strip() else None}
+    return {"input": text, "speaker": "" if clone else speaker, "language": language, "format": fmt, "seed": seed or None, "greedy": False,
+            "instruct": instructions if isinstance(instructions, str) and instructions.strip() else None,
+            "voice": saved_name if clone and saved_name else None, "reference": reference,
+            "reference_text": ref_text.strip() if isinstance(ref_text, str) and ref_text.strip() else None, "x_vector_only": x_vector_only}
 
 
 def wav_pcm(wav):

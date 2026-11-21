@@ -128,7 +128,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | T2 | talker and code predictor, sampling | the codes (greedy and seeded) against the reference |
 | T3 | line protocol, `/v1/audio/speech`, catalogue, router, `coli speak` | tests, real model |
 | T4 | 1.7B, VoiceDesign | measured |
-| T5 | cloning (codec encoder, speaker encoder) | against the reference |
+| T5 | cloning (codec encoder, speaker encoder) | done: 0.6B Base held to the package (reference codes 0 of 2208 differ, generated codes and waveform identical), saved voices, `coli voice` |
 
 ## Status
 
@@ -145,7 +145,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | T2 talker, code predictor, sampling | done: the prefill to 1.2e-7, the first logits to 2e-5, 0 of 1008 choices differ teacher forced, the codes identical free-running greedy |
 | T3 protocol, gateway, catalogue, registry, router, `coli speak`, tests | done: [qwen3-tts.md](qwen3-tts.md); the speech comes back through Qwen3-ASR as the input text, word for word; on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
 | T4 1.7B CustomVoice, VoiceDesign, style `instructions` | done: the 1.7B talker (2048 wide) and the predictor's projection, the instruction rows, no speaker row for VoiceDesign; both held to the official package (prefill 1.2e-7, 0 choices differ, codes identical, on the CPU and the card); gateway `instructions`, `coli speak --instruct`, catalogue entries; [qwen3-tts.md](qwen3-tts.md) |
-| T5 cloning (codec encoder, speaker encoder) | open |
+| T5 cloning (codec encoder, speaker encoder) | done (the codec encoder runs on the CPU: 0.7 s for an 11 s clip) |
 | T6 speed | done: a frame is 14 to 19 ms on the card (111 ms on the CPU), the codec's vocoder on the card too (1.05 s to 0.17 s for 5 s of speech); 56 s of speech in 11 s |
 
 Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend

@@ -64,7 +64,8 @@ class RequestRulesTest(unittest.TestCase):
 
     def test_the_defaults(self):
         self.assertEqual(speech_request({"input": "hello"}, INFO),
-                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "seed": None, "greedy": False, "instruct": None})
+                         {"input": "hello", "speaker": "ryan", "language": "auto", "format": "wav", "seed": None, "greedy": False, "instruct": None,
+                          "voice": None, "reference": None, "reference_text": None, "x_vector_only": False})
 
     def test_input_is_required_and_limited(self):
         self.refused({}, "input", "required")

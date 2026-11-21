@@ -1515,7 +1515,9 @@ def info_speech_model(a, resolved, row):
     if spk:
         row("speakers", ", ".join(spk))
     row("speaks", "24 kHz mono; " + ", ".join(sorted((cfg.get("codec_language_id") or {}).keys())))
-    if kind == "voice_design":
+    if kind == "base":
+        row("voice", "cloned from reference audio: coli voice add NAME clip.wav [--text WORDS], then --voice NAME; or --reference clip.wav --reference-text WORDS; no named speakers")
+    elif kind == "voice_design":
         row("voice", "described in words: --instruct / `instructions` (\"a warm, deep male voice, speaking slowly\"); no named speakers")
     elif cfg.get("hidden_size", 0) >= 2048:
         row("style", "takes a style instruction on top of the speaker: --instruct / `instructions` (\"speak slowly and sadly\")")
@@ -3892,6 +3894,13 @@ def cmd_speak(a):
     return speech_cli.speak(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
                             lambda path,body:_api_fetch(a,path,body),C)
 
+def cmd_voice(a):
+    """coli voice list|add|remove : the saved voices of the cloning speech models (speech_cli.py, docs/qwen3-tts.md)."""
+    banner("voice")
+    import retrieval_cli, speech_cli
+    return speech_cli.voice(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
+                            lambda path,fields,filename,data:_api_upload(a,path,fields,filename,data),C)
+
 def cmd_transcribe(a):
     """coli transcribe FILE... : text from a running server's speech recognition model (speech_cli.py, docs/qwen3-asr.md)."""
     banner("transcribe")
@@ -4753,6 +4762,9 @@ def main():
     psp.add_argument("text",nargs="*",metavar="TEXT",help="the words to speak (- reads standard input; up to 4096 characters)")
     psp.add_argument("--voice",default=None,metavar="NAME",help="the speaker (ryan, vivian, serena, ...; default ryan; coli info lists them)")
     psp.add_argument("--instruct",default=None,metavar="STYLE",help="a style (\"speak slowly and sadly\") for the 1.7B CustomVoice, or the voice itself (\"a warm, deep male voice\") for VoiceDesign")
+    psp.add_argument("--reference",default=None,metavar="FILE",help="clone the voice of this clip (a few seconds of speech) with a Base model: --reference-text says what it says")
+    psp.add_argument("--reference-text",default=None,metavar="WORDS",help="what the reference clip says (without it only the speaker's embedding is used: a looser likeness)")
+    psp.add_argument("--x-vector",action="store_true",help="use the reference's speaker embedding alone, even with --reference-text")
     psp.add_argument("--language",default=None,metavar="CODE",help="the language (en, zh, ... or a name); without it the model decides")
     psp.add_argument("--out",default=None,metavar="FILE",help="where to write the audio (default speech.wav; the suffix picks the format)")
     psp.add_argument("--format",default=None,choices=("wav","mp3","flac","opus","aac","pcm"),help="the audio format (mp3, flac, opus and aac need ffmpeg on the server)")
@@ -4760,6 +4772,15 @@ def main():
     psp.add_argument("--model",default=None,help="the speech synthesis model (default: the first the server lists)")
     psp.add_argument("--host",default="127.0.0.1"); psp.add_argument("--port",type=int,default=None)
     psp.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pvo=sub.add_parser("voice",help="the saved voices a voice-cloning model speaks in: list, add NAME FILE, remove NAME")
+    pvo.add_argument("action",choices=("list","add","remove"))
+    pvo.add_argument("name",nargs="?",default=None,help="the voice's name (lower-case letters, digits, - and _)")
+    pvo.add_argument("file",nargs="?",default=None,help="add: the reference clip (3 to 30 s of speech; WAV, MP3, and with ffmpeg more)")
+    pvo.add_argument("--text",default=None,metavar="WORDS",help="add: what the clip says (without it the server's speech recognition model writes it down)")
+    pvo.add_argument("--no-text",action="store_true",help="add: do not write the words down: the voice is the speaker's embedding alone")
+    pvo.add_argument("--json",action="store_true",help="list: print the server's answer as it is")
+    pvo.add_argument("--host",default="127.0.0.1"); pvo.add_argument("--port",type=int,default=None)
+    pvo.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     prr=sub.add_parser("rerank",help="rank documents against a query with the server's reranking model")
     prr.add_argument("query",nargs="?",default=None,help="the question or search words")
     prr.add_argument("documents",nargs="*",metavar="DOCUMENT",help="the documents to rank (- reads lines from standard input)")
@@ -4871,7 +4892,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,
