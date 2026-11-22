@@ -170,6 +170,16 @@ class Gateway(unittest.TestCase):
         self.assertEqual(first["data"][0]["b64_json"], again["data"][0]["b64_json"])
         self.assertNotEqual(first["data"][0]["b64_json"], other["data"][0]["b64_json"])
 
+    def test_the_model_card_tells_a_client_what_it_can_offer(self):
+        status, _, raw = self.rig.request("/v1/models", method="GET")
+        audio = json.loads(raw)["data"][0]["audio"]
+        self.assertEqual(audio["dits"], ["turbo", "base"])
+        self.assertEqual(audio["tasks"], ["text2music", "cover", "repaint", "extract", "lego", "complete"])
+        self.assertEqual({k: audio["guided"][k] for k in ("available", "default_steps", "max_steps", "default_guidance")},
+                         {"available": True, "default_steps": 32, "max_steps": 200, "default_guidance": 7})
+        self.assertIn("drums", audio["guided"]["tracks"])
+        self.assertEqual(audio["planner"], {"available": False, "lms": [], "default_lm": "1.7B", "temperature": 0.85, "cfg_scale": 2.0, "top_p": 0.9})
+
     def test_refusals_are_400s_that_name_the_field(self):
         wav = B64(make_wav(2))
         for body, param in ((dict(task="extract", src_audio=wav, track_name="kazoo"), "track_name"),
@@ -191,6 +201,10 @@ class OlderEngine(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.rig.close()
+
+    def test_the_model_card_offers_neither(self):
+        audio = json.loads(self.rig.request("/v1/models", method="GET")[2])["data"][0]["audio"]
+        self.assertEqual((audio["dits"], audio["guided"]["available"], audio["planner"]["available"]), ([], False, False))     # an engine that announces no DiTs
 
     def test_the_tasks_are_refused_with_the_remedy(self):
         status, _, raw = self.rig.music(prompt="", task="extract", src_audio=B64(make_wav(2)))

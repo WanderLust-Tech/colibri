@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react"
 
-import { generateMusic, type ChatMessage, type GeneratedMusic, type MusicLimits, type MusicTask, type RepaintMode } from "./api"
+import { generateMusic, type ChatMessage, type GeneratedMusic, type MusicDit, type MusicLimits, type MusicTask, type RepaintMode } from "./api"
 import { parseSeed, randomSeed } from "./images"
 import {
-  DEFAULT_MUSIC_LIMITS, clampDuration, clampMusicSteps, clampUnit, clipProblem, lyricBytes, musicFileName, offersTask, repaintValid,
-  validDuration, validLanguage, type ClipProblem, type MusicRun,
+  DEFAULT_MUSIC_LIMITS, clampDuration, clampMusicSteps, clampUnit, clipProblem, guidanceValid, isGuidedTask, lyricBytes, musicFileName, offersTask,
+  repaintValid, runsGuided, stepLimits, validDuration, validLanguage, type ClipProblem, type MusicRun,
 } from "./music"
 import { setFinish } from "./transcript"
 
@@ -83,6 +83,14 @@ export function useMusic(env: MusicEnvironment) {
   const [repaintStrength, setRepaintStrength] = useState("0.5")
   const [coverStrength, setCoverStrength] = useState("1")
   const [coverNoise, setCoverNoise] = useState("0")
+  /* the planner and the guided DiT */
+  const [plan, setPlan] = useState(() => read("colibri.musicPlan", "") === "1")
+  const [lengthAuto, setLengthAuto] = useState(() => read("colibri.musicLengthAuto", "1") === "1")
+  const [chosenDit, setDit] = useState<MusicDit | "">("")
+  const [guidedSteps, setGuidedSteps] = useState(() => Number(read("colibri.musicGuidedSteps", "")) || 32)
+  const [guidance, setGuidance] = useState("7")
+  const [track, setTrack] = useState("")
+  const [completeTracks, setCompleteTracks] = useState<string[]>([])
   /* The files of each turn, by its id, for the buttons that make it again: kept in the page, not in the transcript. */
   const clipsOf = useRef(new Map<string, { source?: File; reference?: File }>())
   const seed = parseSeed(seedText)
@@ -90,14 +98,28 @@ export function useMusic(env: MusicEnvironment) {
   /* A model that does not offer the task chosen (or a model that is not for music) puts it back to composing. */
   const task: MusicTask = mode && offersTask(env.limits, chosenTask) ? chosenTask : "text2music"
   const audioIn = mode && limits.audioIn !== undefined
+  /* What the checkpoint has: a planner switch only with a planner, a DiT choice only with a second one. */
+  const hasPlanner = mode && limits.planner !== undefined
+  const dits = mode && limits.guided ? limits.guided.dits : []
+  const dit: MusicDit | "" = chosenDit !== "" && dits.includes(chosenDit) && chosenDit !== "turbo" ? chosenDit : ""
+  const guided = mode && limits.guided !== undefined && runsGuided(task, dit)
+  const planning = hasPlanner && plan && task === "text2music"
+  const auto = planning && lengthAuto
+  const activeLimits = stepLimits(limits, guided)
+  const activeSteps = guided ? guidedSteps : steps
+  const setActiveSteps = guided ? setGuidedSteps : setSteps
+  const guidanceValue = number(guidance)
 
   useEffect(() => {
     try {
       if (Number.isFinite(duration)) localStorage.setItem("colibri.musicDuration", String(duration))     // NaN: a field being edited
       if (Number.isFinite(steps)) localStorage.setItem("colibri.musicSteps", String(steps))
+      if (Number.isFinite(guidedSteps)) localStorage.setItem("colibri.musicGuidedSteps", String(guidedSteps))
       localStorage.setItem("colibri.musicLanguage", language)
+      localStorage.setItem("colibri.musicPlan", plan ? "1" : "")
+      localStorage.setItem("colibri.musicLengthAuto", lengthAuto ? "1" : "")
     } catch { /* restricted storage mode */ }
-  }, [duration, steps, language])
+  }, [duration, steps, guidedSteps, language, plan, lengthAuto])
 
   /* Object URLs live until the clip is replaced or the page closes. */
   const urls = useRef(new Set<string>())
@@ -122,25 +144,28 @@ export function useMusic(env: MusicEnvironment) {
   const referenceProblem: ClipProblem | undefined = reference ? clipProblem(reference.file, reference.seconds, limits) : undefined
   const from = number(repaintFrom)
   const to = repaintTo.trim() === "" ? undefined : number(repaintTo)
-  const spanOk = task !== "repaint" || repaintValid(from, to, source?.seconds, limits)
+  const spanOk = (task !== "repaint" && task !== "lego") || repaintValid(from, to, source?.seconds, limits)
   const strengthValue = number(repaintStrength)
   const coverStrengthValue = number(coverStrength)
   const coverNoiseValue = number(coverNoise)
   const unitOk = (value: number) => Number.isFinite(value) && value >= 0 && value <= 1
   const settingsOk = task === "cover" ? unitOk(coverStrengthValue) && unitOk(coverNoiseValue)
     : task === "repaint" ? repaintMode !== "balanced" || unitOk(strengthValue) : true
-  const clipsOk = (task === "text2music" || (source !== null && !sourceProblem)) && !referenceProblem
+  /* A completion may start from the description alone; the other clip tasks need the clip. */
+  const clipsOk = (task === "text2music" || task === "complete" ? !source || !sourceProblem : source !== null && !sourceProblem) && !referenceProblem
+  const needsLength = (task === "text2music" && !auto) || (task === "complete" && !source)
+  const guidedOk = !guided || (guidanceValid(guidanceValue) && (task !== "complete" || completeTracks.length > 0))
 
   /* The values the next song is made with: the remembered ones, put inside the range of the
      model that is selected now (another music model may allow less). */
   const effectiveDuration = clampDuration(duration, limits)
-  const effectiveSteps = clampMusicSteps(steps, limits)
+  const effectiveSteps = clampMusicSteps(activeSteps, activeLimits)
 
   const canSend = useMemo(() => mode && Boolean(
     (task !== "text2music" || env.draft.trim() || lyrics.trim()) && env.model && !env.loading && seed !== undefined &&
-    (task !== "text2music" || validDuration(duration, limits)) && Number.isInteger(steps) && steps >= 1 && steps <= limits.maxSteps &&
-    lyricBytes(lyrics) <= limits.maxLyricBytes && clipsOk && spanOk && settingsOk,
-  ), [mode, task, env.draft, env.model, env.loading, lyrics, seed, duration, steps, limits, clipsOk, spanOk, settingsOk])
+    (!needsLength || validDuration(duration, limits)) && Number.isInteger(activeSteps) && activeSteps >= 1 && activeSteps <= activeLimits.maxSteps &&
+    lyricBytes(lyrics) <= limits.maxLyricBytes && clipsOk && spanOk && settingsOk && guidedOk,
+  ), [mode, task, env.draft, env.model, env.loading, lyrics, seed, duration, activeSteps, activeLimits, limits, clipsOk, spanOk, settingsOk, needsLength, guidedOk])
 
   /* Generates into the assistant turn `targetId`, whose `song` already holds the request.
      Progress lives in `run`, outside the transcript; the finished song is written onto the
@@ -160,6 +185,9 @@ export function useMusic(env: MusicEnvironment) {
         prompt: request.prompt, lyrics: request.lyrics, language: request.language,
         duration: request.duration, steps: request.steps, seed: request.seed,
         ...(request.task ? { task: request.task } : {}),
+        ...(request.plan ? { plan: true } : {}), ...(request.auto ? { auto: true } : {}), ...(request.dit ? { dit: request.dit } : {}),
+        ...(request.guidance !== undefined ? { guidance: request.guidance } : {}),
+        ...(request.track ? { track: request.track } : {}), ...(request.tracks?.length ? { tracks: request.tracks } : {}),
         ...(files?.source ? { source: files.source } : {}), ...(files?.reference ? { reference: files.reference } : {}),
         ...(request.repaint ? { repaint: request.repaint } : {}), ...(request.cover ? { cover: request.cover } : {}),
         signal: controller.signal,
@@ -187,10 +215,17 @@ export function useMusic(env: MusicEnvironment) {
 
   /* What the controls ask for, as the request a turn holds (the clips themselves go to clipsOf). */
   const requestNow = (prompt: string): GeneratedMusic => ({
-    prompt, duration: task === "text2music" ? effectiveDuration : (source?.seconds ?? effectiveDuration), steps: effectiveSteps, seed: seed ?? randomSeed(),
+    prompt, duration: task === "text2music" || (task === "complete" && !source) ? effectiveDuration : (source?.seconds ?? effectiveDuration), steps: effectiveSteps, seed: seed ?? randomSeed(),
+    ...(planning ? { plan: true, ...(auto ? { auto: true } : {}) } : {}),
+    ...(dit ? { dit } : {}),
+    ...(guided ? { guidance: guidanceValue } : {}),
+    ...((task === "extract" || task === "lego") && track ? { track } : {}),
+    ...(task === "complete" && completeTracks.length ? { tracks: completeTracks } : {}),
     ...(lyrics.trim() ? { lyrics } : {}), ...(language ? { language } : {}),
-    ...(task !== "text2music" && source ? { task, source: { name: source.name, ...(source.seconds !== undefined ? { seconds: source.seconds } : {}) } } : {}),
+    ...(task !== "text2music" ? { task } : {}),
+    ...(task !== "text2music" && source ? { source: { name: source.name, ...(source.seconds !== undefined ? { seconds: source.seconds } : {}) } } : {}),
     ...(task === "repaint" ? { repaint: { from, ...(to !== undefined ? { to } : {}), mode: repaintMode, ...(repaintMode === "balanced" ? { strength: clampUnit(strengthValue) } : {}) } } : {}),
+    ...(task === "lego" ? { repaint: { from, ...(to !== undefined ? { to } : {}), mode: "balanced" as RepaintMode } } : {}),
     ...(task === "cover" ? { cover: { strength: clampUnit(coverStrengthValue), noise: clampUnit(coverNoiseValue) } } : {}),
     ...(reference ? { reference: { name: reference.name } } : {}),
   })
@@ -222,7 +257,7 @@ export function useMusic(env: MusicEnvironment) {
     const song = item.song
     if (env.loading || !song) return
     if (!clipsKept(item)) { env.setError("music.clipsLost"); return }
-    const { url: _url, seconds: _seconds, timings: _timings, truncated: _truncated, ...request } = song
+    const { url: _url, seconds: _seconds, timings: _timings, truncated: _truncated, meta: _meta, planCodes: _codes, ranDit: _ran, ...request } = song
     const assistant = turn({ ...request, seed: randomSeed() })
     const files = clipsOf.current.get(item.id)
     if (files) clipsOf.current.set(assistant.id, files)
@@ -233,7 +268,7 @@ export function useMusic(env: MusicEnvironment) {
   const retry = async (item: ChatMessage) => {
     if (env.loading || !item.song) return
     if (!clipsKept(item)) { env.setError("music.clipsLost"); return }
-    const { url: _url, seconds: _seconds, timings: _timings, truncated: _truncated, ...request } = item.song
+    const { url: _url, seconds: _seconds, timings: _timings, truncated: _truncated, meta: _meta, planCodes: _codes, ranDit: _ran, ...request } = item.song
     env.updateMessages((current) => current.map((entry) => entry.id === item.id ? { ...entry, finish: undefined, song: request } : entry))
     await make(item.id, request)
   }
@@ -252,10 +287,12 @@ export function useMusic(env: MusicEnvironment) {
   }
 
   return {
-    mode, limits, duration, steps, language, seedText, lyrics, lyricsOpen, run, copied, seed, canSend,
+    mode, limits, duration, steps: activeSteps, stepLimits: activeLimits, language, seedText, lyrics, lyricsOpen, run, copied, seed, canSend,
     task, audioIn, source, reference, sourceProblem, referenceProblem, spanOk,
     repaintFrom, repaintTo, repaintMode, repaintStrength, coverStrength, coverNoise,
-    setDuration, setSteps, setLanguage, setSeedText, setLyrics, setTask,
+    hasPlanner, plan, planning, lengthAuto, auto, dits, dit, guided, guidance, guidanceOk: guidanceValid(guidanceValue), track, completeTracks, needsLength,
+    setPlan, setLengthAuto, setDit, setGuidance, setTrack, setCompleteTracks,
+    setDuration, setSteps: setActiveSteps, setLanguage, setSeedText, setLyrics, setTask,
     setRepaintFrom, setRepaintTo, setRepaintMode, setRepaintStrength, setCoverStrength, setCoverNoise,
     chooseClip, clearClip,
     toggleLyrics: () => setLyricsOpen((open) => !open),

@@ -234,6 +234,19 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
   if (audioIn && positive(audioIn.max_seconds) && positive(audioIn.ref_seconds) && limits.tasks.length > 1) {
     limits.audioIn = { maxSeconds: Number(audioIn.max_seconds), refSeconds: Number(audioIn.ref_seconds) }
   }
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [])
+  const planner = info.planner as { available?: unknown; lms?: unknown; default_lm?: unknown } | undefined
+  if (planner && planner.available === true) {
+    limits.planner = { lms: strings(planner.lms), defaultLm: typeof planner.default_lm === "string" ? planner.default_lm : "1.7B" }
+  }
+  const guided = info.guided as { available?: unknown; default_steps?: unknown; max_steps?: unknown; default_guidance?: unknown; tracks?: unknown } | undefined
+  if (guided && guided.available === true) {
+    const dits = strings(info.dits).filter((item): item is MusicDit => (MUSIC_DITS as readonly string[]).includes(item))
+    limits.guided = {
+      dits, defaultSteps: number(guided.default_steps, 32), maxSteps: number(guided.max_steps, 200),
+      defaultGuidance: number(guided.default_guidance, 7), tracks: strings(guided.tracks),
+    }
+  }
   return limits.minDuration <= limits.maxDuration ? limits : undefined
 }
 
@@ -1155,13 +1168,18 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
  * events: progress while the engine works, completed with the same object the
  * plain request returns. The WAV travels as base64 in `data[0].b64_json`. */
 
-export type MusicStage = "encode" | "text" | "condition" | "denoise" | "decode"
+export type MusicStage = "meta" | "plan" | "encode" | "text" | "condition" | "denoise" | "decode"
 
 /* What the engine can be asked to make: new music from a description (the default), a cover of a
-   clip, or a clip with a span of it repainted. A reference clip, for the style, goes with any. */
-export type MusicTask = "text2music" | "cover" | "repaint"
+   clip, or a clip with a span of it repainted. A reference clip, for the style, goes with any. The guided
+   DiT (the base one, when installed) adds three: one track taken out of a clip, one track made to go with a
+   clip inside a span, and a partial track completed with others. */
+export type MusicTask = "text2music" | "cover" | "repaint" | "extract" | "lego" | "complete"
 export type RepaintMode = "balanced" | "conservative" | "aggressive"
-export const MUSIC_TASKS: readonly MusicTask[] = ["text2music", "cover", "repaint"]
+export const MUSIC_TASKS: readonly MusicTask[] = ["text2music", "cover", "repaint", "extract", "lego", "complete"]
+export const GUIDED_TASKS: readonly MusicTask[] = ["extract", "lego", "complete"]
+export type MusicDit = "turbo" | "base" | "sft"
+export const MUSIC_DITS: readonly MusicDit[] = ["turbo", "base", "sft"]
 
 export interface MusicProgress {
   stage: MusicStage
@@ -1190,6 +1208,21 @@ export interface MusicLimits {
      audio in, the longest clip and the length a reference is cut to. */
   tasks: MusicTask[]
   audioIn?: { maxSeconds: number; refSeconds: number }
+  /* The 5 Hz planner (a bare caption is enough: it writes the tempo, key, length and the song's structure first), when the
+     checkpoint has one; and the guided DiTs, with the tracks they work on. */
+  planner?: { lms: string[]; defaultLm: string }
+  guided?: { dits: MusicDit[]; defaultSteps: number; maxSteps: number; defaultGuidance: number; tracks: string[] }
+}
+
+/* What the planner chose for a song (colibri.meta): the tempo, the key and scale, the time signature, the language, the length
+   and the caption it rewrote for the DiT. Any of it may be missing. */
+export interface MusicMeta {
+  bpm?: number
+  duration?: number
+  keyscale?: string
+  timesignature?: string
+  language?: string
+  caption?: string
 }
 
 export interface MusicGenerationResponse {
@@ -1199,6 +1232,7 @@ export interface MusicGenerationResponse {
     sample_rate?: number; samples?: number; duration?: number; seed?: number; steps?: number; shift?: number
     task?: MusicTask; src_seconds?: number
     truncated?: boolean; timings?: MusicTimings
+    dit?: string; lm?: string; plan_codes?: number; meta?: MusicMeta | null
   }
 }
 
@@ -1219,6 +1253,17 @@ export interface GeneratedMusic {
   reference?: { name: string }
   repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
   cover?: { strength: number; noise: number }
+  /* The planner and the guided DiT, as asked: `auto` is a length left to the planner (`duration` is then the one it chose). */
+  plan?: boolean
+  auto?: boolean
+  dit?: MusicDit
+  guidance?: number
+  track?: string
+  tracks?: string[]
+  /* What came back: the planner's choices and the codes it wrote, and the DiT that ran. */
+  meta?: MusicMeta
+  planCodes?: number
+  ranDit?: string
   url?: string
   seconds?: number
   timings?: MusicTimings
@@ -1242,6 +1287,13 @@ export interface GenerateMusicOptions {
   reference?: File
   repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
   cover?: { strength: number; noise: number }
+  plan?: boolean
+  /* With `plan`: no length is sent and the planner picks it. */
+  auto?: boolean
+  dit?: MusicDit
+  guidance?: number
+  track?: string
+  tracks?: string[]
   signal: AbortSignal
   onProgress?: (progress: MusicProgress) => void
   /* Streaming was not available and the song is being made by one plain request:
@@ -1268,8 +1320,18 @@ export function musicFields(options: GenerateMusicOptions, stream: boolean) {
     seed: options.seed,
     stream,
   }
-  if (task === "text2music") fields.duration = options.duration
+  if (task === "text2music") { if (!(options.plan && options.auto)) fields.duration = options.duration }
   else fields.task = task
+  if (task === "complete" && !options.source) fields.duration = options.duration      // no clip: made from the description, so it needs a length
+  if (options.plan) fields.thinking = true
+  if (options.dit) fields.dit = options.dit
+  if (options.guidance !== undefined) fields.guidance_scale = options.guidance
+  if ((task === "extract" || task === "lego") && options.track) fields.track_name = options.track
+  if (task === "complete" && options.tracks?.length) fields.complete_track_classes = options.tracks.join(",")
+  if (task === "lego" && options.repaint) {
+    fields.repainting_start = options.repaint.from
+    if (options.repaint.to !== undefined) fields.repainting_end = options.repaint.to
+  }
   if (options.lyrics?.trim()) fields.lyrics = options.lyrics
   if (options.language) fields.language = options.language
   if (task === "repaint" && options.repaint) {
@@ -1409,8 +1471,16 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
     ...(options.task && options.task !== "text2music" ? { task: options.task } : {}),
     ...(options.source ? { source: { name: options.source.name, ...(info?.src_seconds ? { seconds: info.src_seconds } : {}) } } : {}),
     ...(options.reference ? { reference: { name: options.reference.name } } : {}),
-    ...(options.task === "repaint" && options.repaint ? { repaint: options.repaint } : {}),
+    ...((options.task === "repaint" || options.task === "lego") && options.repaint ? { repaint: options.repaint } : {}),
     ...(options.task === "cover" && options.cover ? { cover: options.cover } : {}),
+    ...(options.plan ? { plan: true, ...(options.auto ? { auto: true } : {}) } : {}),
+    ...(options.dit ? { dit: options.dit } : {}),
+    ...(options.guidance !== undefined ? { guidance: options.guidance } : {}),
+    ...(options.track ? { track: options.track } : {}),
+    ...(options.tracks?.length ? { tracks: options.tracks } : {}),
+    ...(info?.meta && typeof info.meta === "object" ? { meta: info.meta } : {}),
+    ...(typeof info?.plan_codes === "number" ? { planCodes: info.plan_codes } : {}),
+    ...(typeof info?.dit === "string" ? { ranDit: info.dit } : {}),
     url: keptUrl ?? wavUrl(song!.b64_json!),
     ...(info?.timings ? { timings: info.timings } : {}),
     ...(info?.truncated ? { truncated: true } : {}),

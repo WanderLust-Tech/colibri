@@ -6760,6 +6760,13 @@ class APIServer(ThreadingHTTPServer):
             entry["audio"] = {key: info.get(key) for key in MUSIC_OPTION_KEYS}
             entry["audio"]["tasks"] = list(info.get("tasks") or ["text2music"])
             entry["audio"]["audio_in"] = self.music_audio_info()
+            # the planner and the guided DiTs, for a client that offers them (the dashboard's Music controls)
+            entry["audio"]["dits"] = list(info.get("dits") or [])
+            planner, guided = music_engine.planner_info(info), music_engine.guided_info(info)
+            entry["audio"]["planner"] = {"available": bool(planner["available"]), "lms": list(planner["lms"]), "default_lm": planner["default_lm"],
+                                         "temperature": planner["temperature"], "cfg_scale": planner["cfg_scale"], "top_p": planner["top_p"]}
+            entry["audio"]["guided"] = {"available": bool(guided["available"]), "default_steps": guided["default_steps"], "max_steps": guided["max_steps"],
+                                        "default_guidance": guided["default_guidance"], "tracks": list(guided.get("tracks") or music_engine.TRACK_NAMES)}
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}

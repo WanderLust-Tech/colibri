@@ -100,6 +100,10 @@ class Gateway(unittest.TestCase):
     def test_the_planner_is_announced(self):
         self.assertTrue(self.rig.engine.info["planner"]["available"])
 
+    def test_the_model_card_offers_it(self):
+        audio = json.loads(self.rig.request("/v1/models", method="GET")[2])["data"][0]["audio"]
+        self.assertEqual((audio["planner"]["available"], audio["planner"]["lms"], audio["planner"]["default_lm"]), (True, ["1.7B"], "1.7B"))
+
     def test_a_planned_song_says_what_the_planner_wrote(self):
         status, out = self.song(prompt="calm piano", thinking=True, seed=2, **META)
         self.assertEqual(status, 200, out)

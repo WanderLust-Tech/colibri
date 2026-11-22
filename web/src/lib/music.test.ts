@@ -4,7 +4,7 @@ import { generateMusic, generatesMusic, listModelInfo, musicFields, musicLimits,
 import { chatTurns } from "./images"
 import {
   DEFAULT_MUSIC_LIMITS, MAX_CLIP_BYTES, MUSIC_LANGUAGES, acceptedClip, clampDuration, clampMusicSteps, clampUnit, clipProblem, lyricBytes,
-  musicFileName, musicProgressFraction, offersTask, repaintValid, songClock, validDuration, validLanguage,
+  guidanceValid, isGuidedTask, musicFileName, musicProgressFraction, offersTask, repaintValid, runsGuided, songClock, stepLimits, validDuration, validLanguage,
 } from "./music"
 import en from "../i18n/en"
 
@@ -40,9 +40,10 @@ describe("music limits", () => {
   })
 
   it("reads the tasks and the audio-in limits an engine reports, and offers composing alone when it reports none", () => {
-    const audio = { tasks: ["repaint", "cover", "text2music", "lego"], audio_in: { max_seconds: 600, ref_seconds: 30, formats: ["wav", "mp3"] } }
+    const audio = { tasks: ["repaint", "cover", "text2music", "bogus"], audio_in: { max_seconds: 600, ref_seconds: 30, formats: ["wav", "mp3"] } }
     const limits = musicLimits(audio)!
-    expect(limits.tasks).toEqual(["text2music", "cover", "repaint"])                // this page's order; "lego" is not offered
+    expect(limits.tasks).toEqual(["text2music", "cover", "repaint"])                // this page's order; a task it does not know is not offered
+    expect(musicLimits({ tasks: ["complete", "extract", "lego"], audio_in: audio.audio_in })!.tasks).toEqual(["text2music", "extract", "lego", "complete"])
     expect(limits.audioIn).toEqual({ maxSeconds: 600, refSeconds: 30 })
     expect(musicLimits({ tasks: ["cover"] })!.tasks).toEqual(["text2music", "cover"])        // composing is always there
     expect(musicLimits({ audio_in: audio.audio_in })!.audioIn).toBeUndefined()            // clips with nothing to do with them are not offered
@@ -260,8 +261,11 @@ describe("generateMusic", () => {
 /* The keys the page builds with a template, and what each ranges over. */
 const TEMPLATES: Record<string, string[]> = {
   "music.stage": ["encode", "text", "condition", "decode"],
-  "music.mode": ["text2music", "cover", "repaint"],
-  "music.mode.help": ["text2music", "cover", "repaint"],
+  "music.mode": ["text2music", "cover", "repaint", "extract", "lego", "complete"],
+  "music.mode.help": ["text2music", "cover", "repaint", "extract", "lego", "complete"],
+  "music.source.add": ["cover", "repaint", "extract", "lego", "complete"],
+  "music.track": ["any", "woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"],
+  "music.dit": ["base", "sft"],
   "music.repaint.mode": ["balanced", "conservative", "aggressive"],
 }
 
@@ -378,5 +382,76 @@ describe("audio in: clips, a repaint's span, and the request", () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(typeof init.body).toBe("string")
     expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json")
+  })
+})
+
+describe("the planner and the guided DiTs", () => {
+  const audioIn = { max_seconds: 600, ref_seconds: 30 }
+
+  it("reads what the checkpoint has: a planner and its models, the guided DiTs and the tracks, and nothing when they are not there", () => {
+    const limits = musicLimits({
+      tasks: ["text2music", "cover", "repaint", "extract", "lego", "complete"], audio_in: audioIn, dits: ["turbo", "base", "nope"],
+      planner: { available: true, lms: ["1.7B"], default_lm: "1.7B" },
+      guided: { available: true, default_steps: 32, max_steps: 200, default_guidance: 7, tracks: ["drums", "bass"] },
+    })!
+    expect(limits.planner).toEqual({ lms: ["1.7B"], defaultLm: "1.7B" })
+    expect(limits.guided).toEqual({ dits: ["turbo", "base"], defaultSteps: 32, maxSteps: 200, defaultGuidance: 7, tracks: ["drums", "bass"] })
+    const bare = musicLimits({ tasks: ["text2music", "cover"], audio_in: audioIn, planner: { available: false, lms: [] }, guided: { available: false } })!
+    expect([bare.planner, bare.guided]).toEqual([undefined, undefined])
+    expect(musicLimits({ default_duration: 30 })!.planner).toBeUndefined()
+  })
+
+  it("knows which songs run on a guided DiT and which steps they may take", () => {
+    expect(["extract", "lego", "complete"].every((task) => isGuidedTask(task as MusicTask))).toBe(true)
+    expect(["text2music", "cover", "repaint"].some((task) => isGuidedTask(task as MusicTask))).toBe(false)
+    expect([runsGuided("text2music", ""), runsGuided("text2music", "base"), runsGuided("cover", "sft"), runsGuided("lego", "")]).toEqual([false, true, true, true])
+    const limits = { ...DEFAULT_MUSIC_LIMITS, guided: { dits: ["turbo", "base"] as ("turbo" | "base")[], defaultSteps: 32, maxSteps: 200, defaultGuidance: 7, tracks: [] } }
+    expect(stepLimits(limits, true)).toMatchObject({ defaultSteps: 32, maxSteps: 200 })
+    expect(stepLimits(limits, false)).toMatchObject({ defaultSteps: 8, maxSteps: 20 })
+    expect(stepLimits(DEFAULT_MUSIC_LIMITS, true)).toBe(DEFAULT_MUSIC_LIMITS)         // nothing guided here: the turbo range
+    expect([0, 7, 100].every(guidanceValid)).toBe(true)
+    expect([-1, 101, Number.NaN].some(guidanceValid)).toBe(false)
+  })
+
+  const base = { baseUrl: "", apiKey: "", model: "m", prompt: "p", duration: 30, steps: 8, seed: 1, signal: new AbortController().signal }
+
+  it("asks for the planner without a length when it chooses one, and with one when it is given", () => {
+    expect(musicFields({ ...base, plan: true, auto: true }, false)).toEqual({ model: "m", prompt: "p", steps: 8, seed: 1, stream: false, thinking: true })
+    expect(musicFields({ ...base, plan: true }, false)).toMatchObject({ thinking: true, duration: 30 })
+    expect(musicFields(base, false)).not.toHaveProperty("thinking")
+    expect(musicFields({ ...base, auto: true }, false)).toHaveProperty("duration")             // a length left to nobody
+  })
+
+  it("sends the DiT, its guidance, a track, the tracks to complete with and a lego's span", () => {
+    expect(musicFields({ ...base, dit: "base", guidance: 7, steps: 32 }, false)).toMatchObject({ dit: "base", guidance_scale: 7, steps: 32, duration: 30 })
+    expect(musicFields({ ...base, task: "extract", track: "drums", guidance: 7 }, false)).toMatchObject({ task: "extract", track_name: "drums", guidance_scale: 7 })
+    expect(musicFields({ ...base, task: "extract", track: "drums", guidance: 7 }, false)).not.toHaveProperty("duration")   // the clip's length
+    expect(musicFields({ ...base, task: "lego", track: "bass", repaint: { from: 2, to: 6, mode: "balanced" } }, false))
+      .toMatchObject({ task: "lego", track_name: "bass", repainting_start: 2, repainting_end: 6 })
+    expect(musicFields({ ...base, task: "lego", repaint: { from: 2, mode: "balanced" } }, false)).not.toHaveProperty("repainting_end")
+    expect(musicFields({ ...base, task: "lego", repaint: { from: 2, mode: "balanced" } }, false)).not.toHaveProperty("track_name")
+    expect(musicFields({ ...base, task: "complete", tracks: ["drums", "bass"] }, false)).toMatchObject({ task: "complete", complete_track_classes: "drums,bass", duration: 30 })
+    const clip = new File([new Uint8Array(4)], "a.wav")
+    expect(musicFields({ ...base, task: "complete", tracks: ["drums"], source: clip }, false)).not.toHaveProperty("duration")
+  })
+
+  it("shows the planner's two stages on the bar before the steps", () => {
+    const at = (stage: MusicProgress["stage"], step: number, steps: number) => musicProgressFraction({ stage, step, steps })
+    expect(at("meta", 0, 1)).toBeCloseTo(0.02)
+    expect(at("plan", 0, 101)).toBeCloseTo(0.03)
+    expect(at("plan", 101, 101)).toBeCloseTo(0.09)
+    expect(at("plan", 50, 101)).toBeGreaterThan(at("plan", 10, 101))
+    expect(at("plan", 101, 101)).toBeLessThan(at("denoise", 0, 8))
+  })
+
+  it("keeps what the planner chose on the song, and the DiT that ran", async () => {
+    const meta = { bpm: 100, duration: 12, keyscale: "C major", timesignature: "4", language: "unknown", caption: "A planned take" }
+    const wav = btoa("RIFF")
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      created: 1, data: [{ b64_json: wav, format: "wav" }], colibri: { duration: 12, seed: 1, steps: 32, dit: "base", plan_codes: 60, meta },
+    }), { status: 200, headers: { "content-type": "application/json" } })))
+    vi.stubGlobal("URL", { ...URL, createObjectURL: () => "blob:x" })
+    const song = await generateMusic({ ...base, plan: true, auto: true, dit: "base", guidance: 7, steps: 32 })
+    expect(song).toMatchObject({ plan: true, auto: true, dit: "base", guidance: 7, duration: 12, meta, planCodes: 60, ranDit: "base" })
   })
 })

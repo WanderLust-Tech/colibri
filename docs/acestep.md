@@ -569,7 +569,13 @@ weights dominate; the working buffers are a few hundred MB at most). Measured on
 **The dashboard.** `coli web` (or the page `coli serve` serves) shows the music composer when the selected model lists
 `music_generation`: a lyrics box, length, steps, language, seed, a progress bar with Cancel, then the browser's audio player
 with Download WAV, Copy seed and New seed, and, when the engine takes audio in, a Compose / Cover / Repaint switch with clip
-cards and a Reference chip (docs: `web/README.md`). The model switcher offers a music model like any other.
+cards and a Reference chip (docs: `web/README.md`). The model switcher offers a music model like any other. What the checkpoint has shows
+as more controls (`/v1/models`' `audio.planner`, `audio.guided` and `audio.dits` say so, and a checkpoint without them shows none): a **Plan**
+chip (the 5 Hz planner writes the song's outline first) with an **Auto length** chip that leaves the length to it, a **DiT** choice (Turbo, or
+the base DiT with its guidance and its own 32-step default), and Extract / Add a track / Complete beside Cover and Repaint (a track, the span of a
+lego, the tracks to complete with). The finished song says what the planner chose (tempo, key, time signature, language, the caption it
+rewrote) under **What the planner chose**, and the DiT that ran. `web/tests/music_guided_ui.py` holds those in a browser against a stub told
+that the checkpoint has the planner and the base DiT.
 `web/tests/music_ui.py` runs it in a real browser (Playwright) against the real gateway and the stub engine: a song whose
 length the browser reads back from the audio element, the downloaded file, a new seed, lyrics and a language on the wire,
 a failure, an invalid length held back, a cancel; and `web/src/lib/music.test.ts` holds the client (`generateMusic`'s

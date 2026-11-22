@@ -1,4 +1,4 @@
-import type { MusicLimits, MusicProgress, MusicTask } from "./api"
+import { GUIDED_TASKS, type MusicDit, type MusicLimits, type MusicProgress, type MusicTask } from "./api"
 
 /* The state of the one song being made. Kept out of the transcript: it changes on every
    step, and only the finished song belongs there. */
@@ -68,6 +68,8 @@ export function musicProgressFraction(progress: MusicProgress | null) {
   const steps = Math.max(1, Math.round(progress.steps) || 1)
   const step = Math.min(steps, Math.max(0, Math.round(progress.step) || 0))
   switch (progress.stage) {          // whole percents, divided at the end, so the stages meet exactly
+    case "meta": return 2 / 100                                    // one frame at the start and one at the end: how many tokens it takes is not known
+    case "plan": return (3 + 6 * (step / steps)) / 100             // the planner's codes, a fifth of a second of song each
     case "encode": return (1 + 7 * (step / steps)) / 100
     case "text": return 9 / 100
     case "condition": return 10 / 100
@@ -122,6 +124,20 @@ export function clampUnit(value: number) {
 
 /* Does the model offer this task (an older engine offers composing only)? */
 export const offersTask = (limits: MusicLimits | undefined, task: MusicTask) => (limits?.tasks ?? ["text2music"]).includes(task)
+
+/* Does a task need the guided DiT (the base one)? */
+export const isGuidedTask = (task: MusicTask) => (GUIDED_TASKS as readonly string[]).includes(task)
+
+/* Does the song run on a guided DiT: one chosen, or a task that has no other? */
+export const runsGuided = (task: MusicTask, dit: MusicDit | "") => dit === "base" || dit === "sft" || isGuidedTask(task)
+
+/* The step range of the DiT that will run: the guided one's (32 by default, up to 200) or the turbo one's. */
+export function stepLimits(limits: MusicLimits, guided: boolean): MusicLimits {
+  return guided && limits.guided ? { ...limits, defaultSteps: limits.guided.defaultSteps, maxSteps: limits.guided.maxSteps } : limits
+}
+
+/* A guidance scale typed into its field: 0 to 100 (upstream's range; 1 or less is off). */
+export const guidanceValid = (value: number) => Number.isFinite(value) && value >= 0 && value <= 100
 
 /* A name that says what the file is and which seed makes it again. */
 export function musicFileName(prompt: string, seed: number) {

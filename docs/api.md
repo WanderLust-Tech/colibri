@@ -660,7 +660,8 @@ route yet. Quality is whatever Gemma's audio understanding gives: it is a chat m
 
 When the served model is ACE-Step (`coli serve --model <ace-step dir>`), `POST /v1/audio/music` makes a song: from a
 description, as a **cover** of a clip you send, as a **repaint** of one span of it, and any of them in the style of a
-**reference** clip. `GET /v1/models` says what the model takes (`audio.tasks`, `audio.audio_in`, and the capability
+**reference** clip. `GET /v1/models` says what the model takes (`audio.tasks`, `audio.audio_in`, `audio.dits`, `audio.planner` and `audio.guided` (the 5 Hz planner and
+the guided DiTs the checkpoint has, with their defaults and the tracks), and the capability
 `audio_input`); the engine itself is described in [acestep.md](acestep.md).
 
 ```bash
