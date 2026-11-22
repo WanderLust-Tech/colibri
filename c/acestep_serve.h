@@ -254,7 +254,7 @@ static int16_t *acs_pcm16(const float *x, size_t n){
 static int acs_serve(AceEngine *e){
     coli_serve_binary_mode();
     char planner_json[320] = "{\"available\":false}";
-    { char lmdir[64], pe[64];
+    { char lmdir[64], pe[128];
       if (!ace_lm_dir(e, NULL, lmdir, sizeof lmdir, pe, sizeof pe)) {
           const char *sizes[3] = {"1.7B", "4B", "0.6B"}; char list[96] = ""; int ln = 0;
           for (int i = 0; i < 3; i++) {
@@ -299,7 +299,7 @@ static int acs_serve(AceEngine *e){
         else {
             acs_cancel_pending = 0;
             AcsRun run = { id };
-            AceHooks hk = { acs_progress, acs_cancelled_run, &run, NULL };
+            AceHooks hk = { acs_progress, acs_cancelled_run, &run, NULL, NULL };
             float *pcm = NULL; AceInfo info;
             int rc = ace_generate(e, &rq, &hk, &pcm, &info, msg, sizeof msg);
             int16_t *s16 = rc == 0 ? acs_pcm16(pcm, (size_t)info.samples * e->vae->ach) : NULL;
