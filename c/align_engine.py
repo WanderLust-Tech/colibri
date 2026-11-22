@@ -150,6 +150,14 @@ class AlignmentEngine(TranscriptionEngine):
                 pass
 
 
+def adopt(runtime):
+    """A speech engine the gateway started as a recogniser, made an AlignmentEngine when its READY line says it is a forced aligner (both are the same
+    executable and the same process wrapper: the launcher cannot tell until the engine has said so). Returns the runtime."""
+    if (getattr(runtime, "info", None) or {}).get("task") == "align" and not isinstance(runtime, AlignmentEngine):
+        runtime.__class__ = AlignmentEngine
+    return runtime
+
+
 def alignment_request(body):
     """The checked fields of POST /v1/audio/alignments: {"text", "language" (a name or None), "words", "format"}, or EmbeddingRequestError (the gateway
     answers 400 with its `param`).

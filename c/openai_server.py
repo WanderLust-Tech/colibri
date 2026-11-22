@@ -9918,7 +9918,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id=None, api_key=None,
             print(f"[rerank] {model_id}: up to {runtime.info['max_tokens']} tokens a pair, "
                   f"{runtime.info['max_documents']} documents a request", file=sys.stderr)
         elif family.modality == "transcription":
-            runtime = asr_engine.TranscriptionEngine(engine, model, env=env)
+            runtime = align_engine.adopt(asr_engine.TranscriptionEngine(engine, model, env=env))
             runtime._win_job = _win_kill_on_close_job(getattr(runtime.process, "pid", None))
             print(f"[asr] {model_id}: pieces of up to {runtime.info['piece_seconds']} s, {runtime.info['sample_rate']} Hz", file=sys.stderr)
         elif family.modality == "speech":

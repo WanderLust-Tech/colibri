@@ -128,6 +128,26 @@ class SubtitlesTest(unittest.TestCase):
         self.assertEqual(subtitles.vtt(cues), "WEBVTT\n\n00:00:00.320 --> 00:00:02.160\nAnd so, my fellow Americans\n\n01:00:00.500 --> 01:00:01.000\nask not\n\n")
 
 
+class AdoptTest(unittest.TestCase):
+    """The launcher starts every engine of this family as a recogniser; the READY line decides what it is."""
+
+    def test_an_engine_that_says_it_aligns_becomes_an_aligner_and_works(self):
+        from asr_engine import TranscriptionEngine
+        engine = TranscriptionEngine(STUB, "model-dir", env=stub_env(ASR_STUB_ALIGN=1), on_log=lambda _m: None)
+        self.addCleanup(engine.close)
+        self.assertFalse(hasattr(engine, "align_samples"))
+        self.assertIs(align_engine.adopt(engine), engine)
+        self.assertIsInstance(engine, AlignmentEngine)
+        self.assertEqual(engine.align_samples(wav_bytes(1.0), ["a", "b"])["starts"], [0.0, 0.4])
+        self.assertEqual(align_engine.adopt(engine).__class__, AlignmentEngine)                 # a second time changes nothing
+
+    def test_a_recogniser_stays_one(self):
+        from asr_engine import TranscriptionEngine
+        engine = TranscriptionEngine(STUB, "model-dir", env=stub_env(), on_log=lambda _m: None)
+        self.addCleanup(engine.close)
+        self.assertIs(align_engine.adopt(engine).__class__, TranscriptionEngine)
+
+
 class AlignHarness:
     """A gateway over the stub started as a forced aligner."""
 
