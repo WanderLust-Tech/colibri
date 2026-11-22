@@ -214,6 +214,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("outdir")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--base", action="store_true",
+                    help="also an acestep-v15-base DiT (the guided one: is_turbo false, upstream's base modeling code) beside the turbo one")
     ap.add_argument("--audio-in", action="store_true",
                     help="a VAE whose encoder holds the engine's 64 latent channels (for the cover, repaint and reference-audio oracles)")
     a = ap.parse_args()
@@ -268,12 +270,32 @@ def main():
         src = os.path.join(root, "acestep", "models", "turbo", name)
         shutil.copyfile(src, os.path.join(dit_dir, name))
 
+    if a.base:
+        # The same network trained to be guided: the same shapes and names (the manifest test holds it to them), its own weights, the
+        # base modeling file and config, and null_condition_emb, which classifier-free guidance conditions on in place of the tokens.
+        base_dir = os.path.join(out, "acestep-v15-base")
+        os.makedirs(base_dir, exist_ok=True)
+        from acestep.models.base.modeling_acestep_v15_base import AceStepConditionGenerationModel as BaseModel
+        bcfg = {**cfg, "is_turbo": False,
+                "auto_map": {"AutoConfig": "configuration_acestep_v15.AceStepConfig",
+                             "AutoModel": "modeling_acestep_v15_base.AceStepConditionGenerationModel"}}
+        bcfg.pop("model_version", None)
+        bdit = BaseModel(AceStepConfig(**{k: v for k, v in bcfg.items() if k not in ("architectures", "auto_map")}))
+        randomize(bdit, a.seed + 103)
+        with open(os.path.join(base_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(bcfg, f, indent=2)
+        save_file(bf16_state(bdit), os.path.join(base_dir, "model.safetensors"), metadata={"format": "pt"})
+        for name in ("modeling_acestep_v15_base.py", "configuration_acestep_v15.py", "apg_guidance.py"):
+            shutil.copyfile(os.path.join(root, "acestep", "models", "base", name), os.path.join(base_dir, name))
+
     # A smooth, nonzero "silence": the engine slices and tiles this, so a constant would hide a wrong offset.
     g = torch.Generator().manual_seed(a.seed + 4)
     t = torch.arange(SILENCE_FRAMES, dtype=torch.float32)
     base = torch.randn(64, 1, generator=g) * 0.5 + 0.3 * torch.sin(t[None] / 50.0 + torch.randn(64, 1, generator=g))
     torch.save((base + 0.02 * torch.randn(64, SILENCE_FRAMES, generator=g))[None].contiguous(),
                os.path.join(dit_dir, "silence_latent.pt"))
+    if a.base:
+        shutil.copyfile(os.path.join(dit_dir, "silence_latent.pt"), os.path.join(out, "acestep-v15-base", "silence_latent.pt"))
 
     with open(os.path.join(out, "fixture.json"), "w", encoding="utf-8") as f:
         json.dump({"seed": a.seed, "dit": TINY_DIT, "vae": vae_config, "text": TINY_TEXT, "tokenizer_vocab": vocab,

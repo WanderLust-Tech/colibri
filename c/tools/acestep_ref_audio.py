@@ -5,6 +5,9 @@ upstream's own handler, for the C engine's oracles. The text2music captures are 
     acestep_ref_audio.py enc MODEL_DIR OUTDIR WAVDIR     the VAE encoder: acestep --vae-enc-ref OUTDIR/<case>
     acestep_ref_audio.py tasks MODEL_DIR OUTDIR WAVDIR [--cases a,b]
                                                          whole generations with audio in: reference audio, cover, repaint
+    acestep_ref_audio.py tasks MODEL_DIR OUTDIR WAVDIR --dit acestep-v15-base [--cases a,b]
+                                                         the same with the base DiT: guidance (APG, ADG, CFG) and the tasks that
+                                                         need it: extract, lego, complete (cases TASKS_BASE)
 
 MODEL_DIR is the checkpoint, WAVDIR a directory of 48 kHz stereo wavs to encode (the audio a text2music capture wrote,
 OUTDIR/<case>/audio.wav, will do: real generated music, where a synthetic signal would not exercise the network the way
@@ -32,8 +35,8 @@ import atexit
 import torch
 
 
-def open_handler(model_dir):
-    """Upstream's handler on CPU in float32, initialised the way acestep_ref.py does it."""
+def open_handler(model_dir, config="acestep-v15-turbo"):
+    """Upstream's handler on CPU in float32, initialised the way acestep_ref.py does it. `config` is the DiT's directory."""
     root = os.environ.get("ACESTEP_UPSTREAM")
     if not root or not os.path.isdir(os.path.join(root, "acestep")):
         sys.exit("set ACESTEP_UPSTREAM to a clone of https://github.com/ace-step/ACE-Step-1.5")
@@ -55,7 +58,7 @@ def open_handler(model_dir):
     h = AceStepHandler()
     h._ensure_models_present = lambda **kw: None
     h._sync_model_code_if_needed = lambda *args, **kw: None
-    msg, ok = h.initialize_service(project_root=root, config_path="acestep-v15-turbo", device="cpu",
+    msg, ok = h.initialize_service(project_root=root, config_path=config, device="cpu",
                                    use_flash_attention=False, compile_model=False, use_mlx_dit=False)
     if not ok:
         sys.exit(str(msg))
@@ -148,7 +151,25 @@ def capture_enc(a):
 
 TASK_INSTRUCTIONS = {"text2music": "Fill the audio semantic mask based on the given conditions:",
                      "repaint": "Repaint the mask area based on the given conditions:",
-                     "cover": "Generate audio semantic tokens based on the given conditions:"}
+                     "cover": "Generate audio semantic tokens based on the given conditions:",
+                     "extract": "Extract the {TRACK_NAME} track from the audio:",
+                     "extract_default": "Extract the track from the audio:",
+                     "lego": "Generate the {TRACK_NAME} track based on the audio context:",
+                     "lego_default": "Generate the track based on the audio context:",
+                     "complete": "Complete the input track with {TRACK_CLASSES}:",
+                     "complete_default": "Complete the input track:"}
+
+
+def instruction_of(params):
+    """The instruction a caller builds for a task (upstream's generate_instruction, which the UI calls before generate_music).
+    `_track` and `_classes` in the case's parameters name the track and the classes; they are not generate_music's."""
+    task = params.get("task_type", "text2music")
+    track, classes = params.get("_track"), params.get("_classes")
+    if task in ("extract", "lego"):
+        return TASK_INSTRUCTIONS[task].format(TRACK_NAME=track.upper()) if track else TASK_INSTRUCTIONS[task + "_default"]
+    if task == "complete":
+        return TASK_INSTRUCTIONS["complete"].format(TRACK_CLASSES=" | ".join(c.upper() for c in classes)) if classes else TASK_INSTRUCTIONS["complete_default"]
+    return TASK_INSTRUCTIONS[task]
 S48 = 48000
 VAE_SEED_XOR = 0x5EED0001          # the seed of the posterior draws is the request's seed xor this (acestep_gen.h ACG_VAE_SEED_XOR)
 
@@ -179,6 +200,31 @@ TASKS = {
     "repaint_extend": ({**INSTR, "task_type": "repaint", "repainting_start": 8.0, "repainting_end": 12.0}, {"src": ("inst10", None)}),  # past the end: the clip is padded with silence
     "repaint_short": ({**INSTR, "task_type": "repaint", "repainting_start": 1.0, "repainting_end": 3.0}, {"src": ("inst10", 4.0)}),    # 100 frames: under the floor
     "repaint_lead": ({**INSTR, "task_type": "repaint", "repainting_start": -2.0, "repainting_end": 3.0}, {"src": ("inst10", None)}),    # before the start
+}
+
+
+# The base DiT: classifier-free guidance against the null condition (APG by default, ADG, plain CFG), a schedule of any length,
+# no DCW unless asked, and the tasks that need a model trained for them. 12 steps keep a case under a minute on the CPU.
+COMMON_BASE = dict(inference_steps=12, use_random_seed=False, seed=42, batch_size=1, dcw_enabled=False, guidance_scale=7.0, shift=1.0)
+TASKS_BASE = {
+    "b_t2m": ({**INSTR, "audio_duration": 10.0}, {}),
+    "b_t2m_shift3": ({**INSTR, "audio_duration": 10.0, "shift": 3.0, "guidance_scale": 4.5}, {}),
+    "b_t2m_nocfg": ({**INSTR, "audio_duration": 10.0, "guidance_scale": 1.0}, {}),
+    "b_t2m_interval": ({**INSTR, "audio_duration": 10.0, "cfg_interval_start": 0.3, "cfg_interval_end": 0.8}, {}),
+    "b_t2m_adg": ({**INSTR, "audio_duration": 10.0, "use_adg": True}, {}),
+    "b_t2m_dcw": ({**INSTR, "audio_duration": 10.0, "dcw_enabled": True}, {}),
+    "b_t2m_steps40": ({**INSTR, "audio_duration": 6.0, "inference_steps": 40}, {}),        # past the turbo's 20: a linspace of 40
+    "b_cover": ({**INSTR, "task_type": "cover"}, {"src": ("inst10", None)}),
+    "b_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
+    "b_extract": ({**INSTR, "task_type": "extract", "_track": "drums"}, {"src": ("inst10", None)}),
+    "b_extract_default": ({**INSTR, "task_type": "extract"}, {"src": ("inst10", None)}),
+    "b_extract_vocal": ({**VOCAL, "task_type": "extract", "_track": "vocals"}, {"src": ("long30", 12.0)}),
+    "b_lego": ({**INSTR, "task_type": "lego", "_track": "guitar", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
+    "b_lego_tail": ({**INSTR, "task_type": "lego", "_track": "bass", "repainting_start": 6.5, "repainting_end": -1}, {"src": ("inst10", None)}),
+    "b_lego_default": ({**INSTR, "task_type": "lego", "repainting_start": 2.0, "repainting_end": 5.0}, {"src": ("inst10", None)}),
+    "b_complete": ({**INSTR, "task_type": "complete", "_classes": ["drums", "bass"], "audio_duration": 10.0}, {"src": ("inst10", None)}),
+    "b_complete_default": ({**INSTR, "task_type": "complete", "audio_duration": 10.0}, {"src": ("inst10", None)}),
+    "b_complete_longer": ({**INSTR, "task_type": "complete", "_classes": ["synth"], "audio_duration": 12.0}, {"src": ("inst10", 7.0)}),
 }
 
 
@@ -249,30 +295,39 @@ def capture_tasks(a):
     import numpy as np
     import soundfile as sf
     from safetensors.torch import save_file
-    h, root = open_handler(a.model_dir)
+    h, root = open_handler(a.model_dir, a.dit)
+    # the checkpoint's own modeling file is what the handler runs, and the one on the hub is older than upstream's (the base one
+    # still spells the guidance argument `diffusion_guidance_sale`, so the handler's guidance_scale is swallowed by **kwargs and every
+    # case runs at the default 7.0): the code beside the weights has to be upstream's at the pinned commit, as acestep_ref.py demands
+    from acestep.model_downloader import _check_code_mismatch
+    mismatch = _check_code_mismatch(a.dit, os.path.abspath(a.model_dir))
+    if mismatch:
+        sys.exit(f"{a.model_dir}/{a.dit}: {mismatch} differ from upstream's; copy them there (this tool will not rewrite a model directory)")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import acestep_ref as base
     from acestep.core.generation.handler import vae_encode
     vae_encode.get_gpu_memory_gb = lambda: 16.0       # a GPU with memory to spare picks upstream's 30 s chunk; with none it picks 15 s, a choice about memory
     rec = AudioRecorder(h, base)
-    names = list(TASKS) if not a.cases else a.cases.split(",")
-    unknown = [n for n in names if n not in TASKS]
+    catalog, common = (TASKS, COMMON) if a.dit == "acestep-v15-turbo" else (TASKS_BASE, COMMON_BASE)
+    names = list(catalog) if not a.cases else a.cases.split(",")
+    unknown = [n for n in names if n not in catalog]
     if unknown:
-        sys.exit(f"unknown case(s) {unknown}; known: {list(TASKS)}")
+        sys.exit(f"unknown case(s) {unknown}; known: {list(catalog)}")
     os.makedirs(a.outdir, exist_ok=True)
     real_randint = random.randint
     # upstream picks the 10 s segments of a reference at random (unseeded); the engine takes the middle of each range
     random.randint = lambda lo, hi: lo + (hi - lo) // 2
     for name in names:
-        params, audio = TASKS[name]
+        params, audio = catalog[name]
         d = os.path.join(a.outdir, name)
         os.makedirs(d, exist_ok=True)
         rec.reset()
-        seeded_posterior(COMMON["seed"] ^ VAE_SEED_XOR)
-        kw = {**COMMON, **params}
+        seeded_posterior(common["seed"] ^ VAE_SEED_XOR)
+        kw = {**common, **params}
         meta = {"case": name, "params": dict(kw)}
-        task = kw.get("task_type", "text2music")
-        kw["instruction"] = TASK_INSTRUCTIONS[task]
+        kw["instruction"] = instruction_of(kw)
+        kw = {k: v for k, v in kw.items() if not k.startswith("_")}
+        meta["instruction"] = kw["instruction"]
         for role, (stem, seconds) in audio.items():
             w = clip_of(a.wavdir, stem, seconds)
             path = os.path.join(d, f"{role}.wav")
@@ -308,6 +363,7 @@ def main():
     t.add_argument("outdir")
     t.add_argument("wavdir")
     t.add_argument("--cases", help="comma-separated; default all")
+    t.add_argument("--dit", default="acestep-v15-turbo", help="the DiT's directory; acestep-v15-base (or -sft) switches to the base cases")
     e = sub.add_parser("enc")
     e.add_argument("model_dir")
     e.add_argument("outdir")

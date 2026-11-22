@@ -81,7 +81,10 @@ static void usage(void){
         "               [--ref CLIP] [--cover CLIP [--cover-strength X] [--cover-noise X]]\n"
         "               [--repaint CLIP [--from S] [--to S] [--repaint-mode M] [--repaint-strength X]]\n"
         "       acestep --model DIR --serve\n"
-        "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/)\n"
+        "  --dit NAME  the DiT to run: acestep-v15-turbo (the default), acestep-v15-base or acestep-v15-sft. The base and SFT ones are guided\n"
+        "              (--guidance X [--cfg-start T --cfg-end T] [--adg]), take up to 200 steps (default 32) and do three more tasks:\n"
+        "               [--extract CLIP --track NAME] [--lego CLIP --track NAME [--from S] [--to S]] [--complete [CLIP] --tracks A,B]\n"
+        "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/, and maybe acestep-v15-base/ and -sft/)\n"
         "  REFDIR  one case captured by tools/acestep_ref.py (REFDIR/ref.safetensors)\n");
 }
 
@@ -98,6 +101,7 @@ static double now(void){
 #define TOL_REL 2e-4
 #define TOL_ABS 5e-5
 
+static const char *g_dit = "acestep-v15-turbo";      /* --dit: the DiT the generation oracle, --make and --serve run on */
 static const char *g_tag = "vae-oracle";      /* the oracle that is running: the prefix of its lines */
 static double g_tol_rel = TOL_REL, g_tol_abs = TOL_ABS;      /* the limits of the oracle that is running */
 static double g_cmp_scale = 0;      /* when set: a scale (a peak) the absolute limit is also a fraction of, besides the reference's own */
@@ -1031,7 +1035,31 @@ static int run_text_oracle(const char *model, const char *refdir){
  * noise: torch's generator reproduced) are held to rounding; a stage fed by the VAE encoder carries the encoder's own error
  * (VENC_TILE_*: torch's float32 against ours, 5e-5 to 3e-5 relative, the posterior draw included); the final latents carry the
  * DiT's chain on top (DIT_CHAIN_*). */
-typedef struct { shards *R; int fails, checks, audio_in; } GenTap;
+/* A guided DiT (base, SFT) with the source clip's latents from our VAE encoder: the encoder's float32 difference from torch's (4e-5) goes in
+ * at the first step and the two branches of the guidance, seven-fold, over the steps carry it to the final latents. Measured on the real base
+ * checkpoint (18 cases): the final latents are within 2e-3 of their norm and 6e-2 at one value (extract with no track name), the audio within
+ * 1.2e-3 and 1.2e-3 of full scale; fed the handler's own source latents (ACESTEP_FEED_LATENTS) the same cases are within 1e-5 of their norm and
+ * 3e-4 at one value, and on the tiny fixture, whose encoder is exact, 1.5e-6. So this is the encoder's noise, amplified, and a wrong
+ * context, mask, guidance or schedule is wrong by 1e-1 to 1. */
+#define GEN_GUIDED_REL 4e-3
+#define GEN_GUIDED_ABS 1e-1
+typedef struct { shards *R; int fails, checks, audio_in; float *fed; int guided; } GenTap;
+
+/* ACESTEP_FEED_LATENTS=1: give the pipeline the handler's own source latents (in.clean_src_latents, or in.src_latents where there is
+ * no span) instead of the ones our VAE encoder makes. The encoder's float32 error is then out of the comparison, and what is left is
+ * the sampler's and the guidance's own: on the real base checkpoint the encoder's 4e-5 is amplified by seven-fold guidance over the
+ * steps to 1e-3 of the latents, which this shows by making it 5e-6. */
+static const float *gen_feed(void *ud, const char *name, size_t n){
+    GenTap *g = (GenTap *)ud;
+    if (strcmp(name, "source_latents") || !getenv("ACESTEP_FEED_LATENTS")) return NULL;
+    int64_t m = 0;
+    free(g->fed);
+    g->fed = ref_tensor(g->R, "in.clean_src_latents", &m, NULL, NULL);
+    if (!g->fed) g->fed = ref_tensor(g->R, "in.src_latents", &m, NULL, NULL);
+    if (!g->fed || m != (int64_t)n) { free(g->fed); g->fed = NULL; return NULL; }
+    fprintf(stderr, "[gen-oracle] fed the handler's own source latents (ACESTEP_FEED_LATENTS)\n");
+    return g->fed;
+}
 
 static void gen_tap(void *ud, const char *name, const float *x, size_t n){
     GenTap *g = (GenTap *)ud;
@@ -1053,7 +1081,7 @@ static void gen_tap(void *ud, const char *name, const float *x, size_t n){
         if (!w) return;
         char label[96]; snprintf(label, sizeof label, "%s", name);
         if (m != (int64_t)n) { fprintf(stderr, "[gen-oracle] %-30s has %zu values, the handler's %lld\n", label, n, (long long)m); g->fails++; }
-        else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? DIT_CHAIN_REL : 1e-4, g->audio_in ? DIT_CHAIN_ABS : 2e-3);
+        else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? (g->guided ? GEN_GUIDED_REL : DIT_CHAIN_REL) : 1e-4, g->audio_in ? (g->guided ? GEN_GUIDED_ABS : DIT_CHAIN_ABS) : 2e-3);
         else if (map[i].encoded == 3) g->fails += cmp_tol(label, x, w, n, g->audio_in ? 1e-4 : 1e-5, g->audio_in ? 1e-3 : 1e-4);      /* the condition encoders, from the text and the timbre */
         else if (map[i].encoded == 4) g->fails += cmp_tol(label, x, w, n, 1e-6, 1e-6);       /* the silence latent and ones: copies */
         else if (map[i].encoded == 1) g->fails += g->audio_in ? cmp_tol(label, x, w, n, VENC_TILE_REL, VENC_TILE_ABS) : cmp_tol(label, x, w, n, 1e-6, 1e-6);
@@ -1095,12 +1123,22 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     rq.seed = (uint64_t)acd_json_num(p, "seed", 42);
     /* audio in: the clips the capture wrote beside the tensors (src.wav, ref.wav), asked for the way a user asks (a default is left unset) */
     const char *task = json_str(p, "task_type");
-    rq.task = task && !strcmp(task, "cover") ? ACG_TASK_COVER : task && !strcmp(task, "repaint") ? ACG_TASK_REPAINT : ACG_TASK_TEXT2MUSIC;
-    char src_path[4300], ref_path[4300];
+    rq.task = !task ? ACG_TASK_TEXT2MUSIC : !strcmp(task, "cover") ? ACG_TASK_COVER : !strcmp(task, "repaint") ? ACG_TASK_REPAINT : !strcmp(task, "extract") ? ACG_TASK_EXTRACT :
+              !strcmp(task, "lego") ? ACG_TASK_LEGO : !strcmp(task, "complete") ? ACG_TASK_COMPLETE : ACG_TASK_TEXT2MUSIC;
+    char src_path[4300], ref_path[4300], tracks_buf[512] = "";
     snprintf(src_path, sizeof src_path, "%s/src.wav", refdir); snprintf(ref_path, sizeof ref_path, "%s/ref.wav", refdir);
     { FILE *t = fopen(ref_path, "rb"); if (t) { fclose(t); rq.ref_path = ref_path; } }
-    if (rq.task != ACG_TASK_TEXT2MUSIC) rq.src_path = src_path;
-    if (rq.task == ACG_TASK_REPAINT) {
+    if (rq.task != ACG_TASK_TEXT2MUSIC) { FILE *t = fopen(src_path, "rb"); if (t) { fclose(t); rq.src_path = src_path; } }      /* a complete may have none */
+    /* the base DiT: guidance and the tracks (the capture keeps the caller's `_track` and `_classes` in its parameters) */
+    jval *gs = json_get(p, "guidance_scale"); rq.guidance = gs && gs->t == J_NUM ? gs->num : 0;
+    rq.cfg_start = acd_json_num(p, "cfg_interval_start", 0); rq.cfg_end = acd_json_num(p, "cfg_interval_end", 1);
+    if (rq.cfg_end >= 1) rq.cfg_end = 0;
+    { jval *ad = json_get(p, "use_adg"); rq.adg = ad && ad->t == J_BOOL && ad->boolean; }
+    rq.track = json_str(p, "_track");
+    { jval *cl = json_get(p, "_classes");
+      if (cl && cl->t == J_ARR) for (int k = 0; k < cl->len; k++) if (cl->kids[k]->t == J_STR) { size_t m = strlen(tracks_buf); snprintf(tracks_buf + m, sizeof tracks_buf - m, "%s%s", m ? "," : "", cl->kids[k]->str); }
+      if (tracks_buf[0]) rq.tracks = tracks_buf; }
+    if (rq.task == ACG_TASK_REPAINT || rq.task == ACG_TASK_LEGO) {
         rq.repaint_start = acd_json_num(p, "repainting_start", 0);
         const double re = acd_json_num(p, "repainting_end", -1);
         rq.repaint_end = re > 0 ? re : 0;
@@ -1114,12 +1152,12 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
         rq.cover_strength = cs == 1.0 ? 0 : cs;
         rq.cover_noise = acd_json_num(p, "cover_noise_strength", 0.0);
     }
-    const int audio_in = rq.task != ACG_TASK_TEXT2MUSIC || rq.ref_path;
+    const int audio_in = rq.src_path || rq.ref_path;
     fprintf(stderr, "[gen-oracle] case: %s%s, %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", task ? task : "text2music", rq.ref_path ? " + reference" : "",
             rq.duration, rq.steps, rq.shift, rq.dcw ? "on" : "off", (unsigned long long)rq.seed);
 
     double t0 = now();
-    AceEngine *e = ace_open(model, err, sizeof err);
+    AceEngine *e = ace_open_dit(model, g_dit, err, sizeof err);
     if (!e) { fprintf(stderr, "[gen-oracle] %s\n", err); json_free(root); free(meta_text); st_destroy(&R); return 2; }
     fprintf(stderr, "[gen-oracle] loaded in %.1fs (silence latent: %d frames)\n", now() - t0, e->silence_frames);
 
@@ -1153,8 +1191,8 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     }
 
     float *pcm = NULL; AceInfo info;
-    GenTap gt = { &R, 0, 0, audio_in };
-    AceHooks hk = { NULL, NULL, NULL, gen_tap };
+    GenTap gt = { &R, 0, 0, audio_in, NULL, !e->dit->turbo };
+    AceHooks hk = { NULL, NULL, NULL, gen_tap, gen_feed };
     hk.ud = &gt;
     t0 = now();
     int rc = ace_generate(e, &rq, &hk, &pcm, &info, err, sizeof err);
@@ -1188,7 +1226,7 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
         if (wav && write_wav16(wav, pcm, (size_t)info.samples, ach, e->vae->rate)) { fprintf(stderr, "[gen-oracle] cannot write %s\n", wav); fails++; }
         else if (wav) fprintf(stderr, "[gen-oracle] wrote %s (%.2f s)\n", wav, (double)info.samples / e->vae->rate);
     }
-    free(pcm);
+    free(pcm); free(gt.fed);
     ace_close(e); json_free(root); free(meta_text); st_destroy(&R);
     if (!checks) { fprintf(stderr, "[gen-oracle] nothing to compare in %s\n", refdir); return 2; }
     if (fails) { fprintf(stderr, "[gen-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
@@ -1200,11 +1238,11 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
 static int run_make(const char *model, AceRequest *rq, const char *out){
     char err[512] = "";
     if (ace_check(rq, err, sizeof err)) { fprintf(stderr, "acestep: %s\n", err); return 2; }
-    AceEngine *e = ace_open(model, err, sizeof err);
+    AceEngine *e = ace_open_dit(model, g_dit, err, sizeof err);
     if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
     float *pcm = NULL; AceInfo info;
     fprintf(stderr, "[acestep] %s%s, %d steps, shift %g, DCW %s, seed %llu\n",
-            rq->task == ACG_TASK_COVER ? "cover" : rq->task == ACG_TASK_REPAINT ? "repaint" : "text to music", rq->ref_path ? " with a reference" : "",
+            (const char *const[]){ "text to music", "cover", "repaint", "extract", "lego", "complete" }[rq->task], rq->ref_path ? " with a reference" : "",
             rq->steps, rq->shift, rq->dcw ? "on" : "off", (unsigned long long)rq->seed);
     double t0 = now();
     int rc = ace_generate(e, rq, NULL, &pcm, &info, err, sizeof err);
@@ -1219,7 +1257,7 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
 
 int main(int argc, char **argv){
     const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *venc_ref = NULL, *cover_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
-    int chunk = 256, overlap = 64, serve = 0, make = 0;
+    int chunk = 256, overlap = 64, serve = 0, make = 0, steps_given = 0, dcw_given = 0;
     AceRequest rq; memset(&rq, 0, sizeof rq);
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
     rq.seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));
@@ -1236,13 +1274,24 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--timesig") && v) { rq.timesig = v; i++; }
         else if (!strcmp(a, "--bpm") && v) { rq.bpm = atoi(v); i++; }
         else if (!strcmp(a, "--duration") && v) { rq.duration = atof(v); i++; }
-        else if (!strcmp(a, "--steps") && v) { rq.steps = atoi(v); i++; }
+        else if (!strcmp(a, "--steps") && v) { rq.steps = atoi(v); steps_given = 1; i++; }
         else if (!strcmp(a, "--shift") && v) { rq.shift = atof(v); i++; }
         else if (!strcmp(a, "--seed") && v) { rq.seed = (uint64_t)strtoull(v, NULL, 10); i++; }
-        else if (!strcmp(a, "--no-dcw")) rq.dcw = 0;
+        else if (!strcmp(a, "--no-dcw")) { rq.dcw = 0; dcw_given = 1; }
+        else if (!strcmp(a, "--dcw")) { rq.dcw = 1; dcw_given = 1; }
         else if (!strcmp(a, "--ref") && v) { rq.ref_path = v; make = 1; i++; }
         else if (!strcmp(a, "--cover") && v) { rq.task = ACG_TASK_COVER; rq.src_path = v; make = 1; i++; }
         else if (!strcmp(a, "--repaint") && v) { rq.task = ACG_TASK_REPAINT; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--extract") && v) { rq.task = ACG_TASK_EXTRACT; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--lego") && v) { rq.task = ACG_TASK_LEGO; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--complete")) { rq.task = ACG_TASK_COMPLETE; make = 1; if (v && v[0] != '-') { rq.src_path = v; i++; } }
+        else if (!strcmp(a, "--track") && v) { rq.track = v; i++; }
+        else if (!strcmp(a, "--tracks") && v) { rq.tracks = v; i++; }
+        else if (!strcmp(a, "--dit") && v) { g_dit = v; i++; }
+        else if (!strcmp(a, "--guidance") && v) { rq.guidance = atof(v); i++; }
+        else if (!strcmp(a, "--cfg-start") && v) { rq.cfg_start = atof(v); i++; }
+        else if (!strcmp(a, "--cfg-end") && v) { rq.cfg_end = atof(v); i++; }
+        else if (!strcmp(a, "--adg")) rq.adg = 1;
         else if (!strcmp(a, "--from") && v) { rq.repaint_start = atof(v); i++; }
         else if (!strcmp(a, "--to") && v) { rq.repaint_end = atof(v); i++; }
         else if (!strcmp(a, "--repaint-mode") && v) {
@@ -1273,12 +1322,16 @@ int main(int argc, char **argv){
         }
         else { usage(); return 2; }
     }
+    if (strcmp(g_dit, "acestep-v15-turbo")) {                          /* a guided DiT: its own defaults, as upstream's (32 steps, no DCW) */
+        if (!steps_given) rq.steps = 32;
+        if (!dcw_given) rq.dcw = 0;
+    }
     if (serve + make + (gen_ref != NULL) > 1) { fprintf(stderr, "acestep: --serve, --caption and --gen-ref are separate modes\n"); return 2; }
     if (model && make && !rq.caption) rq.caption = "";                  /* a cover or a repaint needs no description: its style is the clip's */
     if (model && make && !out) { fprintf(stderr, "acestep: --caption, --cover, --repaint and --ref need --out FILE.wav\n"); return 2; }
     if (model && serve) {
         char err[512] = "";
-        AceEngine *e = ace_open(model, err, sizeof err);
+        AceEngine *e = ace_open_dit(model, g_dit, err, sizeof err);
         if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
         int r = acs_serve(e);
         ace_close(e);

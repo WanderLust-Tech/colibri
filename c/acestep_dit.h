@@ -76,6 +76,9 @@ typedef struct {
     AcdTimeEmb te, ter;
     AcdLin cond_emb, text_proj, lyric_embed, timbre_embed, proj_in, proj_out;
     float *lyric_norm, *timbre_norm, *norm_out, *sst_out;      /* sst_out [2][D] */
+    char variant[64];                                          /* the directory it was loaded from: acestep-v15-turbo, -base or -sft */
+    float *null_emb;                                           /* null_condition_emb [D]: what classifier-free guidance conditions on instead of the tokens */
+    int turbo;                                                 /* config is_turbo: the turbo DiT has guidance baked in, the base and SFT ones are guided at sampling */
     AcdEncLayer *lyric, *timbre;
     AcdLayer *L;
     size_t wbytes;
@@ -172,7 +175,7 @@ static void acd_free(AceDit *d){
     acd_free_lin(&d->ter.l1); acd_free_lin(&d->ter.l2); acd_free_lin(&d->ter.proj);
     acd_free_lin(&d->cond_emb); acd_free_lin(&d->text_proj); acd_free_lin(&d->lyric_embed); acd_free_lin(&d->timbre_embed);
     acd_free_lin(&d->proj_in); acd_free_lin(&d->proj_out);
-    free(d->lyric_norm); free(d->timbre_norm); free(d->norm_out); free(d->sst_out); free(d->sliding);
+    free(d->lyric_norm); free(d->timbre_norm); free(d->norm_out); free(d->sst_out); free(d->sliding); free(d->null_emb);
     for (int i = 0; d->lyric && i < d->nlyric; i++) { AcdEncLayer *e = &d->lyric[i]; acd_free_attn(&e->sa); free(e->ln1); free(e->ln2); acd_free_lin(&e->gate); acd_free_lin(&e->up); acd_free_lin(&e->down); }
     for (int i = 0; d->timbre && i < d->ntimbre; i++) { AcdEncLayer *e = &d->timbre[i]; acd_free_attn(&e->sa); free(e->ln1); free(e->ln2); acd_free_lin(&e->gate); acd_free_lin(&e->up); acd_free_lin(&e->down); }
     for (int i = 0; d->L && i < d->nl; i++) {
@@ -258,14 +261,17 @@ static int acd_load_timeemb(shards *S, const char *pfx, int D, AcdTimeEmb *t, si
     return 0;
 }
 
-/* model_dir holds acestep-v15-turbo/ (config.json and model.safetensors). */
-static AceDit *acd_load(const char *model_dir){
+/* model_dir holds acestep-v15-turbo/ (config.json and model.safetensors), and may hold acestep-v15-base/ and acestep-v15-sft/, the
+ * same network trained to be guided (acd_load_variant). */
+static AceDit *acd_load_variant(const char *model_dir, const char *variant){
     char err[512] = "", path[4200], dir[4096];
     AceDit *d = (AceDit *)calloc(1, sizeof(AceDit));
     shards S; int have_s = 0;
     jval *cfg = NULL; char *text = NULL;
     if (!d) { fprintf(stderr, "acestep dit: out of memory\n"); return NULL; }
-    if (snprintf(dir, sizeof dir, "%s/acestep-v15-turbo", model_dir) >= (int)sizeof dir) { snprintf(err, sizeof err, "path too long"); goto fail; }
+    if (!variant || !*variant || strchr(variant, '/') || strchr(variant, '\\') || strstr(variant, "..")) { snprintf(err, sizeof err, "bad DiT name"); goto fail; }
+    if (snprintf(dir, sizeof dir, "%s/%s", model_dir, variant) >= (int)sizeof dir) { snprintf(err, sizeof err, "path too long"); goto fail; }
+    snprintf(d->variant, sizeof d->variant, "%s", variant);
     snprintf(path, sizeof path, "%s/config.json", dir);
     FILE *f = fopen(path, "rb");
     if (!f) { snprintf(err, sizeof err, "cannot open %.400s", path); goto fail; }
@@ -289,6 +295,7 @@ static AceDit *acd_load(const char *model_dir){
     d->theta = (float)acd_json_num(cfg, "rope_theta", 10000.0);
     jval *sw = json_get(cfg, "use_sliding_window");
     d->window = (sw && sw->t == J_BOOL && !sw->boolean) ? -1 : acd_json_int(cfg, "sliding_window", -1);
+    { jval *tb = json_get(cfg, "is_turbo"); d->turbo = !(tb && tb->t == J_BOOL && !tb->boolean); }   /* absent: turbo, as every config before the base one was */
     jval *rs = json_get(cfg, "rope_scaling");
     if (rs && rs->t != J_NULL) { snprintf(err, sizeof err, "config: rope_scaling is not supported"); goto fail; }
     jval *ab = json_get(cfg, "attention_bias");
@@ -336,6 +343,8 @@ static AceDit *acd_load(const char *model_dir){
       free(b); }
     if (!(d->norm_out = acd_read_f32(&S, "decoder.norm_out.weight", 1, shD, err, sizeof err))) goto fail;
     if (!(d->sst_out = acd_read_f32(&S, "decoder.scale_shift_table", 3, shsst2, err, sizeof err))) goto fail;
+    { int64_t s3[3] = {1, 1, D};
+      if (!(d->null_emb = acd_read_f32(&S, "null_condition_emb", 3, s3, err, sizeof err))) goto fail; }
     { int64_t s[2] = {D, d->textdim};
       if (acd_load_lin(&S, "encoder.text_projector.weight", NULL, D, d->textdim, 2, s, NULL, 0, 0, &d->text_proj, &d->wbytes, err, sizeof err)) goto fail; }
     { int64_t s[2] = {D, d->textdim};
@@ -371,6 +380,8 @@ fail:
     acd_free(d);
     return NULL;
 }
+
+static AceDit *acd_load(const char *model_dir){ return acd_load_variant(model_dir, "acestep-v15-turbo"); }
 
 /* -------------------------------------------------------------------- math -- */
 
@@ -560,20 +571,12 @@ static void acd_cond_free(AcdCond *c){
     free(c->ck); free(c->cv); free(c->enc); free(c);
 }
 
-static AcdCond *acd_cond_new(const AceDit *d, const float *text, int Lt, const float *lyric, int Ll, const float *timbre, int Tr){
-    if (Lt < 1 || Ll < 1 || Tr < 1) return NULL;
+/* The cross-attention keys and values of packed condition tokens raw [len][D] (before condition_embedder). Takes raw. */
+static AcdCond *acd_cond_from_raw(const AceDit *d, float *raw, int len){
     const int D = d->D, Hk = d->kv, hd = d->hd;
     AcdCond *c = (AcdCond *)calloc(1, sizeof *c);
-    if (!c) return NULL;
-    c->nl = d->nl; c->len = Ll + 1 + Lt;
-    float *ly = acd_encoder(d, lyric, Ll, &d->lyric_embed, d->lyric, d->nlyric, d->lyric_norm);
-    float *tb = acd_encoder(d, timbre, Tr, &d->timbre_embed, d->timbre, d->ntimbre, d->timbre_norm);
-    float *raw = (float *)malloc((size_t)c->len * D * sizeof(float));
-    if (!raw) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
-    memcpy(raw, ly, (size_t)Ll * D * sizeof(float));
-    memcpy(raw + (size_t)Ll * D, tb, (size_t)D * sizeof(float));                     /* the first frame's output is the timbre */
-    acd_lin(raw + (size_t)(Ll + 1) * D, text, Lt, &d->text_proj);
-    free(ly); free(tb);
+    if (!c) { free(raw); return NULL; }
+    c->nl = d->nl; c->len = len;
     c->enc = raw;                                                                     /* the packed tokens, before condition_embedder */
     float *emb = (float *)malloc((size_t)c->len * D * sizeof(float));
     if (!emb) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
@@ -590,6 +593,30 @@ static AcdCond *acd_cond_new(const AceDit *d, const float *text, int Lt, const f
     }
     free(emb);
     return c;
+}
+
+/* What classifier-free guidance conditions on in place of `like`: the same number of rows, every one the null embedding (upstream
+ * expands null_condition_emb to the shape of the packed tokens and keeps the mask, so the length is the condition's own). */
+static AcdCond *acd_cond_null(const AceDit *d, const AcdCond *like){
+    float *raw = (float *)malloc((size_t)like->len * d->D * sizeof(float));
+    if (!raw) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    for (int i = 0; i < like->len; i++) memcpy(raw + (size_t)i * d->D, d->null_emb, (size_t)d->D * sizeof(float));
+    return acd_cond_from_raw(d, raw, like->len);
+}
+
+static AcdCond *acd_cond_new(const AceDit *d, const float *text, int Lt, const float *lyric, int Ll, const float *timbre, int Tr){
+    if (Lt < 1 || Ll < 1 || Tr < 1) return NULL;
+    const int D = d->D;
+    const int len = Ll + 1 + Lt;
+    float *ly = acd_encoder(d, lyric, Ll, &d->lyric_embed, d->lyric, d->nlyric, d->lyric_norm);
+    float *tb = acd_encoder(d, timbre, Tr, &d->timbre_embed, d->timbre, d->ntimbre, d->timbre_norm);
+    float *raw = (float *)malloc((size_t)len * D * sizeof(float));
+    if (!raw) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    memcpy(raw, ly, (size_t)Ll * D * sizeof(float));
+    memcpy(raw + (size_t)Ll * D, tb, (size_t)D * sizeof(float));                     /* the first frame's output is the timbre */
+    acd_lin(raw + (size_t)(Ll + 1) * D, text, Lt, &d->text_proj);
+    free(ly); free(tb);
+    return acd_cond_from_raw(d, raw, len);
 }
 
 /* sinusoidal embedding of t scaled by 1000 (cos first, then sin), in float32 as the reference does it, then the MLP:
@@ -793,6 +820,108 @@ static int acd_sample(const AceDit *d, const AcdCond *c, const float *noise, con
     memcpy(out, x, N * sizeof(float));
     free(x); free(nx); free(v);
     return n;
+}
+
+/* ---------------------------------------------------------------- guidance -- */
+
+/* The base and SFT DiTs are not guided inside: the sampler evaluates them twice, once on the condition and once on the null
+ * condition (acd_cond_null), and combines the two velocities. Everything below is upstream's models/common/apg_guidance.py on a
+ * [T][A] velocity (upstream's [1][T][A], with the projection taken over the frames: dims=[1]). */
+
+/* The base DiT's schedule: torch.linspace(1, 0, steps + 1) in float32, then t = shift t / (1 + (shift - 1) t). Unlike the turbo's it
+ * has no cap on the number of steps, and its last entry is 0: the last step goes from t to 0. t holds steps + 1 floats.
+ * (torch's linspace adds a multiple of the step to the start for the first half and subtracts one from the end for the second;
+ * its vectorised kernel adds the lane offsets in a different order, which can move an entry by one float32 rounding.) */
+static int acd_schedule_linspace(int steps, float shift, float *t){
+    if (steps < 1) return 0;
+    const int n = steps + 1;
+    const float step = (0.0f - 1.0f) / (float)(n - 1);
+    for (int i = 0; i < n; i++) t[i] = i < n / 2 ? 1.0f + step * (float)i : 0.0f - step * (float)(n - i - 1);
+    if (shift != 1.0f) for (int i = 0; i < n; i++) t[i] = shift * t[i] / (1.0f + (shift - 1.0f) * t[i]);
+    return steps;
+}
+
+/* Plain classifier-free guidance. */
+static void acd_cfg(float *out, const float *cond, const float *unc, size_t n, double scale){
+    for (size_t k = 0; k < n; k++) out[k] = unc[k] + (float)scale * (cond[k] - unc[k]);
+}
+
+/* APG: the difference of the two velocities, smoothed over the steps by a momentum of -0.75 (`run` [T][A], zero before the first
+ * step and kept between steps), cut to a norm of 2.5 along the frames, and only its part orthogonal to the conditional velocity
+ * is added (eta = 0), scaled by guidance - 1. */
+static void acd_apg(float *out, const float *cond, const float *unc, int T, int A, double scale, float *run){
+    const size_t N = (size_t)T * A;
+    for (size_t k = 0; k < N; k++) run[k] = (cond[k] - unc[k]) + (-0.75f) * run[k];
+    double *dn = (double *)malloc((size_t)A * sizeof(double)), *cn = (double *)malloc((size_t)A * sizeof(double));
+    double *par = (double *)malloc((size_t)A * sizeof(double));
+    if (!dn || !cn || !par) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    for (int c = 0; c < A; c++) { dn[c] = 0; cn[c] = 0; }
+    for (int t = 0; t < T; t++)
+        for (int c = 0; c < A; c++) {
+            const double r = run[(size_t)t * A + c], v = cond[(size_t)t * A + c];
+            dn[c] += r * r; cn[c] += v * v;
+        }
+    float *sf = (float *)malloc((size_t)A * sizeof(float));
+    if (!sf) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    for (int c = 0; c < A; c++) {
+        const float nrm = (float)sqrt(dn[c]), q = 2.5f / nrm;
+        sf[c] = q < 1.0f ? q : 1.0f;                                   /* torch.minimum(ones, 2.5 / norm) */
+        cn[c] = sqrt(cn[c]); if (cn[c] < 1e-12) cn[c] = 1e-12;          /* F.normalize's floor */
+        par[c] = 0;
+    }
+    for (int t = 0; t < T; t++)
+        for (int c = 0; c < A; c++) {
+            const double diff = (double)(run[(size_t)t * A + c] * sf[c]);
+            par[c] += diff * ((double)cond[(size_t)t * A + c] / cn[c]);
+        }
+    for (int t = 0; t < T; t++)
+        for (int c = 0; c < A; c++) {
+            const size_t k = (size_t)t * A + c;
+            const double v1 = (double)cond[k] / cn[c], diff = (double)(run[k] * sf[c]);
+            const float orth = (float)(diff - par[c] * v1);
+            out[k] = cond[k] + (float)(scale - 1.0) * (orth + 0.0f * (float)(par[c] * v1));
+        }
+    free(dn); free(cn); free(par); free(sf);
+}
+
+/* ADG, angle-based guidance, on the predicted clean samples x - sigma v of the two branches, row by row (a frame's 64 channels). */
+static void acd_adg(float *out, const float *x, const float *cond, const float *unc, int T, int A, float sigma, double scale){
+    const double clip = 3.14 / 6;
+    double weight = scale - 1.0;
+    weight = weight * (weight > 0) + 1e-3;
+    float *lt = (float *)malloc((size_t)A * sizeof(float)), *lu = (float *)malloc((size_t)A * sizeof(float));
+    float *diff = (float *)malloc((size_t)A * sizeof(float)), *perp = (float *)malloc((size_t)A * sizeof(float));
+    if (!lt || !lu || !diff || !perp) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    for (int t = 0; t < T; t++) {
+        const size_t o = (size_t)t * A;
+        double nt = 0, nu = 0, dot_d = 0;
+        float dot = 0, nsq = 0;
+        for (int c = 0; c < A; c++) {
+            lt[c] = x[o + c] - sigma * cond[o + c];
+            lu[c] = x[o + c] - sigma * unc[o + c];
+            diff[c] = lt[c] - lu[c];
+            nt += (double)lt[c] * lt[c]; nu += (double)lu[c] * lu[c];
+        }
+        nt = sqrt(nt); nu = sqrt(nu);
+        for (int c = 0; c < A; c++) dot_d += ((double)lt[c] / nt) * ((double)lu[c] / nu);
+        double cs = dot_d;
+        if (cs < -1.0 + 1e-6) cs = -1.0 + 1e-6;
+        if (cs > 1.0 - 1e-6) cs = 1.0 - 1e-6;
+        const double theta = acos(cs);
+        double tn = weight * theta;
+        if (tn < -clip) tn = -clip;
+        if (tn > clip) tn = clip;
+        for (int c = 0; c < A; c++) { dot += diff[c] * lu[c]; nsq += lu[c] * lu[c]; }
+        const float k = dot / (nsq + 1e-8f);
+        for (int c = 0; c < A; c++) perp[c] = diff[c] - k * lu[c];
+        const double st = sin(theta), ctn = cos(tn), stn = sin(tn);
+        for (int c = 0; c < A; c++) {
+            const double vnew = ctn * (double)lt[c];
+            const double pnew = st > 1e-3 ? (double)perp[c] * stn / st : (double)perp[c] * weight;
+            out[o + c] = (float)(((double)x[o + c] - (vnew + pnew)) / (double)sigma);
+        }
+    }
+    free(lt); free(lu); free(diff); free(perp);
 }
 
 #endif

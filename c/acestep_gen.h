@@ -37,7 +37,8 @@
 #define ACG_MIN_FRAMES 128             /* the handler's floor on a clip, 5.12 s */
 #define ACG_MIN_SECONDS 1.0
 #define ACG_MAX_SECONDS 600.0          /* the handler's DURATION_MAX */
-#define ACG_MAX_STEPS 20               /* the schedule has no more entries than this (acd_schedule) */
+#define ACG_MAX_STEPS 200              /* the most a base or SFT DiT takes: its schedule is a linspace of any length */
+#define ACG_MAX_STEPS_TURBO 20         /* the turbo's schedule has no more entries than this (acd_schedule) */
 #define ACG_TIMBRE_FRAMES 750          /* the reference timbre is the silence latent's first 30 s */
 #define ACG_MAX_CAPTION_BYTES 4096
 #define ACG_MAX_LYRIC_BYTES 32768
@@ -209,6 +210,7 @@ typedef struct {
     AceDit *dit; AceText *text; AceTok tok; int tok_open; AcVae *vae;
     float *silence; int silence_frames;
     char model_dir[4096];
+    char dit_name[64];                             /* acestep-v15-turbo, or the base or SFT DiT the engine was opened on */
     AcvEnc *venc;                                  /* the VAE encoder: loaded the first time a request brings audio in */
     AcdTok *cover;                                 /* the audio tokenizer and detokenizer: loaded the first time a cover is asked for */
 } AceEngine;
@@ -222,7 +224,7 @@ static void ace_close(AceEngine *e){
 
 /* Load the three networks and the silence latent from the checkpoint directory. NULL (with err) when one is missing or does
  * not fit; the components' own loaders have printed their reasons on stderr. */
-static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){
+static AceEngine *ace_open_dit(const char *model_dir, const char *dit_name, char *err, size_t errn){
     AceEngine *e = (AceEngine *)calloc(1, sizeof *e);
     char path[4300];
     if (!e) { snprintf(err, errn, "out of memory"); return NULL; }
@@ -230,10 +232,11 @@ static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){
     if (act_tok_open(&e->tok, model_dir)) { snprintf(err, errn, "cannot open the tokenizer in %.400s", model_dir); ace_close(e); return NULL; }
     e->tok_open = 1;
     if (!(e->text = act_load(model_dir))) { snprintf(err, errn, "cannot load the text encoder from %.400s", model_dir); ace_close(e); return NULL; }
-    if (!(e->dit = acd_load(model_dir))) { snprintf(err, errn, "cannot load the DiT from %.400s", model_dir); ace_close(e); return NULL; }
+    snprintf(e->dit_name, sizeof e->dit_name, "%s", dit_name);
+    if (!(e->dit = acd_load_variant(model_dir, dit_name))) { snprintf(err, errn, "cannot load the DiT %.60s from %.400s", dit_name, model_dir); ace_close(e); return NULL; }
     snprintf(path, sizeof path, "%s/vae", model_dir);
     if (!(e->vae = acv_load(path))) { snprintf(err, errn, "cannot load the VAE from %.400s", path); ace_close(e); return NULL; }
-    snprintf(path, sizeof path, "%s/acestep-v15-turbo/silence_latent.pt", model_dir);
+    snprintf(path, sizeof path, "%s/%s/silence_latent.pt", model_dir, dit_name);
     if (!(e->silence = acg_load_silence(path, &e->silence_frames, err, errn))) { ace_close(e); return NULL; }
     if (e->dit->acdim != 64 || e->vae->zdim != e->dit->acdim || e->vae->hop != ACG_HOP || e->vae->rate != ACG_RATE) {
         snprintf(err, errn, "the DiT's latents (%d) and the VAE's (%d, hop %d, %d Hz) do not fit each other or this engine", e->dit->acdim, e->vae->zdim, e->vae->hop, e->vae->rate);
@@ -242,6 +245,8 @@ static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){
     if (e->text->hidden != e->dit->textdim) { snprintf(err, errn, "the text encoder is %d wide, the DiT wants %d", e->text->hidden, e->dit->textdim); ace_close(e); return NULL; }
     return e;
 }
+
+static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){ return ace_open_dit(model_dir, "acestep-v15-turbo", err, errn); }
 
 /* The VAE encoder, loaded on first use. */
 static AcvEnc *ace_encoder(AceEngine *e, char *err, size_t errn){
@@ -266,6 +271,10 @@ static AcdTok *ace_cover_net(AceEngine *e, char *err, size_t errn){
 #define ACG_TASK_TEXT2MUSIC 0
 #define ACG_TASK_COVER 1
 #define ACG_TASK_REPAINT 2
+#define ACG_TASK_EXTRACT 3                         /* the base and SFT DiTs only: pull one track out of the source */
+#define ACG_TASK_LEGO 4                            /* ... add one track to the source inside a span (a repaint of one instrument) */
+#define ACG_TASK_COMPLETE 5                        /* ... complete a partial track with others; the source is optional */
+#define ACG_MAX_TRACK 64
 #define ACG_REPAINT_BALANCED 0
 #define ACG_REPAINT_CONSERVATIVE 1
 #define ACG_REPAINT_AGGRESSIVE 2
@@ -280,7 +289,7 @@ typedef struct {
     int steps; double shift; int dcw;
     uint64_t seed;
     /* audio in (0 and NULL are the defaults): */
-    int task;                                      /* ACG_TASK_*: text to music, a cover of src, a repaint of src */
+    int task;                                      /* ACG_TASK_*: text to music, a cover, a repaint, an extract, a lego or a complete of src */
     const char *src_path;                          /* the clip a cover or a repaint works on: a WAV or an MP3 */
     const char *ref_path;                          /* a clip to take the timbre and style from, in any task */
     double repaint_start, repaint_end;             /* seconds in the clip; an end of 0 or less is its end, a start before 0 adds silence before it and an end past it silence after it */
@@ -288,6 +297,12 @@ typedef struct {
     double repaint_strength;                       /* balanced mode, 0 to 1, higher = freer: 0 is the default, 0.5 */
     double cover_strength;                         /* a cover: 0 to 1, the share of the steps that follow the source's structure; 0 is the default, 1 */
     double cover_noise;                            /* a cover: 0 to 1, how near the source the first step starts; 0 starts from noise */
+    /* the base and SFT DiTs (0, NULL and 0 are the defaults; the turbo DiT has guidance baked in and ignores the first three): */
+    double guidance;                               /* classifier-free guidance scale; 0 is the default, 7; 1 or less turns it off */
+    double cfg_start, cfg_end;                     /* the part of the schedule (t from 1 down to 0) guidance applies to; an end of 0 is 1 */
+    int adg;                                       /* angle-based guidance instead of APG */
+    const char *track;                             /* extract and lego: the track (drums, bass, vocals ...); NULL or "" is "the track" */
+    const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
 } AceRequest;
 
 /* Taps: the oracle's view of what the stages made, by name ("noise", "timbre", "src_latents", "clean_src_latents", "context",
@@ -297,6 +312,9 @@ typedef struct {
     int (*cancelled)(void *ud);                    /* nonzero stops the request at the next opportunity */
     void *ud;
     void (*tap)(void *ud, const char *name, const float *x, size_t n);
+    /* an oracle's way to feed a stage what the reference had instead of what this engine made ("source_latents": the clean latents of the
+     * source clip, [T][64]): returns n floats to use, or NULL to keep our own. NULL in production. */
+    const float *(*feed)(void *ud, const char *name, size_t n);
 } AceHooks;
 
 typedef struct {
@@ -355,25 +373,69 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (strlen(r->caption) > ACG_MAX_CAPTION_BYTES) { snprintf(err, errn, "caption longer than %d bytes", ACG_MAX_CAPTION_BYTES); return 1; }
     if (r->lyrics && strlen(r->lyrics) > ACG_MAX_LYRIC_BYTES) { snprintf(err, errn, "lyrics longer than %d bytes", ACG_MAX_LYRIC_BYTES); return 1; }
     if (r->language && strlen(r->language) > 32) { snprintf(err, errn, "language is not a language code"); return 1; }
-    if (r->task < ACG_TASK_TEXT2MUSIC || r->task > ACG_TASK_REPAINT) { snprintf(err, errn, "task must be text2music, cover or repaint"); return 1; }
-    if (r->task == ACG_TASK_TEXT2MUSIC && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS)) { snprintf(err, errn, "duration must be %g to %g seconds", ACG_MIN_SECONDS, ACG_MAX_SECONDS); return 1; }
+    if (r->task < ACG_TASK_TEXT2MUSIC || r->task > ACG_TASK_COMPLETE) { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return 1; }
+    if ((r->task == ACG_TASK_TEXT2MUSIC || (r->task == ACG_TASK_COMPLETE && !(r->src_path && *r->src_path))) && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS)) { snprintf(err, errn, "duration must be %g to %g seconds", ACG_MIN_SECONDS, ACG_MAX_SECONDS); return 1; }
     if (r->steps < 1 || r->steps > ACG_MAX_STEPS) { snprintf(err, errn, "steps must be 1 to %d", ACG_MAX_STEPS); return 1; }
     if (!(r->shift > 0.0 && r->shift <= 10.0)) { snprintf(err, errn, "shift must be above 0 and at most 10"); return 1; }
     if (r->bpm < 0 || r->bpm > 1000) { snprintf(err, errn, "bpm must be 0 (not given) to 1000"); return 1; }
     if ((r->key && strlen(r->key) > 32) || (r->timesig && strlen(r->timesig) > 8)) { snprintf(err, errn, "key or time signature too long"); return 1; }
     if (r->seed > (uint64_t)ACG_MAX_SEED) { snprintf(err, errn, "seed must be 0 to 4294967295"); return 1; }
-    const int needs_src = r->task != ACG_TASK_TEXT2MUSIC;
-    if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "a %s needs a source clip (src)", r->task == ACG_TASK_COVER ? "cover" : "repaint"); return 1; }
-    if (!needs_src && r->src_path && *r->src_path) { snprintf(err, errn, "a source clip is for a cover or a repaint; for text to music, give a reference clip (ref) to take its style"); return 1; }
+    static const char *const task_names[6] = { "text to music", "cover", "repaint", "extract", "lego", "complete" };
+    const int needs_src = r->task != ACG_TASK_TEXT2MUSIC && r->task != ACG_TASK_COMPLETE;
+    if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "a %s needs a source clip (src)", task_names[r->task]); return 1; }
+    if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference clip (ref) to take its style"); return 1; }
     if (r->src_path && strlen(r->src_path) > 4000) { snprintf(err, errn, "src path too long"); return 1; }
     if (r->ref_path && strlen(r->ref_path) > 4000) { snprintf(err, errn, "ref path too long"); return 1; }
     if (r->task != ACG_TASK_COVER && (r->cover_strength != 0 || r->cover_noise != 0)) { snprintf(err, errn, "cover_strength and cover_noise are for a cover"); return 1; }
     if (!(r->cover_strength >= 0 && r->cover_strength <= 1) || !(r->cover_noise >= 0 && r->cover_noise <= 1)) { snprintf(err, errn, "cover_strength and cover_noise must be 0 to 1"); return 1; }
-    if (r->task != ACG_TASK_REPAINT && (r->repaint_start != 0 || r->repaint_end != 0 || r->repaint_mode != 0 || r->repaint_strength != 0)) { snprintf(err, errn, "the repaint settings are for a repaint"); return 1; }
+    if (r->task != ACG_TASK_REPAINT && r->task != ACG_TASK_LEGO && (r->repaint_start != 0 || r->repaint_end != 0 || r->repaint_mode != 0 || r->repaint_strength != 0)) { snprintf(err, errn, "the repaint settings are for a repaint or a lego"); return 1; }
+    if (!(r->guidance >= 0 && r->guidance <= 100)) { snprintf(err, errn, "guidance must be 0 (the default) to 100"); return 1; }
+    if (!(r->cfg_start >= 0 && r->cfg_start <= 1) || !(r->cfg_end >= 0 && r->cfg_end <= 1) || (r->cfg_end > 0 && r->cfg_end < r->cfg_start)) { snprintf(err, errn, "the guidance interval must be 0 to 1, from before to after"); return 1; }
+    if (r->track && *r->track && r->task != ACG_TASK_EXTRACT && r->task != ACG_TASK_LEGO) { snprintf(err, errn, "a track is for an extract or a lego; a complete takes tracks"); return 1; }
+    if (r->tracks && *r->tracks && r->task != ACG_TASK_COMPLETE) { snprintf(err, errn, "tracks are for a complete"); return 1; }
+    for (int k = 0; k < 2; k++) {
+        const char *s = k ? r->tracks : r->track;
+        if (!s) continue;
+        if (strlen(s) > 512) { snprintf(err, errn, "the track names are too long"); return 1; }
+        for (; *s; s++) if (!(isalnum((unsigned char)*s) || *s == '_' || *s == '-' || *s == ' ' || (k && *s == ','))) { snprintf(err, errn, "a track name has a letter, digit, space, - or _ in it (got '%c')", *s); return 1; }
+    }
     if (r->repaint_mode < 0 || r->repaint_mode > ACG_REPAINT_AGGRESSIVE) { snprintf(err, errn, "repaint_mode must be balanced, conservative or aggressive"); return 1; }
     if (!(r->repaint_strength >= 0 && r->repaint_strength <= 1)) { snprintf(err, errn, "repaint_strength must be 0 to 1"); return 1; }
     if (!isfinite(r->repaint_start) || !isfinite(r->repaint_end) || fabs(r->repaint_start) > 3600 || fabs(r->repaint_end) > 3600) { snprintf(err, errn, "the repaint span is out of range"); return 1; }
     return 0;
+}
+
+/* What a caller writes as a task's instruction (upstream's generate_instruction). A track is upper-cased; complete joins its tracks with " | ". */
+static const char *acg_instruction(int task, const char *track, const char *tracks, char *buf, size_t n){
+    static const char *const fixed[3] = { "Fill the audio semantic mask based on the given conditions:",
+                                           "Generate audio semantic tokens based on the given conditions:",
+                                           "Repaint the mask area based on the given conditions:" };
+    if (task <= ACG_TASK_REPAINT) return fixed[task];
+    if (task == ACG_TASK_COMPLETE) {
+        char list[640]; size_t m = 0; list[0] = 0;
+        for (const char *p = tracks ? tracks : ""; *p; ) {
+            while (*p == ',' || *p == ' ') p++;
+            const char *q = p;
+            while (*q && *q != ',') q++;
+            const char *r = q;
+            while (r > p && r[-1] == ' ') r--;
+            if (r > p) {
+                if (m) m += (size_t)snprintf(list + m, sizeof list - m, " | ");
+                for (const char *c = p; c < r && m + 1 < sizeof list; c++) list[m++] = (char)toupper((unsigned char)*c);
+                list[m] = 0;
+            }
+            p = q;
+        }
+        if (!m) return "Complete the input track:";
+        snprintf(buf, n, "Complete the input track with %s:", list);
+        return buf;
+    }
+    char name[ACG_MAX_TRACK * 2]; size_t m = 0;
+    for (const char *p = track ? track : ""; *p && m + 1 < sizeof name; p++) name[m++] = (char)toupper((unsigned char)*p);
+    name[m] = 0;
+    if (!m) return task == ACG_TASK_EXTRACT ? "Extract the track from the audio:" : "Generate the track based on the audio context:";
+    snprintf(buf, n, task == ACG_TASK_EXTRACT ? "Extract the %s track from the audio:" : "Generate the %s track based on the audio context:", name);
+    return buf;
 }
 
 static double acg_now(void){
@@ -505,12 +567,20 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     if (ace_check(rq, err, errn)) return 1;
     const AceDit *d = e->dit;
     const int A = d->acdim, task = rq->task;
+    const int repaint_like = task == ACG_TASK_REPAINT || task == ACG_TASK_LEGO;       /* a span is generated, the rest is the source put back */
+    const int text_like = task == ACG_TASK_TEXT2MUSIC || (task == ACG_TASK_COMPLETE && !(rq->src_path && *rq->src_path));   /* no source: silence is the context */
+    if (d->turbo && task >= ACG_TASK_EXTRACT) { snprintf(err, errn, "extract, lego and complete need the base or SFT DiT (acestep-v15-base): this engine runs the turbo one"); return 1; }
+    if (d->turbo && rq->steps > ACG_MAX_STEPS_TURBO) { snprintf(err, errn, "the turbo DiT takes at most %d steps (a base or SFT one takes up to %d)", ACG_MAX_STEPS_TURBO, ACG_MAX_STEPS); return 1; }
+    const double guidance = rq->guidance > 0 ? rq->guidance : 7.0;
+    const int use_cfg = !d->turbo && guidance > 1.0;                                   /* the turbo has guidance baked in and upstream forces it to 1 */
+    const double cfg_s = rq->cfg_start, cfg_e = rq->cfg_end > 0 ? rq->cfg_end : 1.0;
     int rc = 1;
     char *cp = NULL, *cp2 = NULL, *lp = NULL;
     float *text = NULL, *text2 = NULL, *lyric = NULL, *timbre = NULL, *lat = NULL, *src = NULL, *ctx = NULL, *ctx2 = NULL, *noise = NULL;
     float *x = NULL, *nx = NULL, *v = NULL, *wav = NULL, *srcpcm = NULL, *planar = NULL, *refp = NULL, *refpcm = NULL;
+    float *vu = NULL, *vg = NULL, *mom = NULL;
     unsigned char *rmask = NULL;
-    AcdCond *cond = NULL, *cond2 = NULL;
+    AcdCond *cond = NULL, *cond2 = NULL, *ncond = NULL, *ncond2 = NULL;
     int *lids = NULL;
     #define ACG_STOP() do { if (h && h->cancelled && h->cancelled(h->ud)) { rc = 2; snprintf(err, errn, "cancelled"); goto out; } } while (0)
     #define ACG_PROGRESS(stage, a, b) do { if (h && h->progress) h->progress(h->ud, stage, a, b); } while (0)
@@ -523,15 +593,15 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     double meta_duration = rq->duration, sp_start = 0, sp_end = 0;
     AcgMt vae_mt; acg_mt_seed(&vae_mt, (uint32_t)rq->seed ^ ACG_VAE_SEED_XOR);
     int src_silent = 0;
-    if (task == ACG_TASK_TEXT2MUSIC) acg_clip(rq->duration, &T, &want_samples);
+    if (text_like) acg_clip(rq->duration, &T, &want_samples);
     else {
         int64_t n = 0;
         ACG_PROGRESS("encode", 0, 1);
         if (acg_load_audio(rq->src_path, "source", &planar, &n, &src_silent, err, errn)) goto out;
         info->src_seconds = (double)n / ACG_RATE;
-        meta_duration = info->src_seconds;
+        meta_duration = info->src_seconds;             /* the prompt's duration is the source's, whatever duration was asked for (batch_prep: a source wins) */
         int64_t lead = 0, tail = 0;
-        if (task == ACG_TASK_REPAINT) {
+        if (repaint_like) {
             const double sd = (double)n / ACG_RATE;
             const double end = rq->repaint_end > 0 ? rq->repaint_end : sd;
             const double left = rq->repaint_start < 0 ? -rq->repaint_start : 0, right = end - sd > 0 ? end - sd : 0;
@@ -545,7 +615,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         lat_frames = (int)(Ns / ACG_HOP);
         T = lat_frames < ACG_MIN_FRAMES ? ACG_MIN_FRAMES : lat_frames;
         want_samples = (int)Ns;
-        if (task == ACG_TASK_REPAINT) {
+        if (repaint_like) {
             span_a = (int)acg_floordiv(sp_start * ACG_RATE, ACG_HOP); span_b = (int)acg_floordiv(sp_end * ACG_RATE, ACG_HOP);
             span_a = span_a < 0 ? 0 : span_a > T - 1 ? T - 1 : span_a;
             span_b = span_b < span_a + 1 ? span_a + 1 : span_b > T ? T : span_b;
@@ -558,7 +628,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
 
     lat = (float *)malloc((size_t)T * A * sizeof(float));
     if (!lat) { snprintf(err, errn, "out of memory"); goto out; }
-    if (task != ACG_TASK_TEXT2MUSIC) {
+    if (!text_like) {
         /* the source's latents: the VAE encoder's posterior sample (a silent clip is the silence latent, as upstream treats it),
          * then silence to the floor of 128 frames */
         if (src_silent) acg_silence_slice(e, lat_frames, lat);
@@ -568,6 +638,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
             if (F != lat_frames) { if (F > 0) snprintf(err, errn, "the VAE encoder returned %lld frames for %d", (long long)F, lat_frames); goto out; }
         }
         if (lat_frames < T) acg_silence_slice(e, T - lat_frames, lat + (size_t)lat_frames * A);      /* the handler pads with the silence latent's first frames */
+        if (h && h->feed) { const float *o = h->feed(h->ud, "source_latents", (size_t)T * A); if (o) memcpy(lat, o, (size_t)T * A * sizeof(float)); }
     }
     /* the timbre reference: the first 750 frames of the silence latent, or the reference clip's latents */
     timbre = (float *)malloc((size_t)ACG_TIMBRE_FRAMES * A * sizeof(float));
@@ -599,7 +670,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     static const char *const instructions[3] = { "Fill the audio semantic mask based on the given conditions:",
                                                   "Repaint the mask area based on the given conditions:",
                                                   "Generate audio semantic tokens based on the given conditions:" };
-    const char *instruction = instructions[task == ACG_TASK_REPAINT ? 1 : task == ACG_TASK_COVER ? 2 : 0];
+    char instr_buf[1024];
+    const char *instruction = acg_instruction(task, rq->track, rq->tracks, instr_buf, sizeof instr_buf);
     const char *lyrics = rq->lyrics ? rq->lyrics : "[Instrumental]";      /* as given, even if empty (the handler does); only none at all is instrumental */
     char bpm[16] = ""; if (rq->bpm > 0) snprintf(bpm, sizeof bpm, "%d", rq->bpm);
     cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration);
@@ -641,6 +713,11 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     cond = acd_cond_new(d, text, cn, lyric, ln, timbre, ACG_TIMBRE_FRAMES);
     if (!cond) { snprintf(err, errn, "the condition encoders failed"); goto out; }
     if (text2 && !(cond2 = acd_cond_new(d, text2, cn2, lyric, ln, timbre, ACG_TIMBRE_FRAMES))) { snprintf(err, errn, "the condition encoders failed"); goto out; }
+    if (use_cfg) {                                                                     /* the other branch of guidance: the null condition, as long as each one */
+        ncond = acd_cond_null(d, cond);
+        if (cond2) ncond2 = acd_cond_null(d, cond2);
+        if (!ncond || (cond2 && !ncond2)) { snprintf(err, errn, "the null condition failed"); goto out; }
+    }
     ACG_TAP("timbre", timbre, (size_t)ACG_TIMBRE_FRAMES * A);
     ACG_TAP("encoder_hidden", cond->enc, (size_t)cond->len * d->D);
     if (cond2) ACG_TAP("noncover_hidden", cond2->enc, (size_t)cond2->len * d->D);
@@ -654,7 +731,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     x = (float *)malloc((size_t)T * A * sizeof(float)); nx = (float *)malloc((size_t)T * A * sizeof(float)); v = (float *)malloc((size_t)T * A * sizeof(float));
     rmask = (unsigned char *)calloc((size_t)T, 1);
     if (!src || !ctx || !noise || !x || !nx || !v || !rmask) { snprintf(err, errn, "out of memory"); goto out; }
-    if (task == ACG_TASK_TEXT2MUSIC) acg_silence_slice(e, T, src);
+    if (text_like) acg_silence_slice(e, T, src);
     else memcpy(src, lat, (size_t)T * A * sizeof(float));
     float *dit_src = src;                                              /* what goes in the context as the source half */
     float *hints = NULL;
@@ -665,11 +742,15 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         if (!hints) { snprintf(err, errn, "out of memory"); goto out; }
         if (atk_hints(d, net, src, T, e->silence, hints)) { free(hints); snprintf(err, errn, "the audio tokenizer failed"); goto out; }
         dit_src = hints;
-    } else if (task == ACG_TASK_REPAINT) {
-        for (int f = span_a; f < span_b; f++) { memcpy(src + (size_t)f * A, e->silence + (size_t)(f % e->silence_frames) * 64, 64 * sizeof(float)); rmask[f] = 1; }
+    } else if (repaint_like) {
+        /* a repaint hides the span from the DiT (silence in its place); a lego shows it: the track is added to what is there */
+        for (int f = span_a; f < span_b; f++) {
+            if (task == ACG_TASK_REPAINT) memcpy(src + (size_t)f * A, e->silence + (size_t)(f % e->silence_frames) * 64, 64 * sizeof(float));
+            rmask[f] = 1;
+        }
     } else memset(rmask, 1, (size_t)T);
     ACG_TAP("src_latents", src, (size_t)T * A);
-    if (task == ACG_TASK_REPAINT) ACG_TAP("clean_src_latents", lat, (size_t)T * A);
+    if (repaint_like) ACG_TAP("clean_src_latents", lat, (size_t)T * A);
     for (int f = 0; f < T; f++) {
         memcpy(ctx + (size_t)f * 2 * A, dit_src + (size_t)f * A, (size_t)A * sizeof(float));
         for (int c = 0; c < A; c++) ctx[(size_t)f * 2 * A + A + c] = 1.0f;      /* all true, repaint too: chunk_mask_mode "auto" sets every entry (the span is told only by the source's silence and the injection) */
@@ -697,8 +778,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     /* 5. the Euler steps. acd_sample is this loop; it is spelled out here to report each step, to stop between them, and for what
      * the audio tasks add: a cover that starts from the renoised source, a cover whose last steps drop the source's context,
      * and a repaint that puts the (renoised) source back outside its span while the first steps run. */
-    float sched_all[ACG_MAX_STEPS];
-    const int n_all = acd_schedule(rq->steps, (float)rq->shift, sched_all);
+    float sched_all[ACG_MAX_STEPS + 1];
+    const int n_all = d->turbo ? acd_schedule(rq->steps, (float)rq->shift, sched_all) : acd_schedule_linspace(rq->steps, (float)rq->shift, sched_all);
     if (n_all < 1) { snprintf(err, errn, "no schedule for %d steps", rq->steps); goto out; }
     const float *sched = sched_all;
     int n = n_all;
@@ -716,18 +797,28 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     }
     const int cover_steps = cond2 ? (int)(n * cover_strength) : n;                    /* int(num_steps * audio_cover_strength) */
     double inject = 0, wav_cf = 0; int cf_frames = 0;
-    if (task == ACG_TASK_REPAINT) acg_repaint_config(rq->repaint_mode, rq->repaint_strength, &inject, &cf_frames, &wav_cf);
+    if (repaint_like) acg_repaint_config(rq->repaint_mode, rq->repaint_strength, &inject, &cf_frames, &wav_cf);
     const int cutoff = (int)acg_pyround(inject * n);
-    AcdCond *cur = cond; const float *cur_ctx = ctx;
+    AcdCond *cur = cond, *ncur = ncond; const float *cur_ctx = ctx;
+    if (use_cfg) {
+        vu = (float *)malloc((size_t)T * A * sizeof(float)); vg = (float *)malloc((size_t)T * A * sizeof(float)); mom = (float *)calloc((size_t)T * A, sizeof(float));
+        if (!vu || !vg || !mom) { snprintf(err, errn, "out of memory"); goto out; }
+    }
     t0 = acg_now();
     for (int i = 0; i < n; i++) {
         ACG_PROGRESS("denoise", i, n);
         ACG_STOP();
-        if (cond2 && i >= cover_steps) { cur = cond2; cur_ctx = ctx2; }
+        if (cond2 && i >= cover_steps) { cur = cond2; ncur = ncond2; cur_ctx = ctx2; }
         acd_forward(d, cur, x, cur_ctx, T, sched[i], sched[i], v);
+        if (use_cfg && sched[i] >= cfg_s && sched[i] <= cfg_e) {                       /* upstream: apply_cfg_guidance = t_curr >= start and t_curr <= end */
+            acd_forward(d, ncur, x, cur_ctx, T, sched[i], sched[i], vu);
+            if (rq->adg) acd_adg(vg, x, v, vu, T, A, sched[i], guidance);
+            else acd_apg(vg, v, vu, T, A, guidance, mom);
+            memcpy(v, vg, (size_t)T * A * sizeof(float));
+        }
         acd_sample_step(x, v, i, n, sched, T, A, &so, nx);
         float *s = x; x = nx; nx = s;
-        if (task == ACG_TASK_REPAINT && i < n - 1 && i < cutoff) {                    /* outside the span the source, noised to the level the next step expects */
+        if (repaint_like && i < n - 1 && i < cutoff) {                    /* outside the span the source, noised to the level the next step expects */
             const float tn = sched[i + 1], a = tn, b = (float)(1.0 - (double)tn);
             for (int f = 0; f < T; f++)
                 if (!rmask[f])
@@ -735,7 +826,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         }
     }
     ACG_PROGRESS("denoise", n, n);
-    if (task == ACG_TASK_REPAINT && cf_frames > 0) acg_blend_boundary(x, lat, rmask, T, A, cf_frames);
+    if (repaint_like && cf_frames > 0) acg_blend_boundary(x, lat, rmask, T, A, cf_frames);
     for (size_t k = 0; k < (size_t)T * A; k++) if (!isfinite(x[k])) { snprintf(err, errn, "the sampler produced a non-finite latent"); goto out; }
     ACG_TAP("latents", x, (size_t)T * A);
     info->t_denoise = acg_now() - t0;
@@ -752,7 +843,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         goto out;
     }
     info->peak = acv_normalize(wav, total * e->vae->ach);
-    if (task == ACG_TASK_REPAINT && rq->repaint_mode != ACG_REPAINT_AGGRESSIVE) acg_splice_waveform(wav, (int64_t)total, srcpcm, Ns, sp_start, sp_end, wav_cf);
+    if (repaint_like && rq->repaint_mode != ACG_REPAINT_AGGRESSIVE) acg_splice_waveform(wav, (int64_t)total, srcpcm, Ns, sp_start, sp_end, wav_cf);
     info->t_decode = acg_now() - t0;
     info->samples = (int)total < want_samples ? (int)total : want_samples;
     *pcm = wav; wav = NULL;
@@ -760,7 +851,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
 out:
     free(cp); free(cp2); free(lp); free(lids); free(text); free(text2); free(lyric); free(timbre); free(lat); free(src); free(ctx); free(ctx2);
     free(noise); free(x); free(nx); free(v); free(wav); free(srcpcm); free(planar); free(refp); free(refpcm); free(rmask);
-    acd_cond_free(cond); acd_cond_free(cond2);
+    free(vu); free(vg); free(mom);
+    acd_cond_free(cond); acd_cond_free(cond2); acd_cond_free(ncond); acd_cond_free(ncond2);
     #undef ACG_STOP
     #undef ACG_PROGRESS
     #undef ACG_TAP

@@ -66,7 +66,7 @@ static AcdTok *atk_load(const AceDit *d, const char *model_dir){
     shards S; int have_s = 0;
     jval *cfg = NULL; char *text = NULL;
     if (!t) { fprintf(stderr, "acestep tokenizer: out of memory\n"); return NULL; }
-    if (snprintf(dir, sizeof dir, "%s/acestep-v15-turbo", model_dir) >= (int)sizeof dir) { snprintf(err, sizeof err, "path too long"); goto fail; }
+    if (snprintf(dir, sizeof dir, "%s/%s", model_dir, d->variant[0] ? d->variant : "acestep-v15-turbo") >= (int)sizeof dir) { snprintf(err, sizeof err, "path too long"); goto fail; }
     snprintf(path, sizeof path, "%s/config.json", dir);
     FILE *f = fopen(path, "rb");
     if (!f) { snprintf(err, sizeof err, "cannot open %.400s", path); goto fail; }
