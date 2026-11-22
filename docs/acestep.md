@@ -435,3 +435,19 @@ to the same protocol by `tests/test_acestep_serve.py`.
 CI (`acestep-tiny-check`) rebuilds the fixture and the references from upstream at the pinned commit, runs the oracles,
 the refusal tests (`tests/test_acestep_{vae,dit,text,gen}_load.py`, `tests/test_acestep_serve.py`), the four mutation tools, and the oracles again under ASan
 and UBSan.
+
+Audio in is held in CI too, on a second fixture: `python3 tools/make_acestep_tiny.py acestep_tiny_enc --audio-in` (7.8 MB). An encoder's last layer holds the mean
+and the scale of the latents, so 64 latent channels need a 128-wide encoder, and that width is also every stage's (times `channel_multiples`); the first fixture's
+8-wide one makes 4 latents, which the DiT, the tokenizer and the engine all refuse. The audio-in fixture has the same DiT and text encoder and a flat 128-wide
+encoder (`channel_multiples` all 1), calibrated like the real one: posterior means near 1, a scale near 1e-2. The text-to-music captures' own audio is what gets encoded.
+Against upstream's handler: `--vae-enc-ref` on 8 clips (parameters 1e-5 of the signal, tiled 1e-5), `--cover-ref` on 5 (2e-6), `--gen-ref` on 19 whole generations
+(audio 1e-6 of the peak, against 4e-6 to 1.2e-4 on the real checkpoint, where the float32 noise is larger), and the mutation tools: `mutate_acestep_venc.py`
+(28 of 28), `mutate_acestep_tok.py` (23 of 23) and `mutate_acestep_audioin.py` (45 of 45). A mutant a fixture cannot show is left out with `--skip` and the tool says
+which: the flat encoder has no widths to get wrong (`block-widths`), the tiny tokenizer never reaches the clamp (`fsq-no-hard-clamp`), and the non-cover prompt is cut
+only with Qwen's tokenizer (`noncover-prompt-not-cut`) and padded only with the tiny one (`noncover-prompt-not-padded`). Running them for the first time on this
+fixture found `cover_half` wrong: see the next paragraph.
+
+The non-cover prompt (a cover with a strength under 1 runs its last steps on the text-to-music prompt): upstream pads its ids to the cover prompt's length. With Qwen's
+tokenizer the text-to-music instruction is a token longer, so the pad is a cut of the final token, which the engine always did. With the tiny tokenizer it is shorter,
+and the pad token goes after the text; upstream does not mask those rows, because the DiT builds its cross-attention mask from the audio's mask and never the text's,
+so they take part in attention. The engine now pads with the tokenizer's `<|endoftext|>` and does the same (`cover_half`: latents 2e-2 off before, 6e-7 after).

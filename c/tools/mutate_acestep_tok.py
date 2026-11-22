@@ -3,7 +3,7 @@
 
     mutate_acestep_tok.py MODEL_DIR REFDIR [REFDIR ...] [--cc gcc] [--only NAME,NAME]
 
-MODEL_DIR is the real checkpoint and each REFDIR a case captured by `acestep_ref_audio.py tasks` (a cover case: it holds
+MODEL_DIR is the real checkpoint (or the tiny one made with `make_acestep_tiny.py --audio-in`, with `--skip fsq-no-hard-clamp`) and each REFDIR a case captured by `acestep_ref_audio.py tasks` (a cover case: it holds
 the tokenizer's own tensors). A mutant is a small, plausible mistake in the path a cover's source takes: the padding of a
 length that is not a multiple of 5, the pooler's special token and its position, the quantizer's soft clamp and rounding, the
 detokenizer's position tokens and window layout. It is compiled into a temporary directory and run against `--cover-ref` on
@@ -22,6 +22,8 @@ import mutate_acestep_vae as base  # noqa: E402
 
 HEADER = "acestep_tok.h"
 FLAG = "--cover-ref"
+
+SKIP_NOTE = "fsq-no-hard-clamp: the tiny fixture's random tokenizer never drives a value to the clamp's bound"
 
 # name: (text in acestep_tok.h, its replacement[, how many times it occurs])
 MUTANTS = {
@@ -70,8 +72,10 @@ def main():
     ap.add_argument("refdirs", nargs="+")
     ap.add_argument("--cc", default="gcc")
     ap.add_argument("--only", help="comma-separated mutant names")
+    ap.add_argument("--skip", help="comma-separated mutant names to leave out: the ones a fixture cannot show (%s)" % SKIP_NOTE)
     a = ap.parse_args()
     names = list(MUTANTS) if not a.only else a.only.split(",")
+    names = [n for n in names if n not in (a.skip.split(",") if a.skip else [])]
     unknown = [n for n in names if n not in MUTANTS]
     if unknown:
         sys.exit(f"unknown mutant(s) {unknown}; known: {list(MUTANTS)}")

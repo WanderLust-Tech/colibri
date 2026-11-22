@@ -3,7 +3,8 @@
 
     mutate_acestep_venc.py MODEL_DIR REFDIR [REFDIR ...] [--cc gcc] [--only NAME,NAME]
 
-MODEL_DIR is a checkpoint (the real one: the tiny fixture has no encoder) and each REFDIR a case captured by
+MODEL_DIR is a checkpoint (the real one, or the tiny one built with `make_acestep_tiny.py --audio-in`: its encoder is flat, 128 wide at
+every stage, so `--skip block-widths` there) and each REFDIR a case captured by
 `acestep_ref_audio.py enc`. A mutant is a small, plausible mistake in what the encoder adds to the decoder's kernels: the
 strided convolution, the order of a block, the split of the output into mean and scale, the std, the posterior draw's layout,
 and the windows of the tiled encode. It is compiled into a temporary directory and run against `--vae-enc-ref` on every case:
@@ -22,6 +23,8 @@ import mutate_acestep_vae as base  # noqa: E402
 
 HEADER = "acestep_vae_enc.h"
 FLAG = "--vae-enc-ref"
+
+SKIP_NOTE = "block-widths needs an encoder whose stages differ in width, which the tiny audio-in fixture's flat one does not have"
 
 # name: (text in acestep_vae_enc.h, its replacement[, how many times it occurs])
 MUTANTS = {
@@ -76,8 +79,10 @@ def main():
     ap.add_argument("refdirs", nargs="+")
     ap.add_argument("--cc", default="gcc")
     ap.add_argument("--only", help="comma-separated mutant names")
+    ap.add_argument("--skip", help="comma-separated mutant names to leave out: the ones a fixture cannot show (%s)" % SKIP_NOTE)
     a = ap.parse_args()
     names = list(MUTANTS) if not a.only else a.only.split(",")
+    names = [n for n in names if n not in (a.skip.split(",") if a.skip else [])]
     unknown = [n for n in names if n not in MUTANTS]
     if unknown:
         sys.exit(f"unknown mutant(s) {unknown}; known: {list(MUTANTS)}")

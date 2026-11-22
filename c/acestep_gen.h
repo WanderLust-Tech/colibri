@@ -620,12 +620,17 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         int cids2[ACT_CAPTION_MAX];
         cp2 = act_caption_prompt(instructions[0], rq->caption, bpm, rq->key, rq->timesig, meta_duration);
         cn2 = act_tokenize(&e->tok, cp2, ACT_CAPTION_MAX, cids2);
-        text2 = act_encode(e->text, cids2, cn2);
+        /* Upstream pads this prompt's ids to the length of the cover prompt's (_pad_sequences). With Qwen's tokenizer the default
+         * instruction is a token longer than the cover one, and torch's pad with a negative amount CUTS: the last token (the end
+         * of text the tokenizer appends) is dropped. The encoder is causal, so the first rows of the whole prompt's states are
+         * the cut one's. A tokenizer that splits the two instructions the other way round (the tiny test fixture's does) gets
+         * the pad token after the text instead, and those rows are not masked: the DiT builds its cross-attention mask from the
+         * AUDIO's mask, never the text's, so the padding takes part in attention like any other row of the condition. */
+        for (int i = cn2; i < cn; i++) cids2[i] = e->tok.eot;
+        const int enc2 = cn2 < cn ? cn : cn2;
+        text2 = act_encode(e->text, cids2, enc2);
         if (!text2) { snprintf(err, errn, "the text encoder failed"); goto out; }
-        /* Upstream pads this prompt's ids to the length of the cover prompt's (_pad_sequences), and torch's pad with a negative
-         * amount CUTS: the default instruction is a token longer than the cover one, so the last token (the end of text the
-         * tokenizer appends) is dropped. The encoder is causal, so the first rows of the whole prompt's states are the cut one's. */
-        if (cn2 > cn) cn2 = cn;
+        cn2 = enc2 > cn ? cn : enc2;
     }
     info->t_text = acg_now() - t0;
     ACG_STOP();

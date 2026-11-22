@@ -4,7 +4,8 @@ time and see that `--gen-ref` says so.
 
     mutate_acestep_audioin.py MODEL_DIR REFDIR [REFDIR ...] [--cc gcc] [--only NAME,NAME]
 
-MODEL_DIR is the real checkpoint (the tiny fixture has no encoder or tokenizer) and each REFDIR a case captured by
+MODEL_DIR is the real checkpoint, or the tiny one built with `make_acestep_tiny.py --audio-in` (`--skip noncover-prompt-not-padded` on the real
+one: Qwen's tokenizer never makes the text-to-music instruction the shorter; `--skip noncover-prompt-not-cut` on the tiny one, whose tokenizer never makes it the longer), and each REFDIR a case captured by
 `acestep_ref_audio.py tasks`. A mutant is a small, plausible mistake in the pieces that join the VAE encoder, the tokenizer and the
 sampler into the three tasks: how a reference clip is cut and encoded, the posterior's seed and its order, the instruction of each
 task, what a cover conditions on, where a cover-noise start and a cover-strength switch fall, how a repaint's span, padding,
@@ -26,6 +27,8 @@ import mutate_acestep_vae as base  # noqa: E402
 HEADER = "acestep_gen.h"
 FLAG = "--gen-ref"
 
+SKIP_NOTE = "the two non-cover prompt mutants are each seen by one tokenizer only: -not-cut by Qwen's (the text-to-music instruction is a token longer), -not-padded by the tiny fixture's (it is shorter)"
+
 # name: (text in acestep_gen.h, its replacement[, how many times it occurs])
 MUTANTS = {
     # --- the reference clip ---------------------------------------------------------------------------------------------
@@ -44,7 +47,8 @@ MUTANTS = {
     "repaint-uses-the-default-instruction": ("instructions[task == ACG_TASK_REPAINT ? 1 : task == ACG_TASK_COVER ? 2 : 0]", "instructions[task == ACG_TASK_COVER ? 2 : 0]"),
     "duration-in-the-metas-is-the-request's": ("cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration);", "cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, rq->duration);"),
     "noncover-prompt-instruction": ("cp2 = act_caption_prompt(instructions[0], rq->caption, bpm, rq->key, rq->timesig, meta_duration);", "cp2 = act_caption_prompt(instructions[2], rq->caption, bpm, rq->key, rq->timesig, meta_duration);"),
-    "noncover-prompt-not-cut": ("        if (cn2 > cn) cn2 = cn;", ""),
+    "noncover-prompt-not-cut": ("        cn2 = enc2 > cn ? cn : enc2;", "        cn2 = enc2;"),
+    "noncover-prompt-not-padded": ("        for (int i = cn2; i < cn; i++) cids2[i] = e->tok.eot;", ""),
     # --- the source's latents ------------------------------------------------------------------------------------------
     "source-padded-with-zeros": ("if (lat_frames < T) acg_silence_slice(e, T - lat_frames, lat + (size_t)lat_frames * A);", "if (lat_frames < T) memset(lat + (size_t)lat_frames * A, 0, (size_t)(T - lat_frames) * A * sizeof(float));"),
     "source-length-rounded-up": ("lat_frames = (int)(Ns / ACG_HOP);", "lat_frames = (int)((Ns + ACG_HOP - 1) / ACG_HOP);"),
@@ -99,8 +103,10 @@ def main():
     ap.add_argument("refdirs", nargs="+")
     ap.add_argument("--cc", default="gcc")
     ap.add_argument("--only", help="comma-separated mutant names")
+    ap.add_argument("--skip", help="comma-separated mutant names to leave out: the ones a fixture cannot show (%s)" % SKIP_NOTE)
     a = ap.parse_args()
     names = list(MUTANTS) if not a.only else a.only.split(",")
+    names = [n for n in names if n not in (a.skip.split(",") if a.skip else [])]
     unknown = [n for n in names if n not in MUTANTS]
     if unknown:
         sys.exit(f"unknown mutant(s) {unknown}; known: {list(MUTANTS)}")

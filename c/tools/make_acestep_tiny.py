@@ -74,6 +74,12 @@ VAE_CONFIG = {
     "encoder_hidden_size": 8, "sampling_rate": 48000,
 }
 
+# The audio-in fixture (--audio-in): the same network with an encoder wide enough to hold 64 latent channels. A VAE's encoder
+# ends in `encoder_hidden_size` channels that hold the mean and the scale, so 64 latents need 128, and that number is also the
+# width of every encoder stage (times channel_multiples): the real [1, 2, 4, 8, 16] would make a 100-million-parameter
+# "tiny" model. All ones keeps it near 7 MB, and the text-to-music fixture keeps the widths that vary.
+VAE_CONFIG_AUDIO_IN = {**VAE_CONFIG, "channel_multiples": [1, 1, 1, 1, 1], "encoder_hidden_size": 128}
+
 TINY_TEXT = {"hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
              "num_key_value_heads": 2, "head_dim": 8}
 
@@ -174,6 +180,26 @@ def calibrate_decoder(vae, seed, target_rms=0.3):
         vae.decoder.conv2.weight_g.mul_(target_rms / rms)
 
 
+def calibrate_encoder(vae, seed, target_rms=1.0, std=0.01):
+    """Make the encoder behave like the real one: posterior means with a spread near 1 (what the DiT's latents have), and a
+    posterior scale near 1e-2 (the real checkpoint's), so the draw is visible in the output but is not the signal.
+
+    A random encoder answers with whatever gain its stack happens to have, and a scale channel near 1 would make every
+    latent mostly noise: an oracle on that would be a test of the random generator. Two numbers are set, both linear in the
+    last convolution: its gain (one number from a probe) and the bias of the scale half (softplus(b) + 1e-4 = std).
+    """
+    import math
+    g = torch.Generator().manual_seed(seed)
+    zdim = VAE_CONFIG_AUDIO_IN["encoder_hidden_size"] // 2
+    probe = torch.randn(1, 2, 48000, generator=g) * 0.3
+    with torch.no_grad():
+        params = vae.encoder(probe)
+        rms = params[:, :zdim].pow(2).mean().sqrt().item()
+        vae.encoder.conv2.weight_g.mul_(target_rms / rms)
+        vae.encoder.conv2.weight_g[zdim:].mul_(0.0)               # the scale half: only its bias counts
+        vae.encoder.conv2.bias[zdim:] = math.log(math.expm1(std)) + 0.05 * torch.randn(zdim, generator=g)
+
+
 def bf16_state(module):
     """The module's tensors as the checkpoint stores them: bf16, contiguous, parametrization names undone."""
     out = {}
@@ -188,6 +214,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("outdir")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--audio-in", action="store_true",
+                    help="a VAE whose encoder holds the engine's 64 latent channels (for the cover, repaint and reference-audio oracles)")
     a = ap.parse_args()
     root = upstream_root()
     sys.path.insert(0, root)
@@ -212,15 +240,18 @@ def main():
 
     # --- VAE ---------------------------------------------------------------------------------------------
     from diffusers.models import AutoencoderOobleck
-    vae = AutoencoderOobleck(**{k: v for k, v in VAE_CONFIG.items() if not k.startswith("_")})
+    vae_config = VAE_CONFIG_AUDIO_IN if a.audio_in else VAE_CONFIG
+    vae = AutoencoderOobleck(**{k: v for k, v in vae_config.items() if not k.startswith("_")})
     randomize(vae, a.seed + 2)
     with torch.no_grad():
         for name, p in vae.named_parameters():
             if "res_unit" in name and ".conv2." in name and name.endswith("weight_g"):
                 p.mul_(RES_BRANCH)
     calibrate_decoder(vae, a.seed + 5)
+    if a.audio_in:
+        calibrate_encoder(vae, a.seed + 6)
     with open(os.path.join(vae_dir, "config.json"), "w", encoding="utf-8") as f:
-        json.dump({**VAE_CONFIG, "_diffusers_version": "0.34.0"}, f, indent=2)
+        json.dump({**vae_config, "_diffusers_version": "0.34.0"}, f, indent=2)
     save_file(bf16_state(vae), os.path.join(vae_dir, "diffusion_pytorch_model.safetensors"), metadata={"format": "pt"})
 
     # --- DiT, condition encoders, FSQ tokenizer ------------------------------------------------------------
@@ -245,7 +276,7 @@ def main():
                os.path.join(dit_dir, "silence_latent.pt"))
 
     with open(os.path.join(out, "fixture.json"), "w", encoding="utf-8") as f:
-        json.dump({"seed": a.seed, "dit": TINY_DIT, "vae": VAE_CONFIG, "text": TINY_TEXT, "tokenizer_vocab": vocab,
+        json.dump({"seed": a.seed, "dit": TINY_DIT, "vae": vae_config, "text": TINY_TEXT, "tokenizer_vocab": vocab,
                    "silence_frames": SILENCE_FRAMES, "torch": torch.__version__}, f, indent=1)
     total = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     print(f"wrote {out}: {total / 1e6:.1f} MB")

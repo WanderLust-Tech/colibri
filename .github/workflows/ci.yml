@@ -1636,6 +1636,37 @@ jobs:
             ./acestep --model acestep_tiny --gen-ref acestep_tiny_ref/$case
           done
           ACESTEP_TINY=acestep_tiny ACESTEP_TINY_REF=acestep_tiny_ref/inst10 python3 -m unittest -v tests.test_acestep_serve tests.test_acestep_gen_load tests.test_acestep_gen_mutants
+      - name: Audio in (the VAE encoder, the tokenizer, a cover, a reference clip, a repaint) against the handler, on a fixture whose encoder fits
+        run: |
+          cd c
+          # A VAE encoder ends in as many channels as the mean and scale of the latents need, so 64 latents need an encoder 128
+          # wide, which the 3.4 MB fixture above does not have (its encoder is 8 wide: 4 latents). --audio-in builds the same
+          # network with a flat 128-wide encoder (7.8 MB), and the audio the text-to-music captures wrote is what gets encoded.
+          # Run with the pipeline's own references, not the real checkpoint's.
+          python3 tools/make_acestep_tiny.py acestep_tiny_enc --audio-in
+          python3 tools/acestep_ref.py capture acestep_tiny_enc acestep_tiny_enc_t2m --cases inst10,long30
+          mkdir acestep_tiny_wavs
+          cp acestep_tiny_enc_t2m/inst10/audio.wav acestep_tiny_wavs/a_inst10.wav
+          cp acestep_tiny_enc_t2m/long30/audio.wav acestep_tiny_wavs/b_long30.wav
+          # the handler changes directory, so every path it is given is absolute
+          python3 tools/acestep_ref_audio.py enc "$PWD/acestep_tiny_enc" "$PWD/acestep_tiny_enc_ref" "$PWD/acestep_tiny_wavs" --f64
+          python3 tools/acestep_ref_audio.py tasks "$PWD/acestep_tiny_enc" "$PWD/acestep_tiny_task_ref" "$PWD/acestep_tiny_wavs"
+          make acestep
+          for case in single10 single_odd single28 tile_small tile_odd tile_short_tail tile_exact tile_default; do
+            ./acestep --model acestep_tiny_enc --vae-enc-ref acestep_tiny_enc_ref/$case
+          done
+          for case in cover10 cover_odd cover_pad4 cover_short cover_vocal; do
+            ./acestep --model acestep_tiny_enc --cover-ref acestep_tiny_task_ref/$case
+          done
+          for case in $(ls acestep_tiny_task_ref); do
+            ./acestep --model acestep_tiny_enc --gen-ref acestep_tiny_task_ref/$case
+          done
+          # and each oracle can fail: the encoder's, the tokenizer's and the audio-in pipeline's mutants. A few can only be seen by
+          # one fixture (the flat encoder has no widths to get wrong; the tiny tokenizer never clamps and never makes the
+          # text-to-music instruction the longer), and each tool says which.
+          python3 tools/mutate_acestep_venc.py acestep_tiny_enc acestep_tiny_enc_ref/single10 acestep_tiny_enc_ref/single28 acestep_tiny_enc_ref/tile_small acestep_tiny_enc_ref/tile_odd acestep_tiny_enc_ref/tile_short_tail acestep_tiny_enc_ref/tile_exact acestep_tiny_enc_ref/tile_default --skip block-widths
+          python3 tools/mutate_acestep_tok.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/cover_vocal --skip fsq-no-hard-clamp
+          python3 tools/mutate_acestep_audioin.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_half acestep_tiny_task_ref/cover_noise acestep_tiny_task_ref/cover_ref acestep_tiny_task_ref/cover_short acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/ref_short acestep_tiny_task_ref/ref_long acestep_tiny_task_ref/repaint_mid acestep_tiny_task_ref/repaint_str acestep_tiny_task_ref/repaint_aggr acestep_tiny_task_ref/repaint_cons acestep_tiny_task_ref/repaint_tail acestep_tiny_task_ref/repaint_extend acestep_tiny_task_ref/repaint_lead acestep_tiny_task_ref/repaint_short --skip noncover-prompt-not-cut
       - name: Every mutation of the decoder, of the DiT, of the text path and of the pipeline is caught by its oracle
         run: |
           cd c

@@ -117,8 +117,12 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
 - [x] **E1. Save finished songs to disk (S).** *Built 2026-11-03 on `feat/free-pipeline-stages` (`COLI_MUSIC_DIR`, `COLI_MUSIC_SAVE=0`).* The image route now keeps a copy of every picture in
   `~/colibri-images`; the music route doesn't, so a stalled browser tab could lose a song the same
   way.
-- [ ] **E2. Audio-in cases in the small CI fixture (S).** The tiny fixture covers text to music
-  only.
+- [x] **E2. Audio-in cases in the small CI fixture (S). Done 2026-11-22** (`make_acestep_tiny.py --audio-in`, [acestep.md](acestep.md)): the VAE encoder, the
+  tokenizer, a cover, a reference clip and a repaint are held to upstream's handler in CI, 8 + 5 + 19 cases at about 1e-6, with their mutants (28 of 28, 23 of 23
+  and 45 of 45 once the mutants a fixture cannot show are left out). Building it found that the 3.4 MB fixture's encoder could never hold 64 latents (an encoder's
+  last layer is the mean and the scale, so 64 needs 128 channels): the audio-in fixture is a second, 7.8 MB one with a flat 128-wide encoder. It also found one
+  real difference from upstream, unreachable with Qwen's tokenizer: when the text-to-music instruction tokenizes SHORTER than the cover one, upstream pads the
+  non-cover prompt with pad tokens that its cross-attention does not mask (it builds that mask from the audio's, not the text's); the engine now does the same.
 - [ ] **E3. The 5 Hz language-model planner (L).** ACE-Step's optional planner
   (`acestep-5Hz-lm-1.7B`, also 0.6B and 4B), which writes metadata and audio codes first.
 - [ ] **E4. Lego, extract and complete tasks (L).** Need other ACE-Step checkpoints.
