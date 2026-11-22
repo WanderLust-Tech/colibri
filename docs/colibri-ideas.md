@@ -123,8 +123,11 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
   last layer is the mean and the scale, so 64 needs 128 channels): the audio-in fixture is a second, 7.8 MB one with a flat 128-wide encoder. It also found one
   real difference from upstream, unreachable with Qwen's tokenizer: when the text-to-music instruction tokenizes SHORTER than the cover one, upstream pads the
   non-cover prompt with pad tokens that its cross-attention does not mask (it builds that mask from the audio's, not the text's); the engine now does the same.
-- [ ] **E3. The 5 Hz language-model planner (L).** ACE-Step's optional planner
-  (`acestep-5Hz-lm-1.7B`, also 0.6B and 4B), which writes metadata and audio codes first.
+- [~] **E3. The 5 Hz language-model planner (L). Half done 2026-11-22** ([acestep.md](acestep.md#the-5-hz-planner-a-language-model-writes-the-songs-structure-first)): the codes phase is
+  built and held to upstream's `LLMHandler` (prompts and codes identical, logits at 1e-6, on the real 1.7B and a tiny fixture; 6 cases of the codes into the music;
+  the sampler checked by a self-test; every mutant caught), through the engine, the protocol, the gateway (`thinking`, `lm_*`) and `coli music --plan`. It needs bpm, key,
+  time signature and duration in the request. Open: the first phase (the model writing the metadata under upstream's grammar, so that a bare caption is enough), the
+  planner's other jobs (understanding a clip, formatting), the 4B and 0.6B on real weights, a Vulkan path, `coli model install` of the planner, the dashboard's controls.
 - [x] **E4. Lego, extract and complete tasks (L). Done 2026-11-22** ([acestep.md](acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete)): the base and SFT
   DiTs (guidance by APG or ADG against the null condition, up to 200 steps) and the three tasks, held to upstream's handler on 19 cases of the real base checkpoint
   and the tiny fixture (30 of 30 mutants caught), through the engine, the protocol, the gateway (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`)

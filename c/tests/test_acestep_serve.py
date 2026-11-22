@@ -140,7 +140,7 @@ class Serve(unittest.TestCase):
         self.assertEqual([p["step"] for p in progress if p["stage"] == "denoise"], [0, 1, 2, 3, 4])
         self.assertEqual(stages[-1], "decode")
         self.assertLessEqual(a["peak"], 100.0)
-        self.assertEqual(set(a["timings"]), {"encode", "text", "condition", "denoise", "decode"})
+        self.assertEqual(set(a["timings"]), {"plan", "encode", "text", "condition", "denoise", "decode"})
 
     def test_a_clip_over_the_floor_has_the_frames_of_its_duration(self):
         _, kind, a = self.gen(duration=7.7, steps=2, seed=1)

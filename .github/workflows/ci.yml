@@ -1643,7 +1643,7 @@ jobs:
           # wide, which the 3.4 MB fixture above does not have (its encoder is 8 wide: 4 latents). --audio-in builds the same
           # network with a flat 128-wide encoder (7.8 MB), and the audio the text-to-music captures wrote is what gets encoded.
           # Run with the pipeline's own references, not the real checkpoint's.
-          python3 tools/make_acestep_tiny.py acestep_tiny_enc --audio-in --base
+          python3 tools/make_acestep_tiny.py acestep_tiny_enc --audio-in --base --lm
           python3 tools/acestep_ref.py capture acestep_tiny_enc acestep_tiny_enc_t2m --cases inst10,long30
           mkdir acestep_tiny_wavs
           cp acestep_tiny_enc_t2m/inst10/audio.wav acestep_tiny_wavs/a_inst10.wav
@@ -1668,12 +1668,22 @@ jobs:
             ./acestep --model acestep_tiny_enc --dit base --gen-ref acestep_tiny_base_ref/$case
           done
           python3 -m unittest -v tests.test_acestep_guided tests.test_acestep_guided_mutants
+          # the planner (--lm added a tiny acestep-5Hz-lm-1.7B: a Qwen3 with the audio codes in its vocabulary): upstream's LLMHandler on four cases (the
+          # codes phase with the metadata given, temperature 0), the engine's prompts, logits at every step and codes against it, the sampler's self-test,
+          # and the codes into the music (the task capture above includes the codes* cases, which the --gen-ref loop already ran)
+          python3 tools/acestep_ref_lm.py capture "$PWD/acestep_tiny_enc" "$PWD/acestep_tiny_lm_ref"
+          for case in $(ls acestep_tiny_lm_ref); do
+            ./acestep --model acestep_tiny_enc --lm-ref acestep_tiny_lm_ref/$case
+          done
+          ./acestep --lm-selftest 1
+          python3 -m unittest -v tests.test_acestep_planner
           # and each oracle can fail: the encoder's, the tokenizer's and the audio-in pipeline's mutants. A few can only be seen by
           # one fixture (the flat encoder has no widths to get wrong; the tiny tokenizer never clamps and never makes the
           # text-to-music instruction the longer), and each tool says which.
           python3 tools/mutate_acestep_venc.py acestep_tiny_enc acestep_tiny_enc_ref/single10 acestep_tiny_enc_ref/single28 acestep_tiny_enc_ref/tile_small acestep_tiny_enc_ref/tile_odd acestep_tiny_enc_ref/tile_short_tail acestep_tiny_enc_ref/tile_exact acestep_tiny_enc_ref/tile_default --skip block-widths
           python3 tools/mutate_acestep_tok.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/cover_vocal --skip fsq-no-hard-clamp
           python3 tools/mutate_acestep_audioin.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_half acestep_tiny_task_ref/cover_noise acestep_tiny_task_ref/cover_ref acestep_tiny_task_ref/cover_short acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/ref_short acestep_tiny_task_ref/ref_long acestep_tiny_task_ref/repaint_mid acestep_tiny_task_ref/repaint_str acestep_tiny_task_ref/repaint_aggr acestep_tiny_task_ref/repaint_cons acestep_tiny_task_ref/repaint_tail acestep_tiny_task_ref/repaint_extend acestep_tiny_task_ref/repaint_lead acestep_tiny_task_ref/repaint_short --skip noncover-prompt-not-cut
+          python3 tools/mutate_acestep_lm.py acestep_tiny_enc acestep_tiny_lm_ref/lm10 acestep_tiny_lm_ref/lm_vocal10 acestep_tiny_lm_ref/lm_cjk6 acestep_tiny_lm_ref/lm_nometa8 --codes acestep_tiny_task_ref/codes10 acestep_tiny_task_ref/codes_short acestep_tiny_task_ref/codes_odd acestep_tiny_task_ref/codes_half acestep_tiny_task_ref/codes_noise
           B=acestep_tiny_base_ref
           python3 tools/mutate_acestep_guided.py acestep_tiny_enc $B/b_t2m $B/b_t2m_shift3 $B/b_t2m_nocfg $B/b_t2m_interval $B/b_t2m_adg $B/b_t2m_steps40 $B/b_cover_half $B/b_extract $B/b_extract_default $B/b_lego $B/b_lego_tail $B/b_complete $B/b_complete_default $B/b_complete_longer
       - name: Every mutation of the decoder, of the DiT, of the text path and of the pipeline is caught by its oracle

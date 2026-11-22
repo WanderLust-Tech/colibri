@@ -1344,6 +1344,98 @@ static int run_lm_oracle(const char *model, const char *refdir, const char *lm_n
     return 0;
 }
 
+/* The sampler's filters and draw, on logits made up for the purpose. torch's multinomial cannot be reproduced, so the planner's oracle runs at
+ * temperature 0; what a temperature, a top-k and a top-p do is held here to what upstream's _apply_top_k_filter, _apply_top_p_filter and
+ * _sample_tokens say they do, on cases small enough to know the answer. */
+static int lm_check(int ok, const char *what){
+    if (!ok) fprintf(stderr, "[lm-selftest] %s <-- FAIL\n", what);
+    return !ok;
+}
+
+static int run_lm_selftest(void){
+    int fails = 0;
+    uint64_t rng = 12345;
+    {   /* top-k keeps every logit not below the k-th largest, ties included */
+        float lg[5] = {5, 4, 3, 2, 1}; AlmSample s = { 0.0, 1.0, 2, 0.0, 1 };
+        int t = alm_choose(lg, 5, &s, &rng);
+        fails += lm_check(t == 0 && lg[0] == 5 && lg[1] == 4 && isinf(lg[2]) && isinf(lg[3]) && isinf(lg[4]), "top-k 2 of five keeps the two largest");
+        float tie[4] = {3, 3, 3, 1}; AlmSample s2 = { 0.0, 1.0, 2, 0.0, 1 };
+        alm_choose(tie, 4, &s2, &rng);
+        fails += lm_check(tie[0] == 3 && tie[1] == 3 && tie[2] == 3 && isinf(tie[3]), "top-k keeps ties with the k-th largest");
+        float all[3] = {1, 2, 3}; AlmSample s3 = { 0.0, 1.0, 5, 0.0, 1 };
+        alm_choose(all, 3, &s3, &rng);
+        fails += lm_check(!isinf(all[0]) && !isinf(all[1]) && !isinf(all[2]), "top-k larger than the row changes nothing");
+    }
+    {   /* top-p keeps the smallest prefix, by descending probability, whose cumulative probability before the next token has not passed p; the first is always kept */
+        const double pr[5] = {0.5, 0.3, 0.1, 0.06, 0.04};
+        for (int c = 0; c < 4; c++) {
+            const double p = c == 0 ? 0.45 : c == 1 ? 0.55 : c == 2 ? 0.85 : 0.99;
+            const int keep = c == 0 ? 1 : c == 1 ? 2 : c == 2 ? 3 : 5;
+            float lg[5]; for (int i = 0; i < 5; i++) lg[4 - i] = (float)log(pr[i]);      /* ascending in memory: the sort has work to do */
+            AlmSample s = { 0.0, 1.0, 0, p, 1 };
+            alm_choose(lg, 5, &s, &rng);
+            int kept = 0; for (int i = 0; i < 5; i++) kept += !isinf(lg[i]);
+            char what[96]; snprintf(what, sizeof what, "top-p %.2f keeps %d of five (kept %d)", p, keep, kept);
+            fails += lm_check(kept == keep && !isinf(lg[4]), what);
+        }
+        float one[3] = {10, 0, 0}; AlmSample s = { 0.0, 1.0, 0, 0.01, 1 };
+        alm_choose(one, 3, &s, &rng);
+        fails += lm_check(!isinf(one[0]) && isinf(one[1]) && isinf(one[2]), "top-p 0.01 still keeps the first token");
+    }
+    {   /* temperature 0 is an argmax, a small one nearly always; 1 draws from the softmax */
+        float lg[3] = {1, 3, 2}; AlmSample s = { 0.0, 1.0, 0, 0.0, 1 };
+        fails += lm_check(alm_choose(lg, 3, &s, &rng) == 1, "temperature 0 is the argmax");
+        float tie[4] = {3, 5, 5, 1};
+        fails += lm_check(alm_choose(tie, 4, &s, &rng) == 1, "an argmax over a tie is the first of them, as torch.argmax gives");
+        int hits = 0;
+        for (int i = 0; i < 200; i++) { float l2[3] = {1, 3, 2}; AlmSample sm = { 0.05, 1.0, 0, 0.0, 1 }; hits += alm_choose(l2, 3, &sm, &rng) == 1; }
+        fails += lm_check(hits >= 195, "a temperature of 0.05 is nearly an argmax");
+        int count[3] = {0, 0, 0};
+        const int N = 30000;
+        for (int i = 0; i < N; i++) { float l3[3] = {2, 1, 0}; AlmSample sm = { 1.0, 1.0, 0, 0.0, 1 }; count[alm_choose(l3, 3, &sm, &rng)]++; }
+        const double z = exp(2.0) + exp(1.0) + 1.0, want[3] = {exp(2.0) / z, exp(1.0) / z, 1.0 / z};
+        int ok = 1; for (int i = 0; i < 3; i++) if (fabs((double)count[i] / N - want[i]) > 0.012) ok = 0;
+        fails += lm_check(ok, "temperature 1 draws from the softmax");
+        int flat[3] = {0, 0, 0};
+        for (int i = 0; i < N; i++) { float l4[3] = {2, 1, 0}; AlmSample sm = { 100.0, 1.0, 0, 0.0, 1 }; flat[alm_choose(l4, 3, &sm, &rng)]++; }
+        ok = 1; for (int i = 0; i < 3; i++) if (fabs((double)flat[i] / N - 1.0 / 3) > 0.02) ok = 0;
+        fails += lm_check(ok, "a high temperature is nearly uniform");
+        int masked = 0;
+        for (int i = 0; i < 2000; i++) { float l5[3] = {0, -INFINITY, 0}; AlmSample sm = { 1.0, 1.0, 0, 0.0, 1 }; masked += alm_choose(l5, 3, &sm, &rng) == 1; }
+        fails += lm_check(masked == 0, "a token at minus infinity is never drawn");
+    }
+    {   /* the same seed is the same draws, another seed is not */
+        uint64_t a = 7, b = 7, c = 8; int same = 1, differ = 0;
+        for (int i = 0; i < 50; i++) {
+            float l1[4] = {1, 1, 1, 1}, l2[4] = {1, 1, 1, 1}, l3[4] = {1, 1, 1, 1}; AlmSample sm = { 1.0, 1.0, 0, 0.0, 1 };
+            int x = alm_choose(l1, 4, &sm, &a), y = alm_choose(l2, 4, &sm, &b), z = alm_choose(l3, 4, &sm, &c);
+            if (x != y) same = 0;
+            if (x != z) differ = 1;
+        }
+        fails += lm_check(same && differ, "a seed repeats its draws and another seed makes others");
+    }
+    {   /* the prompts and the metadata, as upstream's template and YAML write them */
+        char *cot = alm_cot(120, 10, "C Major", "unknown", "4");
+        fails += lm_check(cot && !strcmp(cot, "<think>\nbpm: 120\nduration: 10\nkeyscale: C Major\nlanguage: unknown\ntimesignature: 4\n</think>"), "the metadata as YAML");
+        free(cot);
+        cot = alm_cot(96, 9.6, "G minor", "no", "3/4");
+        fails += lm_check(cot && !strcmp(cot, "<think>\nbpm: 96\nduration: 9\nkeyscale: G minor\nlanguage: 'no'\ntimesignature: 3\n</think>"), "a duration cut to whole seconds, Norwegian quoted as YAML does, 3/4 as 3");
+        free(cot);
+        cot = alm_cot(70, 8, "D minor", NULL, "4");
+        fails += lm_check(cot && !strstr(cot, "language"), "no language, no line");
+        free(cot);
+        char *p = alm_prompt("a song", "[Instrumental]", "<think>\nbpm: 1\n</think>", 0), *u = alm_prompt("a song", "[Instrumental]", "<think>\nbpm: 1\n</think>", 1);
+        fails += lm_check(p && !strcmp(p, "<|im_start|>system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n<|im_end|>\n<|im_start|>user\n"
+                                          "# Caption\na song\n\n# Lyric\n[Instrumental]\n<|im_end|>\n<|im_start|>assistant\n<think>\nbpm: 1\n</think>\n\n"), "the conditional prompt");
+        fails += lm_check(u && !strcmp(u, "<|im_start|>system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n<|im_end|>\n<|im_start|>user\n"
+                                          "NO USER INPUT<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"), "the unconditional prompt");
+        free(p); free(u);
+    }
+    if (fails) { fprintf(stderr, "[lm-selftest] %d check(s) FAILED\n", fails); return 1; }
+    fprintf(stderr, "[lm-selftest] all checks passed\n");
+    return 0;
+}
+
 /* acestep --model DIR --caption TEXT --out FILE.wav ...: one clip, no protocol. */
 static int run_make(const char *model, AceRequest *rq, const char *out){
     char err[512] = "";
@@ -1375,6 +1467,7 @@ int main(int argc, char **argv){
     const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *venc_ref = NULL, *cover_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
     int chunk = 256, overlap = 64, serve = 0, make = 0, steps_given = 0, dcw_given = 0;
     const char *lm_ref = NULL, *lm_name = "acestep-5Hz-lm-1.7B";
+    int lm_selftest = 0;
     AceRequest rq; memset(&rq, 0, sizeof rq);
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
     rq.lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq.lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq.lm_top_p = ACS_DEFAULT_LM_TOP_P;
@@ -1384,6 +1477,7 @@ int main(int argc, char **argv){
         if (!strcmp(a, "--model") && v) { model = v; i++; }
         else if (!strcmp(a, "--gen-ref") && v) { gen_ref = v; i++; }
         else if (!strcmp(a, "--lm-ref") && v) { lm_ref = v; i++; }
+        else if (!strcmp(a, "--lm-selftest") && v) { lm_selftest = 1; i++; }
         else if (!strcmp(a, "--lm") && v) {
             static char lm_dir[80];
             snprintf(lm_dir, sizeof lm_dir, "%s%s", strncmp(v, "acestep-", 8) ? "acestep-5Hz-lm-" : "", v);
@@ -1472,6 +1566,7 @@ int main(int argc, char **argv){
     }
     if (model && make) return run_make(model, &rq, out);
     if (model && gen_ref) return run_gen_oracle(model, gen_ref, wav);
+    if (lm_selftest) return run_lm_selftest();
     if (model && lm_ref) return run_lm_oracle(model, lm_ref, lm_name);
     if (!model || (!vae_ref && !venc_ref && !cover_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
     int rc = 0;

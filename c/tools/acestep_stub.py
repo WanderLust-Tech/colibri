@@ -40,6 +40,8 @@ Knobs (environment), all optional:
     ACESTEP_STUB_LOAD_DELAY  seconds before READY (default 0)
     ACESTEP_STUB_RATE        sample rate of the clips (default 48000; the tests use a low one to stay small)
     ACESTEP_STUB_NO_AUDIO_IN set to make it an older engine: READY without tasks, GEN fields ignored
+    ACESTEP_STUB_PLANNER     set to make it a checkpoint with the 5 Hz planner: READY says "planner", `plan` is accepted (it needs bpm, key and
+                             timesig), a "plan" stage of duration * 5 + 1 steps runs first, and AUDIO says how many codes were written
     ACESTEP_STUB_GUIDED      set to make it a checkpoint with the base DiT too: READY says "guided", the tasks extract, lego and
                              complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
@@ -68,6 +70,8 @@ GUIDED = {"tasks": ["text2music", "cover", "repaint", "extract", "lego", "comple
                      "tracks": ["woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums",
                                 "backing_vocals", "vocals"]}}
 GUIDED_TASKS = ("extract", "lego", "complete")
+PLANNER = {"planner": {"available": True, "lms": ["1.7B"], "default_lm": "1.7B", "temperature": 0.85, "cfg_scale": 2.0, "top_p": 0.9,
+                       "top_k": 0, "max_seconds": 600}}
 MAX_LINE = 1 << 20
 HOP = 1920
 MIN_FRAMES = 128
@@ -97,6 +101,25 @@ def guided_dit(request, guided):
     if request.get("dit"):
         return request["dit"]
     return "base" if guided and task in GUIDED_TASKS else "turbo"
+
+
+def check_plan(request, planner):
+    """The planner's rules, in the engine's words (acestep_gen.h ace_check)."""
+    if request.get("lm") and not request.get("plan"):
+        return "lm is for the planner (plan)"
+    if not request.get("plan"):
+        return None
+    if not planner:
+        return "the planner is not installed"
+    if request.get("task", "text2music") != "text2music":
+        return "the planner is for text to music, with no codes of your own"
+    key, signature = request.get("key"), request.get("timesig")
+    if not isinstance(request.get("bpm"), int) or request["bpm"] < 1 or not (isinstance(key, str) and key.strip()) or not (isinstance(signature, str) and signature.strip()):
+        return ("the planner needs bpm, key and time signature (and the duration): the model's own first phase, where it writes them, "
+                "is not built")
+    if request.get("lm") not in (None, "0.6B", "1.7B", "4B"):
+        return "lm must be 0.6B, 1.7B or 4B"
+    return None
 
 
 def check(request, audio_in=True, guided=False):
@@ -297,7 +320,8 @@ def clip(request, rate, want48, frames, digests):
                                         request.get("repaint_start"), request.get("repaint_end"),
                                         request.get("repaint_mode"), request.get("repaint_strength"),
                                         request.get("cover_strength"), request.get("cover_noise"), request.get("dit"),
-                                        request.get("guidance"), request.get("track"), request.get("tracks")]).encode()).digest()
+                                        request.get("guidance"), request.get("track"), request.get("tracks"), request.get("plan"),
+                                        request.get("lm"), request.get("lm_temperature")]).encode()).digest()
     voices = [(220.0 * 2 ** (digest[i] / 96.0), 0.12 + digest[i + 4] / 2550.0) for i in range(4)]
     pan = digest[8] / 255.0
     out = bytearray()
@@ -331,7 +355,8 @@ def serve():
     audio_in = not os.environ.get("ACESTEP_STUB_NO_AUDIO_IN")
     out = Out()
     guided = bool(os.environ.get("ACESTEP_STUB_GUIDED")) and audio_in
-    out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {})})
+    planner = bool(os.environ.get("ACESTEP_STUB_PLANNER"))
+    out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {}), **(PLANNER if planner else {})})
     lines = queue.Queue()
 
     def reader():
@@ -377,7 +402,7 @@ def serve():
             out.line("ERROR", {"id": "?", "message": "bad GEN line (not a JSON object)"})
             continue
         rid = request.get("id") if isinstance(request.get("id"), str) else "?"
-        problem = check(request, audio_in, guided)
+        problem = check(request, audio_in, guided) or check_plan(request, planner)
         if problem:
             out.line("ERROR", {"id": rid, "message": problem})
             continue
@@ -444,6 +469,16 @@ def serve():
             if poll():
                 out.line("ERROR", {"id": rid, "message": "cancelled"})
                 continue
+        plan_codes = 0
+        if request.get("plan"):
+            plan_codes = int(float(request.get("duration", 30)) * 5)
+            for i in range(plan_codes + 1):
+                out.line("PROGRESS", {"id": rid, "stage": "plan", "step": i, "steps": plan_codes + 1})
+                if poll():
+                    break
+            if stop or poll():
+                out.line("ERROR", {"id": rid, "message": "cancelled"})
+                continue
         out.line("PROGRESS", {"id": rid, "stage": "text", "step": 0, "steps": 1})
         out.line("PROGRESS", {"id": rid, "stage": "condition", "step": 0, "steps": 1})
         for i in range(steps):
@@ -466,6 +501,7 @@ def serve():
                            "src_seconds": round(src_seconds, 3), "dit": "acestep-v15-" + guided_dit(request, guided),
                            "guidance": (request.get("guidance") or 7) if guided_dit(request, guided) != "turbo" else 0,
                            "task": request.get("task", "text2music"),
+                           "lm": ("acestep-5Hz-lm-" + (request.get("lm") or "1.7B")) if plan_codes else "", "plan_codes": plan_codes,
                            "caption_tokens": len(caption.split()) + 20, "lyric_tokens": 15 if not lyrics_given else 40,
                            "truncated": False, "peak": 0.5,
                            "timings": {"text": 0.0, "condition": 0.0, "denoise": round(time.monotonic() - started, 3), "decode": 0.0}},

@@ -707,8 +707,10 @@ static int ace_plan_and_generate(AceEngine *e, const AceRequest *rq, const AceHo
     if (!lm) return 1;
     const int target = (int)(rq->duration * 5);                                         /* upstream: int(duration * 5) codes, a second being 5 */
     if (target < 5 || target > ACG_MAX_CODES) { snprintf(err, errn, "the duration asks for %d codes: 1 to %d seconds", target, ACG_MAX_CODES / 5); return 1; }
-    char *cot = alm_cot(rq->bpm, rq->duration, rq->key, rq->language && *rq->language ? rq->language : "unknown", rq->timesig);
-    const char *lyrics = rq->lyrics ? rq->lyrics : "[Instrumental]";
+    const char *plan_language = "unknown", *lyrics = rq->lyrics;                       /* what the planner is told, with the handler's words for nothing */
+    if (rq->language && *rq->language) plan_language = rq->language;
+    if (!lyrics) lyrics = "[Instrumental]";
+    char *cot = alm_cot(rq->bpm, rq->duration, rq->key, plan_language, rq->timesig);
     char *pc = cot ? alm_prompt(rq->caption, lyrics, cot, 0) : NULL, *pu = cot ? alm_prompt(rq->caption, lyrics, cot, 1) : NULL;
     int nc = 0, nu = 0;
     int *ic = pc ? alm_tokenize(lm, pc, &nc) : NULL, *iu = pu ? alm_tokenize(lm, pu, &nu) : NULL;

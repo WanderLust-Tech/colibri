@@ -83,6 +83,21 @@ VAE_CONFIG_AUDIO_IN = {**VAE_CONFIG, "channel_multiples": [1, 1, 1, 1, 1], "enco
 TINY_TEXT = {"hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
              "num_key_value_heads": 2, "head_dim": 8}
 
+# The planner (--lm): a tiny Qwen3 with the audio codes added to its vocabulary, in the real layout (acestep-5Hz-lm-1.7B/: a Qwen3Model with tied embeddings, the
+# ids of <|audio_code_0|> up the 64000 codes of the quantizer and a few more, as the real one's 65535).
+TINY_LM = {"hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 8}
+LM_DIR = "acestep-5Hz-lm-1.7B"            # the engine looks for this name first; the content is the tiny one
+LM_CODES = 65535
+LM_CORPUS = [
+    "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n# Caption\n\n# Lyric\n[Instrumental]\n",
+    "<|im_start|>system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n<|im_end|>\n<|im_start|>user\nNO USER INPUT<|im_end|>\n"
+    "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "<think>\nbpm: 120\nduration: 10\nkeyscale: C Major\nlanguage: unknown\ntimesignature: 4\n</think>\n\n",
+    "calm piano with soft strings, upbeat electronic dance music, a slow acoustic guitar ballad, heavy rock drums, bright ukulele, warm indie folk",
+    "[Verse 1]\nwalking down the empty street\nthe city sleeps beneath my feet\n[Chorus]\nsing it out loud tonight\n",
+    "unknown en zh ja ko fr de es it pt ru instrumental bpm timesignature keyscale duration minor major G A D F# Bb",
+] * 4
+
 SILENCE_FRAMES = 1500   # 60 seconds at 25 Hz; the real file holds 15000 (10 minutes)
 
 # Strength of each VAE residual unit's output convolution. A random stack of 15 residual units with Snake
@@ -107,6 +122,32 @@ CORPUS = [
 # letters with at most one leading non-letter, ONE digit at a time (cl100k takes up to three), punctuation runs, newline and
 # whitespace runs. The tiny tokenizer has to split text the way the real one does, or a port tested on it proves nothing.
 QWEN_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
+
+
+def make_lm_tokenizer(path):
+    """The planner's tokenizer: a 600-entry byte-level BPE, <|endoftext|>, <|im_start|>, <|im_end|>, <think> and </think> as special tokens, and the audio
+    codes as added tokens after them. No end token is appended (the real one's post-processor only undoes the byte-level split), and the chat template is
+    Qwen3's own (tools/qwen3_chat_template.jinja). Returns the vocabulary size."""
+    from tokenizers import AddedToken, Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers
+    from transformers import PreTrainedTokenizerFast
+
+    tok = Tokenizer(models.BPE())
+    tok.normalizer = normalizers.NFC()
+    tok.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(Regex(QWEN_SPLIT), behavior="isolated", invert=False),
+        pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
+    tok.decoder = decoders.ByteLevel()
+    special = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<think>", "</think>"]
+    tok.train_from_iterator(LM_CORPUS, trainers.BpeTrainer(
+        vocab_size=600, special_tokens=special, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+    tok.add_tokens([AddedToken(f"<|audio_code_{i}|>", special=False, normalized=False) for i in range(LM_CODES)])
+    tok.post_processor = processors.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False)
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_chat_template.jinja"), encoding="utf-8") as f:
+        template = f.read()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="<|endoftext|>", eos_token="<|im_end|>", chat_template=template,
+                                   clean_up_tokenization_spaces=False)
+    fast.save_pretrained(path)
+    return len(fast)
 
 
 def make_tokenizer(path):
@@ -214,6 +255,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("outdir")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--lm", action="store_true",
+                    help="also a tiny 5 Hz planner (acestep-5Hz-lm-1.7B/: a Qwen3 with the audio codes in its vocabulary) for the planner's oracle")
     ap.add_argument("--base", action="store_true",
                     help="also an acestep-v15-base DiT (the guided one: is_turbo false, upstream's base modeling code) beside the turbo one")
     ap.add_argument("--audio-in", action="store_true",
@@ -287,6 +330,22 @@ def main():
         save_file(bf16_state(bdit), os.path.join(base_dir, "model.safetensors"), metadata={"format": "pt"})
         for name in ("modeling_acestep_v15_base.py", "configuration_acestep_v15.py", "apg_guidance.py"):
             shutil.copyfile(os.path.join(root, "acestep", "models", "base", name), os.path.join(base_dir, name))
+
+    if a.lm:
+        from transformers import Qwen3Config, Qwen3Model
+        lm_dir = os.path.join(out, LM_DIR)
+        os.makedirs(lm_dir, exist_ok=True)
+        lm_vocab = make_lm_tokenizer(lm_dir)
+        eos = json.load(open(os.path.join(lm_dir, "tokenizer.json"), encoding="utf-8"))["model"]["vocab"]["<|im_end|>"]
+        lm_cfg = Qwen3Config(vocab_size=lm_vocab, max_position_embeddings=8192, rope_theta=1000000.0, rms_norm_eps=1e-6, tie_word_embeddings=True,
+                             bos_token_id=0, eos_token_id=eos, pad_token_id=0, **TINY_LM)
+        torch.manual_seed(a.seed + 7)
+        lm = Qwen3Model(lm_cfg)
+        randomize(lm, a.seed + 8)
+        lm_cfg.dtype = "bfloat16"
+        lm_cfg.architectures = ["Qwen3Model"]
+        lm_cfg.save_pretrained(lm_dir)
+        save_file(bf16_state(lm), os.path.join(lm_dir, "model.safetensors"), metadata={"format": "pt"})
 
     # A smooth, nonzero "silence": the engine slices and tiles this, so a constant would hide a wrong offset.
     g = torch.Generator().manual_seed(a.seed + 4)

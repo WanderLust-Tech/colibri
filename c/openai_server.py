@@ -6553,11 +6553,11 @@ def parse_multipart_edit(content_type, raw):
 
 # POST /v1/audio/music as multipart/form-data: the clips are files named `src_audio` and `reference_audio`, the
 # rest text fields (the JSON body's own names).
-_MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm")
+_MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm", "lm_top_k")
 _MUSIC_FLOAT_FIELDS = ("duration", "shift", "repainting_start", "repainting_end", "repaint_strength",
                        "audio_cover_strength", "cover_noise_strength", "guidance_scale", "cfg_interval_start",
-                       "cfg_interval_end")
-_MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg")
+                       "cfg_interval_end", "lm_temperature", "lm_cfg_scale", "lm_top_p")
+_MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg", "thinking")
 # Body limits for audio in, from the clip caps: the pair may be 192 MiB, so a multipart body is that and a MiB of
 # fields; the same pair as base64 in a JSON body is 4/3 of it (the reason to send a file, not text, for a long clip).
 MUSIC_MAX_BODY_MULTIPART = music_engine.MAX_CLIPS_BYTES + (1 << 20)
@@ -8835,6 +8835,10 @@ class APIHandler(BaseHTTPRequestHandler):
                      "repaint_strength": request["repaint_strength"], "cover_strength": request["audio_cover_strength"],
                      "cover_noise": request["cover_noise_strength"], "track": request.get("track_name"),
                      "tracks": ",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None}
+        if request.get("thinking"):                              # the 5 Hz planner writes the song's structure first
+            audio.update({"plan": True, "lm": request.get("lm_model"), "lm_temperature": request.get("lm_temperature"),
+                          "lm_cfg_scale": request.get("lm_cfg_scale"), "lm_top_p": request.get("lm_top_p"),
+                          "lm_top_k": request.get("lm_top_k")})
         if request.get("guided") or request.get("dit"):         # the base and SFT DiTs: which, and how hard they are guided
             audio.update({"dit": request.get("dit"), "guidance": request.get("guidance_scale"),
                           "cfg_start": request.get("cfg_interval_start"), "cfg_end": request.get("cfg_interval_end"),
@@ -8852,7 +8856,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if wav is None:
             wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
-                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance")
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance", "lm", "plan_codes")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
                 "colibri": {**{key: result.get(key) for key in keys},

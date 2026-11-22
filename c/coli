@@ -3063,8 +3063,8 @@ class MusicProgress:
     """The live line under a generation:  ⠹ composing 3/8 · 41s · seed 1234  (one line, redrawn in place
     on a terminal; nothing at all when the output is a pipe)."""
     FRAMES = Spinner.FRAMES
-    STAGES = {"encode": "reading the clip", "text": "reading the caption", "condition": "preparing the conditioning",
-              "denoise": "composing", "decode": "decoding the audio"}
+    STAGES = {"plan": "planning the structure", "encode": "reading the clip", "text": "reading the caption",
+              "condition": "preparing the conditioning", "denoise": "composing", "decode": "decoding the audio"}
 
     def __init__(self, stream, seed):
         self.out = stream
@@ -3079,7 +3079,7 @@ class MusicProgress:
         if not self.live:
             return
         stage = self.STAGES.get(self.stage, self.stage)
-        count = f" {self.step}/{self.steps}" if self.stage in ("denoise", "decode") and self.steps > 1 else ""
+        count = f" {self.step}/{self.steps}" if self.stage in ("plan", "denoise", "decode") and self.steps > 1 else ""
         note = f" · {C.yel}{self.note}{C.r}" if self.note else ""
         frame = self.FRAMES[self.tick % len(self.FRAMES)]
         self.out.write(f"\r  {C.teal}{frame}{C.r} {C.dim}{stage}{count} · {time.time()-self.t0:.0f}s · "
@@ -3175,6 +3175,14 @@ def music_audio_flags(a):
             body[field] = getattr(a, dest)
     if getattr(a, "dit", None):
         body["dit"] = a.dit
+    if getattr(a, "plan", False):
+        body["thinking"] = True
+    for flag, dest, field in (("--lm", "lm", "lm_model"), ("--lm-temperature", "lm_temperature", "lm_temperature"), ("--lm-cfg", "lm_cfg", "lm_cfg_scale"),
+                              ("--lm-top-p", "lm_top_p", "lm_top_p"), ("--lm-top-k", "lm_top_k", "lm_top_k")):
+        if getattr(a, dest, None) is not None:
+            if not getattr(a, "plan", False):
+                sys.exit(f"{C.yel}{flag} is for --plan{C.r} (the planner)")
+            body[field] = getattr(a, dest)
     if getattr(a, "adg", False):
         body["use_adg"] = True
     return body
@@ -3197,7 +3205,9 @@ def music_settings(a, prompt, info):
                 "repaint_strength": "--repaint-strength", "audio_cover_strength": "--cover-strength",
                 "cover_noise_strength": "--cover-noise", "task": "the task", "track_name": "--track",
                 "complete_track_classes": "--tracks", "guidance_scale": "--guidance", "cfg_interval_start": "--cfg-start",
-                "cfg_interval_end": "--cfg-end", "use_adg": "--adg"}.get(
+                "cfg_interval_end": "--cfg-end", "use_adg": "--adg", "thinking": "--plan", "lm_model": "--lm",
+                "lm_temperature": "--lm-temperature", "lm_cfg_scale": "--lm-cfg", "lm_top_p": "--lm-top-p", "lm_top_k": "--lm-top-k",
+                "bpm": "--bpm", "key": "--key"}.get(
                     error.param, f"--{error.param}" if error.param else "the request")
         sys.exit(f"{C.yel}{flag}: {error}{C.r}")
 
@@ -3217,6 +3227,8 @@ def generate_music(engine, request, out=None, stream=None):
                                  repaint_end=request.get("repainting_end"), repaint_mode=request.get("repaint_mode"),
                                  repaint_strength=request.get("repaint_strength"),
                                  cover_strength=request.get("audio_cover_strength"), cover_noise=request.get("cover_noise_strength"),
+                                 plan=request.get("thinking") or None, lm=request.get("lm_model"), lm_temperature=request.get("lm_temperature"),
+                                 lm_cfg_scale=request.get("lm_cfg_scale"), lm_top_p=request.get("lm_top_p"), lm_top_k=request.get("lm_top_k"),
                                  dit=request.get("dit"), guidance=request.get("guidance_scale"), cfg_start=request.get("cfg_interval_start"),
                                  cfg_end=request.get("cfg_interval_end"), adg=request.get("use_adg"), track=request.get("track_name"),
                                  tracks=",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None,
@@ -4701,6 +4713,12 @@ def main():
                  ("--cfg-start",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule (1 = the start, 0 = the end) guidance begins to apply (default 0)")),
                  ("--cfg-end",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule guidance stops applying (default 1)")),
                  ("--adg",dict(action="store_true",help="with the base or sft DiT: angle-based guidance instead of APG")),
+                 ("--plan",dict(action="store_true",help="the 5 Hz planner writes the song's structure first and the music follows it (music models with acestep-5Hz-lm-1.7B); needs --bpm, --key and --time-signature")),
+                 ("--lm",dict(choices=["0.6B","1.7B","4B"],default=None,help="with --plan: which planner (default: the first the model has)")),
+                 ("--lm-temperature",dict(type=float,default=None,metavar="X",help="with --plan: the planner's sampling temperature, 0 to 2 (default 0.85; 0 is greedy)")),
+                 ("--lm-cfg",dict(type=float,default=None,metavar="X",help="with --plan: the planner's guidance, 0 to 20 (default 2)")),
+                 ("--lm-top-p",dict(type=float,default=None,metavar="X",help="with --plan: the planner's top-p, 0 to 1 (default 0.9)")),
+                 ("--lm-top-k",dict(type=int,default=None,metavar="N",help="with --plan: the planner's top-k (default off)")),
                  ("--ref",dict(default=None,metavar="FILE",help="a clip (a WAV or MP3) to take the voice and style from; works alone or with --cover/--repaint (music models)")))
     for flag,kw in music_flags: pr.add_argument(flag,**kw)
     pr.add_argument("--no-dcw",action="store_true",help="turn off the sampler's wavelet correction (music models)")
