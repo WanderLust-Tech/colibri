@@ -196,9 +196,19 @@ keep. It has no delete button: remove files from the folders. The browser, not t
 
 ## Pages that are only there with a router
 
-Settings shows Presets, Requests and Log only when the server is a `coli router`: against a plain `coli serve` they would only say
+Settings shows Presets, Voices, Requests and Log only when the server is a `coli router`: against a plain `coli serve` they would only say
 there is nothing to show. A router started without a request log or a presets file keeps those pages, and they say how to turn
 them on. A server that predates the feature list keeps every page.
+
+## Talk to it, and hear it answer
+
+With a speech recognition model and a speech model on the server (a router with `qwen3-asr-0.6b` and `qwen3-tts-0.6b`), the chat composer has
+three more buttons: the **microphone** (speak, and it sends what you said when you pause, or when you press it again), **read replies aloud**,
+and **hands-free** (listen again after each reply, a conversation with no keys; it stops after 12 seconds of silence or on Stop). Open the dashboard
+as `http://localhost:8000`: a browser gives the microphone only to `localhost` and https pages, not to the PC's network address. The page's
+**Settings → Voices** keeps the saved voices of the voice-cloning models: **New voice** makes one from an audio clip of 3 to 30 seconds (and, better,
+what it says), **Try** speaks a phrase in it and plays it, **Read replies in this voice** makes it the voice of the read-aloud button, **Remove**
+forgets it. Details: [voice-loop.md](voice-loop.md), [qwen3-tts.md](qwen3-tts.md).
 
 ## See why a model is slow to load, or failed to start
 

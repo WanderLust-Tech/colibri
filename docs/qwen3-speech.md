@@ -1,8 +1,6 @@
 # Qwen3 speech: Qwen3-ASR (speech to text) and Qwen3-TTS (text to speech)
 
-Plan and notes, 2026-11-21. Two new engines for the fork, both Apache-2.0 checkpoints from Qwen. Nothing here is built yet: this page is
-what was found out (from the checkpoints' `config.json` files and the reference packages' code, not from memory) and the order of work.
-It is updated as stages land; the status table at the end is the truth.
+Plan and notes, 2026-11-21, kept up to date as the work landed. Two engines for the fork, both Apache-2.0 checkpoints from Qwen, and what was built on them: all of it is done, pushed and deployed (the status table at the end is the truth). This page is what was found out (from the checkpoints' `config.json` files and the reference packages' code, not from memory) and the order the work went in. The results are in [qwen3-asr.md](qwen3-asr.md), [qwen3-tts.md](qwen3-tts.md) (cloning, streaming) and [voice-loop.md](voice-loop.md).
 
 Where the references and weights are on this machine (outside the repository):
 
@@ -138,15 +136,17 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | A1 mel front end | done: 1.4e-5 against the reference features |
 | A2 audio encoder | done: 5e-6 (windowed oracle), 6.6e-7 (full attention against stock transformers) |
 | A3 decoder, prompt, greedy decode, parse | done: the prompt and the 30 generated ids identical, 0.6B and 1.7B |
-| A4 protocol, gateway, catalogue, registry, router, `coli`, long audio, tests | done: [qwen3-asr.md](qwen3-asr.md); on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
+| A4 protocol, gateway, catalogue, registry, router, `coli`, long audio, tests | done: [qwen3-asr.md](qwen3-asr.md); deployed |
 | A5 Vulkan (encoder and decode on the chain) | done: the decoder and the encoder's layers on the card, 20 times faster, same tokens |
 | T0 reference capture | done: `tools/qwen3_tts_ref.py`, the 0.6B CustomVoice reference (text ids, prefill, logits, 63 frames of codes, waveform) |
 | T1 codec decoder | done: the waveform from the reference's codes to 1.4e-6 |
 | T2 talker, code predictor, sampling | done: the prefill to 1.2e-7, the first logits to 2e-5, 0 of 1008 choices differ teacher forced, the codes identical free-running greedy |
-| T3 protocol, gateway, catalogue, registry, router, `coli speak`, tests | done: [qwen3-tts.md](qwen3-tts.md); the speech comes back through Qwen3-ASR as the input text, word for word; on the branch `feat/qwen3-speech`, not merged, not pushed, not deployed |
+| T3 protocol, gateway, catalogue, registry, router, `coli speak`, tests | done: [qwen3-tts.md](qwen3-tts.md); the speech comes back through Qwen3-ASR as the input text, word for word; deployed |
 | T4 1.7B CustomVoice, VoiceDesign, style `instructions` | done: the 1.7B talker (2048 wide) and the predictor's projection, the instruction rows, no speaker row for VoiceDesign; both held to the official package (prefill 1.2e-7, 0 choices differ, codes identical, on the CPU and the card); gateway `instructions`, `coli speak --instruct`, catalogue entries; [qwen3-tts.md](qwen3-tts.md) |
 | T5 cloning (codec encoder, speaker encoder) | done (the encoders' matrix products on the card: 0.35 s for an 11 s clip, 0.7 s on the CPU) |
 | T6 speed | done: a frame is 14 to 19 ms on the card (111 ms on the CPU), the codec's vocoder on the card too (1.05 s to 0.17 s for 5 s of speech); 56 s of speech in 11 s |
+| T7 streaming | done: `stream_format` "sse" and `stream: true`, the first sound after 6 frames (about 0.35 s), pieces decoded with 96 frames of context |
+| V1 the voice loop | done: [voice-loop.md](voice-loop.md): `coli talk` and the dashboard's microphone, read-aloud and hands-free; the first sound about 1 s after the speaker stops |
 
 Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend
 use; this engine implements the windows and can reproduce the stock behaviour (`AS_FULL_ATTN=1`).

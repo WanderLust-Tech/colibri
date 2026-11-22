@@ -271,7 +271,7 @@ accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here dis
 the engine's word (`GET /v1/models`, `input_modalities`; `context_length`, in tokens, is the window it serves with, for the engines that
 say: Gemma 4 and Qwen3.6/Qwen3-Coder). Speech to text has its own route on the Gemma E2B and E4B
 ([below](#speech-to-text-v1audiotranscriptions)), and the Qwen3-Embedding models have `/v1/embeddings`
-([below](#embeddings-v1embeddings)) and the Qwen3-Reranker models `/v1/rerank` ([below](#rerank-v1rerank)). There is no text-to-speech route (`/v1/audio/speech`) and no `/v1/responses`.
+([below](#embeddings-v1embeddings)) and the Qwen3-Reranker models `/v1/rerank` ([below](#rerank-v1rerank)). There is no `/v1/responses`. Text to speech is [`/v1/audio/speech`](#text-to-speech-v1audiospeech) and speech to text `/v1/audio/transcriptions`; chained with a chat model they are the [voice loop](voice-loop.md).
 
 On supported engines, pass OpenAI `tools` and optionally `tool_choice` to
 `/v1/chat/completions`. The Anthropic endpoint translates `tools`,

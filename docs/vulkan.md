@@ -1945,6 +1945,28 @@ per matrix, and a matrix that does not reach the device keeps that product on th
 chain off for the rest of the run and the CPU does the forward again from the ids. The matrices go up as bf16 (fmt 11): they use
 the fp32 tiled GEMM, not the cooperative-matrix one, which needs weights that are exact in fp16.
 
+### Speech: Qwen3-ASR and Qwen3-TTS (`qwen3asr.c`, `qwen3tts.c`)
+
+Both speech engines ([qwen3-asr.md](qwen3-asr.md), [qwen3-tts.md](qwen3-tts.md)) use the dense chain's layer ops; each needs `make qwen3asr qwen3tts VK=1` and
+`COLI_VULKAN=1` (the router sets it), and says `"device":"vulkan"` in its `READY` line. The matrices go up as bf16 (the codec's convolution weights as f32) on
+first use and stay.
+
+- **ASR decoder:** the prompt (about 160 rows) and each token are one submission of the Qwen3 layer (norms, q/k/v, head norms, RoPE, `vkc_attn_w` over a
+  position-major KV cache that lives on the device, o, SwiGLU, down); the 151936-row head's logits come back, the argmax is the host's.
+- **ASR encoder:** the 18 or 24 layers and the output projections are one submission of `chain_enc`'s ops (`vkc_enc_norm` LayerNorm with bias,
+  `vkc_enc_bias` with GELU, `vkc_enc_attn` over each row's window of 104 frames), the three attention matrices joined into one `[3d][d]` product; the
+  three convolutions' GEMMs go up per chunk (their im2col and the first convolution stay on the CPU). An 11 s clip: 0.23 s (0.6B) against 4.5 s on the CPU.
+- **TTS talker and code predictor:** the same layer chain per frame (one talker step, sixteen predictor steps), 14 to 19 ms a frame (0.6B) against 111 ms.
+- **TTS codec vocoder:** `chain_codec.comp` (causal-conv im2col, SnakeBeta, the transposed convolution's overlap-add, a one-channel last layer with the
+  clamp) and tiled GEMMs over resident f32 weights (`vkc_matmul` takes at most 32768 rows a call, so a long sequence goes in tiles); 5 s of speech's
+  codec in 0.17 s instead of 1.05 s.
+- **Cloning encoders:** the Mimi convolutions' im2col products (tiles of up to 32768 rows) and the codec transformer's matrices (`qc_gemm_hook`); an 11 s
+  clip's codes in 0.34 s instead of 0.67 s.
+
+A step that fails (a lost device) turns the chain off and the CPU runs the request again from the start (a streamed speech that has already sent audio
+ends with an error instead: it cannot be made again). Not the bits of the CPU's: the codes and tokens are identical on the references checked, the
+waveform is within one step of the 16-bit sample, the encoder within 1e-5.
+
 ### Gemma 4 experts on the tier
 
 The 26B-A4B's routed experts go through the shared tier (`vk_tier.c`) like the other mixture-of-experts engines', wired in

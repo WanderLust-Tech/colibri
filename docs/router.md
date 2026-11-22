@@ -11,7 +11,10 @@ coli router --host 0.0.0.0 --api-key "$COLI_API_KEY"
 Clients and the dashboard see one server. `POST /v1/chat/completions` with `"model": "qwen3-coder-30b"`,
 `POST /v1/images/generations` with `"model": "qwen-image-2.1"` and `POST /v1/audio/music` with
 `"model": "ace-step-1.5"` all go to the same address, and each is answered by its own model without a
-restart in between.
+restart in between. So do speech to text (`/v1/audio/transcriptions`) and text to speech (`/v1/audio/speech`, also streamed), and a spoken
+conversation is those two and a chat model in turn ([voice-loop.md](voice-loop.md): it needs them all loaded, which is the default
+`max_loaded` of three). The router also keeps the **saved voices** of the voice-cloning speech models (`GET /v1/audio/voices`, `POST
+/v1/audio/voices`, `POST /v1/audio/voices/delete`; `coli voice`, [qwen3-tts.md](qwen3-tts.md#voice-cloning-the-base-models)).
 
 Two things build on the router: a model can be offered under a name of its own with settings baked in (`coli preset`,
 [presets.md](presets.md)), and every request can be logged to a file, the router's line joined to its worker's
