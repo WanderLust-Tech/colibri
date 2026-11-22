@@ -38,10 +38,14 @@ typedef struct {
     int rope_n; float *cs, *sn;        /* RoPE tables for positions 0 .. rope_n - 1 */
     char dir_name[64];
     void *meta_tab; void (*meta_free)(void *);     /* the first phase's token tables (acestep_meta.h), built the first time */
+    void *vk;                          /* the planner's weights on a Vulkan device (acestep_lm_vk.h) */
+    int vk_tried, vk_on, vk_fail;      /* the device was asked for; the steps run on it; a step failed on it (the run is started again on the CPU) */
 } AceLm;
 
+static void alm_vk_free(AceLm *m);
 static void alm_free(AceLm *m){
     if (!m) return;
+    alm_vk_free(m);
     for (int i = 0; m->L && i < m->nl; i++) {
         AcdEncLayer *l = &m->L[i];
         acd_free_attn(&l->sa); free(l->ln1); free(l->ln2); acd_free_lin(&l->gate); acd_free_lin(&l->up); acd_free_lin(&l->down);
@@ -124,10 +128,24 @@ fail:
 
 /* ------------------------------------------------------------------------------------------------------ the model */
 
-typedef struct { float **k, **v; int cap, len; } AlmCache;
+/* k, v: the keys and values on the host; NULL when the sequence lives on the device (vk), which holds them instead. */
+typedef struct { float **k, **v; int cap, len; void *vk; } AlmCache;
 
-static int alm_cache_new(const AceLm *m, AlmCache *c, int cap){
+static void alm_rope(AceLm *m, int n);
+static void alm_embed_row(const AceLm *m, int id, float *dst);
+#ifdef COLI_VULKAN
+#include "acestep_lm_vk.h"
+#else
+static int alm_vk_open(AceLm *m){ (void)m; return 0; }
+static void alm_vk_cache_free(AlmCache *c){ (void)c; }
+static void alm_vk_free(AceLm *m){ (void)m; }
+static int alm_vk_forward(AceLm *m, AlmCache *C, const float *xrows, int n, int pos0, float *last){ (void)m; (void)C; (void)xrows; (void)n; (void)pos0; (void)last; return 0; }
+static int alm_vk_logits(AceLm *m, const float *h, int nr, float *full){ (void)m; (void)h; (void)nr; (void)full; return 0; }
+#endif
+
+static int alm_cache_new(AceLm *m, AlmCache *c, int cap){
     memset(c, 0, sizeof *c);
+    if (alm_vk_open(m)) { c->cap = cap; return 0; }                           /* on the card: the cache is made there, by the first step */
     c->k = (float **)calloc((size_t)m->nl, sizeof(float *)); c->v = (float **)calloc((size_t)m->nl, sizeof(float *));
     if (!c->k || !c->v) return -1;
     c->cap = cap;
@@ -138,6 +156,7 @@ static int alm_cache_new(const AceLm *m, AlmCache *c, int cap){
     return 0;
 }
 static void alm_cache_free(const AceLm *m, AlmCache *c){
+    alm_vk_cache_free(c);
     for (int i = 0; c->k && i < m->nl; i++) { free(c->k[i]); free(c->v[i]); }
     free(c->k); free(c->v); memset(c, 0, sizeof *c);
 }
@@ -188,6 +207,12 @@ static void alm_attend_row(const AceLm *m, const AlmCache *C, int li, const floa
  * x [nr][D] is the rows' embeddings and is updated in place. The keys and values go into the caches. */
 static void alm_decode_rows(AceLm *m, AlmCache **cache, const int *pos, float *x, int nr){
     const int D = m->D, H = m->H, Hk = m->Hk, hd = m->hd, I = m->inter;
+    if (!cache[0]->k) {                                                        /* on the card: a submission a row, each sequence with its own cache */
+        for (int r = 0; r < nr && !m->vk_fail; r++) {
+            if (alm_vk_forward(m, cache[r], x + (size_t)r * D, 1, pos[r], x + (size_t)r * D)) cache[r]->len = pos[r] + 1;
+        }
+        return;
+    }
     int maxpos = 0;
     for (int r = 0; r < nr; r++) if (pos[r] + 1 > maxpos) maxpos = pos[r] + 1;
     alm_rope(m, maxpos);
@@ -229,6 +254,14 @@ static void alm_decode_rows(AceLm *m, AlmCache **cache, const int *pos, float *x
  * causal within the prompt; it runs as one block per layer. */
 static void alm_prefill(AceLm *m, AlmCache *C, const int *ids, int n, float *last){
     const int D = m->D, H = m->H, Hk = m->Hk, hd = m->hd, I = m->inter;
+    if (!C->k) {                                                               /* on the card */
+        float *e = (float *)malloc((size_t)n * D * sizeof(float));
+        if (!e) { fprintf(stderr, "acestep lm: out of memory\n"); exit(1); }
+        for (int i = 0; i < n; i++) alm_embed_row(m, ids[i], e + (size_t)i * D);
+        if (!m->vk_fail && alm_vk_forward(m, C, e, n, 0, last)) C->len = n;
+        free(e);
+        return;
+    }
     alm_rope(m, n);
     float *x = (float *)malloc((size_t)n * D * sizeof(float));
     float *nb = (float *)malloc((size_t)n * D * sizeof(float)), *o = (float *)malloc((size_t)n * D * sizeof(float));
@@ -264,8 +297,19 @@ static void alm_prefill(AceLm *m, AlmCache *C, const int *ids, int n, float *las
 
 /* The head, on the columns asked for: logits[r][j] = <final_norm(h[r]), embed[ids[j]]>, j < nid. The head is the embedding table, and a codes
  * phase only needs the 64000 audio codes and the end token of its 217204. */
-static void alm_logits(const AceLm *m, const float *h, int nr, const int *ids, int nid, float *logits){
+static void alm_logits(AceLm *m, const float *h, int nr, const int *ids, int nid, float *logits){
     const int D = m->D;
+    if (m->vk_on && nr <= 2) {                                                 /* the head on the card, then the columns asked for */
+        float *full = (float *)malloc((size_t)nr * m->vocab * sizeof(float));
+        if (!full) { fprintf(stderr, "acestep lm: out of memory\n"); exit(1); }
+        if (alm_vk_logits(m, h, nr, full)) {
+            for (int r = 0; r < nr; r++) for (int j = 0; j < nid; j++) logits[(size_t)r * nid + j] = full[(size_t)r * m->vocab + ids[j]];
+            free(full);
+            return;
+        }
+        free(full);
+        if (m->vk_fail) { memset(logits, 0, (size_t)nr * nid * sizeof(float)); return; }      /* the run is started again on the CPU */
+    }
     float *hn = (float *)malloc((size_t)nr * D * sizeof(float));
     if (!hn) { fprintf(stderr, "acestep lm: out of memory\n"); exit(1); }
     acd_rmsnorm(hn, h, nr, D, m->norm, m->eps);
@@ -396,8 +440,8 @@ static int alm_choose(float *lg, int nid, const AlmSample *s, uint64_t *rng){
 
 /* Upstream's codes phase: both prompts in, then one token a step until the end token, which is blocked until `target` codes are out and forced after.
  * codes[target] receives the codes (ids 0..63999). Returns how many codes were written, or -1 (reason in err) / -2 when `step` asked to stop. */
-static int alm_generate_codes(AceLm *m, const int *cond, int nc, const int *unc, int nu, int target, const AlmSample *s, int *codes,
-                              AlmStepFn step, void *ud, char *err, size_t errn){
+static int alm_generate_codes_run(AceLm *m, const int *cond, int nc, const int *unc, int nu, int target, const AlmSample *s, int *codes,
+                                  AlmStepFn step, void *ud, char *err, size_t errn){
     const int D = m->D, nid = ALM_CODES + 1;
     const int guided = s->cfg_scale > 1.0;
     int *ids = (int *)malloc((size_t)nid * sizeof(int));
@@ -440,6 +484,15 @@ done:
     free(ids); free(h); free(x); free(lg); free(cfg);
     alm_cache_free(m, &c0); alm_cache_free(m, &c1);
     return produced;
+}
+
+/* A run that failed on the card is made again on the CPU (the device is off for the rest of the process by then). */
+static int alm_generate_codes(AceLm *m, const int *cond, int nc, const int *unc, int nu, int target, const AlmSample *s, int *codes,
+                              AlmStepFn step, void *ud, char *err, size_t errn){
+    m->vk_fail = 0;
+    int r = alm_generate_codes_run(m, cond, nc, unc, nu, target, s, codes, step, ud, err, errn);
+    if (m->vk_fail) { m->vk_fail = 0; r = alm_generate_codes_run(m, cond, nc, unc, nu, target, s, codes, step, ud, err, errn); }
+    return r;
 }
 
 #endif

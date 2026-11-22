@@ -1351,8 +1351,8 @@ ifneq ($(EXE),)
 .PHONY: acestep
 acestep: acestep$(EXE)
 endif
-acestep$(EXE): acestep.c acestep_vae.h acestep_vae_enc.h acestep_dit.h acestep_tok.h acestep_text.h acestep_audio.h third_party/minimp3.h acestep_gen.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h .build-config
-	$(CC) $(CFLAGS) acestep.c -o acestep$(EXE) $(LDFLAGS)
+acestep$(EXE): acestep.c acestep_vae.h acestep_vae_enc.h acestep_dit.h acestep_tok.h acestep_text.h acestep_audio.h third_party/minimp3.h acestep_gen.h acestep_lm.h acestep_lm_vk.h acestep_meta.h acestep_serve.h serve_poll.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) acestep.c $(VK_OBJ) -o acestep$(EXE) $(LDFLAGS)
 
 # Qwen3-Embedding (0.6B, 4B, 8B): text embeddings for POST /v1/embeddings (docs/embeddings.md). The layers are ACE-Step's text
 # encoder's (acestep_text.h loads and computes them), so this builds from the same headers.

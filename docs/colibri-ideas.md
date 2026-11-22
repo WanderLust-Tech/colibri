@@ -128,7 +128,7 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
   duration, language and a rewritten caption) is identical to upstream's in every step of 7 cases on the real 1.7B (state, tokens let through, logits at 1e-6, the token), in its
   token tables, its parse and its PyYAML-exact YAML (6229 strings, 1546 texts); phase 2 (the codes) and the codes into the music as before; through the engine, the protocol, the gateway
   (`thinking`, `use_cot_caption`, `use_cot_language`, `lm_*`; the `meta` stage and `colibri.meta`) and `coli music --plan`. Open: the `genres` field (refused, not guessed), the planner's
-  other jobs (understanding a clip, formatting), the 4B and 0.6B on real weights, a Vulkan path (phase 1 is 0.13 s a token on the CPU), `coli model install` of the planner, the dashboard's controls.
+  other jobs (understanding a clip, formatting), the 4B and 0.6B on real weights. Done after: the planner on the Vulkan card (phase 1 22 s to 2 s, same tokens as upstream), `coli model install` of the planner and the base DiT, the dashboard's controls. What is left of the time in a planned song is the DiT's CPU denoising.
 - [x] **E4. Lego, extract and complete tasks (L). Done 2026-11-22** ([acestep.md](acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete)): the base and SFT
   DiTs (guidance by APG or ADG against the null condition, up to 200 steps) and the three tasks, held to upstream's handler on 19 cases of the real base checkpoint
   and the tiny fixture (29 of 30 mutants caught; the 30th needs a tokenizer whose cover and text instructions differ in length), through the engine, the protocol, the gateway (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`)

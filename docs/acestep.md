@@ -441,7 +441,7 @@ says what is installed.
 **What is built, and what is not.** Both phases, held to upstream (below). Two things of upstream's are replicated as they are, strange as they look: the language the model
 writes goes only into phase 2's prompt, not to the DiT (upstream looks for a `vocal_language` key that the parse never makes), and the DiT's key is the model's lowercase
 `C major`. **Not built:** the `genres` field (upstream skips it in this phase; a model that writes `genres:` after the caption is refused, not guessed at), the planner's other
-jobs (describing a clip from its codes, formatting a caption or lyrics, writing a song from a one-line query) and the Vulkan path for the language model (the decode is the CPU's).
+jobs (describing a clip from its codes, formatting a caption or lyrics, writing a song from a one-line query).
 Upstream limits the duration the model may write to what the GPU can hold (240 s on a CPU, 480 s, up to 600 s); this engine allows 600 s (`ame_max_duration`).
 
 **How phase 1 runs.** The prompt (the chat template with the caption and the lyrics, the assistant turn left open) goes in in one pass, and one sequence advances a token at
@@ -454,6 +454,19 @@ token (upstream never writes `</think>`). Then the text is parsed as upstream pa
 after it; the caption's lines flattened to one) and written back as PyYAML writes it for phase 2: 80 columns, plain, single-quoted or double-quoted as PyYAML chooses for each
 string, which needs its analysis of the string, its implicit resolvers (a string that would read back as a bool, a number, a timestamp is quoted) and its three scalar writers. Cost
 on the 24-core CPU for the 1.7B: 0.13 s a token, 22 s for a 172-token block with a 120-token caption; then phase 2 as before (0.2 s a token, two rows).
+On a Vulkan card (below) the same block is 2 s and phase 2 is 0.03 s a token.
+
+**On the card.** Built with `VK=1` and started with `COLI_VULKAN=1` (the router's `--gpu auto` sets it when the card has room, as for any model), the planner runs on the
+graphics card: its weights go up once, when the first sequence starts (3.7 GB for the 1.7B, a couple of seconds), each sequence (phase 1's, and the conditional and
+unconditional of phase 2) keeps its KV cache on the device, and a step is one submission of the dense chain (norms, q/k/v, head norms, RoPE, attention, o, SwiGLU, down), then
+the tied embedding table as the output matrix; only the hidden row and the logits come back (`c/acestep_lm_vk.h`, the speech models' decode chain on the planner's tensors). The DiT,
+the text encoder and the VAE stay on the CPU. On the 5090: phase 1 is 0.01 s a token (172 tokens in 2 s, from 22), phase 2 0.03 s a token (50 codes in 1.6 s, from 9), a 10-second
+planned song 28 s from a cold start where the CPU took 48 (the DiT's 8.5 s of denoising is now most of what is left). It is the same planner: all 7 phase-1 cases and all 4 codes cases of the
+real 1.7B run through `--meta-ref` and `--lm-ref` with COLI_VULKAN=1 and match upstream token for token with the logits at 1e-5 or better (worst 1.9e-5, against limits of 3e-5 and 1e-5;
+the matrices are bf16 and the arithmetic f32, so the last bits differ from the CPU's). `COLI_VK_LM=0` keeps the planner on the CPU. A card that is missing, a matrix that will not go up, or a
+step that fails (`ACESTEP_LM_VK_FAULT=N` makes step N fail, to test it) puts the whole run back on the CPU: the run is made again from the start and the rest of the process stays there.
+`tests/test_acestep_planner_vk.py` holds the card to the CPU on the tiny fixture (same metadata, same codes, so the same audio byte for byte; a failing step; the switch), skipped without a
+VK build and a device.
 
 **What is held to upstream, and how.** Phase 2 and the sampler as before (`acestep_ref_lm.py`, `--lm-ref`, `--lm-selftest`). For phase 1, `tools/acestep_ref_meta.py`:
 
@@ -485,7 +498,7 @@ what ends a caption, which field follows, what is injected, what is forced; the 
 colon inside a longer token, an audio code as the top token after a line break) are left to the real planner's cases.
 
 ```sh
-cd c && make acestep
+cd c && make acestep                                                                                  # make VK=1 acestep, then COLI_VULKAN=1: the planner on the card
 ./acestep --model ~/models/ace-step-1.5 --caption "bright ukulele" --plan --out planned.wav          # the model picks tempo, key, length and the rest
 ./acestep --model ~/models/ace-step-1.5 --caption "bright ukulele" --plan --duration 30 --bpm 120 --out planned.wav
 python3 tools/acestep_ref_meta.py capture ~/models/ace-step-1.5 meta_ref                            # upstream's LLMHandler, 7 cases

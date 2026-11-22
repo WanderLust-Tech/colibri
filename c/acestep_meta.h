@@ -932,8 +932,8 @@ static char *alm_meta_prompt(const char *caption, const char *lyrics){
 /* Upstream's phase 1: the prompt in, then a token a step under the machine until the end token, the metadata parsed from what the model wrote. `step` (may be
  * NULL) hears each step with the tokens the machine let through and the model's raw logit at each. Returns the tokens written (and the metadata in out), -1 with
  * a reason in err, or -2 when `prog` asked to stop. */
-static int alm_generate_meta(AceLm *m, const int *prompt, int np, const AlmAsk *ask, const AlmSample *s, AlmMeta *out, AmTraceFn trace, void *ud,
-                             int (*prog)(void *ud, int step), void *pud, int *wrote_ids, char *err, size_t errn){
+static int alm_generate_meta_run(AceLm *m, const int *prompt, int np, const AlmAsk *ask, const AlmSample *s, AlmMeta *out, AmTraceFn trace, void *ud,
+                                 int (*prog)(void *ud, int step), void *pud, int *wrote_ids, char *err, size_t errn){
     AmeTab *t = ame_tab(m, err, errn);
     if (!t) return -1;
     const int D = m->D;
@@ -1014,6 +1014,15 @@ done:
     free(h); free(x); free(lg); free(wk); free(gen); free(ids_buf);
     alm_cache_free(m, &c);
     return produced;
+}
+
+/* A run that failed on the card is made again on the CPU (the device is off for the rest of the process by then). */
+static int alm_generate_meta(AceLm *m, const int *prompt, int np, const AlmAsk *ask, const AlmSample *s, AlmMeta *out, AmTraceFn trace, void *ud,
+                             int (*prog)(void *ud, int step), void *pud, int *wrote_ids, char *err, size_t errn){
+    m->vk_fail = 0;
+    int r = alm_generate_meta_run(m, prompt, np, ask, s, out, trace, ud, prog, pud, wrote_ids, err, errn);
+    if (m->vk_fail) { m->vk_fail = 0; r = alm_generate_meta_run(m, prompt, np, ask, s, out, trace, ud, prog, pud, wrote_ids, err, errn); }
+    return r;
 }
 
 #endif
