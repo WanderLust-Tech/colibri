@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import ModelInstaller from "@/components/ModelInstaller"
 import { useLocale } from "@/i18n"
 import {
-  cancelInstall, getModelCatalog, getModelSettings, installActive, installModel, listInstalledModels, setModelSettings,
+  cancelInstall, getModelCatalog, uninstallAddon, getModelSettings, installActive, installModel, listInstalledModels, setModelSettings,
   switchModel, uninstallModel, unloadModel, waitForModel,
   type CatalogRow, type GpuChoice, type InstalledModel, type InstalledModels, type ModelCatalog, type ModelSettings,
 } from "@/lib/api"
@@ -174,6 +174,19 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
     }
   }
 
+  /* Deletes an add-on's files (the planner, the base DiT). The router refuses while the model it belongs to is loaded. */
+  const removeAddon = async (row: CatalogRow) => {
+    setResult(null)
+    try {
+      const outcome = await uninstallAddon(baseUrl, apiKey, row.id)
+      setResult({ kind: "info", text: t("install.addonRemoved", { name: row.name, size: formatBytes(outcome.freedBytes) }) })
+      const next = await getModelCatalog(baseUrl, apiKey)
+      if (next) setCatalog(next)
+    } catch (cause) {
+      setResult({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }
+
   /* Deletes the model's files. The router refuses a model that is loaded, and the button is off for one. */
   const remove = async (entry: InstalledModel) => {
     setRemoveKey(null)
@@ -310,7 +323,7 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
       </ul>
       {installed && installed.models.length <= 1 && !catalog && <p className="field-help">{t("models.empty")}</p>}
       {router && catalog && (
-        <ModelInstaller catalog={catalog} onInstall={(row) => void install(row)} onStop={(row) => void stopInstall(row)} disabled={!!switching || removing !== null} />
+        <ModelInstaller catalog={catalog} onInstall={(row) => void install(row)} onStop={(row) => void stopInstall(row)} onRemoveAddon={(row) => void removeAddon(row)} disabled={!!switching || removing !== null} />
       )}
     </section>
   )

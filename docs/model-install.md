@@ -35,6 +35,24 @@ coli model uninstall z-image-turbo   show what goes and how much space it frees,
 * Presets that name a removed model stay in the presets file; they report that the model is not installed until it is installed
   again.
 
+**Add-ons.** A few catalog entries are not models of their own but files that go into the folder of one that is installed:
+ACE-Step's `ace-step-1.5-planner-1.7b` (the language-model planner, 3.7 GB, from the main repository's `acestep-5Hz-lm-1.7B/`) and
+`ace-step-1.5-base-dit` (the guided DiT for extract, lego and complete, 4.8 GB, from `ACE-Step/acestep-v15-base`: only the config, the
+weights and the silence latent). They install and uninstall like any other (`coli model install ace-step-1.5-planner-1.7b`) and their rows in
+`coli model available` and the dashboard say what they belong to (`into`). The rest differs in four ways:
+
+* the parent has to be installed first (`409 needs_parent`; the row's status is `needs-parent` and says what to run);
+* they land in a subfolder of the parent's folder (`<models>/ace-step-1.5/acestep-5Hz-lm-1.7B/`), with a manifest of their own, so
+  the parent's stays complete and the engine finds them where it looks; a folder that holds the files `check` names counts as installed
+  however it got there (one put together by hand, as docs/acestep.md used to say);
+* removing one takes only that subfolder, and is refused while the parent is loaded (the music engine keeps the planner's files open:
+  unload it first, `coli stop ace-step-1.5`);
+* the music engine reads what is installed when it starts, so the router stops the parent's engine when an add-on has landed (one that
+  is answering a request keeps going, and the add-on shows up once it has been stopped and started again: `coli stop ace-step-1.5`).
+
+`coli setup` never offers an add-on. The planner's 0.6B and 4B and the SFT DiT are not in the catalog: the 4B is two shards, and none of the
+three has been held to upstream on real weights.
+
 With `--host`, `--port` and `--api-key` (or `COLI_API_KEY`) the same commands manage the router of another machine: the files go
 into that machine's models folder.
 
@@ -53,15 +71,16 @@ answers 404). The write routes take `application/json` and refuse a cross-origin
 
 | Route | |
 |---|---|
-| `GET /v1/models/catalog` | every model that can be fetched: `id`, `name`, `kind` (`text`, `image`, `audio`), `download_gb`, `ram_min_gb`, `ram_good_gb`, `summary`, `license_note`, `status` (`good`, `tight`, `needs-ram`, `needs-disk`, `unsupported`), `fits`, `reason`, `installed` (`key`, `id`, `state`, or null), `unfinished` (a download was started), `job`. Also `roots` (the models folders) and `free_gb` |
+| `GET /v1/models/catalog` | every model that can be fetched: `id`, `name`, `kind` (`text`, `image`, `audio`), `download_gb`, `ram_min_gb`, `ram_good_gb`, `summary`, `license_note`, `status` (`good`, `tight`, `needs-ram`, `needs-disk`, `unsupported`, `needs-parent`), `fits`, `reason`, `installed` (`key`, `id`, `state`, or null; an add-on's `key` is null), `unfinished` (a download was started), `job`, and `into` for an add-on (the catalog id of the model it goes into). Also `roots` (the models folders) and `free_gb` |
 | `POST /v1/models/install` | `{"id": "z-image-turbo", "confirm": true}`. `confirm` must be `true`: the caller has shown the size and the licence. Answers `202` with the job |
 | `GET /v1/models/installs` | the jobs, newest first (the last 8) |
 | `GET /v1/models/installs/{id}` | one job: `state` (`starting`, `downloading`, `finishing`, `done`, `failed`, `cancelled`), `done` and `total` bytes, `rate`, `eta_seconds`, `file`, `error`, `license_note` |
 | `POST /v1/models/install/cancel` | `{"id": ...}`. The part fetched is kept |
-| `POST /v1/models/uninstall` | `{"model": NAME, "confirm": true}` (or `key`, from `GET /v1/models/installed`). Answers `freed_bytes` and `presets`, the names of the presets that use the model |
+| `POST /v1/models/uninstall` | `{"model": NAME, "confirm": true}` (or `key`, from `GET /v1/models/installed`). Answers `freed_bytes` and `presets`, the names of the presets that use the model. For an add-on: `{"id": "ace-step-1.5-planner-1.7b", "confirm": true}` (`presets` is empty) |
 
 Refusals: `400 confirmation_required`, `404 model_not_found`, `409 already_installed`, `install_busy` (another install is running),
 `insufficient_disk`, `folder_exists` (the target folder holds something that is not a download of this model),
+`needs_parent` (an add-on whose model is not installed), `model_missing` (nothing of an add-on is here to remove),
 `model_busy` (another colibri process, or a download, holds the folder), `model_loaded`, `model_in_use` (the files are open in
 another process), `outside_models_folder`, `model_is_link`.
 

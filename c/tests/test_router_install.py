@@ -196,5 +196,48 @@ class Uninstall(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(other, "config.json")))
 
 
+class Addon(unittest.TestCase):
+    """An add-on (the planner, the base DiT) goes into an installed model's folder and is removed by its catalog id."""
+
+    def rig(self):
+        rig = InstallRig(self, api_key="sekrit")
+        parent = setup_catalog.CatalogModel(**{**rig.fetchable.__dict__, "id": "text-a", "repo": "someone/nothing"})
+        addon = setup_catalog.CatalogModel(**{**rig.fetchable.__dict__, "id": "text-a-extra", "name": "Extra",
+                                              "into": "text-a", "subdir": "extra", "include": ("weights.safetensors",),
+                                              "check": ("weights.safetensors",)})
+        rig.server.installer._catalog = lambda: (parent, addon)
+        return rig
+
+    def test_installed_by_id_and_removed_by_id_once_its_model_is_unloaded(self):
+        rig = self.rig()
+        folder = os.path.join(rig.root, "text-a", "extra")
+        status, _, _, body = rig.call("POST", "/v1/models/install", {"id": "text-a-extra", "confirm": True}, headers=AUTH)
+        self.assertEqual(status, 202, body)
+        self.assertEqual(rig.wait_job("text-a-extra")["state"], "done")
+        self.assertTrue(os.path.isfile(os.path.join(folder, "weights.safetensors")))
+        rows = {r["id"]: r for r in rig.call("GET", "/v1/models/catalog", headers=AUTH)[3]["data"]}
+        self.assertEqual((rows["text-a-extra"]["into"], rows["text-a-extra"]["installed"]["id"]), ("text-a", "text-a-extra"))
+        # its model is loaded: the engine holds the files
+        self.assertEqual(rig.call("POST", "/v1/chat/completions", {"model": "text-a-colibri", "messages": []}, headers=AUTH)[0], 200)
+        status, _, _, body = rig.call("POST", "/v1/models/uninstall", {"id": "text-a-extra", "confirm": True}, headers=AUTH)
+        self.assertEqual((status, body["error"]["code"]), (409, "model_loaded"))
+        self.assertTrue(os.path.isdir(folder))
+        rig.call("POST", "/v1/models/unload", {"model": "text-a"}, headers=AUTH)
+        status, _, _, body = rig.call("POST", "/v1/models/uninstall", {"id": "text-a-extra", "confirm": True}, headers=AUTH)
+        self.assertEqual((status, body["status"], body["id"]), (200, "removed", "text-a-extra"), body)
+        self.assertFalse(os.path.exists(folder))
+        self.assertTrue(os.path.isfile(os.path.join(rig.root, "text-a", "weights.bin")), "the model's own files went")
+
+    def test_a_confirmation_is_needed_and_a_model_that_is_not_an_add_on_is_not_removed_this_way(self):
+        rig = self.rig()
+        rig.call("POST", "/v1/models/install", {"id": "text-a-extra", "confirm": True}, headers=AUTH)
+        rig.wait_job("text-a-extra")
+        status, _, _, body = rig.call("POST", "/v1/models/uninstall", {"id": "text-a-extra"}, headers=AUTH)
+        self.assertEqual((status, body["error"]["code"]), (400, "confirmation_required"))
+        status, _, _, body = rig.call("POST", "/v1/models/uninstall", {"id": "text-a", "confirm": True}, headers=AUTH)
+        self.assertEqual((status, body["error"]["code"]), (404, "model_not_found"))
+        self.assertTrue(os.path.isdir(os.path.join(rig.root, "text-a")))
+
+
 if __name__ == "__main__":
     unittest.main()

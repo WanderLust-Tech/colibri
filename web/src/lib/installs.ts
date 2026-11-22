@@ -38,6 +38,11 @@ export function installable(rows: CatalogRow[]): CatalogRow[] {
   return rows.filter((row) => !row.installed)
 }
 
+/* The add-ons that are here: they are not in the list of installed models (they are files inside one), so they are listed with a Remove. */
+export function installedAddons(rows: CatalogRow[]): CatalogRow[] {
+  return rows.filter((row) => !!row.into && !!row.installed)
+}
+
 /* Whether the page should keep asking the router for progress. */
 export function anyInstalling(rows: CatalogRow[]): boolean {
   return rows.some((row) => row.job && (row.job.state === "starting" || row.job.state === "downloading" || row.job.state === "finishing"))

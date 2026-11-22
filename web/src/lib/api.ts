@@ -372,10 +372,12 @@ export interface CatalogRow {
   ram_good_gb: number
   summary: string
   license_note: string
-  status: "good" | "tight" | "needs-ram" | "needs-disk" | "unsupported"
+  status: "good" | "tight" | "needs-ram" | "needs-disk" | "unsupported" | "needs-parent"
   fits: boolean
   reason: string
-  installed: { key: string; id: string; state: string } | null
+  /* An add-on (the music planner, the base DiT) names the catalog model whose folder it goes into; it has no key of its own. */
+  into?: string
+  installed: { key: string | null; id: string; state: string; size_bytes?: number | null } | null
   /* A download of it was started and is not finished: installing again continues it. */
   unfinished: boolean
   partial_bytes?: number
@@ -423,6 +425,16 @@ export async function uninstallModel(baseUrl: string, apiKey: string, key: strin
   if (!response.ok) throw new Error(await responseError(response))
   const body = (await response.json()) as { freed_bytes?: number; presets?: string[] }
   return { freedBytes: body.freed_bytes ?? 0, presets: body.presets ?? [] }
+}
+
+/* Removes an installed add-on's files by its catalog id. The router refuses while the model it belongs to is loaded. */
+export async function uninstallAddon(baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<{ freedBytes: number }> {
+  const response = await fetch(endpoint(baseUrl, "models/uninstall"), {
+    method: "POST", headers: headers(apiKey), body: JSON.stringify({ id, confirm: true }), signal,
+  })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { freed_bytes?: number }
+  return { freedBytes: body.freed_bytes ?? 0 }
 }
 
 /* Where a model runs: the graphics card, the CPU, or whatever the router's policy says ("auto"). */

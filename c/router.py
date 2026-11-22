@@ -2427,10 +2427,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "Request body must be a JSON object.")
         return body
 
-    def management_request(self, path):
+    def management_request(self, path, body=None):
         """The JSON body and the model of a request that manages models (switch, unload): from `key` (what
         /v1/models/installed gives) or `model` (what a client names it)."""
-        body = self.management_json(path)
+        if body is None:
+            body = self.management_json(path)
         key, name = body.get("key"), body.get("model")
         if isinstance(key, str) and key:
             entry, param = self.server.catalog.by_key(key), "key"
@@ -2604,7 +2605,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         """Remove an installed model's files: body `model` (or `key`) and `confirm: true`. A model that is loaded is refused
         (unload it first); so is anything outside the models folders. Presets that name the model are reported, and stay."""
         installer = self.need_installer()
-        body, entry, param = self.management_request("/v1/models/uninstall")
+        body = self.management_json("/v1/models/uninstall")
+        if isinstance(body.get("id"), str) and not body.get("key") and not body.get("model"):
+            return self.uninstall_addon(installer, body)   # an `id` is a catalog add-on's; a model is named by `key` or `model`
+        body, entry, param = self.management_request("/v1/models/uninstall", body)
         worker = self.server.pool.get(entry["key"])
         if worker is not None and worker.state in ("starting", "ready", "stopping"):
             raise ApiError(409, f"`{entry['id']}` is loaded; unload it first (POST /v1/models/unload).", "model_loaded", param)
@@ -2619,6 +2623,22 @@ class RouterHandler(BaseHTTPRequestHandler):
         except model_installer.InstallError as error:
             raise self.install_error(error)
         self.send_json(200, {**result, "id": entry["id"], "key": entry["key"], "presets": named})
+
+    def uninstall_addon(self, installer, body):
+        """Remove an add-on (the planner, the base DiT): body `id` of its catalog row and `confirm: true`. Its parent model must
+        not be loaded, since the engine keeps the files open."""
+        try:
+            plan = installer.addon_plan(body["id"])
+        except model_installer.InstallError as error:
+            raise self.install_error(error)
+        worker = self.server.pool.get(plan["parent"]["key"])
+        if worker is not None and worker.state in ("starting", "ready", "stopping"):
+            raise ApiError(409, f"`{plan['parent']['id']}` is loaded; unload it first (POST /v1/models/unload).", "model_loaded", "id")
+        try:
+            result = installer.uninstall_addon(body["id"], confirm=body.get("confirm"))
+        except model_installer.InstallError as error:
+            raise self.install_error(error)
+        self.send_json(200, {**result, "id": body["id"], "key": None, "presets": []})
 
     def preset_save(self):
         """Create or replace a preset (the dashboard's Presets tab; `coli preset add` does the same to the file). The body is
@@ -2785,7 +2805,10 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
             out.append(found)
         return out
 
-    installer = model_installer.Installer(roots=catalog.install_roots, installed=installed_models, refresh=catalog.invalidate)
+    installer = model_installer.Installer(
+        roots=catalog.install_roots, installed=installed_models, refresh=catalog.invalidate,
+        # an engine reads what an add-on adds (the music planner, a second DiT) when it starts: an idle one is stopped so that the next request starts it again
+        on_addon=lambda parent: parent and pool.unload(parent["key"], "an add-on was installed"))
     installer.sweep()                                    # a deletion that was cut short by a restart
     server = RouterServer((host, port), pool, catalog, gate, api_key,
                           openai_server.cors_origin_list(cors_origins), allowed_hosts, queue_timeout,

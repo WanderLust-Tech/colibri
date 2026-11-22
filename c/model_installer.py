@@ -118,6 +118,32 @@ def match_installed(entry, installed):
     return None
 
 
+def addon_parent(entry, installed, catalog):
+    """The installed folder an add-on goes into (the catalog model `entry.into`, finished), or None."""
+    parent = next((e for e in catalog if e.id == entry.into), None)
+    if parent is None:
+        return None
+    here = match_installed(parent, installed)
+    return here if here is not None and not here.get("unfinished") else None
+
+
+def addon_here(entry, parent_path):
+    """How an add-on stands in its parent's folder: (folder, state) with state "installed", "partial" or None. A folder
+    that holds the files `check` names is installed however it got there; one with only a manifest or `.part` files is
+    a download that stopped."""
+    folder = os.path.join(parent_path, entry.subdir)
+    if not os.path.isdir(folder):
+        return folder, None
+    manifest = setup_download.read_manifest(folder)
+    if manifest and manifest.get("complete") and setup_download.is_complete(folder):
+        return folder, "installed"
+    if entry.check and all(os.path.isfile(os.path.join(folder, name)) for name in entry.check) and not manifest:
+        return folder, "installed"
+    if manifest or any(n.endswith(".part") for n in os.listdir(folder)):
+        return folder, "partial"
+    return folder, None
+
+
 def folder_bytes(path):
     """What a folder holds, in bytes (files only, links not followed)."""
     total = 0
@@ -155,8 +181,9 @@ class Installer:
     refresh()   called after a change, so the next listing sees it
     launcher_dir where tools/ lives, for a model's post-install steps"""
 
-    def __init__(self, roots, installed, refresh=None, launcher_dir=None, catalog=None, memory=None):
+    def __init__(self, roots, installed, refresh=None, launcher_dir=None, catalog=None, memory=None, on_addon=None):
         self.roots, self.installed, self.refresh = roots, installed, refresh or (lambda: None)
+        self.on_addon = on_addon                 # called with the parent's installed entry once an add-on has landed
         self.launcher_dir = launcher_dir or os.path.dirname(os.path.abspath(__file__))
         self._catalog = catalog or setup_catalog.catalog
         self._memory = memory or (lambda: setup_hw.detect_memory().get("total"))
@@ -184,7 +211,11 @@ class Installer:
         installed = self.installed()
         ram = self._memory()
         rows = []
-        for entry in self._catalog():
+        catalog = list(self._catalog())
+        for entry in catalog:
+            if entry.into:
+                rows.append(self._addon_row(entry, installed, catalog, ram))
+                continue
             here = match_installed(entry, installed)
             have = 0
             if here is not None:
@@ -209,6 +240,33 @@ class Installer:
             rows.append(row)
         rows.sort(key=lambda r: (r["installed"] is None, not r["fits"], r["kind"] != "text", r["download_gb"]))
         return rows
+
+    def _addon_row(self, entry, installed, catalog, ram):
+        """A catalog row for an add-on: it needs its parent model here, and is installed when its folder in the parent is."""
+        parent = addon_parent(entry, installed, catalog)
+        row = {"id": entry.id, "name": entry.name, "kind": entry.modality, "family": entry.family, "repo": entry.repo,
+               "download_gb": entry.disk_gb, "ram_min_gb": entry.ram_min_gb, "ram_good_gb": entry.ram_good_gb,
+               "summary": entry.summary, "license_note": entry.license_note, "doc": entry.doc, "into": entry.into,
+               "installed": None, "unfinished": False, "job": self.job(entry.id)}
+        if parent is None:
+            row.update(status="needs-parent", fits=False,
+                       reason=f"goes into {entry.into}, which is not installed: coli model install {entry.into}")
+            return row
+        folder, state = addon_here(entry, parent["path"])
+        have = 0
+        if state is not None:
+            manifest = setup_download.read_manifest(folder)
+            have = setup_download.bytes_present(folder, manifest.get("files", [])) if manifest else 0
+        status, reason = setup_catalog.assess(entry, ram, setup_hw.disk_free(parent["path"]),
+                                              os_name=sys.platform, machine=setup_hw.platform.machine().lower(),
+                                              already_downloaded=have)
+        row.update(status=status, fits=status in ("good", "tight"), reason=reason)
+        if state == "installed":
+            row["installed"] = {"key": None, "id": entry.id, "state": "idle", "size_bytes": folder_bytes(folder)}
+        elif state == "partial":
+            row["unfinished"] = True
+            row["partial_bytes"] = have
+        return row
 
     # ---- jobs
     def job(self, model_id):
@@ -250,14 +308,37 @@ class Installer:
         except StopIteration:
             raise InstallError(404, f"No model called `{model_id}` is in the catalog.", "model_not_found", "id")
         installed = self.installed()
-        here = match_installed(entry, installed)
-        if here is not None and not here.get("unfinished"):
-            raise InstallError(409, f"{entry.name} is already installed.", "already_installed", "id")
+        addon = None
+        here = None
+        if entry.into:
+            parent = addon_parent(entry, installed, list(self._catalog()))
+            if parent is None:
+                raise InstallError(409, f"{entry.name} goes into {entry.into}, which is not installed; install that first.",
+                                   "needs_parent", "id")
+            addon = addon_here(entry, parent["path"])
+            if addon[1] == "installed":
+                raise InstallError(409, f"{entry.name} is already installed.", "already_installed", "id")
+        else:
+            here = match_installed(entry, installed)
+            if here is not None and not here.get("unfinished"):
+                raise InstallError(409, f"{entry.name} is already installed.", "already_installed", "id")
         running = self.active()
         if running is not None:
             raise InstallError(409, f"{running['name']} is being downloaded; one install at a time.", "install_busy")
         need = int(entry.disk_gb * GB * 1.02 + 2 * GB)
-        if here is not None:
+        if addon is not None:
+            model_dir = addon[0]
+            manifest = setup_download.read_manifest(model_dir)
+            if manifest:
+                need = max(0, need - setup_download.bytes_present(model_dir, manifest.get("files", [])))
+            elif addon[1] is None and os.path.isdir(model_dir) and os.listdir(model_dir):
+                raise InstallError(409, f"{model_dir} exists and is not a download of this model; move or remove it.",
+                                   "folder_exists")
+            free = setup_hw.disk_free(parent["path"])
+            if free is not None and free < need:
+                raise InstallError(409, f"{entry.name} needs {need / GB:.0f} GB free; {free / GB:.0f} GB is free there.",
+                                   "insufficient_disk")
+        elif here is not None:
             model_dir = here["path"]
             manifest = setup_download.read_manifest(model_dir) or {}
             need = max(0, need - setup_download.bytes_present(model_dir, manifest.get("files", [])))
@@ -302,6 +383,9 @@ class Installer:
             token = setup_download.hf_token()
             files = setup_download.list_repo_files(entry.repo, entry.revision, include=entry.include,
                                                    exclude=entry.exclude, token=token)
+            if entry.strip:                           # the add-on's folder is the repository's subfolder: its paths start there
+                files = [dict(f, remote=f["path"], path=f["path"][len(entry.strip):])
+                         for f in files if f["path"].startswith(entry.strip)]
             if not files:
                 raise setup_download.DownloadError(f"{entry.repo}: the repository lists no files")
             total = sum(f["size"] for f in files)
@@ -330,6 +414,11 @@ class Installer:
             self._update(entry.id, state="finishing", done=total, file=None, eta_seconds=0)
             self._post_install(entry, model_dir)
             self._update(entry.id, state="done", finished=time.time(), rate=None, eta_seconds=None)
+            if entry.into and self.on_addon is not None:
+                try:
+                    self.on_addon(addon_parent(entry, self.installed(), list(self._catalog())))
+                except Exception:                     # the install is done; a failed courtesy must not undo that
+                    pass
         except Cancelled:
             self._update(entry.id, state="cancelled", finished=time.time(), rate=None, eta_seconds=None,
                          error="cancelled; the part that was fetched is kept, install again to continue")
@@ -386,6 +475,56 @@ class Installer:
         gone = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}{DELETING}")
         try:
             os.rename(path, gone)            # out of the scan at once; refused when a process still holds files in it
+        except OSError as error:
+            raise InstallError(409, f"The files are in use ({error.strerror or error}); unload the model and try again.",
+                               "model_in_use")
+        try:
+            remove_tree(gone)
+        except OSError as error:
+            raise InstallError(500, f"{plan['bytes'] / GB:.1f} GB of {path} were set aside but not all deleted "
+                                    f"({error}); the leftovers are in {gone}.", "delete_failed")
+        finally:
+            self.refresh()
+        return {"status": "removed", "path": path, "freed_bytes": plan["bytes"]}
+
+    def is_addon(self, model_id):
+        return any(e.id == model_id and e.into for e in self._catalog())
+
+    def addon_plan(self, model_id):
+        """What removing an add-on would do: {"id", "name", "path", "bytes", "parent"}, or the InstallError that says why not."""
+        catalog = list(self._catalog())
+        entry = next((e for e in catalog if e.id == model_id and e.into), None)
+        if entry is None:
+            raise InstallError(404, f"`{model_id}` is not an add-on of the catalog.", "model_not_found", "id")
+        parent = addon_parent(entry, self.installed(), catalog)
+        if parent is None:
+            raise InstallError(409, f"{entry.name} is not installed.", "model_missing", "id")
+        folder, state = addon_here(entry, parent["path"])
+        if state is None:
+            raise InstallError(409, f"{entry.name} is not installed.", "model_missing", "id")
+        real_parent = _real(parent["path"])
+        roots = [_real(r) for r in self.roots() if r]
+        if os.path.dirname(real_parent) not in roots:
+            raise InstallError(409, f"{parent['path']} is not inside a models folder; remove {entry.subdir} by hand.",
+                               "outside_models_folder")
+        if os.path.islink(folder) or getattr(os.path, "isjunction", lambda p: False)(folder) or os.path.islink(parent["path"]):
+            raise InstallError(409, f"{folder} is a link; remove the link by hand.", "model_is_link")
+        job = self.jobs.get(entry.id)
+        holder = lock_holder(folder)
+        if (job and job["state"] in ("starting", "downloading", "finishing")) or \
+                (holder and holder != os.getpid() and _pid_alive(holder)):
+            raise InstallError(409, "A download is writing that folder; cancel it first.", "model_busy")
+        return {"id": entry.id, "name": entry.name, "path": folder, "bytes": folder_bytes(folder), "parent": parent}
+
+    def uninstall_addon(self, model_id, confirm=False):
+        """Remove an add-on's folder from its parent's. The caller has checked that no engine has the parent loaded."""
+        if confirm is not True:
+            raise InstallError(400, "Send `confirm`: true to remove the add-on's files.", "confirmation_required", "confirm")
+        plan = self.addon_plan(model_id)
+        path = plan["path"]
+        gone = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}{DELETING}")
+        try:
+            os.rename(path, gone)
         except OSError as error:
             raise InstallError(409, f"The files are in use ({error.strerror or error}); unload the model and try again.",
                                "model_in_use")

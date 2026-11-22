@@ -1087,8 +1087,13 @@
                               "tight",
                               "needs-ram",
                               "needs-disk",
-                              "unsupported"
+                              "unsupported",
+                              "needs-parent"
                             ]
+                          },
+                          "into": {
+                            "type": "string",
+                            "description": "Set for an add-on (ACE-Step's planner or base DiT): the catalog id of the installed model whose folder it goes into. `status` is `needs-parent` while that model is not installed."
                           },
                           "fits": {
                             "type": "boolean"
@@ -1101,7 +1106,7 @@
                               "object",
                               "null"
                             ],
-                            "description": "`key`, `id`, `state` of the folder when it is here and whole."
+                            "description": "`key`, `id`, `state` of the folder when it is here and whole. An add-on's `key` is null."
                           },
                           "unfinished": {
                             "type": "boolean",
@@ -1644,6 +1649,10 @@
                   "model": {
                     "type": "string",
                     "description": "What a client names the model, instead of `key`."
+                  },
+                  "id": {
+                    "type": "string",
+                    "description": "An installed add-on's catalog id (`ace-step-1.5-planner-1.7b`, `ace-step-1.5-base-dit`), instead of `key` or `model`: only its subfolder is removed, and not while the model it belongs to is loaded."
                   },
                   "confirm": {
                     "type": "boolean",

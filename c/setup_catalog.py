@@ -59,6 +59,13 @@ class CatalogModel:
     prebuilt_since: str = "1.12.1"
     doc: str = ""
     notes: tuple = field(default_factory=tuple)
+    # An add-on is not a model of its own: it lands in a folder of an installed catalog model (`into`, that model's id),
+    # under `subdir`, from `repo` with the repository's `strip` prefix taken off the paths. It is never offered by `coli
+    # setup`. `check` names files whose presence says it is there (a folder put together by hand has no manifest).
+    into: str = ""
+    subdir: str = ""
+    strip: str = ""
+    check: tuple = ()
 
 
 CATALOG = (
@@ -179,10 +186,29 @@ CATALOG = (
         ram_min_gb=9, ram_good_gb=12, dense_gb=6.4, rank=1, size_class="small",
         modality="audio", summary="text to music (songs with or without lyrics, not chat)",
         license_note="MIT",
-        # The repository also holds the 5 Hz language-model planners (3.7 GB and more),
-        # which the engine does not use.
+        # The repository also holds the 5 Hz language-model planner (3.7 GB), which is its own entry below.
         exclude=("acestep-5Hz-lm-*/*",),
         prebuilt_since="2.1.0", doc="docs/acestep.md"),
+    CatalogModel(
+        id="ace-step-1.5-base-dit", family="ace_step", name="ACE-Step 1.5 base DiT",
+        repo="ACE-Step/acestep-v15-base", disk_gb=4.8,
+        # docs/acestep.md: the base DiT adds 4.8 GB to the resident set once a request names it
+        ram_min_gb=14, ram_good_gb=17, dense_gb=11.2, rank=2, size_class="small",
+        modality="audio", summary="add-on for ACE-Step 1.5: the guided DiT (30 to 100 steps) for extract, lego and complete, and a second voice for text to music",
+        license_note="MIT",
+        include=("config.json", "model.safetensors", "silence_latent.pt"),
+        into="ace-step-1.5", subdir="acestep-v15-base", check=("config.json", "model.safetensors", "silence_latent.pt"),
+        prebuilt_since="2.1.0", doc="docs/acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete"),
+    CatalogModel(
+        id="ace-step-1.5-planner-1.7b", family="ace_step", name="ACE-Step 1.5 planner 1.7B",
+        repo="ACE-Step/Ace-Step1.5", disk_gb=3.7,
+        # docs/acestep.md: a Qwen3 1.7B decoder with the audio codes in its vocabulary, held as bf16
+        ram_min_gb=13, ram_good_gb=16, dense_gb=10.1, rank=3, size_class="small",
+        modality="audio", summary="add-on for ACE-Step 1.5: the 5 Hz language-model planner (a bare caption is enough: it writes tempo, key, length and the song's structure first)",
+        license_note="MIT",
+        include=("acestep-5Hz-lm-1.7B/*",), strip="acestep-5Hz-lm-1.7B/",
+        into="ace-step-1.5", subdir="acestep-5Hz-lm-1.7B", check=("config.json", "model.safetensors", "tokenizer.json"),
+        prebuilt_since="2.1.0", doc="docs/acestep.md#the-5-hz-planner-a-language-model-writes-the-song-first"),
     CatalogModel(
         id="qwen3-embedding-0.6b", family="qwen3_embedding", name="Qwen3-Embedding-0.6B",
         repo="Qwen/Qwen3-Embedding-0.6B", disk_gb=1.2,
@@ -384,6 +410,8 @@ def recommend(ram_total, disk_free, *, os_name="linux", machine="x86_64",
     downloaded = downloaded or {}
     rows = []
     for entry in catalog():
+        if entry.into:                      # an add-on goes into a model that is here already (coli model install)
+            continue
         if entry.modality != "text" and not include_images:
             continue
         status, reason = assess(entry, ram_total, disk_free, os_name=os_name, machine=machine,

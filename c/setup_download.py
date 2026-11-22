@@ -434,7 +434,7 @@ def download_repo(repo, revision, model_dir, files, *, token=None, progress=None
                 progress({"file": _spec["path"], "file_done": have, "file_total": size,
                           "done": _base + have, "total": total})
 
-        url = file_url(repo, revision, spec["path"], base)
+        url = file_url(repo, revision, spec.get("remote", spec["path"]), base)
         if curl:
             download_file_windows(url, dest, spec, curl, token=token, progress=on_bytes, verify=verify)
         else:

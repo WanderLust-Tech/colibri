@@ -364,8 +364,9 @@ duration is always the source's, whatever `duration` says (upstream's `prepare_b
 
 **Installing.** The engine opens `acestep-v15-turbo` and loads any other DiT the first time a request names it, so the base DiT goes beside the
 turbo one in the checkpoint: `acestep-v15-base/` with `config.json`, `model.safetensors` and `silence_latent.pt` from
-`ACE-Step/acestep-v15-base` (`huggingface-cli download ACE-Step/acestep-v15-base config.json model.safetensors silence_latent.pt --local-dir
-<model>/acestep-v15-base`). The engine never reads the Python files in that repository. Not yet in `coli model install`.
+`ACE-Step/acestep-v15-base`: `coli model install ace-step-1.5-base-dit` (an add-on of the catalog, [model install](model-install.md#from-the-terminal); the dashboard's
+install list has it too) or by hand with `huggingface-cli download ACE-Step/acestep-v15-base config.json model.safetensors silence_latent.pt --local-dir
+<model>/acestep-v15-base`. The engine never reads the Python files in that repository. The SFT DiT is not in the catalog.
 
 **Choosing.** A request names `dit` (`turbo`, `base` or `sft`); extract, lego and complete run on the base DiT (the SFT if there is no
 base) when it does not, and everything else on the turbo one. A guided DiT's defaults are upstream's: 32 steps (up to 200; the turbo takes
@@ -426,8 +427,8 @@ rewritten caption, the duration, the key and scale, the language and the time si
 that carries that block, and the DiT takes their hints (the detokenizer's output, as for a cover's source) as its context where a clip would have been: upstream's
 handler turns text to music with `audio_code_string` into a cover of those codes. Songs made this way follow a structure; plain text to music makes it up as it denoises.
 
-**Using it.** The checkpoint needs `acestep-5Hz-lm-1.7B/` beside the DiT (`huggingface-cli download ACE-Step/Ace-Step1.5 --include "acestep-5Hz-lm-1.7B/*"
---local-dir <model>`; `coli model install` leaves it out, 3.5 GB, and does not yet offer it). **A bare caption is enough:** `acestep --caption "bright ukulele" --plan
+**Using it.** The checkpoint needs `acestep-5Hz-lm-1.7B/` beside the DiT: `coli model install ace-step-1.5-planner-1.7b` (3.7 GB, an add-on of the catalog) or
+`huggingface-cli download ACE-Step/Ace-Step1.5 --include "acestep-5Hz-lm-1.7B/*" --local-dir <model>`. The 0.6B and 4B planners are not in the catalog. **A bare caption is enough:** `acestep --caption "bright ukulele" --plan
 --out song.wav`, `coli music "bright ukulele" --plan`, or `POST /v1/audio/music` with `thinking: true`. Whatever of `bpm`, `key`, `time_signature` and `duration` you
 give the model is told as written; it writes the rest, picks the length (10 to 600 s) when there is no `duration`, rewrites the caption the DiT follows (`--no-lm-caption`,
 `use_cot_caption: false` keeps yours) and writes the language (`--no-lm-language`, `use_cot_language: false`). With all four of the tempo, key, time signature and duration

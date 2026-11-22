@@ -4,28 +4,33 @@ import { Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useLocale } from "@/i18n"
 import { installActive, type CatalogRow, type ModelCatalog } from "@/lib/api"
-import { canInstall, formatBytes, installable, installPercent, progressLine } from "@/lib/installs"
+import { canInstall, formatBytes, installable, installedAddons, installPercent, progressLine } from "@/lib/installs"
 
 interface ModelInstallerProps {
   catalog: ModelCatalog
   /* Starts the download; the licence and size were shown by the confirmation this component asks for. */
   onInstall: (row: CatalogRow) => void
   onStop: (row: CatalogRow) => void
+  /* Deletes an installed add-on's files; the confirmation was asked here. */
+  onRemoveAddon: (row: CatalogRow) => void
   disabled: boolean
 }
 
 /* The models a router can download, below the ones that are here: size, kind, licence and whether this machine fits it, an
    Install button that first shows the size and the licence and asks, and a progress bar with a stop button while it
    downloads (c/model_installer.py, docs/model-install.md). */
-export default function ModelInstaller({ catalog, onInstall, onStop, disabled }: ModelInstallerProps) {
+export default function ModelInstaller({ catalog, onInstall, onStop, onRemoveAddon, disabled }: ModelInstallerProps) {
   const { t } = useLocale()
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  const [removeId, setRemoveId] = useState<string | null>(null)
   const rows = installable(catalog.rows)
+  const addons = installedAddons(catalog.rows)
   const running = catalog.rows.some((row) => installActive(row.job))
 
   const status = (row: CatalogRow) => {
     if (row.status === "needs-disk") return t("install.noRoom")
     if (row.status === "unsupported") return t("install.unsupported")
+    if (row.status === "needs-parent") return t("install.needsParent")
     if (row.status === "needs-ram") return t("install.needsRam")
     return ""
   }
@@ -81,6 +86,32 @@ export default function ModelInstaller({ catalog, onInstall, onStop, disabled }:
           )
         })}
       </ul>
+      {addons.length > 0 && (
+        <>
+          <div className="section-title">{t("install.addons")}</div>
+          <p className="field-help">{t("install.addonsHelp")}</p>
+          <ul className="model-list">
+            {addons.map((row) => (
+              <li key={row.id} className="model-row install-row">
+                <div className="model-info">
+                  <strong>{row.name}</strong>
+                  <small>{formatBytes(row.installed?.size_bytes)}{row.summary ? ` · ${row.summary}` : ""}</small>
+                </div>
+                {removeId === row.id ? (
+                  <div className="model-confirm">
+                    <span>{t("install.removeConfirm", { name: row.name, size: formatBytes(row.installed?.size_bytes) })}</span>
+                    <Button type="button" size="sm" onClick={() => { setRemoveId(null); onRemoveAddon(row) }}>{t("install.removeYes")}</Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={() => setRemoveId(null)}>{t("install.cancel")}</Button>
+                  </div>
+                ) : (
+                  <Button type="button" size="sm" variant="secondary" disabled={disabled || running}
+                    aria-label={`${t("install.remove")} ${row.name}`} onClick={() => setRemoveId(row.id)}>{t("install.remove")}</Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   )
 }

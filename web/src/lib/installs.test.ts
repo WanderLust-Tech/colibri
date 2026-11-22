@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { CatalogRow, InstallJob } from "./api"
-import { anyInstalling, canInstall, etaText, formatBytes, installable, installPercent, progressLine } from "./installs"
+import { anyInstalling, canInstall, etaText, formatBytes, installable, installedAddons, installPercent, progressLine } from "./installs"
 
 const job = (extra: Partial<InstallJob> = {}): InstallJob => ({
   id: "z-image-turbo", name: "Z-Image-Turbo", state: "downloading", done: 13_500_000_000, total: 32_900_000_000,
@@ -45,6 +45,12 @@ describe("what to offer", () => {
   it("offers what is not here, and not what is", () => {
     const here = row({ id: "a", installed: { key: "k", id: "a", state: "idle" } })
     expect(installable([here, row({ id: "b" }), row({ id: "c", unfinished: true })]).map((r) => r.id)).toEqual(["b", "c"])
+  })
+
+  it("lists the add-ons that are here, and an add-on without its model cannot be installed", () => {
+    const on = row({ id: "lm", into: "ace", installed: { key: null, id: "lm", state: "idle", size_bytes: 3_700_000_000 } })
+    expect(installedAddons([on, row({ id: "ace", installed: { key: "k", id: "ace", state: "idle" } }), row({ id: "dit", into: "ace" })]).map((r) => r.id)).toEqual(["lm"])
+    expect(canInstall(row({ id: "dit", into: "ace", status: "needs-parent", fits: false }), false)).toBe(false)
   })
 
   it("lets an install start when it fits, or only RAM is short, and nothing else runs", () => {

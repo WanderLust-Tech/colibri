@@ -80,6 +80,8 @@ class RemoteBackend:
         for catalog_row in self.rows():                  # the catalog's own id for a model that is here
             held = catalog_row.get("installed")
             if catalog_row["id"].lower() == wanted and held:
+                if catalog_row.get("into"):              # an add-on has no entry of its own in the installed list
+                    return {"id": catalog_row["id"], "key": None, "addon": True, "size_bytes": held.get("size_bytes")}
                 return next((i for i in self.installed() if i["key"] == held["key"]), None)
         return None
 
@@ -90,6 +92,8 @@ class RemoteBackend:
         return {"name": item["id"], "bytes": size, "where": None}
 
     def remove(self, item):
+        if item.get("addon"):
+            return self._call("POST", "/v1/models/uninstall", {"id": item["id"], "confirm": True})
         result = self._call("POST", "/v1/models/uninstall", {"key": item["key"], "confirm": True})
         return result
 
@@ -147,9 +151,18 @@ class LocalBackend:
                 names.add(item["id"].lower()[:-len("-colibri")])
             if wanted in names:
                 return item
+        for row in self.rows():
+            if row.get("into") and row.get("installed") and row["id"].lower() == wanted:
+                return {"id": row["id"], "key": None, "addon": True, "size_bytes": row["installed"].get("size_bytes")}
         return None
 
     def plan(self, item):
+        if item.get("addon"):
+            try:
+                plan = self.installer.addon_plan(item["id"])
+            except self.mi.InstallError as error:
+                raise Refused(error.message)
+            return {"name": item["id"], "bytes": plan["bytes"], "where": plan["path"]}
         try:
             plan = self.installer.plan_uninstall(item)
         except self.mi.InstallError as error:
@@ -158,6 +171,8 @@ class LocalBackend:
 
     def remove(self, item):
         try:
+            if item.get("addon"):
+                return self.installer.uninstall_addon(item["id"], confirm=True)
             return self.installer.uninstall(item, confirm=True)
         except self.mi.InstallError as error:
             raise Refused(error.message)
