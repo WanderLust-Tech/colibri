@@ -31,6 +31,7 @@
 #include "acestep_tok.h"
 #include "acestep_text.h"
 #include "acestep_audio.h"
+#include "acestep_lm.h"
 
 #define ACG_RATE 48000
 #define ACG_HOP 1920                   /* samples per latent frame: 25 latent frames a second */
@@ -218,13 +219,14 @@ typedef struct {
     char dit_name[64];                             /* the DiT the engine was opened on: what a request that names none runs on */
     AceSlot slot[3]; int nslot, cur;               /* the DiTs loaded so far: the others come in the first time a request names them */
     AcvEnc *venc;                                  /* the VAE encoder: loaded the first time a request brings audio in */
+    AceLm *lm;                                     /* the 5 Hz planner: loaded the first time a request asks to plan (ace_planner) */
 } AceEngine;
 
 static void ace_close(AceEngine *e){
     if (!e) return;
     for (int i = 0; i < e->nslot; i++) { acd_free(e->slot[i].dit); atk_free(e->slot[i].cover); free(e->slot[i].silence); }
     act_free(e->text); if (e->tok_open) act_tok_close(&e->tok); acv_free(e->vae);
-    acve_free(e->venc);
+    acve_free(e->venc); alm_free(e->lm);
     free(e);
 }
 
@@ -275,6 +277,40 @@ static AceEngine *ace_open_dit(const char *model_dir, const char *dit_name, char
 
 static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){ return ace_open_dit(model_dir, "acestep-v15-turbo", err, errn); }
 
+/* The planners in a checkpoint, smallest last: acestep-5Hz-lm-0.6B, -1.7B and -4B (the 1.7B ships with the checkpoint). */
+static const char *const ACE_LM_DIRS[3] = { "acestep-5Hz-lm-1.7B", "acestep-5Hz-lm-4B", "acestep-5Hz-lm-0.6B" };
+
+/* "0.6B", "1.7B" or "4B", or a whole directory name, to the directory name; NULL or "" is the first one that is there. 0, or -1 with err. */
+static int ace_lm_dir(const AceEngine *e, const char *given, char *out, size_t n, char *err, size_t errn){
+    char path[4400];
+    if (given && *given) {
+        for (int i = 0; i < 3; i++)
+            if (!strcmp(given, ACE_LM_DIRS[i]) || !strcmp(given, ACE_LM_DIRS[i] + 15)) { snprintf(out, n, "%s", ACE_LM_DIRS[i]); goto check; }
+        snprintf(err, errn, "lm must be 0.6B, 1.7B or 4B"); return -1;
+    }
+    for (int i = 0; i < 3; i++) {
+        snprintf(path, sizeof path, "%s/%s/config.json", e->model_dir, ACE_LM_DIRS[i]);
+        FILE *f = fopen(path, "rb");
+        if (f) { fclose(f); snprintf(out, n, "%s", ACE_LM_DIRS[i]); return 0; }
+    }
+    snprintf(err, errn, "this checkpoint has no 5 Hz planner (acestep-5Hz-lm-1.7B is not in it)"); return -1;
+check:
+    snprintf(path, sizeof path, "%s/%s/config.json", e->model_dir, out);
+    { FILE *f = fopen(path, "rb"); if (!f) { snprintf(err, errn, "the planner %s is not installed in this checkpoint", out); return -1; } fclose(f); }
+    return 0;
+}
+
+/* The planner, loaded on first use and kept; asking for another size replaces it. */
+static AceLm *ace_planner(AceEngine *e, const char *given, char *err, size_t errn){
+    char dir[64], path[4400];
+    if (ace_lm_dir(e, given, dir, sizeof dir, err, errn)) return NULL;
+    if (e->lm && !strcmp(e->lm->dir_name, dir)) return e->lm;
+    alm_free(e->lm); e->lm = NULL;
+    snprintf(path, sizeof path, "%s/%s", e->model_dir, dir);
+    if (!(e->lm = alm_load(path))) { snprintf(err, errn, "cannot load the planner from %.400s", path); return NULL; }
+    return e->lm;
+}
+
 /* Is the DiT's directory in the checkpoint? */
 static int ace_have_dit(const AceEngine *e, const char *dir_name){
     char path[4400];
@@ -319,6 +355,8 @@ static AcdTok *ace_cover_net(AceEngine *e, char *err, size_t errn){
 #define ACG_TASK_LEGO 4                            /* ... add one track to the source inside a span (a repaint of one instrument) */
 #define ACG_TASK_COMPLETE 5                        /* ... complete a partial track with others; the source is optional */
 #define ACG_MAX_TRACK 64
+#define ACG_CODE_FRAMES 5                        /* latent frames a planner code stands for: 25 Hz frames pooled by 5 to 5 codes a second */
+#define ACG_MAX_CODES 3000                         /* 600 seconds of them */
 #define ACG_REPAINT_BALANCED 0
 #define ACG_REPAINT_CONSERVATIVE 1
 #define ACG_REPAINT_AGGRESSIVE 2
@@ -348,6 +386,13 @@ typedef struct {
     const char *track;                             /* extract and lego: the track (drums, bass, vocals ...); NULL or "" is "the track" */
     const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
     const char *dit;                               /* turbo, base or sft; NULL or "": see ace_select_for */
+    const int *codes; int ncodes;                  /* the planner's audio codes (0..63999): text to music from them, as upstream's cover of codes; ncodes 0 is none */
+    /* the planner (text to music only): the 5 Hz language model first writes the codes of the song's structure from the caption, the lyrics and the
+     * metadata below, which the DiT then takes as its context. bpm, key, timesig and duration must all be given (the model's own first phase, where it
+     * writes them, is not built). The callers set the sampling defaults upstream has: temperature 0.85, guidance 2, top-p 0.9, top-k off. */
+    int plan;
+    const char *lm;                                /* 0.6B, 1.7B or 4B; NULL or "": the first the checkpoint has */
+    double lm_temperature, lm_cfg_scale, lm_top_p; int lm_top_k;
 } AceRequest;
 
 /* Taps: the oracle's view of what the stages made, by name ("noise", "timbre", "src_latents", "clean_src_latents", "context",
@@ -369,6 +414,8 @@ typedef struct {
     float peak;                                    /* the raw waveform's peak before the limit */
     double src_seconds;                            /* the source clip's length, 0 for text to music */
     char dit[64];                                  /* the DiT that ran: acestep-v15-turbo, -base or -sft */
+    char lm[64];                                   /* the planner that ran, "" without one */
+    int plan_codes; double t_plan;                 /* the codes it wrote, and the seconds it took (the model's load included) */
     double guidance;                               /* the guidance scale applied (0 for the turbo DiT, or when it is 1 or less) */
 } AceInfo;
 
@@ -433,7 +480,15 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference clip (ref) to take its style"); return 1; }
     if (r->src_path && strlen(r->src_path) > 4000) { snprintf(err, errn, "src path too long"); return 1; }
     if (r->ref_path && strlen(r->ref_path) > 4000) { snprintf(err, errn, "ref path too long"); return 1; }
-    if (r->task != ACG_TASK_COVER && (r->cover_strength != 0 || r->cover_noise != 0)) { snprintf(err, errn, "cover_strength and cover_noise are for a cover"); return 1; }
+    if (r->plan) {
+        if (r->task != ACG_TASK_TEXT2MUSIC || r->ncodes > 0) { snprintf(err, errn, "the planner is for text to music, with no codes of your own"); return 1; }
+        if (r->bpm < 1 || act_blank(r->key) || act_blank(r->timesig)) { snprintf(err, errn, "the planner needs bpm, key and time signature (and the duration): the model's own first phase, where it writes them, is not built"); return 1; }
+        if (!(r->lm_cfg_scale >= 0 && r->lm_cfg_scale <= 20) || !(r->lm_temperature >= 0 && r->lm_temperature <= 2) || !(r->lm_top_p >= 0 && r->lm_top_p <= 1) || r->lm_top_k < 0 || r->lm_top_k > 100000) {
+            snprintf(err, errn, "lm_temperature must be 0 to 2, lm_cfg_scale 0 to 20, lm_top_p 0 to 1 and lm_top_k a whole number"); return 1; }
+    } else if (r->lm && *r->lm) { snprintf(err, errn, "lm is for the planner (plan)"); return 1; }
+    if (r->ncodes < 0 || r->ncodes > ACG_MAX_CODES || (r->ncodes > 0 && !r->codes)) { snprintf(err, errn, "codes must be 1 to %d audio codes", ACG_MAX_CODES); return 1; }
+    if (r->ncodes > 0 && r->task != ACG_TASK_TEXT2MUSIC) { snprintf(err, errn, "audio codes are for text to music (a cover has its clip's own)"); return 1; }
+    if (r->task != ACG_TASK_COVER && !(r->ncodes > 0) && (r->cover_strength != 0 || r->cover_noise != 0)) { snprintf(err, errn, "cover_strength and cover_noise are for a cover"); return 1; }
     if (!(r->cover_strength >= 0 && r->cover_strength <= 1) || !(r->cover_noise >= 0 && r->cover_noise <= 1)) { snprintf(err, errn, "cover_strength and cover_noise must be 0 to 1"); return 1; }
     if (r->task != ACG_TASK_REPAINT && r->task != ACG_TASK_LEGO && (r->repaint_start != 0 || r->repaint_end != 0 || r->repaint_mode != 0 || r->repaint_strength != 0)) { snprintf(err, errn, "the repaint settings are for a repaint or a lego"); return 1; }
     if (!(r->guidance >= 0 && r->guidance <= 100)) { snprintf(err, errn, "guidance must be 0 (the default) to 100"); return 1; }
@@ -634,16 +689,64 @@ static int ace_select_for(AceEngine *e, const AceRequest *rq, char *err, size_t 
     return 0;
 }
 
+typedef struct { const AceHooks *h; int target; int stopped; } AcgPlanCtx;
+static int acg_plan_step(int step, const float *cond, const float *unc, int token, void *ud){
+    AcgPlanCtx *c = (AcgPlanCtx *)ud;
+    if (c->h && c->h->progress) c->h->progress(c->h->ud, "plan", step, c->target + 1);
+    if (c->h && c->h->cancelled && c->h->cancelled(c->h->ud)) { c->stopped = 1; return 1; }
+    return 0;
+}
+
+static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn);
+
+/* The planner's half of a request: the 5 Hz model writes the codes (upstream's codes phase of generate_with_stop_condition with the metadata given), then
+ * the request runs again with them, as a cover of codes. */
+static int ace_plan_and_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn){
+    double t0 = acg_now();
+    AceLm *lm = ace_planner(e, rq->lm, err, errn);
+    if (!lm) return 1;
+    const int target = (int)(rq->duration * 5);                                         /* upstream: int(duration * 5) codes, a second being 5 */
+    if (target < 5 || target > ACG_MAX_CODES) { snprintf(err, errn, "the duration asks for %d codes: 1 to %d seconds", target, ACG_MAX_CODES / 5); return 1; }
+    char *cot = alm_cot(rq->bpm, rq->duration, rq->key, rq->language && *rq->language ? rq->language : "unknown", rq->timesig);
+    const char *lyrics = rq->lyrics ? rq->lyrics : "[Instrumental]";
+    char *pc = cot ? alm_prompt(rq->caption, lyrics, cot, 0) : NULL, *pu = cot ? alm_prompt(rq->caption, lyrics, cot, 1) : NULL;
+    int nc = 0, nu = 0;
+    int *ic = pc ? alm_tokenize(lm, pc, &nc) : NULL, *iu = pu ? alm_tokenize(lm, pu, &nu) : NULL;
+    int *codes = (int *)malloc((size_t)target * sizeof(int));
+    int rc = 1;
+    if (!ic || !iu || !codes) { snprintf(err, errn, "out of memory"); goto out; }
+    {
+        AlmSample sm = { rq->lm_temperature, rq->lm_cfg_scale, rq->lm_top_k, rq->lm_top_p, rq->seed ? rq->seed : 1 };
+        AcgPlanCtx ctx = { h, target, 0 };
+        int got = alm_generate_codes(lm, ic, nc, iu, nu, target, &sm, codes, acg_plan_step, &ctx, err, errn);
+        if (got == -2 || ctx.stopped) { rc = 2; snprintf(err, errn, "cancelled"); goto out; }
+        if (got < 1) { if (got == 0) snprintf(err, errn, "the planner wrote no codes"); goto out; }
+        AceRequest r2 = *rq;
+        r2.plan = 0; r2.lm = NULL; r2.codes = codes; r2.ncodes = got;
+        const double t_plan = acg_now() - t0;
+        rc = ace_generate(e, &r2, h, pcm, info, err, errn);
+        snprintf(info->lm, sizeof info->lm, "%s", lm->dir_name);
+        info->plan_codes = got; info->t_plan = t_plan;
+    }
+out:
+    free(cot); free(pc); free(pu); free(ic); free(iu); free(codes);
+    return rc;
+}
+
 /* Make the music. Returns 0 and the interleaved stereo waveform in [-1, 1] (malloc'd, *pcm, info->samples frames), 1 with a
  * reason in err, or 2 when the hooks asked to stop. */
 static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn){
     memset(info, 0, sizeof *info);
     *pcm = NULL;
     if (ace_check(rq, err, errn)) return 1;
+    if (rq->plan) return ace_plan_and_generate(e, rq, h, pcm, info, err, errn);
     if (ace_select_for(e, rq, err, errn)) return 1;
     const AceDit *d = e->dit;
     snprintf(info->dit, sizeof info->dit, "%s", e->slot[e->cur].name);
-    const int A = d->acdim, task = rq->task;
+    /* text to music with the planner's codes is what the handler turns into a cover (_resolve_generate_music_task): the cover instruction, and the
+     * codes' own hints as the context where a cover's source would be heard */
+    const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;
+    const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;
     const int repaint_like = task == ACG_TASK_REPAINT || task == ACG_TASK_LEGO;       /* a span is generated, the rest is the source put back */
     const int text_like = task == ACG_TASK_TEXT2MUSIC || (task == ACG_TASK_COMPLETE && !(rq->src_path && *rq->src_path));   /* no source: silence is the context */
     if (d->turbo && task >= ACG_TASK_EXTRACT) { snprintf(err, errn, "extract, lego and complete need the base or SFT DiT (acestep-v15-base): this engine runs the turbo one"); return 1; }
@@ -672,7 +775,11 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     AcgMt vae_mt; acg_mt_seed(&vae_mt, (uint32_t)rq->seed ^ ACG_VAE_SEED_XOR);
     int src_silent = 0;
     if (text_like) acg_clip(rq->duration, &T, &want_samples);
-    else {
+    else if (from_codes) {                                                     /* the codes' length is the song's: 5 frames a code, 128 at least */
+        lat_frames = rq->ncodes * ACG_CODE_FRAMES;
+        T = lat_frames < ACG_MIN_FRAMES ? ACG_MIN_FRAMES : lat_frames;
+        want_samples = lat_frames * ACG_HOP;
+    } else {
         int64_t n = 0;
         ACG_PROGRESS("encode", 0, 1);
         if (acg_load_audio(rq->src_path, "source", &planar, &n, &src_silent, err, errn)) goto out;
@@ -706,7 +813,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
 
     lat = (float *)malloc((size_t)T * A * sizeof(float));
     if (!lat) { snprintf(err, errn, "out of memory"); goto out; }
-    if (!text_like) {
+    if (from_codes) acg_silence_slice(e, T, lat);                              /* replaced by the codes' hints below, once the detokenizer is loaded */
+    else if (!text_like) {
         /* the source's latents: the VAE encoder's posterior sample (a silent clip is the silence latent, as upstream treats it),
          * then silence to the floor of 128 frames */
         if (src_silent) acg_silence_slice(e, lat_frames, lat);
@@ -818,7 +926,12 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         if (!net) goto out;
         hints = (float *)malloc((size_t)T * A * sizeof(float));
         if (!hints) { snprintf(err, errn, "out of memory"); goto out; }
-        if (atk_hints(d, net, src, T, e->silence, hints)) { free(hints); snprintf(err, errn, "the audio tokenizer failed"); goto out; }
+        if (from_codes) {
+            if (net->P != ACG_CODE_FRAMES) { free(hints); snprintf(err, errn, "the audio tokenizer pools %d frames, a code is %d", net->P, ACG_CODE_FRAMES); goto out; }
+            if (atk_hints_from_codes(d, net, rq->codes, rq->ncodes, T, e->silence, hints)) { free(hints); snprintf(err, errn, "the audio detokenizer failed"); goto out; }
+            memcpy(lat, hints, (size_t)T * A * sizeof(float));                 /* the handler's target latents are the decoded codes (what a cover-noise start renoises) */
+            memcpy(src, hints, (size_t)T * A * sizeof(float));
+        } else if (atk_hints(d, net, src, T, e->silence, hints)) { free(hints); snprintf(err, errn, "the audio tokenizer failed"); goto out; }
         dit_src = hints;
     } else if (repaint_like) {
         /* a repaint hides the span from the DiT (silence in its place); a lego shows it: the track is added to what is there */

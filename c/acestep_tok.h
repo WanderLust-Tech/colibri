@@ -264,4 +264,32 @@ static int atk_hints(const AceDit *d, const AcdTok *t, const float *x, int T, co
     return 0;
 }
 
+/* The codes the 5 Hz planner writes (upstream's `quantizer.get_output_from_indices` then `detokenizer`): W indices into the FSQ's 64000 codes (the digits of a
+ * mixed-radix number, the first level the least significant, each digit a level of 2 / (L - 1) steps from -1 to 1) -> hints [T][acdim]. The detokenizer makes
+ * W * P frames; they are cut to T, or (the handler's _prepare_precomputed_lm_hints) padded from the silence latent's first frames when T is more. */
+static int atk_hints_from_codes(const AceDit *d, const AcdTok *t, const int *codes, int W, int T, const float *silence, float *hints){
+    const int A = d->acdim, P = t->P, D = d->D, n = t->nlev;
+    if (W < 1 || T < 1) return -1;
+    int64_t total = 1;
+    for (int i = 0; i < n; i++) total *= t->levels[i];
+    float *c = (float *)malloc((size_t)W * n * sizeof(float)), *q = (float *)malloc((size_t)W * D * sizeof(float));
+    float *hp = (float *)malloc((size_t)W * P * A * sizeof(float));
+    if (!c || !q || !hp) { free(c); free(q); free(hp); return -1; }
+    for (int w = 0; w < W; w++) {
+        int64_t idx = codes[w] < 0 ? 0 : codes[w] >= total ? total - 1 : codes[w];     /* the handler clamps to 0 .. 63999 */
+        for (int i = 0; i < n; i++) {
+            const int L = t->levels[i];
+            c[(size_t)w * n + i] = (2.f / (float)(L - 1)) * (float)(idx % L) - 1.f;
+            idx /= L;
+        }
+    }
+    acd_lin(q, c, W, &t->q_out);
+    atk_detok(d, t, q, W, hp);
+    const int F = W * P, keep = F < T ? F : T;
+    memcpy(hints, hp, (size_t)keep * A * sizeof(float));
+    for (int f = keep; f < T; f++) memcpy(hints + (size_t)f * A, silence + (size_t)(f - keep) * A, (size_t)A * sizeof(float));
+    free(c); free(q); free(hp);
+    return 0;
+}
+
 #endif

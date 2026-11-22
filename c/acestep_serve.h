@@ -29,6 +29,9 @@
 #define ACS_DEFAULT_DURATION 30.0
 #define ACS_DEFAULT_STEPS 8
 #define ACS_DEFAULT_SHIFT 1.0
+#define ACS_DEFAULT_LM_TEMPERATURE 0.85        /* the planner's sampling, upstream's defaults */
+#define ACS_DEFAULT_LM_CFG 2.0
+#define ACS_DEFAULT_LM_TOP_P 0.9
 #ifndef ACS_MODEL_NAME
 #define ACS_MODEL_NAME "ace-step-1.5-turbo"
 #endif
@@ -165,6 +168,7 @@ static int acs_string(jval *j, const char *key, const char **out, char *err, siz
 static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, size_t errn){
     memset(rq, 0, sizeof *rq);
     rq->duration = ACS_DEFAULT_DURATION; rq->steps = ACS_DEFAULT_STEPS; rq->shift = ACS_DEFAULT_SHIFT; rq->dcw = 1;
+    rq->lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq->lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq->lm_top_p = ACS_DEFAULT_LM_TOP_P;
     rq->seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));
     double x;
     int r, steps_given = 0, dcw_given = 0;
@@ -197,6 +201,14 @@ static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, s
         else if (!strcmp(task, "complete")) rq->task = ACG_TASK_COMPLETE;
         else { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return -1; }
     }
+    /* the 5 Hz planner: write the song's structure first (needs bpm, key, timesig and duration) */
+    { jval *pl = json_get(j, "plan"); if (pl && pl->t != J_NULL) { if (pl->t != J_BOOL) { snprintf(err, errn, "plan must be true or false"); return -1; } rq->plan = pl->boolean; } }
+    if (acs_string(j, "lm", &rq->lm, err, errn) < 0) return -1;
+    if (acs_number(j, "lm_temperature", &rq->lm_temperature, err, errn) < 0) return -1;
+    if (acs_number(j, "lm_cfg_scale", &rq->lm_cfg_scale, err, errn) < 0) return -1;
+    if (acs_number(j, "lm_top_p", &rq->lm_top_p, err, errn) < 0) return -1;
+    if ((r = acs_number(j, "lm_top_k", &x, err, errn)) < 0) return -1;
+    if (r) { if (x != floor(x) || x < 0 || x > 1e6) { snprintf(err, errn, "lm_top_k must be a whole number"); return -1; } rq->lm_top_k = (int)x; }
     /* the guided DiTs (base, SFT): which one, how hard to guide, and the tracks of the three tasks only they do */
     if (acs_string(j, "dit", &rq->dit, err, errn) < 0) return -1;
     if (acs_string(j, "track", &rq->track, err, errn) < 0) return -1;
@@ -241,13 +253,25 @@ static int16_t *acs_pcm16(const float *x, size_t n){
 
 static int acs_serve(AceEngine *e){
     coli_serve_binary_mode();
+    char planner_json[320] = "{\"available\":false}";
+    { char lmdir[64], pe[64];
+      if (!ace_lm_dir(e, NULL, lmdir, sizeof lmdir, pe, sizeof pe)) {
+          const char *sizes[3] = {"1.7B", "4B", "0.6B"}; char list[96] = ""; int ln = 0;
+          for (int i = 0; i < 3; i++) {
+              char path[4400]; snprintf(path, sizeof path, "%s/%s/config.json", e->model_dir, ACE_LM_DIRS[i]);
+              FILE *f = fopen(path, "rb");
+              if (f) { fclose(f); ln += snprintf(list + ln, sizeof list - ln, "%s\"%s\"", ln ? "," : "", sizes[i]); }
+          }
+          snprintf(planner_json, sizeof planner_json, "{\"available\":true,\"lms\":[%s],\"default_lm\":\"%s\",\"temperature\":%g,\"cfg_scale\":%g,\"top_p\":%g,\"top_k\":0,\"max_seconds\":%d}",
+                   list, lmdir + 15, ACS_DEFAULT_LM_TEMPERATURE, ACS_DEFAULT_LM_CFG, ACS_DEFAULT_LM_TOP_P, ACG_MAX_CODES / 5);
+      } }
     const int have_base = ace_have_dit(e, "acestep-v15-base"), have_sft = ace_have_dit(e, "acestep-v15-sft");
     const int guided_primary = strcmp(e->dit_name, "acestep-v15-turbo") != 0;
     const int guided = have_base || have_sft || guided_primary;
     printf("READY {\"model\":\"%s\",\"sample_rate\":%d,\"channels\":%d,\"format\":\"s16le\",\"default_duration\":%g,\"min_duration\":%g,"
            "\"max_duration\":%g,\"default_steps\":%d,\"max_steps\":%d,\"default_shift\":%g,\"max_caption_bytes\":%d,\"max_lyric_bytes\":%d,"
            "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"%s],"
-           "\"dits\":[%s%s%s%s%s],"
+           "\"dits\":[%s%s%s%s%s],\"planner\":%s,"
            "\"guided\":{\"available\":%s,\"default_steps\":32,\"max_steps\":%d,\"default_guidance\":7,\"tracks\":[\"woodwinds\",\"brass\",\"fx\",\"synth\",\"strings\","
            "\"percussion\",\"keyboard\",\"guitar\",\"bass\",\"drums\",\"backing_vocals\",\"vocals\"]},"
            "\"audio_in\":{\"formats\":[\"wav\",\"mp3\"],\"max_seconds\":%g,\"ref_seconds\":%d}}\n",
@@ -256,7 +280,7 @@ static int acs_serve(AceEngine *e){
            guided ? ",\"extract\",\"lego\",\"complete\"" : "",
            ace_have_dit(e, "acestep-v15-turbo") ? "\"turbo\"" : "", have_base ? (ace_have_dit(e, "acestep-v15-turbo") ? ",\"base\"" : "\"base\"") : "",
            have_sft ? (ace_have_dit(e, "acestep-v15-turbo") || have_base ? ",\"sft\"" : "\"sft\"") : "", "", "",
-           guided ? "true" : "false", ACG_MAX_STEPS, ACG_MAX_SECONDS, ACG_REF_SECONDS);
+           planner_json, guided ? "true" : "false", ACG_MAX_STEPS, ACG_MAX_SECONDS, ACG_REF_SECONDS);
     fflush(stdout);
     char *line;
     for (;;) {
@@ -286,13 +310,13 @@ static int acs_serve(AceEngine *e){
                 printf("AUDIO {\"id\":\""); acs_escape(id);
                 printf("\",\"sample_rate\":%d,\"channels\":%d,\"samples\":%d,\"bytes\":%zu,\"seed\":%llu,\"steps\":%d,\"shift\":%g,\"duration\":%.3f,"
                        "\"frames\":%d,\"caption_tokens\":%d,\"lyric_tokens\":%d,\"truncated\":%s,\"peak\":%.4f,"
-                       "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,"
-                       "\"timings\":{\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
+                       "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,\"lm\":\"%s\",\"plan_codes\":%d,"
+                       "\"timings\":{\"plan\":%.2f,\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
                        e->vae->rate, e->vae->ach, info.samples, bytes, (unsigned long long)rq.seed, rq.steps, rq.shift,
                        (double)info.samples / e->vae->rate, info.frames, info.caption_tokens, info.lyric_tokens,
                        info.caption_cut || info.lyric_cut ? "true" : "false", info.peak,
-                       (const char *const[]){ "text2music", "cover", "repaint", "extract", "lego", "complete" }[rq.task], info.src_seconds, info.dit, info.guidance,
-                       info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
+                       (const char *const[]){ "text2music", "cover", "repaint", "extract", "lego", "complete" }[rq.task], info.src_seconds, info.dit, info.guidance, info.lm, info.plan_codes,
+                       info.t_plan, info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
                 fwrite(s16, 1, bytes, stdout);
                 putchar('\n');
                 fflush(stdout);

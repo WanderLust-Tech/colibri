@@ -176,6 +176,13 @@ VAE_SEED_XOR = 0x5EED0001          # the seed of the posterior draws is the requ
 COMMON = dict(inference_steps=8, use_random_seed=False, seed=42, batch_size=1, dcw_enabled=True)
 INSTR = dict(captions="bright ukulele and light percussion, summery", lyrics="[Instrumental]", vocal_language="unknown")
 VOCAL = dict(captions="warm indie folk with soft vocals", lyrics="[Verse 1]\nmorning light on the kitchen floor\n[Chorus]\nsing it back to me once more", vocal_language="en")
+def code_string(n, seed):
+    """n pseudo-random audio codes as the planner writes them: <|audio_code_N|> with N below 64000."""
+    import random
+    rng = random.Random(seed)
+    return "".join("<|audio_code_%d|>" % rng.randrange(64000) for _ in range(n))
+
+
 # name: (generate_music arguments, the audio it needs: {"src": (wav stem, seconds or None), "ref": (...)}, seconds of the clip when text2music)
 TASKS = {
     # cover: the source goes through the tokenizer and detokenizer, the instruction is the cover one, the length is the source's
@@ -186,6 +193,13 @@ TASKS = {
     "cover_noise": ({**INSTR, "task_type": "cover", "cover_noise_strength": 0.3}, {"src": ("inst10", None)}),     # starts from the source renoised, not from noise (level 0.7: the schedule's 0.75)
     "cover_pad4": ({**INSTR, "task_type": "cover"}, {"src": ("long30", 9.24)}),                # 231 frames: the tokenizer's last window is one frame and four of padding
     "cover_short": ({**INSTR, "task_type": "cover"}, {"src": ("long30", 3.0)}),               # 75 frames, under the floor of 128: the source is padded with silence latents
+    # the planner's codes in place of a source clip: upstream turns text to music with audio_code_string into a cover whose context is the codes' hints
+    "codes10": ({**INSTR, "audio_duration": 10.0, "audio_code_string": code_string(50, 11)}, {}),
+    "codes_short": ({**INSTR, "audio_duration": 4.0, "audio_code_string": code_string(20, 12)}, {}),               # 100 frames: the floor of 128 pads the hints with silence
+    "codes_odd": ({**INSTR, "audio_duration": 9.07, "audio_code_string": code_string(45, 13)}, {}),                  # 225 frames; the prompt says 9 seconds
+    "codes_vocal": ({**VOCAL, "audio_duration": 12.0, "audio_code_string": code_string(60, 14)}, {}),
+    "codes_half": ({**INSTR, "audio_duration": 10.0, "audio_code_string": code_string(50, 15), "audio_cover_strength": 0.5}, {}),
+    "codes_noise": ({**INSTR, "audio_duration": 10.0, "audio_code_string": code_string(50, 16), "cover_noise_strength": 0.3}, {}),
     "cover_ref": ({**VOCAL, "task_type": "cover"}, {"src": ("inst10", None), "ref": ("long30", None)}),   # both clips: the source is encoded first, then the reference
     # reference audio: the timbre encoder gets the clip's latents instead of the silence latent
     "ref30": ({**INSTR, "audio_duration": 10.0}, {"ref": ("long30", None)}),                  # exactly 30 s: three segments, no randomness

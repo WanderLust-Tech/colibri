@@ -66,6 +66,7 @@
 #include "acestep_dit.h"
 #include "acestep_tok.h"
 #include "acestep_text.h"
+#include "acestep_lm.h"           /* the 5 Hz planner: caption and lyrics to audio codes */
 #include "acestep_gen.h"          /* the three networks joined: a request in, audio out */
 #include "acestep_serve.h"        /* and its line protocol */
 
@@ -76,6 +77,9 @@ static void usage(void){
         "       acestep --model DIR --vae-enc-ref REFDIR | --cover-ref REFDIR\n"
         "       acestep --model DIR --tok-ref FILE.json | --text-ref REFDIR\n"
         "       acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]\n"
+        "       acestep --model DIR --lm-ref REFDIR [--lm 1.7B]      the planner (tools/acestep_ref_lm.py)\n"
+        "       acestep --model DIR --caption TEXT --plan --bpm N --key K --timesig T --duration S --out FILE.wav [--lm 0.6B|1.7B|4B] [--lm-temperature X]\n"
+        "               [--lm-cfg X] [--lm-top-p X] [--lm-top-k N]    the 5 Hz planner writes the song's structure first (needs bpm, key, timesig and duration)\n"
         "       acestep --model DIR --caption TEXT --out FILE.wav [--lyrics TEXT] [--language CODE] [--duration S] [--steps N]\n"
         "               [--shift X] [--seed N] [--bpm N] [--key K] [--timesig T] [--no-dcw]\n"
         "               [--ref CLIP] [--cover CLIP [--cover-strength X] [--cover-noise X]]\n"
@@ -1147,12 +1151,25 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
         const double rs = acd_json_num(p, "repaint_strength", 0.5);
         rq.repaint_strength = rs == 0.5 ? 0 : rs;
     }
-    if (rq.task == ACG_TASK_COVER) {
+    if (rq.task == ACG_TASK_COVER || (json_str(p, "audio_code_string") && *json_str(p, "audio_code_string"))) {        /* a cover, or text to music from codes: the same */
         const double cs = acd_json_num(p, "audio_cover_strength", 1.0);
         rq.cover_strength = cs == 1.0 ? 0 : cs;
         rq.cover_noise = acd_json_num(p, "cover_noise_strength", 0.0);
     }
-    const int audio_in = rq.src_path || rq.ref_path;
+    /* the planner's codes, as the handler was given them (audio_code_string): text to music from them */
+    int *code_buf = NULL;
+    { const char *cs = json_str(p, "audio_code_string");
+      if (cs && *cs) {
+          int n = 0, cap = 64;
+          code_buf = (int *)malloc((size_t)cap * sizeof(int));
+          for (const char *q = cs; (q = strstr(q, "<|audio_code_")); ) {
+              q += 13;
+              if (n == cap) { cap *= 2; code_buf = (int *)realloc(code_buf, (size_t)cap * sizeof(int)); }
+              code_buf[n++] = atoi(q);
+          }
+          rq.codes = code_buf; rq.ncodes = n;
+      } }
+    const int audio_in = rq.src_path || rq.ref_path || rq.ncodes > 0;
     fprintf(stderr, "[gen-oracle] case: %s%s, %.1f s, %d steps, shift %g, DCW %s, seed %llu\n", task ? task : "text2music", rq.ref_path ? " + reference" : "",
             rq.duration, rq.steps, rq.shift, rq.dcw ? "on" : "off", (unsigned long long)rq.seed);
 
@@ -1208,9 +1225,9 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
          * it must return is the shorter of the two, and that prefix of each channel is what is compared. For audio in, the
          * length asked is the source's (with a repaint's silence added). */
         const int64_t per = aud && ach > 0 && n % ach == 0 ? n / ach : -1;
-        const int ask = audio_in && rq.task != ACG_TASK_TEXT2MUSIC ? (int)((int64_t)info.frames * ACG_HOP) : want_samples;
+        const int ask = audio_in && (rq.task != ACG_TASK_TEXT2MUSIC || rq.ncodes > 0) ? (int)((int64_t)info.frames * ACG_HOP) : want_samples;
         const int64_t expect = per < 0 ? -1 : per < ask ? per : ask;
-        if (aud && per > 0 && (info.samples == expect || (rq.task != ACG_TASK_TEXT2MUSIC && info.samples <= per))) {
+        if (aud && per > 0 && (info.samples == expect || ((rq.task != ACG_TASK_TEXT2MUSIC || rq.ncodes > 0) && info.samples <= per))) {
             const int64_t cmpn = info.samples < per ? info.samples : per;
             float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)cmpn * ach * sizeof(float)), *got = (float *)malloc((size_t)cmpn * ach * sizeof(float));
             if (!want || !got) { fprintf(stderr, "out of memory\n"); exit(1); }
@@ -1226,11 +1243,104 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
         if (wav && write_wav16(wav, pcm, (size_t)info.samples, ach, e->vae->rate)) { fprintf(stderr, "[gen-oracle] cannot write %s\n", wav); fails++; }
         else if (wav) fprintf(stderr, "[gen-oracle] wrote %s (%.2f s)\n", wav, (double)info.samples / e->vae->rate);
     }
-    free(pcm); free(gt.fed);
+    free(pcm); free(gt.fed); free(code_buf);
     ace_close(e); json_free(root); free(meta_text); st_destroy(&R);
     if (!checks) { fprintf(stderr, "[gen-oracle] nothing to compare in %s\n", refdir); return 2; }
     if (fails) { fprintf(stderr, "[gen-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
     fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, audio_in ? GEN_AUDIO_REL : GEN_REL, audio_in ? GEN_AUDIO_ABS : GEN_ABS);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------- the planner's oracle -- */
+
+/* The language model against upstream's LLMHandler (tools/acestep_ref_lm.py): the two prompts' ids (exactly), then the codes phase run free from
+ * those prompts at temperature 0, its logits over the audio codes and the end token compared at every step with the handler's (as long as the
+ * tokens agree, which they do unless a near tie flips), and the codes themselves (exactly). */
+#define LM_REL 1e-5
+#define LM_ABS 2e-3
+typedef struct { shards *R; const int *codes; int ncodes, fails, checks, diverged, worst_step; double worst_rel; } LmTap;
+
+static int lm_step(int step, const float *cond, const float *unc, int token, void *ud){
+    LmTap *t = (LmTap *)ud;
+    const int nid = ALM_CODES + 1;
+    if (t->diverged) return 0;
+    char n1[32], n2[32]; int64_t m1 = 0, m2 = 0;
+    snprintf(n1, sizeof n1, "step%d.cond", step); snprintf(n2, sizeof n2, "step%d.uncond", step);
+    float *wc = ref_tensor(t->R, n1, &m1, NULL, NULL), *wu = ref_tensor(t->R, n2, &m2, NULL, NULL);
+    if (!wc || !wu || m1 != nid || m2 != nid) { fprintf(stderr, "[lm-oracle] step %d: the handler recorded %lld and %lld logits, expected %d\n", step, (long long)m1, (long long)m2, nid); t->fails++; t->checks++; t->diverged = 1; free(wc); free(wu); return 0; }
+    char lab[64];
+    snprintf(lab, sizeof lab, "step %d conditional logits", step); int f1 = cmp_tol(lab, cond, wc, (size_t)nid, LM_REL, LM_ABS);
+    snprintf(lab, sizeof lab, "step %d unconditional logits", step); int f2 = unc ? cmp_tol(lab, unc, wu, (size_t)nid, LM_REL, LM_ABS) : 0;
+    t->fails += f1 + f2; t->checks += 2;
+    free(wc); free(wu);
+    if (step < t->ncodes ? token != t->codes[step] : token != -1) {
+        fprintf(stderr, "[lm-oracle] step %d: chose %d, the handler %d\n", step, token, step < t->ncodes ? t->codes[step] : -1);
+        t->fails++; t->checks++; t->diverged = 1;
+    }
+    return 0;
+}
+
+static int run_lm_oracle(const char *model, const char *refdir, const char *lm_name){
+    g_tag = "lm-oracle";
+    char path[4300], err[512] = "";
+    snprintf(path, sizeof path, "%s/%s", model, lm_name);
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    if (R.n == 0) { fprintf(stderr, "[lm-oracle] no safetensors in %s\n", refdir); return 2; }
+    char jpath[4300]; snprintf(jpath, sizeof jpath, "%s/ref.json", refdir);
+    char *meta_text = NULL; jval *root = NULL;
+    FILE *f = fopen(jpath, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+        meta_text = (char *)malloc(len > 0 ? (size_t)len + 1 : 1);
+        if (meta_text && len > 0 && len < (16 << 20) && fread(meta_text, 1, len, f) == (size_t)len) { meta_text[len] = 0; root = json_parse_checked(meta_text); }
+        fclose(f);
+    }
+    const char *caption = json_str(root, "caption"), *lyrics = json_str(root, "lyrics");
+    jval *md = root ? json_get(root, "metadata") : NULL;
+    if (!root || !caption || !lyrics || !md) { fprintf(stderr, "[lm-oracle] ref.json needs caption, lyrics and metadata\n"); json_free(root); free(meta_text); st_destroy(&R); return 2; }
+    const double seconds = acd_json_num(root, "seconds", 10), cfg_scale = acd_json_num(root, "cfg_scale", 2.0);
+    double t0 = now();
+    AceLm *m = alm_load(path);
+    if (!m) { json_free(root); free(meta_text); st_destroy(&R); return 2; }
+    fprintf(stderr, "[lm-oracle] %s: %d layers, %d wide, %d tokens in the vocabulary, loaded in %.1fs (%.2f GB)\n", m->dir_name, m->nl, m->D, m->vocab, now() - t0, m->wbytes / 1e9);
+    int fails = 0, checks = 0;
+    char *cot = alm_cot((int)acd_json_num(md, "bpm", 0), acd_json_num(md, "duration", seconds), json_str(md, "keyscale"), json_str(md, "language"), json_str(md, "timesignature"));
+    char *pc = alm_prompt(caption, lyrics, cot, 0), *pu = alm_prompt(caption, lyrics, cot, 1);
+    int nc = 0, nu = 0;
+    int *ic = alm_tokenize(m, pc, &nc), *iu = alm_tokenize(m, pu, &nu);
+    for (int k = 0; k < 2; k++) {
+        const int *ids = k ? iu : ic; const int n = k ? nu : nc;
+        int64_t rn = 0; float *want = ref_tensor(&R, k ? "prompt.uncond" : "prompt.cond", &rn, NULL, NULL);
+        int bad = !want || rn != n;
+        for (int i = 0; !bad && i < n; i++) if ((int)want[i] != ids[i]) { fprintf(stderr, "[lm-oracle] %s prompt: token %d is %d, the handler's %d\n", k ? "unconditional" : "conditional", i, ids[i], (int)want[i]); bad = 1; }
+        if (!want || rn != n) fprintf(stderr, "[lm-oracle] %s prompt: %d tokens, the handler's %lld\n", k ? "unconditional" : "conditional", n, (long long)rn);
+        fprintf(stderr, "[lm-oracle] %-28s %d tokens %s\n", k ? "unconditional prompt" : "conditional prompt", n, bad ? "<-- FAIL" : "identical");
+        fails += bad; checks++;
+        free(want);
+    }
+    int64_t ncodes = 0; float *rc = ref_tensor(&R, "codes", &ncodes, NULL, NULL);
+    int *rcodes = (int *)malloc((size_t)(ncodes > 0 ? ncodes : 1) * sizeof(int));
+    for (int64_t i = 0; i < ncodes; i++) rcodes[i] = (int)rc[i];
+    free(rc);
+    const int target = (int)(seconds * 5);
+    int *codes = (int *)malloc((size_t)(target > 0 ? target : 1) * sizeof(int));
+    LmTap tap = { &R, rcodes, (int)ncodes, 0, 0, 0, -1, 0 };
+    AlmSample sm = { 0.0, cfg_scale, 0, 0.0, 1 };
+    t0 = now();
+    int got = alm_generate_codes(m, ic, nc, iu, nu, target, &sm, codes, lm_step, &tap, err, sizeof err);
+    double dt = now() - t0;
+    fails += tap.fails; checks += tap.checks;
+    if (got < 0) { fprintf(stderr, "[lm-oracle] generation failed: %s\n", err); fails++; checks++; }
+    else {
+        int same = got == (int)ncodes;
+        for (int i = 0; same && i < got; i++) if (codes[i] != rcodes[i]) same = 0;
+        fprintf(stderr, "[lm-oracle] %-28s %d codes, the handler's %lld: %s (%.1fs, %.2f s a token)\n", "the codes", got, (long long)ncodes, same ? "identical" : "<-- FAIL", dt, dt / (got + 1));
+        fails += !same; checks++;
+    }
+    free(cot); free(pc); free(pu); free(ic); free(iu); free(rcodes); free(codes);
+    alm_free(m); json_free(root); free(meta_text); st_destroy(&R);
+    if (fails) { fprintf(stderr, "[lm-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
+    fprintf(stderr, "[lm-oracle] all %d comparison(s) within their limits (logits: rel %.0e, abs %.0e)\n", checks, LM_REL, LM_ABS);
     return 0;
 }
 
@@ -1253,6 +1363,7 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
     int rc = ace_generate(e, rq, NULL, &pcm, &info, err, sizeof err);
     if (rc) { fprintf(stderr, "acestep: %s\n", err); ace_close(e); return 1; }
     if (write_wav16(out, pcm, (size_t)info.samples, e->vae->ach, e->vae->rate)) { fprintf(stderr, "acestep: cannot write %s\n", out); free(pcm); ace_close(e); return 1; }
+    if (info.plan_codes) fprintf(stderr, "[acestep] the planner (%s) wrote %d codes in %.1fs\n", info.lm, info.plan_codes, info.t_plan);
     fprintf(stderr, "[acestep] wrote %s: %.2f s of %d Hz stereo in %.1fs (text %.1f, condition %.1f, denoise %.1f, decode %.1f)%s\n", out,
             (double)info.samples / e->vae->rate, e->vae->rate, now() - t0, info.t_text, info.t_cond, info.t_denoise, info.t_decode,
             info.caption_cut || info.lyric_cut ? "; the caption or the lyrics were cut at their token limit" : "");
@@ -1263,13 +1374,26 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
 int main(int argc, char **argv){
     const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *venc_ref = NULL, *cover_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
     int chunk = 256, overlap = 64, serve = 0, make = 0, steps_given = 0, dcw_given = 0;
+    const char *lm_ref = NULL, *lm_name = "acestep-5Hz-lm-1.7B";
     AceRequest rq; memset(&rq, 0, sizeof rq);
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
+    rq.lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq.lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq.lm_top_p = ACS_DEFAULT_LM_TOP_P;
     rq.seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--model") && v) { model = v; i++; }
         else if (!strcmp(a, "--gen-ref") && v) { gen_ref = v; i++; }
+        else if (!strcmp(a, "--lm-ref") && v) { lm_ref = v; i++; }
+        else if (!strcmp(a, "--lm") && v) {
+            static char lm_dir[80];
+            snprintf(lm_dir, sizeof lm_dir, "%s%s", strncmp(v, "acestep-", 8) ? "acestep-5Hz-lm-" : "", v);
+            lm_name = lm_dir; rq.lm = v; i++;
+        }
+        else if (!strcmp(a, "--plan")) { rq.plan = 1; make = 1; }
+        else if (!strcmp(a, "--lm-temperature") && v) { rq.lm_temperature = atof(v); i++; }
+        else if (!strcmp(a, "--lm-cfg") && v) { rq.lm_cfg_scale = atof(v); i++; }
+        else if (!strcmp(a, "--lm-top-p") && v) { rq.lm_top_p = atof(v); i++; }
+        else if (!strcmp(a, "--lm-top-k") && v) { rq.lm_top_k = atoi(v); i++; }
         else if (!strcmp(a, "--serve")) serve = 1;
         else if (!strcmp(a, "--out") && v) { out = v; i++; }
         else if (!strcmp(a, "--caption") && v) { rq.caption = v; make = 1; i++; }
@@ -1348,6 +1472,7 @@ int main(int argc, char **argv){
     }
     if (model && make) return run_make(model, &rq, out);
     if (model && gen_ref) return run_gen_oracle(model, gen_ref, wav);
+    if (model && lm_ref) return run_lm_oracle(model, lm_ref, lm_name);
     if (!model || (!vae_ref && !venc_ref && !cover_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
     int rc = 0;
     if (tok_ref) rc = run_tok_oracle(model, tok_ref);
