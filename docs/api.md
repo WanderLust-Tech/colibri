@@ -690,12 +690,16 @@ The request's fields, with upstream's own names for the audio ones:
 | field | meaning |
 |---|---|
 | `prompt` (or `caption`), `lyrics`, `language`, `duration`, `steps`, `shift`, `seed`, `bpm`, `key`, `time_signature`, `dcw` | as for text to music; a cover or a repaint may leave `prompt` empty, and for them `duration` is not read: the clip's length is the song's |
-| `task` | `text2music` (default), `cover` or `repaint` |
-| `src_audio` | the clip to cover or repaint (required for those two, refused for text to music) |
+| `task` | `text2music` (default), `cover`, `repaint`, and with the base DiT installed `extract`, `lego` or `complete` |
+| `src_audio` | the clip to cover, repaint, extract from or lego onto (required for those four; a `complete` may have one; refused for text to music) |
+| `dit` | `turbo` (default), `base` or `sft`: the guided DiTs take `guidance_scale`, up to 200 `steps` (default 32, no DCW) and the three tasks below; extract, lego and complete use the base when this is left out |
+| `guidance_scale`, `cfg_interval_start`, `cfg_interval_end`, `use_adg` | base and sft: how hard the music is held to the description (0 to 100, default 7; 1 or less is off), the part of the schedule it applies to (0 to 1, t from the start to the end), and angle-based guidance instead of APG |
+| `track_name` | extract and lego: `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals` or `vocals` (without one, "the track") |
+| `complete_track_classes` | complete: the tracks to complete the input with, a list or a comma-separated string |
 | `reference_audio` | a clip to take the voice and style from, with any task. A clip under 30 s is repeated to 30 s; a longer one is sampled in three places |
 | `audio_cover_strength` | cover: above 0, at most 1 (default 1): the share of the steps that follow the clip's structure; less lets the text lead the last steps |
 | `cover_noise_strength` | cover: 0 to 1 (default 0): how near the clip the first step starts; 0 starts from noise |
-| `repainting_start`, `repainting_end` | repaint: the span in seconds of the clip (default 0 and the end). A start below 0 adds silence before the clip, an end past it silence after; the whole may not pass 600 s |
+| `repainting_start`, `repainting_end` | repaint and lego: the span in seconds of the clip (default 0 and the end). A start below 0 adds silence before the clip, an end past it silence after; the whole may not pass 600 s |
 | `repaint_mode` | repaint: `balanced` (default), `conservative` (keeps the most of the source around the span) or `aggressive` (the span is freest, no splice back of the source's own samples) |
 | `repaint_strength` | repaint, balanced mode: above 0, at most 1 (default 0.5): higher is freer. For the conservative end of the range, say `repaint_mode: conservative` |
 

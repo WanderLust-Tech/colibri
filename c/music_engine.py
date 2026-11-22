@@ -65,7 +65,15 @@ _FRAMES = ("READY", "PROGRESS", "AUDIO", "ERROR")
 STAGES = ("encode", "text", "condition", "denoise", "decode")
 RESPONSE_FORMATS = (None, "b64_json", "wav")
 # Audio in. What the engine announces in READY wins (`tasks`, `audio_in`); these are the contract's own numbers.
-TASKS = ("text2music", "cover", "repaint")
+TASKS = ("text2music", "cover", "repaint", "extract", "lego", "complete")
+# The tasks only the guided DiTs (acestep-v15-base, -sft) do, with a track to work on (extract, lego) or tracks to add (complete).
+GUIDED_TASKS = ("extract", "lego", "complete")
+DITS = ("turbo", "base", "sft")
+TRACK_NAMES = ("woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums",
+               "backing_vocals", "vocals")
+# What a guided DiT is asked for when it is not told (upstream's defaults); READY's `guided` wins field by field.
+DEFAULT_GUIDED = {"available": False, "default_steps": 32, "max_steps": 200, "default_guidance": 7}
+MAX_GUIDANCE = 100.0
 REPAINT_MODES = ("balanced", "conservative", "aggressive")
 DEFAULT_AUDIO_IN = {"formats": ["wav", "mp3"], "max_seconds": 600, "ref_seconds": 30}
 # A clip is held in memory as bytes, then as the temporary file: 128 MiB is 12 minutes of 48 kHz 16-bit stereo WAV
@@ -266,7 +274,8 @@ class MusicEngine:
                  bpm=None, key=None, time_signature=None, dcw=None, on_progress=None, cancelled=None,
                  on_idle=None, interruptible=False, on_interrupt=None, task=None, src_audio=None,
                  ref_audio=None, repaint_start=None, repaint_end=None, repaint_mode=None,
-                 repaint_strength=None, cover_strength=None, cover_noise=None):
+                 repaint_strength=None, cover_strength=None, cover_noise=None, dit=None, guidance=None,
+                 cfg_start=None, cfg_end=None, adg=None, track=None, tracks=None):
         """Run one GEN to its final frame and return the audio.
 
         Fields left as None are left out of the request, so the engine's own defaults apply (no lyrics
@@ -282,17 +291,28 @@ class MusicEngine:
         `repaint_end` in seconds of the source (an end of 0 or less is its end), `repaint_mode`,
         `repaint_strength`, `cover_strength`, `cover_noise` (the engine's own names, see the header of
         acestep_serve.h). The clips are written to a private temporary directory for the engine, and it
-        is removed when the request ends: found, failed, cancelled or abandoned."""
+        is removed when the request ends: found, failed, cancelled or abandoned.
+
+        The guided DiTs (the checkpoint's acestep-v15-base and -sft, when installed): `dit` ("turbo", "base" or
+        "sft"; extract, lego and complete run on the base unless told otherwise), `guidance` (the scale, 7 by
+        default; 1 or less is off), `cfg_start` and `cfg_end` (the part of the schedule it applies to), `adg`
+        (angle-based guidance), and for the three tasks only they do: `task` "extract" or "lego" with a `track`
+        (drums, bass, vocals ...), or "complete" with `tracks` (a comma-separated string of the tracks to add)."""
         request = {"caption": caption}
         for name, value in (("lyrics", lyrics), ("language", language), ("duration", duration), ("steps", steps),
                             ("shift", shift), ("seed", seed), ("bpm", bpm), ("key", key),
-                            ("timesig", time_signature), ("dcw", dcw)):
+                            ("timesig", time_signature), ("dcw", dcw), ("dit", dit), ("guidance", guidance),
+                            ("cfg_start", cfg_start), ("cfg_end", cfg_end), ("adg", adg), ("track", track),
+                            ("tracks", tracks)):
             if value is not None:
                 request[name] = value
         audio_in = (task not in (None, "text2music") or src_audio is not None or ref_audio is not None)
         if audio_in and "cover" not in self.tasks:
             raise MusicEngineError("this music engine does not take audio in (it announced no tasks): "
                                    "update the engine")
+        if task in GUIDED_TASKS and task not in self.tasks:
+            raise MusicEngineError(f"this music engine does not do `{task}`: it needs a checkpoint with the base or SFT "
+                                   "DiT (acestep-v15-base)")
         if task not in (None, "text2music"):
             request["task"] = task
         for name, value in (("repaint_start", repaint_start), ("repaint_mode", repaint_mode),
@@ -624,13 +644,19 @@ def _unit_number(body, name, low_open=False, default=None):
     return float(value)
 
 
+def guided_info(info):
+    """What the engine says about its guided DiTs (READY's `guided`), the contract's own for what it leaves out."""
+    return {**DEFAULT_GUIDED, **((info or {}).get("guided") or {})}
+
+
 def _audio_request(body, info):
     """The audio-in half of a music request: task, clips and the task's settings, validated."""
     task = body.get("task")
     if task is None:
         task = "text2music"
     if task not in TASKS:
-        raise MusicRequestError("`task` must be \"text2music\", \"cover\" or \"repaint\".", "task")
+        raise MusicRequestError("`task` must be \"text2music\", \"cover\", \"repaint\", \"extract\", \"lego\" or "
+                                "\"complete\".", "task")
     limits = audio_in_info(info)
     clips = {name: body.get(name) for name in CLIP_FIELDS if body.get(name) is not None}
     given = [name for name in ("audio_cover_strength", "cover_noise_strength", "repainting_start", "repainting_end",
@@ -638,26 +664,28 @@ def _audio_request(body, info):
     if limits is None and (task != "text2music" or clips):
         raise MusicRequestError("This music engine does not take audio in (it announced no tasks): update the "
                                 "engine.", "task" if task != "text2music" else next(iter(clips)))
+    if task in GUIDED_TASKS and task not in ((info or {}).get("tasks") or ()):
+        raise MusicRequestError(f"This music engine does not do `{task}`: it needs a checkpoint with the base or SFT "
+                                "DiT (acestep-v15-base), and this one has only the turbo DiT.", "task")
     if task == "text2music":
         if "src_audio" in clips:
-            raise MusicRequestError("`src_audio` is for a cover or a repaint; for text to music, give a reference "
-                                    "clip (`reference_audio`) to take its style.", "src_audio")
+            raise MusicRequestError("`src_audio` is for a cover, a repaint, an extract, a lego or a complete; for text to "
+                                    "music, give a reference clip (`reference_audio`) to take its style.", "src_audio")
         for name in given:
             raise MusicRequestError(f"`{name}` is for a {'cover' if 'cover' in name else 'repaint'}: set `task`.", name)
-    elif "src_audio" not in clips:
+    elif "src_audio" not in clips and task != "complete":
         raise MusicRequestError(f"`src_audio` is required for task `{task}`: the clip to {task}.", "src_audio")
     cover_only, repaint_only = ("audio_cover_strength", "cover_noise_strength"), \
         ("repainting_start", "repainting_end", "repaint_mode", "repaint_strength")
-    if task == "cover":
-        for name in repaint_only:
-            if body.get(name) is not None:
-                raise MusicRequestError(f"`{name}` is for a repaint; this is a cover.", name)
-    if task == "repaint":
-        for name in cover_only:
-            if body.get(name) is not None:
-                raise MusicRequestError(f"`{name}` is for a cover; this is a repaint.", name)
+    for name in cover_only:
+        if task != "cover" and body.get(name) is not None and task != "text2music":
+            raise MusicRequestError(f"`{name}` is for a cover; this is a {task}.", name)
+    for name in repaint_only:
+        if task not in ("repaint", "lego") and body.get(name) is not None and task != "text2music":
+            raise MusicRequestError(f"`{name}` is for a repaint or a lego; this is a {task}.", name)
     out = {"task": task, "src_audio": None, "reference_audio": None, "repainting_start": None, "repainting_end": None,
-           "repaint_mode": None, "repaint_strength": None, "audio_cover_strength": None, "cover_noise_strength": None}
+           "repaint_mode": None, "repaint_strength": None, "audio_cover_strength": None, "cover_noise_strength": None,
+           "track_name": None, "complete_track_classes": None}
     total = 0
     for name in CLIP_FIELDS:
         if name in clips:
@@ -670,7 +698,7 @@ def _audio_request(body, info):
         # 0 would be read by the engine as "not given" (the default, 1), so it is refused rather than misread
         out["audio_cover_strength"] = _unit_number(body, "audio_cover_strength", low_open=True)
         out["cover_noise_strength"] = _unit_number(body, "cover_noise_strength")
-    if task == "repaint":
+    if task in ("repaint", "lego"):
         for name in ("repainting_start", "repainting_end"):
             value = body.get(name)
             if value is not None and (not _number(value) or abs(value) > MAX_REPAINT_SPAN):
@@ -688,6 +716,25 @@ def _audio_request(body, info):
         # 0 would be read by the engine as "not given" (the default, 0.5); in balanced mode it is the conservative
         # mode, which is asked for by name
         out["repaint_strength"] = _unit_number(body, "repaint_strength", low_open=True)
+    track = body.get("track_name")
+    if track is not None:
+        if task not in ("extract", "lego"):
+            raise MusicRequestError("`track_name` is for an extract or a lego; a complete takes "
+                                    "`complete_track_classes`.", "track_name")
+        if not isinstance(track, str) or track.strip().lower() not in TRACK_NAMES:
+            raise MusicRequestError(f"`track_name` must be one of {', '.join(TRACK_NAMES)}.", "track_name")
+        out["track_name"] = track.strip().lower()
+    classes = body.get("complete_track_classes")
+    if classes is not None:
+        if task != "complete":
+            raise MusicRequestError("`complete_track_classes` is for a complete.", "complete_track_classes")
+        if isinstance(classes, str):
+            classes = [c for c in (part.strip() for part in classes.split(",")) if c]
+        if (not isinstance(classes, (list, tuple)) or not classes or len(classes) > len(TRACK_NAMES)
+                or any(not isinstance(c, str) or c.strip().lower() not in TRACK_NAMES for c in classes)):
+            raise MusicRequestError(f"`complete_track_classes` must be a list of tracks from {', '.join(TRACK_NAMES)}.",
+                                    "complete_track_classes")
+        out["complete_track_classes"] = [c.strip().lower() for c in classes]
     return out
 
 
@@ -719,8 +766,8 @@ def music_request(body, info=None):
     if lyrics is not None and not isinstance(lyrics, str):
         raise MusicRequestError("`lyrics` must be a string.", "lyrics")
     lyrics = lyrics if lyrics and lyrics.strip() else None
-    if not caption.strip() and lyrics is None and body.get("task") not in ("cover", "repaint"):
-        # a cover or a repaint may say nothing: the clip is what it works from
+    if not caption.strip() and lyrics is None and body.get("task") not in ("cover", "repaint", "extract", "lego", "complete"):
+        # a cover, a repaint, an extract, a lego or a complete may say nothing: the clip is what it works from
         raise MusicRequestError("Say what the music is like in `prompt`, or give `lyrics`.", "prompt")
     if len(caption.encode("utf-8", "surrogatepass")) > int(info["max_caption_bytes"]):
         raise MusicRequestError(f"`prompt` is longer than {info['max_caption_bytes']} bytes.", "prompt")
@@ -737,16 +784,51 @@ def music_request(body, info=None):
         raise MusicRequestError(f"`language` must be a language code of at most {MAX_LANGUAGE} characters.", "language")
     language = language or None
     audio = _audio_request(body, info)
+    # The DiT: the guided ones (base, SFT) take the three tasks of their own and guidance, 32 steps and no DCW by default
+    dit = body.get("dit")
+    if dit is not None and dit not in DITS:
+        raise MusicRequestError("`dit` must be \"turbo\", \"base\" or \"sft\".", "dit")
+    guided = (dit in ("base", "sft")) or (dit is None and audio["task"] in GUIDED_TASKS)
+    if dit == "turbo" and audio["task"] in GUIDED_TASKS:
+        raise MusicRequestError(f"`{audio['task']}` needs the base or SFT DiT: the turbo one does not do it.", "dit")
+    gi = guided_info(info)
+    if guided and not gi["available"]:
+        raise MusicRequestError("This music engine has no base or SFT DiT: install acestep-v15-base beside the turbo one.", "dit")
+    guidance = body.get("guidance_scale")
+    if guidance is not None:
+        if not _number(guidance) or not 0 <= guidance <= MAX_GUIDANCE:
+            raise MusicRequestError(f"`guidance_scale` must be a number between 0 and {MAX_GUIDANCE:g}.", "guidance_scale")
+        if not guided:
+            raise MusicRequestError("`guidance_scale` is for the base and SFT DiTs (set `dit`): the turbo one has guidance "
+                                    "built in.", "guidance_scale")
+    cfg = {}
+    for name in ("cfg_interval_start", "cfg_interval_end"):
+        value = body.get(name)
+        if value is not None:
+            if not _number(value) or not 0 <= value <= 1:
+                raise MusicRequestError(f"`{name}` must be a number between 0 and 1.", name)
+            if not guided:
+                raise MusicRequestError(f"`{name}` is for the base and SFT DiTs (set `dit`).", name)
+        cfg[name] = None if value is None else float(value)
+    if (cfg["cfg_interval_start"] is not None and cfg["cfg_interval_end"] is not None and cfg["cfg_interval_end"] > 0
+            and cfg["cfg_interval_end"] < cfg["cfg_interval_start"]):
+        raise MusicRequestError("`cfg_interval_end` must not be before `cfg_interval_start`.", "cfg_interval_end")
+    adg = body.get("use_adg")
+    if adg is not None:
+        if not isinstance(adg, bool):
+            raise MusicRequestError("`use_adg` must be true or false.", "use_adg")
+        if not guided:
+            raise MusicRequestError("`use_adg` is for the base and SFT DiTs (set `dit`).", "use_adg")
     low, high = float(info["min_duration"]), float(info["max_duration"])
     duration = body.get("duration")
     duration = info["default_duration"] if duration is None else duration
-    if audio["task"] != "text2music":
+    if audio["task"] not in ("text2music", "complete") or (audio["task"] == "complete" and audio["src_audio"] is not None):
         duration = None                       # the clip's own length is the song's
     elif not _number(duration) or not low <= duration <= high:
         raise MusicRequestError(f"`duration` must be a number of seconds between {low:g} and {high:g}.", "duration")
     steps = body.get("steps")
-    steps = info["default_steps"] if steps is None else steps
-    max_steps = int(info["max_steps"])
+    steps = (gi["default_steps"] if guided else info["default_steps"]) if steps is None else steps
+    max_steps = int(gi["max_steps"] if guided else info["max_steps"])
     if isinstance(steps, bool) or not isinstance(steps, int) or not MIN_STEPS <= steps <= max_steps:
         raise MusicRequestError(f"`steps` must be an integer between {MIN_STEPS} and {max_steps}.", "steps")
     shift = body.get("shift")
@@ -779,8 +861,9 @@ def music_request(body, info=None):
         raise MusicRequestError("`dcw` must be true or false.", "dcw")
     return {"caption": caption, "lyrics": lyrics, "language": language, "duration": duration, "steps": steps,
             "shift": shift, "seed": seed, "seed_given": seed_given, "bpm": bpm, "key": key or None,
-            "time_signature": signature or None, "dcw": True if dcw is None else dcw,
-            "response_format": response_format, **audio}
+            "time_signature": signature or None, "dcw": (None if guided else True) if dcw is None else dcw,
+            "response_format": response_format, "dit": dit, "guided": guided,
+            "guidance_scale": None if guidance is None else float(guidance), **cfg, "use_adg": adg, **audio}
 
 
 # ---------------------------------------------------------------- WAV

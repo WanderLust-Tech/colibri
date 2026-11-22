@@ -40,6 +40,8 @@ Knobs (environment), all optional:
     ACESTEP_STUB_LOAD_DELAY  seconds before READY (default 0)
     ACESTEP_STUB_RATE        sample rate of the clips (default 48000; the tests use a low one to stay small)
     ACESTEP_STUB_NO_AUDIO_IN set to make it an older engine: READY without tasks, GEN fields ignored
+    ACESTEP_STUB_GUIDED      set to make it a checkpoint with the base DiT too: READY says "guided", the tasks extract, lego and
+                             complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
 the denoising, __stub_garbage__ writes a stray stdout line first: the three failure shapes a front
 end has to survive.
@@ -61,6 +63,11 @@ READY = {"model": "ace-step-1.5-turbo", "sample_rate": 48000, "channels": 2, "fo
          "protocol": 1}
 AUDIO_IN = {"tasks": ["text2music", "cover", "repaint"],
             "audio_in": {"formats": ["wav", "mp3"], "max_seconds": 600, "ref_seconds": 30}}
+GUIDED = {"tasks": ["text2music", "cover", "repaint", "extract", "lego", "complete"], "dits": ["turbo", "base"],
+          "guided": {"available": True, "default_steps": 32, "max_steps": 200, "default_guidance": 7,
+                     "tracks": ["woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums",
+                                "backing_vocals", "vocals"]}}
+GUIDED_TASKS = ("extract", "lego", "complete")
 MAX_LINE = 1 << 20
 HOP = 1920
 MIN_FRAMES = 128
@@ -84,7 +91,15 @@ def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def check(request, audio_in=True):
+def guided_dit(request, guided):
+    """The DiT a request runs on: the one it names, else the base for the tasks only it does, else the turbo."""
+    task = request.get("task", "text2music")
+    if request.get("dit"):
+        return request["dit"]
+    return "base" if guided and task in GUIDED_TASKS else "turbo"
+
+
+def check(request, audio_in=True, guided=False):
     """The engine's own refusals, in its own words (acestep_gen.h ace_check)."""
     caption = request.get("caption")
     if not isinstance(caption, str):
@@ -95,14 +110,23 @@ def check(request, audio_in=True):
     if lyrics is not None and (not isinstance(lyrics, str) or len(lyrics.encode()) > READY["max_lyric_bytes"]):
         return "lyrics must be a string of at most %d bytes" % READY["max_lyric_bytes"]
     task = request.get("task", "text2music") if audio_in else "text2music"
-    if task not in AUDIO_IN["tasks"]:
-        return "task must be text2music, cover or repaint"
+    if task not in (GUIDED if guided else AUDIO_IN)["tasks"]:
+        return "task must be text2music, cover or repaint" if not guided else "task must be text2music, cover, repaint, extract, lego or complete"
+    dit = guided_dit(request, guided)
+    if dit not in ("turbo", "base", "sft"):
+        return "dit must be turbo, base or sft"
+    if task in GUIDED_TASKS and dit == "turbo":
+        return "extract, lego and complete need the base or SFT DiT"
     duration = request.get("duration", READY["default_duration"])
-    if task == "text2music" and (not number(duration) or not 1 <= duration <= 600):
+    if (task == "text2music" or (task == "complete" and not request.get("src_path"))) and (not number(duration) or not 1 <= duration <= 600):
         return "duration must be 1 to 600 seconds"
-    steps = request.get("steps", 8)
-    if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 20:
-        return "steps must be 1 to 20"
+    steps = request.get("steps", 32 if dit != "turbo" else 8)
+    top = 200 if dit != "turbo" else 20
+    if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= top:
+        return "steps must be 1 to %d" % top
+    guidance = request.get("guidance", 0)
+    if not number(guidance) or not 0 <= guidance <= 100:
+        return "guidance must be 0 (the default) to 100"
     shift = request.get("shift", 1)
     if not number(shift) or not 0 < shift <= 10:
         return "shift must be above 0 and at most 10"
@@ -118,11 +142,11 @@ def check(request, audio_in=True):
     if not audio_in:
         return None
     src, ref = request.get("src_path"), request.get("ref_path")
-    if task != "text2music" and not (isinstance(src, str) and src):
-        return "a %s needs a source clip (src)" % ("cover" if task == "cover" else "repaint")
+    if task not in ("text2music", "complete") and not (isinstance(src, str) and src):
+        return "%s needs a source clip (src)" % {"cover": "a cover", "repaint": "a repaint", "extract": "an extract", "lego": "a lego"}[task]
     if task == "text2music" and isinstance(src, str) and src:
-        return ("a source clip is for a cover or a repaint; for text to music, give a reference clip (ref) "
-                "to take its style")
+        return ("a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference "
+                "clip (ref) to take its style")
     if (src is not None and not isinstance(src, str)) or (isinstance(src, str) and len(src) > 4000):
         return "src path too long"
     if (ref is not None and not isinstance(ref, str)) or (isinstance(ref, str) and len(ref) > 4000):
@@ -135,8 +159,8 @@ def check(request, audio_in=True):
     mode = request.get("repaint_mode")
     mode_code = {None: 0, "balanced": 0, "conservative": 1, "aggressive": 2}.get(mode, -1) if not isinstance(mode, list) else -1
     start, end, strength = request.get("repaint_start", 0), request.get("repaint_end", 0), request.get("repaint_strength", 0)
-    if task != "repaint" and (start != 0 or end != 0 or mode_code != 0 or strength != 0):
-        return "the repaint settings are for a repaint"
+    if task not in ("repaint", "lego") and (start != 0 or end != 0 or mode_code != 0 or strength != 0):
+        return "the repaint settings are for a repaint or a lego"
     if mode_code < 0:
         return "repaint_mode must be balanced, conservative or aggressive"
     if not (number(strength) and 0 <= strength <= 1):
@@ -231,18 +255,22 @@ def read_clip(path, what):
     return seconds, silent, digest
 
 
+def has_src(request):
+    return bool(request.get("src_path"))
+
+
 def plan(request, src_seconds):
     """(samples at 48 kHz asked for, latent frames run) as acg does it: text to music from the duration, audio from the
     source with a repaint's silence added; whole 1920-sample frames, never fewer than 128. Returns (want48, frames) or
     an error message."""
     task = request.get("task", "text2music")
-    if task == "text2music":
+    if task == "text2music" or (task == "complete" and not has_src(request)):
         duration = round(float(request.get("duration", 30)), 1)
         want = int(duration * RATE48)
     else:
         n = int(src_seconds * RATE48)
         lead = tail = 0
-        if task == "repaint":
+        if task in ("repaint", "lego"):
             sd = n / RATE48
             start, end = float(request.get("repaint_start", 0)), float(request.get("repaint_end", 0))
             end = end if end > 0 else sd
@@ -268,7 +296,8 @@ def clip(request, rate, want48, frames, digests):
                                         request.get("task", "text2music"), digests,
                                         request.get("repaint_start"), request.get("repaint_end"),
                                         request.get("repaint_mode"), request.get("repaint_strength"),
-                                        request.get("cover_strength"), request.get("cover_noise")]).encode()).digest()
+                                        request.get("cover_strength"), request.get("cover_noise"), request.get("dit"),
+                                        request.get("guidance"), request.get("track"), request.get("tracks")]).encode()).digest()
     voices = [(220.0 * 2 ** (digest[i] / 96.0), 0.12 + digest[i + 4] / 2550.0) for i in range(4)]
     pan = digest[8] / 255.0
     out = bytearray()
@@ -301,7 +330,8 @@ def serve():
     rate = int(env_float("ACESTEP_STUB_RATE", 48000))
     audio_in = not os.environ.get("ACESTEP_STUB_NO_AUDIO_IN")
     out = Out()
-    out.line("READY", {**READY, "sample_rate": rate, **(AUDIO_IN if audio_in else {})})
+    guided = bool(os.environ.get("ACESTEP_STUB_GUIDED")) and audio_in
+    out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {})})
     lines = queue.Queue()
 
     def reader():
@@ -347,7 +377,7 @@ def serve():
             out.line("ERROR", {"id": "?", "message": "bad GEN line (not a JSON object)"})
             continue
         rid = request.get("id") if isinstance(request.get("id"), str) else "?"
-        problem = check(request, audio_in)
+        problem = check(request, audio_in, guided)
         if problem:
             out.line("ERROR", {"id": rid, "message": problem})
             continue
@@ -358,7 +388,7 @@ def serve():
         if "__stub_error__" in caption:
             out.line("ERROR", {"id": rid, "message": "the stub was asked to fail"})
             continue
-        steps = request.get("steps", 8)
+        steps = request.get("steps", 32 if guided_dit(request, guided) != "turbo" else 8)
         stop = False
 
         def poll():
@@ -433,7 +463,9 @@ def serve():
         out.line("AUDIO", {"id": rid, "sample_rate": rate, "channels": 2, "samples": samples, "bytes": len(pcm),
                            "seed": request.get("seed", 0), "steps": steps, "shift": request.get("shift", 1),
                            "duration": round(samples / rate, 3), "frames": frames,
-                           "src_seconds": round(src_seconds, 3),
+                           "src_seconds": round(src_seconds, 3), "dit": "acestep-v15-" + guided_dit(request, guided),
+                           "guidance": (request.get("guidance") or 7) if guided_dit(request, guided) != "turbo" else 0,
+                           "task": request.get("task", "text2music"),
                            "caption_tokens": len(caption.split()) + 20, "lyric_tokens": 15 if not lyrics_given else 40,
                            "truncated": False, "peak": 0.5,
                            "timings": {"text": 0.0, "condition": 0.0, "denoise": round(time.monotonic() - started, 3), "decode": 0.0}},

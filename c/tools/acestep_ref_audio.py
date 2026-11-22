@@ -215,6 +215,7 @@ TASKS_BASE = {
     "b_t2m_dcw": ({**INSTR, "audio_duration": 10.0, "dcw_enabled": True}, {}),
     "b_t2m_steps40": ({**INSTR, "audio_duration": 6.0, "inference_steps": 40}, {}),        # past the turbo's 20: a linspace of 40
     "b_cover": ({**INSTR, "task_type": "cover"}, {"src": ("inst10", None)}),
+    "b_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5}, {"src": ("inst10", None)}),      # the second half of the steps on the null condition of the text-to-music prompt
     "b_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
     "b_extract": ({**INSTR, "task_type": "extract", "_track": "drums"}, {"src": ("inst10", None)}),
     "b_extract_default": ({**INSTR, "task_type": "extract"}, {"src": ("inst10", None)}),

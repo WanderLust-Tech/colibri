@@ -415,7 +415,7 @@ class Client(unittest.TestCase):
     def test_the_stub_refuses_what_the_engine_refuses_in_its_words(self):
         wav = make_wav(1.5)
         cases = [
-            (dict(src_audio=wav), "a source clip is for a cover or a repaint; for text to music, give a reference clip (ref) to take its style"),
+            (dict(src_audio=wav), "a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference clip (ref) to take its style"),
             (dict(task="cover"), "a cover needs a source clip (src)"),
             (dict(task="repaint"), "a repaint needs a source clip (src)"),
             (dict(task="repaint", src_audio=wav, cover_strength=0.5), "cover_strength and cover_noise are for a cover"),

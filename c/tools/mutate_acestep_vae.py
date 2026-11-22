@@ -56,10 +56,11 @@ MUTANTS = {
 # of context the output is wrong, so the oracle does see the overlap when it matters.
 
 
-def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h", flag="--vae-ref"):
+def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h", flag="--vae-ref", extra=()):
     """Build acestep.c with `header` (a copy of c/<header>, with source_edit applied) and run the oracle `flag` on every
     case in `refs`. Returns ("pass" | "fail" | "build-failed" | "bad-mutant", the last line of the failing run).
-    A mutant is (old, new) or (old, new, count): `old` must occur exactly `count` times (default 1) and all are replaced."""
+    A mutant is (old, new) or (old, new, count): `old` must occur exactly `count` times (default 1) and all are replaced.
+    `extra` is more arguments for the engine (--dit acestep-v15-base for the guided DiT's oracles)."""
     refs = [refs] if isinstance(refs, str) else list(refs)
     shutil.copyfile(os.path.join(C_DIR, "acestep.c"), os.path.join(work, "acestep.c"))
     with open(os.path.join(C_DIR, header), encoding="utf-8", newline="") as f:
@@ -80,7 +81,7 @@ def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h
     last = ""
     for ref in refs:
         use_flag, target = ref if isinstance(ref, tuple) else (flag, ref)          # (oracle flag, reference) to mix oracles
-        run = subprocess.run([exe, "--model", model, use_flag, target], capture_output=True, text=True)
+        run = subprocess.run([exe, "--model", model, *extra, use_flag, target], capture_output=True, text=True)
         last = run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
         if run.returncode != 0:
             return "fail", f"{use_flag[2:]} {os.path.basename(target)}: {last}"

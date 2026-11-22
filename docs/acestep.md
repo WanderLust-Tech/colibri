@@ -324,8 +324,8 @@ What the engine does differently from upstream, each on purpose:
 - **A clip under 128 frames** (5.12 s) is made on 128 and cut to its length, as in text to music.
 - **A repaint that ends before it starts** is refused; upstream quietly regenerates the whole clip.
 
-Not built, and said so: the 5 Hz planner (it turns a caption into audio codes, and the cover-from-codes path with them), and the
-tasks that need the base or SFT checkpoints (lego, extract, complete).
+Not built, and said so: the 5 Hz planner (it turns a caption into audio codes, and the cover-from-codes path with them). The tasks that need
+the base or SFT checkpoints (lego, extract, complete) are in the next section.
 
 Cost, 24-core i9, a 10 s clip: reading and encoding the source 1.9 s, the tokenizer and detokenizer 2 s on top of the condition
 for a cover, so a cover is about 16 s against 11 s for text to music; a 30 s reference adds 5 s. The encoder (0.4 GB) and the
@@ -343,6 +343,79 @@ python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 task_ref wavs    
 python3 tools/mutate_acestep_venc.py ~/models/ace-step-1.5 enc_ref/single10 enc_ref/tile_small ...
 python3 tools/mutate_acestep_tok.py ~/models/ace-step-1.5 task_ref/cover10 task_ref/cover_odd task_ref/cover_pad4
 python3 tools/mutate_acestep_audioin.py ~/models/ace-step-1.5 task_ref/cover10 task_ref/repaint_mid ...
+```
+
+## The base and SFT DiTs: guidance, extract, lego, complete
+
+The turbo DiT has classifier-free guidance distilled into it: eight steps, one call each. The checkpoint's other DiTs, `acestep-v15-base`
+and `acestep-v15-sft` (4.8 GB each, the same network with the same tensor names and shapes, `is_turbo` false in the config), are
+guided when they sample: every step evaluates the model twice, on the condition and on the null condition, and combines the two velocities.
+They take 30 to 100 steps and do three tasks the turbo one was not trained for:
+
+| task | what it makes | the instruction it is given |
+|---|---|---|
+| `extract` | the one track (`drums`, `bass`, `vocals` ...) out of the source clip | `Extract the DRUMS track from the audio:` (without a track: `Extract the track from the audio:`) |
+| `lego` | that track, added to the source inside a span (`repainting_start` to `repainting_end`), the rest of the source kept | `Generate the BASS track based on the audio context:` |
+| `complete` | a partial track completed with other tracks (`complete_track_classes`); the clip is optional, without one the song is made from the description | `Complete the input track with DRUMS \| BASS:` |
+
+The tracks are `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals`
+and `vocals`. Extract and complete hand the DiT the source's latents whole as its context; a lego is a repaint that **shows** the span
+instead of hiding it (a repaint puts the silence latent there), with the same injection, crossfade and waveform splice. The prompt's
+duration is always the source's, whatever `duration` says (upstream's `prepare_batch_data`).
+
+**Installing.** The engine opens `acestep-v15-turbo` and loads any other DiT the first time a request names it, so the base DiT goes beside the
+turbo one in the checkpoint: `acestep-v15-base/` with `config.json`, `model.safetensors` and `silence_latent.pt` from
+`ACE-Step/acestep-v15-base` (`huggingface-cli download ACE-Step/acestep-v15-base config.json model.safetensors silence_latent.pt --local-dir
+<model>/acestep-v15-base`). The engine never reads the Python files in that repository. Not yet in `coli model install`.
+
+**Choosing.** A request names `dit` (`turbo`, `base` or `sft`); extract, lego and complete run on the base DiT (the SFT if there is no
+base) when it does not, and everything else on the turbo one. A guided DiT's defaults are upstream's: 32 steps (up to 200; the turbo takes
+at most 20), guidance 7, no DCW, `shift` 1. `READY` says what is there (`dits`, `guided`, and the three tasks under `tasks`), and a
+gateway or `coli music` refuses the tasks, by name and with the remedy, when the checkpoint has no guided DiT.
+
+**Guidance** is upstream's `apg_guidance.py`. APG (the default): the difference of the two velocities is smoothed over the steps by a
+momentum of -0.75, cut to a norm of 2.5 along the frames, and only its part orthogonal to the conditional velocity is added, scaled by
+guidance - 1. `use_adg` selects ADG, the angle-based form. `cfg_interval_start` and `cfg_interval_end` limit it to a part of the schedule
+(t from 1 down to 0; outside it the velocity is the conditional one alone). A guidance of 1 or less is off, and then the null branch is not
+evaluated. The schedule is `linspace(1, 0, steps + 1)` bent by `shift`, so its last step goes from t to 0. Not built: the Heun sampler,
+the SDE sampler, velocity-norm clamping and EMA smoothing (upstream's options, off by default), and flow-edit.
+
+**What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks MODEL_DIR OUT WAVDIR --dit acestep-v15-base` captures 19
+cases from upstream's own handler (CPU, float32): guidance on and off, the interval, ADG, DCW, shift 3, 40 steps, a cover (with and without
+the last steps on the text-to-music prompt, which then has its own null condition), a repaint, extract (a track, none, vocals of a longer
+clip), lego (a span, to the end, no track) and complete (tracks, none, and a clip shorter than the duration). `acestep --dit base
+--gen-ref CASE` runs each through the engine and compares the noise, the contexts and the final latents and the audio.
+
+| | the real base checkpoint | the tiny fixture (`make_acestep_tiny.py --audio-in --base`) |
+|---|---|---|
+| text to music (7 cases) | latents 2.5e-6 to 5.7e-5 of the norm, audio 7e-6 to 4.4e-5 | 4e-7 to 1.4e-6, audio 7e-7 to 1.6e-6 |
+| with audio in (12 cases) | latents 1e-5 to 1.9e-3, audio 1.4e-5 to 1.2e-3 of the norm | 1.4e-6 to 1.8e-6, audio 8e-7 to 1.9e-6 |
+
+The audio-in cases on the real checkpoint are worse for one reason that is shown, not assumed: the source's latents come from our VAE encoder, whose float32 differs
+from torch's by 4e-5, and guidance carries that through twelve steps. Fed the handler's own source latents (`ACESTEP_FEED_LATENTS=1`) the same
+cases are within 1e-5 of the norm and 3e-4 at one value; on the tiny fixture, whose encoder is exact, the whole chain is at 1.5e-6. The guided audio-in limit
+(latents 4e-3, 1e-1 at one value) is therefore the encoder's noise, amplified, with the margin the other oracles keep, and a wrong context, mask, guidance
+or schedule is wrong by 1e-1 to 1.
+
+`tools/mutate_acestep_guided.py` breaks the code one line at a time (APG's momentum, its norm cut and its projection, ADG's angle and clip, the schedule's
+shift and length, the null condition, the interval, the guidance default, a lego hiding its span, an extract with a silent context, each instruction and the
+track's case) and every one of its 30 mutants is caught on the tiny fixture. The hub's `modeling_acestep_v15_base.py` is older than upstream's and spells the
+guidance argument `diffusion_guidance_sale`, so a capture made with it ignores `guidance_scale` and runs every case at 7: the capture tool refuses a checkpoint
+whose modeling code is not upstream's at the pinned commit.
+
+Cost on the real checkpoint (24-core i9), a 10 s clip: 2.5 s a step (two DiT calls), so 32 steps are 80 s of denoising and about 90 s in all, against 12 s for
+the turbo's eight; the base DiT adds 4.8 GB to the resident set once a request names it.
+
+```sh
+cd c && make acestep
+./acestep --model ~/models/ace-step-1.5 --dit base --caption "bright ukulele" --duration 10 --out base.wav               # 32 steps, guidance 7
+./acestep --model ~/models/ace-step-1.5 --extract song.wav --track drums --out drums.wav                                 # the base DiT is chosen
+./acestep --model ~/models/ace-step-1.5 --lego song.wav --track bass --from 8 --to 20 --out song-bass.wav
+./acestep --model ~/models/ace-step-1.5 --complete song.wav --tracks drums,bass --out full.wav
+coli music --extract song.wav --track drums                       # the same through the gateway's rules
+python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 base_ref wavs --dit acestep-v15-base
+./acestep --model ~/models/ace-step-1.5 --dit base --gen-ref base_ref/b_lego
+python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base_ref/b_lego ...
 ```
 
 ## In colibri

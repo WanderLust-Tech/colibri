@@ -162,12 +162,12 @@ static int acs_string(jval *j, const char *key, const char **out, char *err, siz
 }
 
 /* GEN's fields into a request, defaults for what is absent. 0 or -1 with err. */
-static int acs_request(jval *j, AceRequest *rq, char *err, size_t errn){
+static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, size_t errn){
     memset(rq, 0, sizeof *rq);
     rq->duration = ACS_DEFAULT_DURATION; rq->steps = ACS_DEFAULT_STEPS; rq->shift = ACS_DEFAULT_SHIFT; rq->dcw = 1;
     rq->seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));
     double x;
-    int r;
+    int r, steps_given = 0, dcw_given = 0;
     if (acs_string(j, "caption", &rq->caption, err, errn) < 0) return -1;
     if (!rq->caption) { snprintf(err, errn, "caption is required (it may be empty)"); return -1; }
     if (acs_string(j, "lyrics", &rq->lyrics, err, errn) < 0) return -1;
@@ -177,13 +177,13 @@ static int acs_request(jval *j, AceRequest *rq, char *err, size_t errn){
     if ((r = acs_number(j, "duration", &rq->duration, err, errn)) < 0) return -1;
     if ((r = acs_number(j, "shift", &rq->shift, err, errn)) < 0) return -1;
     if ((r = acs_number(j, "steps", &x, err, errn)) < 0) return -1;
-    if (r) { if (x != floor(x) || fabs(x) > 1e6) { snprintf(err, errn, "steps must be a whole number"); return -1; } rq->steps = (int)x; }
+    if (r) { if (x != floor(x) || fabs(x) > 1e6) { snprintf(err, errn, "steps must be a whole number"); return -1; } rq->steps = (int)x; steps_given = 1; }
     if ((r = acs_number(j, "bpm", &x, err, errn)) < 0) return -1;
     if (r) { if (x != floor(x) || x < 0 || x > 1e6) { snprintf(err, errn, "bpm must be a whole number"); return -1; } rq->bpm = (int)x; }
     if ((r = acs_number(j, "seed", &x, err, errn)) < 0) return -1;
     if (r) { if (x != floor(x) || x < 0 || x > ACG_MAX_SEED) { snprintf(err, errn, "seed must be a whole number from 0 to 4294967295"); return -1; } rq->seed = (uint64_t)x; }
     jval *d = json_get(j, "dcw");
-    if (d && d->t != J_NULL) { if (d->t != J_BOOL) { snprintf(err, errn, "dcw must be true or false"); return -1; } rq->dcw = d->boolean; }
+    if (d && d->t != J_NULL) { if (d->t != J_BOOL) { snprintf(err, errn, "dcw must be true or false"); return -1; } rq->dcw = d->boolean; dcw_given = 1; }
     rq->seed &= 0xffffffffu;
     /* audio in */
     const char *task = NULL, *mode = NULL;
@@ -192,8 +192,19 @@ static int acs_request(jval *j, AceRequest *rq, char *err, size_t errn){
         if (!strcmp(task, "text2music")) rq->task = ACG_TASK_TEXT2MUSIC;
         else if (!strcmp(task, "cover")) rq->task = ACG_TASK_COVER;
         else if (!strcmp(task, "repaint")) rq->task = ACG_TASK_REPAINT;
-        else { snprintf(err, errn, "task must be text2music, cover or repaint"); return -1; }
+        else if (!strcmp(task, "extract")) rq->task = ACG_TASK_EXTRACT;
+        else if (!strcmp(task, "lego")) rq->task = ACG_TASK_LEGO;
+        else if (!strcmp(task, "complete")) rq->task = ACG_TASK_COMPLETE;
+        else { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return -1; }
     }
+    /* the guided DiTs (base, SFT): which one, how hard to guide, and the tracks of the three tasks only they do */
+    if (acs_string(j, "dit", &rq->dit, err, errn) < 0) return -1;
+    if (acs_string(j, "track", &rq->track, err, errn) < 0) return -1;
+    if (acs_string(j, "tracks", &rq->tracks, err, errn) < 0) return -1;
+    if (acs_number(j, "guidance", &rq->guidance, err, errn) < 0) return -1;
+    if (acs_number(j, "cfg_start", &rq->cfg_start, err, errn) < 0) return -1;
+    if (acs_number(j, "cfg_end", &rq->cfg_end, err, errn) < 0) return -1;
+    { jval *a = json_get(j, "adg"); if (a && a->t != J_NULL) { if (a->t != J_BOOL) { snprintf(err, errn, "adg must be true or false"); return -1; } rq->adg = a->boolean; } }
     if (acs_string(j, "src_path", &rq->src_path, err, errn) < 0) return -1;
     if (acs_string(j, "ref_path", &rq->ref_path, err, errn) < 0) return -1;
     if (acs_number(j, "repaint_start", &rq->repaint_start, err, errn) < 0) return -1;
@@ -208,6 +219,12 @@ static int acs_request(jval *j, AceRequest *rq, char *err, size_t errn){
         else if (!strcmp(mode, "aggressive")) rq->repaint_mode = ACG_REPAINT_AGGRESSIVE;
         else { snprintf(err, errn, "repaint_mode must be balanced, conservative or aggressive"); return -1; }
     }
+    /* what a request that does not say gets: the turbo's 8 steps with DCW, or a guided DiT's 32 without it (upstream's defaults for each) */
+    { char want[64], ignore[64];
+      if (e && !ace_pick_dit(e, rq, want, sizeof want, ignore, sizeof ignore) && strcmp(want, "acestep-v15-turbo")) {
+          if (!steps_given) rq->steps = 32;
+          if (!dcw_given) rq->dcw = 0;
+      } }
     return 0;
 }
 
@@ -224,12 +241,22 @@ static int16_t *acs_pcm16(const float *x, size_t n){
 
 static int acs_serve(AceEngine *e){
     coli_serve_binary_mode();
+    const int have_base = ace_have_dit(e, "acestep-v15-base"), have_sft = ace_have_dit(e, "acestep-v15-sft");
+    const int guided_primary = strcmp(e->dit_name, "acestep-v15-turbo") != 0;
+    const int guided = have_base || have_sft || guided_primary;
     printf("READY {\"model\":\"%s\",\"sample_rate\":%d,\"channels\":%d,\"format\":\"s16le\",\"default_duration\":%g,\"min_duration\":%g,"
            "\"max_duration\":%g,\"default_steps\":%d,\"max_steps\":%d,\"default_shift\":%g,\"max_caption_bytes\":%d,\"max_lyric_bytes\":%d,"
-           "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"],"
+           "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"%s],"
+           "\"dits\":[%s%s%s%s%s],"
+           "\"guided\":{\"available\":%s,\"default_steps\":32,\"max_steps\":%d,\"default_guidance\":7,\"tracks\":[\"woodwinds\",\"brass\",\"fx\",\"synth\",\"strings\","
+           "\"percussion\",\"keyboard\",\"guitar\",\"bass\",\"drums\",\"backing_vocals\",\"vocals\"]},"
            "\"audio_in\":{\"formats\":[\"wav\",\"mp3\"],\"max_seconds\":%g,\"ref_seconds\":%d}}\n",
            ACS_MODEL_NAME, e->vae->rate, e->vae->ach, ACS_DEFAULT_DURATION, ACG_MIN_SECONDS, ACG_MAX_SECONDS, ACS_DEFAULT_STEPS,
-           ACG_MAX_STEPS, ACS_DEFAULT_SHIFT, ACG_MAX_CAPTION_BYTES, ACG_MAX_LYRIC_BYTES, ACG_MAX_SECONDS, ACG_REF_SECONDS);
+           ACG_MAX_STEPS_TURBO, ACS_DEFAULT_SHIFT, ACG_MAX_CAPTION_BYTES, ACG_MAX_LYRIC_BYTES,
+           guided ? ",\"extract\",\"lego\",\"complete\"" : "",
+           ace_have_dit(e, "acestep-v15-turbo") ? "\"turbo\"" : "", have_base ? (ace_have_dit(e, "acestep-v15-turbo") ? ",\"base\"" : "\"base\"") : "",
+           have_sft ? (ace_have_dit(e, "acestep-v15-turbo") || have_base ? ",\"sft\"" : "\"sft\"") : "", "", "",
+           guided ? "true" : "false", ACG_MAX_STEPS, ACG_MAX_SECONDS, ACG_REF_SECONDS);
     fflush(stdout);
     char *line;
     for (;;) {
@@ -244,7 +271,7 @@ static int acs_serve(AceEngine *e){
         acs_id_of(j, id, sizeof id);
         AceRequest rq;
         if (!j || j->t != J_OBJ) acs_error(id, "bad GEN line (not a JSON object)");
-        else if (acs_request(j, &rq, msg, sizeof msg) || ace_check(&rq, msg, sizeof msg)) acs_error(id, msg);
+        else if (acs_request(j, e, &rq, msg, sizeof msg) || ace_check(&rq, msg, sizeof msg)) acs_error(id, msg);
         else {
             acs_cancel_pending = 0;
             AcsRun run = { id };
@@ -259,12 +286,12 @@ static int acs_serve(AceEngine *e){
                 printf("AUDIO {\"id\":\""); acs_escape(id);
                 printf("\",\"sample_rate\":%d,\"channels\":%d,\"samples\":%d,\"bytes\":%zu,\"seed\":%llu,\"steps\":%d,\"shift\":%g,\"duration\":%.3f,"
                        "\"frames\":%d,\"caption_tokens\":%d,\"lyric_tokens\":%d,\"truncated\":%s,\"peak\":%.4f,"
-                       "\"task\":\"%s\",\"src_seconds\":%.3f,"
+                       "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,"
                        "\"timings\":{\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
                        e->vae->rate, e->vae->ach, info.samples, bytes, (unsigned long long)rq.seed, rq.steps, rq.shift,
                        (double)info.samples / e->vae->rate, info.frames, info.caption_tokens, info.lyric_tokens,
                        info.caption_cut || info.lyric_cut ? "true" : "false", info.peak,
-                       rq.task == ACG_TASK_COVER ? "cover" : rq.task == ACG_TASK_REPAINT ? "repaint" : "text2music", info.src_seconds,
+                       (const char *const[]){ "text2music", "cover", "repaint", "extract", "lego", "complete" }[rq.task], info.src_seconds, info.dit, info.guidance,
                        info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
                 fwrite(s16, 1, bytes, stdout);
                 putchar('\n');

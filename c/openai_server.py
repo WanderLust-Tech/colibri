@@ -6555,8 +6555,9 @@ def parse_multipart_edit(content_type, raw):
 # rest text fields (the JSON body's own names).
 _MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm")
 _MUSIC_FLOAT_FIELDS = ("duration", "shift", "repainting_start", "repainting_end", "repaint_strength",
-                       "audio_cover_strength", "cover_noise_strength")
-_MUSIC_BOOL_FIELDS = ("stream", "dcw")
+                       "audio_cover_strength", "cover_noise_strength", "guidance_scale", "cfg_interval_start",
+                       "cfg_interval_end")
+_MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg")
 # Body limits for audio in, from the clip caps: the pair may be 192 MiB, so a multipart body is that and a MiB of
 # fields; the same pair as base64 in a JSON body is 4/3 of it (the reason to send a file, not text, for a long clip).
 MUSIC_MAX_BODY_MULTIPART = music_engine.MAX_CLIPS_BYTES + (1 << 20)
@@ -8832,7 +8833,12 @@ class APIHandler(BaseHTTPRequestHandler):
                      "ref_audio": request["reference_audio"], "repaint_start": request["repainting_start"],
                      "repaint_end": request["repainting_end"], "repaint_mode": request["repaint_mode"],
                      "repaint_strength": request["repaint_strength"], "cover_strength": request["audio_cover_strength"],
-                     "cover_noise": request["cover_noise_strength"]}
+                     "cover_noise": request["cover_noise_strength"], "track": request.get("track_name"),
+                     "tracks": ",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None}
+        if request.get("guided") or request.get("dit"):         # the base and SFT DiTs: which, and how hard they are guided
+            audio.update({"dit": request.get("dit"), "guidance": request.get("guidance_scale"),
+                          "cfg_start": request.get("cfg_interval_start"), "cfg_end": request.get("cfg_interval_end"),
+                          "adg": request.get("use_adg")})
         result = engine.generate(request["caption"], duration=request["duration"], lyrics=request["lyrics"],
                                  language=request["language"], steps=request["steps"], shift=request["shift"],
                                  seed=request["seed"], bpm=request["bpm"], key=request["key"],
@@ -8846,7 +8852,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if wav is None:
             wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
-                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds")
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
                 "colibri": {**{key: result.get(key) for key in keys},

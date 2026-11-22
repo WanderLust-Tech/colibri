@@ -206,24 +206,57 @@ done:
 
 /* ------------------------------------------------------------------------------------------ the engine -- */
 
+/* One DiT of the checkpoint: acestep-v15-turbo, -base or -sft. The turbo is guided inside (8 steps); the base and SFT ones are guided at
+ * sampling (up to 200 steps) and do the extract, lego and complete tasks. Each has its own tokenizer for covers and its own silence latent
+ * (the file beside its weights); the text encoder, the VAE and its encoder are the checkpoint's own and shared. */
+typedef struct { char name[64]; AceDit *dit; AcdTok *cover; float *silence; int silence_frames; } AceSlot;
+
 typedef struct {
-    AceDit *dit; AceText *text; AceTok tok; int tok_open; AcVae *vae;
-    float *silence; int silence_frames;
+    AceDit *dit; AcdTok *cover; float *silence; int silence_frames;   /* the active slot's: ace_select_for points these at slot[cur] */
+    AceText *text; AceTok tok; int tok_open; AcVae *vae;
     char model_dir[4096];
-    char dit_name[64];                             /* acestep-v15-turbo, or the base or SFT DiT the engine was opened on */
+    char dit_name[64];                             /* the DiT the engine was opened on: what a request that names none runs on */
+    AceSlot slot[3]; int nslot, cur;               /* the DiTs loaded so far: the others come in the first time a request names them */
     AcvEnc *venc;                                  /* the VAE encoder: loaded the first time a request brings audio in */
-    AcdTok *cover;                                 /* the audio tokenizer and detokenizer: loaded the first time a cover is asked for */
 } AceEngine;
 
 static void ace_close(AceEngine *e){
     if (!e) return;
-    acd_free(e->dit); act_free(e->text); if (e->tok_open) act_tok_close(&e->tok); acv_free(e->vae); free(e->silence);
-    acve_free(e->venc); atk_free(e->cover);
+    for (int i = 0; i < e->nslot; i++) { acd_free(e->slot[i].dit); atk_free(e->slot[i].cover); free(e->slot[i].silence); }
+    act_free(e->text); if (e->tok_open) act_tok_close(&e->tok); acv_free(e->vae);
+    acve_free(e->venc);
     free(e);
 }
 
-/* Load the three networks and the silence latent from the checkpoint directory. NULL (with err) when one is missing or does
- * not fit; the components' own loaders have printed their reasons on stderr. */
+static void ace_alias(AceEngine *e){
+    const AceSlot *s = &e->slot[e->cur];
+    e->dit = s->dit; e->cover = s->cover; e->silence = s->silence; e->silence_frames = s->silence_frames;
+}
+
+/* Load a DiT and its silence latent into the next slot, after the VAE and the text encoder. 0, or -1 with err. */
+static int ace_load_slot(AceEngine *e, const char *dit_name, char *err, size_t errn){
+    char path[4300];
+    if (e->nslot >= 3) { snprintf(err, errn, "too many DiTs loaded"); return -1; }
+    AceSlot *s = &e->slot[e->nslot];
+    memset(s, 0, sizeof *s);
+    snprintf(s->name, sizeof s->name, "%s", dit_name);
+    if (!(s->dit = acd_load_variant(e->model_dir, dit_name))) { snprintf(err, errn, "cannot load the DiT %.60s from %.400s", dit_name, e->model_dir); return -1; }
+    snprintf(path, sizeof path, "%s/%s/silence_latent.pt", e->model_dir, dit_name);
+    if (!(s->silence = acg_load_silence(path, &s->silence_frames, err, errn))) { acd_free(s->dit); memset(s, 0, sizeof *s); return -1; }
+    if (s->dit->acdim != 64 || e->vae->zdim != s->dit->acdim || e->vae->hop != ACG_HOP || e->vae->rate != ACG_RATE) {
+        snprintf(err, errn, "the DiT's latents (%d) and the VAE's (%d, hop %d, %d Hz) do not fit each other or this engine", s->dit->acdim, e->vae->zdim, e->vae->hop, e->vae->rate);
+        acd_free(s->dit); free(s->silence); memset(s, 0, sizeof *s); return -1;
+    }
+    if (e->text->hidden != s->dit->textdim) {
+        snprintf(err, errn, "the text encoder is %d wide, the DiT wants %d", e->text->hidden, s->dit->textdim);
+        acd_free(s->dit); free(s->silence); memset(s, 0, sizeof *s); return -1;
+    }
+    e->nslot++;
+    return 0;
+}
+
+/* Load the networks and the silence latent from the checkpoint directory, on the DiT `dit_name`. NULL (with err) when one is missing
+ * or does not fit; the components' own loaders have printed their reasons on stderr. */
 static AceEngine *ace_open_dit(const char *model_dir, const char *dit_name, char *err, size_t errn){
     AceEngine *e = (AceEngine *)calloc(1, sizeof *e);
     char path[4300];
@@ -232,21 +265,31 @@ static AceEngine *ace_open_dit(const char *model_dir, const char *dit_name, char
     if (act_tok_open(&e->tok, model_dir)) { snprintf(err, errn, "cannot open the tokenizer in %.400s", model_dir); ace_close(e); return NULL; }
     e->tok_open = 1;
     if (!(e->text = act_load(model_dir))) { snprintf(err, errn, "cannot load the text encoder from %.400s", model_dir); ace_close(e); return NULL; }
-    snprintf(e->dit_name, sizeof e->dit_name, "%s", dit_name);
-    if (!(e->dit = acd_load_variant(model_dir, dit_name))) { snprintf(err, errn, "cannot load the DiT %.60s from %.400s", dit_name, model_dir); ace_close(e); return NULL; }
     snprintf(path, sizeof path, "%s/vae", model_dir);
     if (!(e->vae = acv_load(path))) { snprintf(err, errn, "cannot load the VAE from %.400s", path); ace_close(e); return NULL; }
-    snprintf(path, sizeof path, "%s/%s/silence_latent.pt", model_dir, dit_name);
-    if (!(e->silence = acg_load_silence(path, &e->silence_frames, err, errn))) { ace_close(e); return NULL; }
-    if (e->dit->acdim != 64 || e->vae->zdim != e->dit->acdim || e->vae->hop != ACG_HOP || e->vae->rate != ACG_RATE) {
-        snprintf(err, errn, "the DiT's latents (%d) and the VAE's (%d, hop %d, %d Hz) do not fit each other or this engine", e->dit->acdim, e->vae->zdim, e->vae->hop, e->vae->rate);
-        ace_close(e); return NULL;
-    }
-    if (e->text->hidden != e->dit->textdim) { snprintf(err, errn, "the text encoder is %d wide, the DiT wants %d", e->text->hidden, e->dit->textdim); ace_close(e); return NULL; }
+    snprintf(e->dit_name, sizeof e->dit_name, "%s", dit_name);
+    if (ace_load_slot(e, dit_name, err, errn)) { ace_close(e); return NULL; }
+    e->cur = 0; ace_alias(e);
     return e;
 }
 
 static AceEngine *ace_open(const char *model_dir, char *err, size_t errn){ return ace_open_dit(model_dir, "acestep-v15-turbo", err, errn); }
+
+/* Is the DiT's directory in the checkpoint? */
+static int ace_have_dit(const AceEngine *e, const char *dir_name){
+    char path[4400];
+    snprintf(path, sizeof path, "%s/%s/config.json", e->model_dir, dir_name);
+    FILE *f = fopen(path, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* "turbo", "base" or "sft", or the whole directory name, to the directory name. 0, or -1 for anything else. */
+static int ace_dit_dir(const char *given, char *out, size_t n){
+    if (!strcmp(given, "turbo") || !strcmp(given, "base") || !strcmp(given, "sft")) { snprintf(out, n, "acestep-v15-%s", given); return 0; }
+    if (!strcmp(given, "acestep-v15-turbo") || !strcmp(given, "acestep-v15-base") || !strcmp(given, "acestep-v15-sft")) { snprintf(out, n, "%s", given); return 0; }
+    return -1;
+}
 
 /* The VAE encoder, loaded on first use. */
 static AcvEnc *ace_encoder(AceEngine *e, char *err, size_t errn){
@@ -265,6 +308,7 @@ static AcvEnc *ace_encoder(AceEngine *e, char *err, size_t errn){
 /* The audio tokenizer and detokenizer, loaded on first use. */
 static AcdTok *ace_cover_net(AceEngine *e, char *err, size_t errn){
     if (!e->cover && !(e->cover = atk_load(e->dit, e->model_dir))) { snprintf(err, errn, "cannot load the audio tokenizer from %.400s", e->model_dir); return NULL; }
+    e->slot[e->cur].cover = e->cover;
     return e->cover;
 }
 
@@ -303,6 +347,7 @@ typedef struct {
     int adg;                                       /* angle-based guidance instead of APG */
     const char *track;                             /* extract and lego: the track (drums, bass, vocals ...); NULL or "" is "the track" */
     const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
+    const char *dit;                               /* turbo, base or sft; NULL or "": see ace_select_for */
 } AceRequest;
 
 /* Taps: the oracle's view of what the stages made, by name ("noise", "timbre", "src_latents", "clean_src_latents", "context",
@@ -323,6 +368,8 @@ typedef struct {
     double t_text, t_encode, t_cond, t_denoise, t_decode;
     float peak;                                    /* the raw waveform's peak before the limit */
     double src_seconds;                            /* the source clip's length, 0 for text to music */
+    char dit[64];                                  /* the DiT that ran: acestep-v15-turbo, -base or -sft */
+    double guidance;                               /* the guidance scale applied (0 for the turbo DiT, or when it is 1 or less) */
 } AceInfo;
 
 /* Python's round(x, 1): the nearest decimal to the binary value, which printf does and x * 10 does not at a tie. */
@@ -380,9 +427,9 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->bpm < 0 || r->bpm > 1000) { snprintf(err, errn, "bpm must be 0 (not given) to 1000"); return 1; }
     if ((r->key && strlen(r->key) > 32) || (r->timesig && strlen(r->timesig) > 8)) { snprintf(err, errn, "key or time signature too long"); return 1; }
     if (r->seed > (uint64_t)ACG_MAX_SEED) { snprintf(err, errn, "seed must be 0 to 4294967295"); return 1; }
-    static const char *const task_names[6] = { "text to music", "cover", "repaint", "extract", "lego", "complete" };
+    static const char *const task_names[6] = { "text to music", "a cover", "a repaint", "an extract", "a lego", "a complete" };
     const int needs_src = r->task != ACG_TASK_TEXT2MUSIC && r->task != ACG_TASK_COMPLETE;
-    if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "a %s needs a source clip (src)", task_names[r->task]); return 1; }
+    if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "%s needs a source clip (src)", task_names[r->task]); return 1; }
     if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference clip (ref) to take its style"); return 1; }
     if (r->src_path && strlen(r->src_path) > 4000) { snprintf(err, errn, "src path too long"); return 1; }
     if (r->ref_path && strlen(r->ref_path) > 4000) { snprintf(err, errn, "ref path too long"); return 1; }
@@ -559,13 +606,43 @@ static void acg_splice_waveform(float *wav, int64_t total, const float *src, int
     }
 }
 
+/* The DiT a request runs on: the one it names; else, for extract, lego and complete, the engine's own if that is guided, or the base
+ * (the SFT if there is no base) of the checkpoint; else the engine's own. Makes it the active one, loading it the first time. */
+static int ace_pick_dit(const AceEngine *e, const AceRequest *rq, char *want, size_t n, char *err, size_t errn){
+    if (rq->dit && *rq->dit) {
+        if (ace_dit_dir(rq->dit, want, n)) { snprintf(err, errn, "dit must be turbo, base or sft"); return 1; }
+    } else if (rq->task >= ACG_TASK_EXTRACT) {
+        if (strcmp(e->dit_name, "acestep-v15-turbo")) snprintf(want, n, "%s", e->dit_name);
+        else if (ace_have_dit(e, "acestep-v15-base")) snprintf(want, n, "acestep-v15-base");
+        else if (ace_have_dit(e, "acestep-v15-sft")) snprintf(want, n, "acestep-v15-sft");
+        else { snprintf(err, errn, "extract, lego and complete need the base or SFT DiT, and this checkpoint has only the turbo one (acestep-v15-base is not installed)"); return 1; }
+    } else snprintf(want, n, "%s", e->dit_name);
+    return 0;
+}
+
+static int ace_select_for(AceEngine *e, const AceRequest *rq, char *err, size_t errn){
+    char want[64];
+    if (ace_pick_dit(e, rq, want, sizeof want, err, errn)) return 1;
+    int at = -1;
+    for (int i = 0; i < e->nslot; i++) if (!strcmp(e->slot[i].name, want)) at = i;
+    if (at < 0) {
+        if (!ace_have_dit(e, want)) { snprintf(err, errn, "the DiT %s is not installed in this checkpoint", want); return 1; }
+        if (ace_load_slot(e, want, err, errn)) return 1;
+        at = e->nslot - 1;
+    }
+    e->cur = at; ace_alias(e);
+    return 0;
+}
+
 /* Make the music. Returns 0 and the interleaved stereo waveform in [-1, 1] (malloc'd, *pcm, info->samples frames), 1 with a
  * reason in err, or 2 when the hooks asked to stop. */
 static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn){
     memset(info, 0, sizeof *info);
     *pcm = NULL;
     if (ace_check(rq, err, errn)) return 1;
+    if (ace_select_for(e, rq, err, errn)) return 1;
     const AceDit *d = e->dit;
+    snprintf(info->dit, sizeof info->dit, "%s", e->slot[e->cur].name);
     const int A = d->acdim, task = rq->task;
     const int repaint_like = task == ACG_TASK_REPAINT || task == ACG_TASK_LEGO;       /* a span is generated, the rest is the source put back */
     const int text_like = task == ACG_TASK_TEXT2MUSIC || (task == ACG_TASK_COMPLETE && !(rq->src_path && *rq->src_path));   /* no source: silence is the context */
@@ -573,6 +650,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     if (d->turbo && rq->steps > ACG_MAX_STEPS_TURBO) { snprintf(err, errn, "the turbo DiT takes at most %d steps (a base or SFT one takes up to %d)", ACG_MAX_STEPS_TURBO, ACG_MAX_STEPS); return 1; }
     const double guidance = rq->guidance > 0 ? rq->guidance : 7.0;
     const int use_cfg = !d->turbo && guidance > 1.0;                                   /* the turbo has guidance baked in and upstream forces it to 1 */
+    info->guidance = use_cfg ? guidance : 0;
     const double cfg_s = rq->cfg_start, cfg_e = rq->cfg_end > 0 ? rq->cfg_end : 1.0;
     int rc = 1;
     char *cp = NULL, *cp2 = NULL, *lp = NULL;

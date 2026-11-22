@@ -1238,6 +1238,11 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
 static int run_make(const char *model, AceRequest *rq, const char *out){
     char err[512] = "";
     if (ace_check(rq, err, sizeof err)) { fprintf(stderr, "acestep: %s\n", err); return 2; }
+    /* the turbo DiT's own limit, named before anything is loaded (a request that picks a guided DiT is checked once it is known) */
+    if (!strcmp(g_dit, "acestep-v15-turbo") && rq->task < ACG_TASK_EXTRACT && !(rq->dit && *rq->dit) && rq->steps > ACG_MAX_STEPS_TURBO) {
+        fprintf(stderr, "acestep: steps must be 1 to %d for the turbo DiT (a base or SFT one, --dit base, takes up to %d)\n", ACG_MAX_STEPS_TURBO, ACG_MAX_STEPS);
+        return 2;
+    }
     AceEngine *e = ace_open_dit(model, g_dit, err, sizeof err);
     if (!e) { fprintf(stderr, "acestep: %s\n", err); return 2; }
     float *pcm = NULL; AceInfo info;
@@ -1287,7 +1292,11 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--complete")) { rq.task = ACG_TASK_COMPLETE; make = 1; if (v && v[0] != '-') { rq.src_path = v; i++; } }
         else if (!strcmp(a, "--track") && v) { rq.track = v; i++; }
         else if (!strcmp(a, "--tracks") && v) { rq.tracks = v; i++; }
-        else if (!strcmp(a, "--dit") && v) { g_dit = v; i++; }
+        else if (!strcmp(a, "--dit") && v) {
+            static char dit_dir[64];
+            if (ace_dit_dir(v, dit_dir, sizeof dit_dir)) { fprintf(stderr, "acestep: --dit is turbo, base or sft\n"); return 2; }
+            g_dit = dit_dir; i++;
+        }
         else if (!strcmp(a, "--guidance") && v) { rq.guidance = atof(v); i++; }
         else if (!strcmp(a, "--cfg-start") && v) { rq.cfg_start = atof(v); i++; }
         else if (!strcmp(a, "--cfg-end") && v) { rq.cfg_end = atof(v); i++; }
@@ -1322,7 +1331,7 @@ int main(int argc, char **argv){
         }
         else { usage(); return 2; }
     }
-    if (strcmp(g_dit, "acestep-v15-turbo")) {                          /* a guided DiT: its own defaults, as upstream's (32 steps, no DCW) */
+    if (strcmp(g_dit, "acestep-v15-turbo") || rq.task >= ACG_TASK_EXTRACT) {     /* a guided DiT: its own defaults, as upstream's (32 steps, no DCW) */
         if (!steps_given) rq.steps = 32;
         if (!dcw_given) rq.dcw = 0;
     }

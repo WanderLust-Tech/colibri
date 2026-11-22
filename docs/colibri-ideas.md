@@ -125,7 +125,10 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
   non-cover prompt with pad tokens that its cross-attention does not mask (it builds that mask from the audio's, not the text's); the engine now does the same.
 - [ ] **E3. The 5 Hz language-model planner (L).** ACE-Step's optional planner
   (`acestep-5Hz-lm-1.7B`, also 0.6B and 4B), which writes metadata and audio codes first.
-- [ ] **E4. Lego, extract and complete tasks (L).** Need other ACE-Step checkpoints.
+- [x] **E4. Lego, extract and complete tasks (L). Done 2026-11-22** ([acestep.md](acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete)): the base and SFT
+  DiTs (guidance by APG or ADG against the null condition, up to 200 steps) and the three tasks, held to upstream's handler on 19 cases of the real base checkpoint
+  and the tiny fixture (30 of 30 mutants caught), through the engine, the protocol, the gateway (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`)
+  and `coli music --extract/--lego/--complete`. Not done: `coli model install` of the base DiT (it goes in by hand), the dashboard's controls, the Heun and SDE samplers.
 - [x] **E5. Push `main` to the fork (S).** *Done 2026-11-10: the fork's `main` is at `0b51fd62`, level with local `main` and the live clone.* Ask before each push.
 
 ## G. Gemma 4 follow-ups (added 2026-11-07)
