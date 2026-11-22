@@ -21,6 +21,7 @@ VK_EXE = os.environ.get("ACESTEP_VK_EXE")
 TEXT = os.environ.get("ACESTEP_TINY_TEXT")
 BARE = "bright ukulele and light percussion, summery"
 ON_CARD = b" on the card ("
+CARD = {"COLI_VULKAN": "1", "COLI_VK_DIT": "0"}          # the planner on the card and the DiT on the CPU, so that the song can be compared byte for byte
 
 
 class Run(serve.Engine):
@@ -29,7 +30,7 @@ class Run(serve.Engine):
     def __init__(self, model, env):
         self.err = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([VK_EXE, "--model", model, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, bufsize=0,
-                                     env={**{k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_LM")}, **env})
+                                     env={**{k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_LM", "COLI_VK_DIT")}, **env})
         import queue
         import threading
         self.frames = queue.Queue()
@@ -64,7 +65,7 @@ class OnTheCard(unittest.TestCase):
     def setUpClass(cls):
         cls.cpu, err = song({})
         assert ON_CARD not in err, "the planner ran on a card nobody asked for"
-        cls.card, err = song({"COLI_VULKAN": "1"})
+        cls.card, err = song(CARD)
         cls.engaged = ON_CARD in err
 
     def setUp(self):
@@ -79,13 +80,13 @@ class OnTheCard(unittest.TestCase):
     def test_the_codes_phase_alone_gives_the_same_song(self):
         fields = dict(bpm=100, key="C major", timesig="4", duration=4)         # all four given: phase 1 is skipped
         cpu, _ = song({}, **fields)
-        card, _ = song({"COLI_VULKAN": "1"}, **fields)
+        card, _ = song(CARD, **fields)
         self.assertNotIn("meta", cpu)
         self.assertEqual((card["plan_codes"], card["_pcm"]), (cpu["plan_codes"], cpu["_pcm"]))
 
     def test_a_step_that_fails_on_the_card_is_made_again_on_the_cpu(self):
         """Fault injection (ACESTEP_LM_VK_FAULT): the card fails at its 40th step, in phase 1; the song is the CPU's, and so is the next one."""
-        engine = Run(TEXT, {"COLI_VULKAN": "1", "ACESTEP_LM_VK_FAULT": "40"})
+        engine = Run(TEXT, {**CARD, "ACESTEP_LM_VK_FAULT": "40"})
         try:
             kind, _, _ = engine.next(300)
             self.assertEqual(kind, "READY")
@@ -101,7 +102,7 @@ class OnTheCard(unittest.TestCase):
         self.assertEqual(err.count(ON_CARD), 1, "the planner went back to the card after it failed")
 
     def test_the_switch_keeps_the_planner_on_the_cpu(self):
-        frame, err = song({"COLI_VULKAN": "1", "COLI_VK_LM": "0"})
+        frame, err = song({**CARD, "COLI_VK_LM": "0"})
         self.assertNotIn(ON_CARD, err)
         self.assertEqual(frame["_pcm"], self.cpu["_pcm"])
 

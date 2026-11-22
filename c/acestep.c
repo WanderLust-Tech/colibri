@@ -1052,6 +1052,15 @@ static int run_text_oracle(const char *model, const char *refdir){
  * context, mask, guidance or schedule is wrong by 1e-1 to 1. */
 #define GEN_GUIDED_REL 4e-3
 #define GEN_GUIDED_ABS 1e-1
+/* The DiT's steps on the card (acestep_dit_vk.h) are as exact per call as the CPU's (1e-6 of the norm against upstream's), but the sampler's 40 guided steps
+ * carry a different rounding further: on the real base checkpoint's 40-step case the final latents are 1.9e-4 of their norm and 3.2e-3 at one value
+ * from upstream's (the CPU's 5.7e-5 and 1.1e-3), the audio 1.7e-4 (limit 5e-4). The latents' limits are 5x wider when the card ran the DiT. */
+static int dit_on_card(void){
+#ifdef COLI_VULKAN
+    for (int i = 0; i < adv_nstates; i++) if (adv_states[i].ok && adv_states[i].steps) return 1;
+#endif
+    return 0;
+}
 typedef struct { shards *R; int fails, checks, audio_in; float *fed; int guided; } GenTap;
 
 /* ACESTEP_FEED_LATENTS=1: give the pipeline the handler's own source latents (in.clean_src_latents, or in.src_latents where there is
@@ -1090,7 +1099,7 @@ static void gen_tap(void *ud, const char *name, const float *x, size_t n){
         if (!w) return;
         char label[96]; snprintf(label, sizeof label, "%s", name);
         if (m != (int64_t)n) { fprintf(stderr, "[gen-oracle] %-30s has %zu values, the handler's %lld\n", label, n, (long long)m); g->fails++; }
-        else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? (g->guided ? GEN_GUIDED_REL : DIT_CHAIN_REL) : 1e-4, g->audio_in ? (g->guided ? GEN_GUIDED_ABS : DIT_CHAIN_ABS) : 2e-3);
+        else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? (g->guided ? GEN_GUIDED_REL : DIT_CHAIN_REL) : (dit_on_card() ? 5e-4 : 1e-4), g->audio_in ? (g->guided ? GEN_GUIDED_ABS : DIT_CHAIN_ABS) : (dit_on_card() ? 1e-2 : 2e-3));
         else if (map[i].encoded == 3) g->fails += cmp_tol(label, x, w, n, g->audio_in ? 1e-4 : 1e-5, g->audio_in ? 1e-3 : 1e-4);      /* the condition encoders, from the text and the timbre */
         else if (map[i].encoded == 4) g->fails += cmp_tol(label, x, w, n, 1e-6, 1e-6);       /* the silence latent and ones: copies */
         else if (map[i].encoded == 1) g->fails += g->audio_in ? cmp_tol(label, x, w, n, VENC_TILE_REL, VENC_TILE_ABS) : cmp_tol(label, x, w, n, 1e-6, 1e-6);
@@ -1795,6 +1804,9 @@ int main(int argc, char **argv){
     int lm_selftest = 0;
     const char *meta_ref = NULL, *meta_trees = NULL, *yaml_ref = NULL, *parse_ref = NULL;
     AceRequest rq; memset(&rq, 0, sizeof rq);
+#ifdef COLI_VULKAN
+    adv_attach();                      /* the DiT's steps go to the card when COLI_VULKAN says so and there is one */
+#endif
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
     rq.lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq.lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq.lm_top_p = ACS_DEFAULT_LM_TOP_P;
     rq.seed = (uint64_t)((uint32_t)time(NULL) ^ ((uint32_t)clock() << 7));

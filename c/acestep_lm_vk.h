@@ -13,8 +13,7 @@
 #define ACESTEP_LM_VK_H
 #ifdef COLI_VULKAN
 
-#include "backend_vulkan.h"
-#include "vk_chain.h"
+#include "acestep_vk.h"
 
 typedef struct {
     int ok, nl;
@@ -28,8 +27,6 @@ typedef struct {
 
 typedef struct { VkcBuf *kc, *vc; size_t cap; } AlmVk;      /* one sequence's keys and values, [nl][cap][Hk * hd] */
 
-static struct { int tried, chain; } alm_vk_dev;
-
 static ColiVkTensor *alm_vk_tensor(const AcdLin *l){
     const QiMat *W = &l->m;
     if (l->b || W->ld || !W->w || (W->fmt != QI_F32 && W->fmt != QI_BF16) || W->K % 2) return NULL;
@@ -38,7 +35,7 @@ static ColiVkTensor *alm_vk_tensor(const AcdLin *l){
 }
 
 static void alm_vk_lost(AceLm *m){
-    if (vkc_lost()) { vkc_finish(); coli_vk_mark_lost(); alm_vk_dev.chain = 0; }
+    acv_failed();
     m->vk_on = 0; m->vk_fail = 1;
 }
 
@@ -48,15 +45,7 @@ static int alm_vk_open(AceLm *m){
     m->vk_tried = 1;
     const char *off = getenv("COLI_VK_LM");
     if (off && !strcmp(off, "0")) return 0;
-    if (!alm_vk_dev.tried) {
-        alm_vk_dev.tried = 1;
-        if (coli_vk_init_env("acestep")) {                    /* COLI_VULKAN unset, or no device: the CPU */
-            atexit(coli_vk_shutdown);
-            const char *c = getenv("COLI_VK_CHAIN");
-            if (!(c && !strcmp(c, "0")) && vkc_init() && vkc_ready()) { alm_vk_dev.chain = 1; atexit(vkc_shutdown); }   /* registered after the backend's: runs before it */
-        }
-    }
-    if (!alm_vk_dev.chain || m->hd > 256 || m->H % m->Hk) return 0;
+    if (!acv_open() || m->hd > 256 || m->H % m->Hk) return 0;
     AlmVkW *w = (AlmVkW *)calloc(1, sizeof *w);
     if (!w) return 0;
     const int nl = m->nl, D = m->D, hd = m->hd;

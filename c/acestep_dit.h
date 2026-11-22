@@ -85,7 +85,13 @@ typedef struct {
 } AceDit;
 
 /* What one request's condition tokens make of the network: the packed tokens and every layer's cross K/V. */
-typedef struct { int len; float *enc; float **ck, **cv; int nl; } AcdCond;
+typedef struct { int len; float *enc; float **ck, **cv; int nl; unsigned long long id; } AcdCond;      /* id: a number no other condition has had (the card's copy of its cross K/V is keyed by it) */
+static unsigned long long acd_cond_serial = 0;
+
+/* The DiT's step on another device (acestep_dit_vk.h): called first by acd_forward, which runs on the CPU when it answers 0. acd_free_hook hears of a DiT being freed. */
+typedef int (*AcdForwardHook)(const AceDit *d, const AcdCond *c, const float *xt, const float *ctx, int T, float t, float r, float *v);
+static AcdForwardHook acd_forward_hook = NULL;
+static void (*acd_free_hook)(const AceDit *d) = NULL;
 
 /* ----------------------------------------------------------------- loading -- */
 
@@ -171,6 +177,7 @@ static void acd_free_attn(AcdAttn *a){ acd_free_lin(&a->q); acd_free_lin(&a->k);
 
 static void acd_free(AceDit *d){
     if (!d) return;
+    if (acd_free_hook) acd_free_hook(d);
     acd_free_lin(&d->te.l1); acd_free_lin(&d->te.l2); acd_free_lin(&d->te.proj);
     acd_free_lin(&d->ter.l1); acd_free_lin(&d->ter.l2); acd_free_lin(&d->ter.proj);
     acd_free_lin(&d->cond_emb); acd_free_lin(&d->text_proj); acd_free_lin(&d->lyric_embed); acd_free_lin(&d->timbre_embed);
@@ -576,7 +583,7 @@ static AcdCond *acd_cond_from_raw(const AceDit *d, float *raw, int len){
     const int D = d->D, Hk = d->kv, hd = d->hd;
     AcdCond *c = (AcdCond *)calloc(1, sizeof *c);
     if (!c) { free(raw); return NULL; }
-    c->nl = d->nl; c->len = len;
+    c->nl = d->nl; c->len = len; c->id = ++acd_cond_serial;
     c->enc = raw;                                                                     /* the packed tokens, before condition_embedder */
     float *emb = (float *)malloc((size_t)c->len * D * sizeof(float));
     if (!emb) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
@@ -690,6 +697,7 @@ static void acd_layer(const AceDit *d, const AcdCond *c, int li, float *h, int T
 
 /* One DiT evaluation: xt [T][acdim], ctx [T][2*acdim] (source latents ++ mask), timesteps t and r -> v [T][acdim]. */
 static void acd_forward(const AceDit *d, const AcdCond *c, const float *xt, const float *ctx, int T, float t, float r, float *v){
+    if (acd_forward_hook && acd_forward_hook(d, c, xt, ctx, T, t, r, v)) return;                  /* on the card */
     const int D = d->D, P = d->patch, A = d->acdim, Tp = (T + P - 1) / P, hd = d->hd;
     float *temb = (float *)malloc((size_t)D * sizeof(float)), *tr = (float *)malloc((size_t)D * sizeof(float));
     float *proj = (float *)malloc((size_t)6 * D * sizeof(float)), *pr = (float *)malloc((size_t)6 * D * sizeof(float));

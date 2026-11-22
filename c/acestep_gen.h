@@ -33,6 +33,9 @@
 #include "acestep_audio.h"
 #include "acestep_lm.h"
 #include "acestep_meta.h"
+#ifdef COLI_VULKAN
+#include "acestep_dit_vk.h"           /* the DiT's steps on the card (acd_forward calls it first) */
+#endif
 
 #define ACG_RATE 48000
 #define ACG_HOP 1920                   /* samples per latent frame: 25 latent frames a second */
@@ -244,6 +247,9 @@ static int ace_load_slot(AceEngine *e, const char *dit_name, char *err, size_t e
     memset(s, 0, sizeof *s);
     snprintf(s->name, sizeof s->name, "%s", dit_name);
     if (!(s->dit = acd_load_variant(e->model_dir, dit_name))) { snprintf(err, errn, "cannot load the DiT %.60s from %.400s", dit_name, e->model_dir); return -1; }
+#ifdef COLI_VULKAN
+    adv_attach();
+#endif
     snprintf(path, sizeof path, "%s/%s/silence_latent.pt", e->model_dir, dit_name);
     if (!(s->silence = acg_load_silence(path, &s->silence_frames, err, errn))) { acd_free(s->dit); memset(s, 0, sizeof *s); return -1; }
     if (s->dit->acdim != 64 || e->vae->zdim != s->dit->acdim || e->vae->hop != ACG_HOP || e->vae->rate != ACG_RATE) {

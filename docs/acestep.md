@@ -404,7 +404,27 @@ guidance argument `diffusion_guidance_sale`, so a capture made with it ignores `
 whose modeling code is not upstream's at the pinned commit.
 
 Cost on the real checkpoint (24-core i9), a 10 s clip: 2.5 s a step (two DiT calls), so 32 steps are 80 s of denoising and about 90 s in all, against 12 s for
-the turbo's eight; the base DiT adds 4.8 GB to the resident set once a request names it.
+the turbo's eight; the base DiT adds 4.8 GB to the resident set once a request names it. On a Vulkan card (below) the base DiT's 32 steps are 5.7 s and the clip 8.5 s in all.
+
+## The DiT on the card
+
+Built with `VK=1` and started with `COLI_VULKAN=1`, the DiT's denoising steps run on the graphics card (`c/acestep_dit_vk.h`; `acd_forward` tries it first). The 24 layers of a
+step are one submission: the matrices (bf16, f32 arithmetic) go up once, when the first step runs (4.4 GB for the turbo DiT; the base one when a request names it), and a step
+uploads the patch embedding and the step's modulation, and brings back the hidden rows. The patch embedding, the output norm and the output projection are small and stay on the CPU, as do
+the text encoder, the condition encoders and the VAE. The ops are the chain's, shared with the planner and the image models: the adaptive norm is `vkc_norm` with the weight times
+`(1 + scale)` made on the host each step and the shift added onto a buffer of ones, the gates are `GATE_ADD`'s per-column factor, the self-attention's K and V projections go up with their rows
+repeated for each group of query heads (16 over 8: the attention shader reads full-width K and V) and the cross-attention's cached K and V are repeated the same way when a condition goes up (the condition
+and the null condition of a guided DiT are two slots), and the attention is the encoder shader's (a range of rows a query: the sliding window is `[i - 128, i + 128]`, the full layers and the cross-attention
+`[0, n - 1]`).
+
+On the 5090 a step of the 10 s clip is 0.1 s (1.5 s on the CPU) and the turbo's eight steps 0.8 s (11.8 s); a whole 10 s song is 4.3 s (text 0.5, condition 0.9, denoise 1.6, decode 1.4), a 10 s
+song with the planner 13 s (it was 48), the base DiT's 32 guided steps 5.7 s, and a 2-minute clip's 8 steps 6.2 s, of which the decode on the CPU is then 30 s. Held to upstream by the same oracles as the CPU's
+with COLI_VULKAN=1 on the real checkpoint: `--dit-ref` (a call 1e-6 of the norm, as the CPU; the chain of 8 steps 1.1e-4 at one value against the CPU's 9.8e-5), `--gen-ref` on all 11 turbo cases
+(the 30-second clip exercises the sliding window, the 9-second one an odd length) and all 19 base cases (the audio-in ones within the limits the CPU's are). One case is wider on the card: the base DiT's 40 guided
+steps end 1.9e-4 of the norm from upstream's latents (the CPU's 5.7e-5; the audio 1.7e-4, limit 5e-4), a different rounding carried through forty steps of seven-fold guidance, so the oracle's latents limit
+is 5 times wider when the card ran the DiT. `COLI_VK_DIT=0` keeps the DiT on the CPU. A card that is missing, a matrix that will not go up or a step that fails leaves that step to the CPU (a step has no state,
+so nothing is repeated: `ACESTEP_DIT_VK_FAULT=N` makes step N fail, once, to test it). `tests/test_acestep_dit_vk.py` holds the card to the CPU on the tiny guided fixture (turbo and base, a clip past
+the window, an odd length, a failing step, the switch), skipped without a VK build and a device.
 
 ```sh
 cd c && make acestep
@@ -459,8 +479,7 @@ On a Vulkan card (below) the same block is 2 s and phase 2 is 0.03 s a token.
 **On the card.** Built with `VK=1` and started with `COLI_VULKAN=1` (the router's `--gpu auto` sets it when the card has room, as for any model), the planner runs on the
 graphics card: its weights go up once, when the first sequence starts (3.7 GB for the 1.7B, a couple of seconds), each sequence (phase 1's, and the conditional and
 unconditional of phase 2) keeps its KV cache on the device, and a step is one submission of the dense chain (norms, q/k/v, head norms, RoPE, attention, o, SwiGLU, down), then
-the tied embedding table as the output matrix; only the hidden row and the logits come back (`c/acestep_lm_vk.h`, the speech models' decode chain on the planner's tensors). The DiT,
-the text encoder and the VAE stay on the CPU. On the 5090: phase 1 is 0.01 s a token (172 tokens in 2 s, from 22), phase 2 0.03 s a token (50 codes in 1.6 s, from 9), a 10-second
+the tied embedding table as the output matrix; only the hidden row and the logits come back (`c/acestep_lm_vk.h`, the speech models' decode chain on the planner's tensors). The text encoder and the VAE stay on the CPU, and the DiT has its own card path (a section below). On the 5090: phase 1 is 0.01 s a token (172 tokens in 2 s, from 22), phase 2 0.03 s a token (50 codes in 1.6 s, from 9), a 10-second
 planned song 28 s from a cold start where the CPU took 48 (the DiT's 8.5 s of denoising is now most of what is left). It is the same planner: all 7 phase-1 cases and all 4 codes cases of the
 real 1.7B run through `--meta-ref` and `--lm-ref` with COLI_VULKAN=1 and match upstream token for token with the logits at 1e-5 or better (worst 1.9e-5, against limits of 3e-5 and 1e-5;
 the matrices are bf16 and the arithmetic f32, so the last bits differ from the CPU's). `COLI_VK_LM=0` keeps the planner on the CPU. A card that is missing, a matrix that will not go up, or a
