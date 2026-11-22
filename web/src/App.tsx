@@ -61,6 +61,9 @@ import { cn } from "@/lib/utils"
 import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
 import VoicesPanel from "@/components/VoicesPanel"
+import VoiceControls from "@/components/VoiceControls"
+import { useVoice } from "@/lib/useVoice"
+import { pickVoiceModels } from "@/lib/voice"
 import LibraryPanel from "@/components/LibraryPanel"
 import LogPanel from "@/components/LogPanel"
 import RequestsPanel from "@/components/RequestsPanel"
@@ -587,6 +590,40 @@ export default function App() {
     try { await navigator.clipboard.writeText(String(item.generated.seed)); setCopied(`${item.id}:seed`) } catch { setError(t("ui.copyError")) }
   }
 
+  /* The voice loop (docs/voice-loop.md): the microphone sends what is said as the next message, replies can be read aloud, and hands-free listens
+     again after each. It needs a speech recognition model and a speech model on the server. */
+  const voiceModels = useMemo(() => pickVoiceModels(modelInfos), [modelInfos])
+  const [speakReplies, setSpeakReplies] = useState(() => stored(localStorage, "colibri.speakReplies", "") === "1")
+  const [handsFree, setHandsFree] = useState(() => stored(localStorage, "colibri.handsFree", "") === "1")
+  const [replyVoice, setReplyVoice] = useState(() => stored(localStorage, "colibri.replyVoice", ""))
+  useEffect(() => {
+    try {
+      localStorage.setItem("colibri.speakReplies", speakReplies ? "1" : "")
+      localStorage.setItem("colibri.handsFree", handsFree ? "1" : "")
+      localStorage.setItem("colibri.replyVoice", replyVoice)
+    } catch { /* restricted storage mode */ }
+  }, [speakReplies, handsFree, replyVoice])
+  const sendRef = useRef(send)
+  sendRef.current = send
+  const voice = useVoice({
+    baseUrl, apiKey, asrModel: voiceModels.asr, ttsModel: replyVoice && voiceModels.clone ? voiceModels.clone : voiceModels.tts, voice: replyVoice || undefined,
+    onTranscript: (words) => { void sendRef.current(words) }, onNothing: () => setHandsFree(false), onError: setError,
+  })
+  const voiceRef = useRef(voice)
+  voiceRef.current = voice
+  const heardLast = useRef(messages.length ? messages[messages.length - 1].id : "")
+  const lastTurn = messages.length ? messages[messages.length - 1] : undefined
+  useEffect(() => {
+    if (loading || !lastTurn || lastTurn.role !== "assistant" || lastTurn.mode || !lastTurn.content || heardLast.current === lastTurn.id) return
+    if (lastTurn.finish !== "stop" && lastTurn.finish !== "length") return
+    heardLast.current = lastTurn.id
+    if (!voiceRef.current.available) return
+    void (async () => {
+      if (speakReplies) await voiceRef.current.speak(lastTurn.content)
+      if (handsFree) void voiceRef.current.listen()
+    })()
+  }, [loading, lastTurn?.id, lastTurn?.finish]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const submit = () => { if (music.mode) void music.send(); else if (imageMode) void sendImage(); else void send() }
 
   const openSettings = (page = "general") => { setSettingsPage(page); setView("settings") }
@@ -764,7 +801,7 @@ export default function App() {
             <PresetsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} onChanged={() => void connect()}
               onUse={(name) => { startFromPreset(name); setModel(name); setView("chat") }} />
           </section>}
-          {activePage === "voices" && <section className="settings-card"><VoicesPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
+          {activePage === "voices" && <section className="settings-card"><VoicesPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} replyVoice={replyVoice} onReplyVoice={setReplyVoice} /></section>}
           {activePage === "requests" && <section className="settings-card wide"><RequestsPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "log" && <section className="settings-card wide"><LogPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} /></section>}
           {activePage === "library" && <section className="settings-card wide"><LibraryPanel baseUrl={baseUrl} apiKey={apiKey} connected={connected} jobsAvailable={canBackground}
@@ -849,6 +886,9 @@ export default function App() {
               <button type="button" className="attach-chip" aria-label={t("ui.attachImage")} title={t("ui.attachImage")}
                 onClick={() => fileRef.current?.click()}><ImagePlus /></button>
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
+              {voice.available && <VoiceControls state={voice.state} level={voice.level} replies={speakReplies} onReplies={() => { setSpeakReplies((value) => !value); voice.stopSpeaking() }}
+                handsFree={handsFree} onHandsFree={() => { if (handsFree) { setHandsFree(false); voice.cancel() } else { setHandsFree(true); if (voice.state === "idle" && !loading) void voice.listen() } }}
+                onListen={() => void voice.listen()} onFinish={voice.finish} onStop={() => { setHandsFree(false); voice.cancel() }} />}
               <button type="button" className="slot-chip" onClick={() => openSettings("model")}><Database />{t("topbar.slot", { n: cacheSlot + 1 })}</button>
               </>}
               {(imageMode || music.mode) && <>

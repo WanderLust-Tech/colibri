@@ -73,6 +73,12 @@ button{color:inherit}button:disabled{cursor:default;opacity:.4}svg.lucide{stroke
 .attach-chip,.settings-chip{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:.6rem;color:inherit;opacity:.75}
 .attach-chip:hover,.settings-chip:hover{opacity:1;background:color-mix(in srgb,var(--foreground) 10%,transparent)}
 .attach-chip svg,.settings-chip svg{width:1.05rem;height:1.05rem}
+.voice-chip{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:.6rem;color:inherit;opacity:.75;background:none;border:0}
+.voice-chip:hover{opacity:1;background:color-mix(in srgb,var(--foreground) 10%,transparent)}
+.voice-chip svg{width:1.05rem;height:1.05rem}
+.voice-chip[aria-pressed=true]{opacity:1;background:color-mix(in srgb,var(--foreground) 14%,transparent)}
+.voice-chip.listening{opacity:1;box-shadow:0 0 0 calc(2px + 6px * var(--voice-level,0)) color-mix(in srgb,#e5484d 35%,transparent);color:#e5484d}
+.voice-status{font-size:11px;color:var(--muted-foreground);min-width:0}
 .message-images{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 .5rem}
 .message-images img{max-width:min(320px,100%);border-radius:.6rem;border:1px solid color-mix(in srgb,var(--foreground) 14%,transparent)}
 

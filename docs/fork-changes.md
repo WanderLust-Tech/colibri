@@ -657,6 +657,13 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   JSON), the engine wrapper's `speak_stream` generator keeps the engine in step when a client hangs up, the router relays it unchanged. The stream
   is the one-piece speech to a few percent of its level (the codec's attention reaches 8 x 72 frames, a part sees 96), no step at the joins.
   `tests/test_tts_stream.py` (13), `StreamingTest` in `tests/test_qwen3tts_real.py` (4, CPU and card).
+- **The voice loop** ([voice-loop.md](voice-loop.md)): speech in, a chat model's answer, speech out, chained over the server's three routes (transcriptions,
+  streamed chat, streamed speech). `c/voice_loop.py` (stdlib: the three calls, the sentence splitter and the text cleaning for a voice, `VoiceLoop.turn`),
+  `c/talk_cli.py` + `coli talk` (the microphone and the loudspeaker through ffmpeg/ffplay, a voice-activity detector, `--file`, `--text`, `--out`,
+  `--list-mics`), and in the dashboard a microphone, read-replies-aloud and hands-free buttons in the composer (`lib/useVoice.ts`: `MediaRecorder` in,
+  the speech SSE through Web Audio out; `lib/voice.ts`; a reply voice chosen on Settings → Voices). Measured on the card with Gemma E2B, ASR 0.6B and
+  TTS 0.6B loaded: first sound about 1.0 s after the speaker stops. `tests/test_voice_loop.py` (31), `web/src/lib/voice.test.ts` (16); the page's
+  recording and playing run once in headless Edge with a fake microphone. Half-duplex, no barge-in; the browser microphone needs localhost or https.
 - **Dashboard: Settings → Voices** (`web/src/components/VoicesPanel.tsx`, `lib/voices.ts`, the router's pages list): the saved voices, a form from a
   clip, Try (speaks a phrase in the voice through the first installed Base model and plays it) and Remove; the page exists only on a router.
 - **The encoders on the card** (`qc_gemm_hook`): the Mimi convolutions' im2col products (in tiles of up to 32768 rows) and the encoder transformer's

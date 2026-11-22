@@ -12,12 +12,15 @@ interface VoicesPanelProps {
   baseUrl: string
   apiKey: string
   connected: boolean
+  /* The saved voice the page reads its replies in ("" for the speech model's own), and how it is chosen. */
+  replyVoice: string
+  onReplyVoice: (name: string) => void
 }
 
 /* The saved voices of the voice-cloning speech models (Qwen3-TTS Base): a name, a few seconds of reference speech and what it says
    (docs/qwen3-tts.md). The router keeps them in ~/colibri-voices; `voice` in a speech request names one. Here they are made from a clip,
    tried out and removed. */
-export default function VoicesPanel({ baseUrl, apiKey, connected }: VoicesPanelProps) {
+export default function VoicesPanel({ baseUrl, apiKey, connected, replyVoice, onReplyVoice }: VoicesPanelProps) {
   const { t } = useLocale()
   const [list, setList] = useState<VoiceList | null>(null)
   const [models, setModels] = useState<InstalledModel[]>([])
@@ -82,6 +85,7 @@ export default function VoicesPanel({ baseUrl, apiKey, connected }: VoicesPanelP
       await deleteVoice(baseUrl, apiKey, voice)
       setMessage({ kind: "ok", text: t("voices.deleted", { name: voice }) })
       if (trying === voice) setTrying(null)
+      if (replyVoice === voice) onReplyVoice("")
       await refresh()
     } catch (cause) {
       setMessage({ kind: "error", text: cause instanceof Error ? cause.message : String(cause) })
@@ -140,6 +144,8 @@ export default function VoicesPanel({ baseUrl, apiKey, connected }: VoicesPanelP
               ) : (
                 <div className="model-confirm">
                   <Button type="button" size="sm" variant="secondary" disabled={models.length === 0} onClick={() => setTrying(trying === voice.name ? null : voice.name)}><Play className="size-3.5" /> {t("voices.try")}</Button>
+                  <Button type="button" size="sm" variant="secondary" aria-pressed={replyVoice === voice.name} disabled={models.length === 0}
+                    onClick={() => onReplyVoice(replyVoice === voice.name ? "" : voice.name)}>{t(replyVoice === voice.name ? "voices.replying" : "voices.replyWith")}</Button>
                   <Button type="button" size="sm" variant="secondary" aria-label={t("voices.delete")} title={t("voices.delete")} onClick={() => setConfirmDelete(voice.name)}><Trash2 className="size-3.5" /></Button>
                 </div>
               )}

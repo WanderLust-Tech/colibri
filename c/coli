@@ -3894,6 +3894,14 @@ def cmd_speak(a):
     return speech_cli.speak(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
                             lambda path,body:_api_fetch(a,path,body),C)
 
+def cmd_talk(a):
+    """coli talk : a spoken conversation through a running server's speech recognition, chat and speech models (talk_cli.py, docs/voice-loop.md)."""
+    banner("talk")
+    import retrieval_cli, talk_cli
+    if a.list_mics:
+        return talk_cli.list_mics(C)
+    return talk_cli.talk(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),C)
+
 def cmd_voice(a):
     """coli voice list|add|remove : the saved voices of the cloning speech models (speech_cli.py, docs/qwen3-tts.md)."""
     banner("voice")
@@ -4772,6 +4780,24 @@ def main():
     psp.add_argument("--model",default=None,help="the speech synthesis model (default: the first the server lists)")
     psp.add_argument("--host",default="127.0.0.1"); psp.add_argument("--port",type=int,default=None)
     psp.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    ptk=sub.add_parser("talk",help="a spoken conversation: microphone in, a chat model's answer spoken (speech recognition, chat and speech models of the server)")
+    ptk.add_argument("files",nargs="*",metavar="FILE",help="audio files to say instead of using the microphone (one turn each)")
+    ptk.add_argument("--text",default=None,metavar="WORDS",help="type the words instead of speaking them (one turn); the answer is still spoken")
+    ptk.add_argument("--model",default=None,help="the chat model (default: a Gemma E2B/E4B if the server has one)")
+    ptk.add_argument("--asr",default=None,help="the speech recognition model (default: the first the server lists)")
+    ptk.add_argument("--tts",default=None,help="the speech model (default: the first the server lists; a Base model for a saved voice)")
+    ptk.add_argument("--voice",default=None,metavar="NAME",help="the speaker, or a saved voice (coli voice add)")
+    ptk.add_argument("--language",default=None,metavar="CODE",help="the language of the speech (en, ...); without it the models decide")
+    ptk.add_argument("--system",default=None,metavar="PROMPT",help="what the assistant is told it is (default: short spoken answers, no markdown)")
+    ptk.add_argument("--max-tokens",type=int,default=200,help="the longest answer, in tokens (default 200)")
+    ptk.add_argument("--mic",default=None,metavar="NAME",help="the capture device (coli talk --list-mics)")
+    ptk.add_argument("--list-mics",action="store_true",help="list the microphones ffmpeg can read and exit")
+    ptk.add_argument("--silence",type=float,default=0.8,metavar="SECONDS",help="how long a pause ends what you said (default 0.8)")
+    ptk.add_argument("--threshold",type=float,default=0.012,metavar="LEVEL",help="the quietest level that counts as speech, 0 to 1 (default 0.012)")
+    ptk.add_argument("--out",default=None,metavar="DIR",help="save each answer as DIR/reply-N.wav instead of playing it (with FILE or --text)")
+    ptk.add_argument("--no-play",action="store_true",help="do not play the answer")
+    ptk.add_argument("--host",default="127.0.0.1"); ptk.add_argument("--port",type=int,default=None)
+    ptk.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pvo=sub.add_parser("voice",help="the saved voices a voice-cloning model speaks in: list, add NAME FILE, remove NAME")
     pvo.add_argument("action",choices=("list","add","remove"))
     pvo.add_argument("name",nargs="?",default=None,help="the voice's name (lower-case letters, digits, - and _)")
@@ -4892,7 +4918,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"talk":cmd_talk,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,
