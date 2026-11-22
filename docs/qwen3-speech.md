@@ -146,6 +146,7 @@ environment that writes its intermediate tensors; the C side loads the same inpu
 | T5 cloning (codec encoder, speaker encoder) | done (the encoders' matrix products on the card: 0.35 s for an 11 s clip, 0.7 s on the CPU) |
 | T6 speed | done: a frame is 14 to 19 ms on the card (111 ms on the CPU), the codec's vocoder on the card too (1.05 s to 0.17 s for 5 s of speech); 56 s of speech in 11 s |
 | T7 streaming | done: `stream_format` "sse" and `stream: true`, the first sound after 6 frames (about 0.35 s), pieces decoded with 96 frames of context |
+| F1 the forced aligner | done: [qwen3-aligner.md](qwen3-aligner.md): word times and subtitles; every time identical to the reference on an 11 s and a 33 s clip, CPU and card |
 | V1 the voice loop | done: [voice-loop.md](voice-loop.md): `coli talk` and the dashboard's microphone, read-aloud and hands-free; the first sound about 1 s after the speaker stops |
 
 Found on the way: the stock transformers encoder ignores the 800-frame attention windows that the checkpoint's config and the vLLM backend

@@ -638,7 +638,8 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions -H "Authorization: Bearer $KE
 ```
 
 - **`response_format`:** `json` (the default, `{"text": ...}`), `text`, or `verbose_json` (adds `duration` and `segments`).
-  `srt` and `vtt` are refused: the model gives no timestamps inside a stretch of speech. Word timestamps are refused too.
+  `srt` and `vtt` are refused: the model gives no timestamps inside a stretch of speech. Word timestamps are refused too (the forced
+  aligner gives them: `POST /v1/audio/alignments` with the audio and the `text` said in it, JSON words, `srt`, `vtt` or `text`; [qwen3-aligner.md](qwen3-aligner.md)).
 - **File:** WAV (PCM of 8 to 32 bits or float, any rate, any number of channels), MP3, and with ffmpeg on the server FLAC, Ogg, M4A and
   more (read from the file's first bytes; mixed to mono and resampled to 16 kHz). Up to 25 MB and 15 minutes. A JSON body with `file` as base64 works as well.
 - **Long files:** the model hears 30 seconds at a time. A longer file is cut where it is quietest, within the last four

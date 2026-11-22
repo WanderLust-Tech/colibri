@@ -8,6 +8,8 @@ forced one or "English" (what a model that detected English would say), so a tes
 decoded, that the language and the context were passed on, and what the gateway does with the answer. Environment: ASR_STUB_DELAY
 (seconds per request), ASR_STUB_DIE_ON (a context that makes the stub exit without answering), ASR_STUB_FAIL_ON (a context it
 answers with ERROR), ASR_STUB_LANGUAGE (what it says it detected; default English, "" for a model that does not say).
+ASR_STUB_ALIGN=1 makes it a forced aligner: READY says task "align", it takes ALIGN {id, wav, words} and answers ALIGNED with word i at
+`i * 400` ms to `i * 400 + 300` ms (so a test can see which words arrived and in what order); ASR_STUB_FAIL_ALIGN answers ERROR.
 """
 import json
 import os
@@ -19,6 +21,8 @@ DELAY = float(os.environ.get("ASR_STUB_DELAY", "0"))
 DIE_ON = os.environ.get("ASR_STUB_DIE_ON")
 FAIL_ON = os.environ.get("ASR_STUB_FAIL_ON")
 DETECTED = os.environ.get("ASR_STUB_LANGUAGE", "English")
+ALIGN = bool(os.environ.get("ASR_STUB_ALIGN"))
+FAIL_ALIGN = bool(os.environ.get("ASR_STUB_FAIL_ALIGN"))
 
 
 def send(keyword, body):
@@ -29,11 +33,26 @@ def send(keyword, body):
 def main():
     if "--serve" not in sys.argv:
         sys.exit("asr_stub: --serve only")
-    send("READY", {"model": "asr-stub", "task": "transcribe", "sample_rate": 16000, "piece_seconds": 1200, "layers": 1, "encoder_layers": 1,
-                   "device": "cpu"})
+    send("READY", {"model": "asr-stub", "task": "align" if ALIGN else "transcribe", "sample_rate": 16000, "piece_seconds": 300 if ALIGN else 1200,
+                   "layers": 1, "encoder_layers": 1, "device": "cpu"})
     for line in sys.stdin:
         keyword, _, rest = line.rstrip("\r\n").partition(" ")
-        if keyword != "TRANSCRIBE":
+        if ALIGN and keyword == "ALIGN":
+            try:
+                request = json.loads(rest)
+                with wave.open(request["wav"], "rb") as clip:
+                    seconds = clip.getnframes() / clip.getframerate()
+            except (ValueError, KeyError, OSError, wave.Error) as error:
+                send("ERROR", {"id": "", "message": f"cannot read the request or the audio: {error}"})
+                continue
+            if FAIL_ALIGN:
+                send("ERROR", {"id": request.get("id", ""), "message": "the aligner failed"})
+                continue
+            words = request.get("words") or []
+            send("ALIGNED", {"id": request.get("id", ""), "starts": [i * 400 for i in range(len(words))], "ends": [i * 400 + 300 for i in range(len(words))],
+                             "audio_seconds": seconds, "seconds": 0.01})
+            continue
+        if keyword != "TRANSCRIBE" or ALIGN:
             send("ERROR", {"id": "", "message": "unknown message"})
             continue
         try:

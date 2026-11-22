@@ -1952,6 +1952,8 @@ FAMILIES = (
         display_name="Qwen3-ASR",
         display_scale="",
         display_variants=(
+            # forced_aligner: 1 is made by resolve_model (thinker_config.model_type "qwen3_forced_aligner"): the same network with a 5000-way head
+            DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28), ("forced_aligner", 1)), "Qwen3-ForcedAligner", "0.6B", model_id="qwen3-forcedaligner-0.6b"),
             DisplayVariant((("hidden_size", 1024), ("num_hidden_layers", 28)), "Qwen3-ASR", "0.6B", model_id="qwen3-asr-0.6b"),
             DisplayVariant((("hidden_size", 2048), ("num_hidden_layers", 28)), "Qwen3-ASR", "1.7B", model_id="qwen3-asr-1.7b"),
         ),
@@ -2367,7 +2369,8 @@ def resolve_model(model_dir):
         # text_config families' are (the display variants then match nothing and the family's own model id is used).
         thinker = config.get("thinker_config")
         inner = thinker.get("text_config") if isinstance(thinker, dict) else None
-        family_config = inner if isinstance(inner, dict) else config
+        aligner = isinstance(thinker, dict) and "forced_aligner" in str(thinker.get("model_type", ""))
+        family_config = (dict(inner, forced_aligner=1) if aligner else inner) if isinstance(inner, dict) else config
     elif family.config_section == "talker_config":
         # Qwen3-TTS keeps the talker's sizes in talker_config; read as it stands when the section is missing (see above)
         inner = config.get("talker_config")

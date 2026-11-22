@@ -162,6 +162,7 @@ from the terminal.
 | Model | `--model` / install id | Takes | Download | RAM | Speed here (CPU) | Page |
 |---|---|---|---|---|---|---|
 | Qwen3-ASR-0.6B | `qwen3-asr-0.6b` | 16 kHz speech; 30 languages and 22 Chinese dialects, detected or forced | 1.9 GB | 3 / 5 GB | an 11 s clip in 0.23 s on the card, 4.3 s on the CPU | [qwen3-asr.md](qwen3-asr.md) |
+| Qwen3-ForcedAligner-0.6B | `qwen3-forcedaligner-0.6b` | where each word of a transcript is said (11 languages): word times, `srt`, `vtt`; it does not transcribe | 1.9 GB | 4 / 6 GB | an 11 s clip in 0.13 s on the card, 1.5 s on the CPU | [qwen3-aligner.md](qwen3-aligner.md) |
 | Qwen3-ASR-1.7B | `qwen3-asr-1.7b` | the same, more accurate (about 5.4% word error on English, against 7.6% for Whisper large-v3-turbo, by Qwen's report and the Open ASR leaderboard: not measured here) | 4.7 GB | 7 / 10 GB | an 11 s clip in 0.3 s on the card, 7.6 s on the CPU | [qwen3-asr.md](qwen3-asr.md) |
 
 Both Apache-2.0. `POST /v1/audio/transcriptions` in the shape Whisper clients send (`language`, `prompt` as context, `json`, `text` and

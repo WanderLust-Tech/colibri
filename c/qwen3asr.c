@@ -149,6 +149,7 @@ typedef struct {
     uint16_t *embed;                                             /* bf16 [vocab][D] */
     AcdLin head;
     int audio_pad, audio_start, audio_end, im_end, eos2, asr_text;
+    int aligner, nhead, ts_id, ts_ms;                            /* forced aligner: its head's width, the <timestamp> token, the time of one class in ms */
     Tok tok;
     size_t wbytes;
 } Asr;
@@ -179,6 +180,11 @@ static int as_load(Asr *m, const char *dir, char *err, size_t errn){
     m->eff = acd_json_int(ac, "encoder_ffn_dim", 0); m->eout = acd_json_int(ac, "output_dim", 0); m->dsh = acd_json_int(ac, "downsample_hidden_size", 480);
     m->nl = acd_json_int(tc, "num_hidden_layers", 0); m->D = acd_json_int(tc, "hidden_size", 0); m->H = acd_json_int(tc, "num_attention_heads", 0);
     m->Hk = acd_json_int(tc, "num_key_value_heads", 0); m->hd = acd_json_int(tc, "head_dim", 128); m->inter = acd_json_int(tc, "intermediate_size", 0);
+    jval *tmt = json_get(th, "model_type");
+    m->aligner = tmt && tmt->t == J_STR && strstr(tmt->str, "forced_aligner") != NULL;
+    m->nhead = acd_json_int(th, "classify_num", 0);
+    m->ts_id = acd_json_int(root, "timestamp_token_id", -1);
+    m->ts_ms = acd_json_int(root, "timestamp_segment_time", 80);
     m->vocab = acd_json_int(tc, "vocab_size", 0); m->eps = (float)acd_json_num(tc, "rms_norm_eps", 1e-6); m->theta = (float)acd_json_num(tc, "rope_theta", 1e6);
     if (acd_json_int(ac, "num_mel_bins", 128) != AS_NMEL || m->dsh != 480 || m->eout != m->D || !m->el || !m->nl || !m->ed || m->ed % m->eh) {
         snprintf(err, errn, "unsupported Qwen3-ASR geometry in config.json"); return -1;
@@ -243,9 +249,10 @@ static int as_load(Asr *m, const char *dir, char *err, size_t errn){
     m->embed = (uint16_t *)malloc((size_t)te->numel * 2);
     st_read_raw(&S, n, m->embed, 1);
     m->wbytes += (size_t)te->numel * 2;
-    int64_t shh[2] = {m->vocab, m->D};
+    if (!m->nhead) m->nhead = m->vocab;
+    int64_t shh[2] = {m->nhead, m->D};
     const char *hn = st_find(&S, "thinker.lm_head.weight") ? "thinker.lm_head.weight" : n;
-    if (acd_load_lin(&S, hn, NULL, m->vocab, m->D, 2, shh, NULL, 0, 0, &m->head, &m->wbytes, err, errn)) return -1;
+    if (acd_load_lin(&S, hn, NULL, m->nhead, m->D, 2, shh, NULL, 0, 0, &m->head, &m->wbytes, err, errn)) return -1;
     st_destroy(&S);
     snprintf(path, sizeof path, "%s/tokenizer.json", dir);
     FILE *tf = fopen(path, "rb");
@@ -256,6 +263,7 @@ static int as_load(Asr *m, const char *dir, char *err, size_t errn){
     m->audio_end = tok_id_of(&m->tok, "<|audio_end|>"); m->im_end = tok_id_of(&m->tok, "<|im_end|>");
     m->eos2 = tok_id_of(&m->tok, "<|endoftext|>"); m->asr_text = tok_id_of(&m->tok, "<asr_text>");
     if (m->audio_pad < 0 || m->audio_start < 0 || m->audio_end < 0 || m->im_end < 0 || m->asr_text < 0) { snprintf(err, errn, "the tokenizer lacks the audio tokens"); return -1; }
+    if (m->aligner && (m->ts_id < 0 || tok_id_of(&m->tok, "<timestamp>") != m->ts_id)) { snprintf(err, errn, "the tokenizer's <timestamp> is not the config's timestamp_token_id"); return -1; }
     return 0;
 }
 
@@ -386,7 +394,8 @@ static float *as_encode(const Asr *m, const float *mel, int T, int *nf, float **
     free(chunk); free(co); free(pe);
     if (conv_dump) { *conv_dump = (float *)malloc((size_t)F * D * sizeof(float)); memcpy(*conv_dump, x, (size_t)F * D * sizeof(float)); }
     /* the layers: attention inside windows of 104 frames */
-    const int WIN = getenv("AS_FULL_ATTN") ? (F > 0 ? F : 1) : 13 * (800 / AS_CHUNK), H = m->eh, hd = D / H;
+    const int WIN = (getenv("AS_FULL_ATTN") || m->aligner) ? (F > 0 ? F : 1) :   /* the aligner: as the reference package runs it, over the whole clip */
+        13 * (800 / AS_CHUNK), H = m->eh, hd = D / H;
 #ifdef COLI_VULKAN
     {
         float *dout = as_vk_encode(m, x, F, WIN);
@@ -533,7 +542,7 @@ typedef struct {
     ColiVkTensor **t;                       /* [nl][7]: q k v o gate up down */
     ColiVkTensor *head;
     VkcBuf *prm;                            /* per layer: ln1 [D], ln2 [D], q norm [hd], k norm [hd]; then the final norm [D] */
-    VkcBuf *cs, *kc, *vc, *xu, *x, *nrm, *q, *k, *v, *ctx, *g, *u, *tmp, *lg, *out;
+    VkcBuf *cs, *kc, *vc, *xu, *x, *nrm, *q, *k, *v, *ctx, *g, *u, *tmp, *lg, *out, *hid;
     size_t cap, rows;
 } AsVk;
 
@@ -586,7 +595,7 @@ static int as_vk_reserve(AsVk *v, const Asr *m, size_t rows, size_t cap, const f
         !vkc_reserve(&v->k, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->v, rows * rk * 4, VKC_DEV) || !vkc_reserve(&v->g, rows * I * 4, VKC_DEV) ||
         !vkc_reserve(&v->u, rows * I * 4, VKC_DEV) || !vkc_reserve(&v->lg, nlog * 4, VKC_DEV) || !vkc_reserve(&v->out, nlog * 4, VKC_DOWN) ||
         !vkc_reserve(&v->kc, (size_t)m->nl * cap * rk * 4, VKC_DEV) || !vkc_reserve(&v->vc, (size_t)m->nl * cap * rk * 4, VKC_DEV) ||
-        !vkc_reserve(&v->cs, cap * hd * 4, VKC_DEV))
+        !vkc_reserve(&v->cs, cap * hd * 4, VKC_DEV) || !vkc_reserve(&v->hid, rows * D * 4, VKC_DOWN))
         return 0;
     float *tab = (float *)malloc(cap * hd * sizeof(float));
     if (!tab) return 0;
@@ -600,7 +609,7 @@ static int as_vk_reserve(AsVk *v, const Asr *m, size_t rows, size_t cap, const f
 
 /* n rows (host, [n][D]) at positions pos0.. through every layer, their keys and values appended to the device cache; then, when `logits` is
  * not NULL, the last row through the final norm and the output matrix. 1 on success; 0 leaves the CPU to run the request. */
-static int as_vk_run(AsVk *v, const Asr *m, const float *xrows, int n, int pos0, float *logits){
+static int as_vk_run(AsVk *v, const Asr *m, const float *xrows, int n, int pos0, float *logits, float *all){
     if (!v->ok || (size_t)n > v->rows || (size_t)(pos0 + n) > v->cap) return 0;
     const int D = m->D, H = m->H, Hk = m->Hk, hd = m->hd, I = m->inter;
     const size_t rq = (size_t)H * hd, rk = (size_t)Hk * hd, per = (size_t)2 * D + 2 * hd;
@@ -637,6 +646,7 @@ static int as_vk_run(AsVk *v, const Asr *m, const float *xrows, int n, int pos0,
         VkcNorm fn = {1, D, 1, (n - 1) * D, D, D, 0, D, D, (int)(m->nl * per), 0, 0, m->eps, 1.f};
         ok = vkc_norm(v->x, v->prm, v->nrm, &fn) && vkc_matmul(v->head, v->nrm, 0, v->lg, 0, 1) && vkc_copy(v->out, 0, v->lg, 0, (size_t)m->vocab);
     }
+    if (ok && all) ok = vkc_copy(v->hid, 0, v->x, 0, (size_t)n * D);                       /* every row's hidden state, for a caller that wants more than the last */
     ok = ok && vkc_submit(1);
     if (!ok) {
         fprintf(stderr, "[VK] qwen3asr: a step failed; the CPU runs the request\n");
@@ -645,6 +655,7 @@ static int as_vk_run(AsVk *v, const Asr *m, const float *xrows, int n, int pos0,
         return 0;
     }
     if (logits) memcpy(logits, vkc_ptr(v->out), (size_t)m->vocab * sizeof(float));
+    if (all) memcpy(all, vkc_ptr(v->hid), (size_t)n * D * sizeof(float));
     return 1;
 }
 #endif
@@ -872,7 +883,7 @@ static int *as_generate_on(const Asr *m, const float *enc, int nf, const char *c
     int dev = 0;
 #ifdef COLI_VULKAN
     if (allow_dev && as_vk.chain && as_vk_setup(&as_vk_dec, m))
-        dev = as_vk_reserve(&as_vk_dec, m, (size_t)n, (size_t)cap, cs, sn) && as_vk_run(&as_vk_dec, m, x, n, 0, logits);
+        dev = as_vk_reserve(&as_vk_dec, m, (size_t)n, (size_t)cap, cs, sn) && as_vk_run(&as_vk_dec, m, x, n, 0, logits, NULL);
 #else
     (void)allow_dev;
 #endif
@@ -891,7 +902,7 @@ static int *as_generate_on(const Asr *m, const float *enc, int nf, const char *c
         as_embed_row(m, tok, row);
 #ifdef COLI_VULKAN
         if (dev) {
-            if (!as_vk_run(&as_vk_dec, m, row, 1, pos, logits)) { *dev_failed = 1; break; }
+            if (!as_vk_run(&as_vk_dec, m, row, 1, pos, logits, NULL)) { *dev_failed = 1; break; }
             tok = as_argmax(logits, m->vocab);
             pos++;
             continue;
@@ -918,6 +929,144 @@ static int *as_generate(const Asr *m, const float *enc, int nf, const char *cont
     if (!failed) return gen;
     failed = 0;
     return as_generate_on(m, enc, nf, context, language, max_new, ng, prompt_len, prompt_out, 0, &failed);
+}
+
+/* ------------------------------------------------------------------------------------------------ forced alignment
+ * Qwen3-ForcedAligner-0.6B is the same network as Qwen3-ASR with a 5000-way head instead of the vocabulary: the audio encoder (24 layers), a causal 28-layer
+ * decoder, and no generation. The prompt is <|audio_start|> [audio slots] <|audio_end|> then the words, each followed by two <timestamp> tokens
+ * (its start and its end); one pass over all of it, and at each <timestamp> position the head's argmax is a class, times 80 ms. The times are then
+ * made monotonic (fix_timestamp of the reference: the longest non-decreasing run stays, the rest is interpolated or snapped to its neighbours). */
+
+#define AS_ALIGN_MAX_S 300.0       /* the reference's limit on the audio of one alignment */
+
+static void as_fix_timestamps(const int *data, int n, int *out){
+    int *dp = (int *)malloc((size_t)(n ? n : 1) * sizeof(int)), *par = (int *)malloc((size_t)(n ? n : 1) * sizeof(int));
+    char *normal = (char *)calloc((size_t)(n ? n : 1), 1);
+    double *res = (double *)malloc((size_t)(n ? n : 1) * sizeof(double));
+    for (int i = 0; i < n; i++) { dp[i] = 1; par[i] = -1; res[i] = data[i]; }
+    for (int i = 1; i < n; i++)
+        for (int j = 0; j < i; j++)
+            if (data[j] <= data[i] && dp[j] + 1 > dp[i]) { dp[i] = dp[j] + 1; par[i] = j; }
+    int best = 0;
+    for (int i = 1; i < n; i++) if (dp[i] > dp[best]) best = i;
+    for (int idx = n ? best : -1; idx != -1; idx = par[idx]) normal[idx] = 1;
+    for (int i = 0; i < n;) {
+        if (normal[i]) { i++; continue; }
+        int j = i;
+        while (j < n && !normal[j]) j++;
+        const int count = j - i;
+        int has_l = 0, has_r = 0;
+        double lv = 0, rv = 0;
+        for (int k = i - 1; k >= 0; k--) if (normal[k]) { lv = res[k]; has_l = 1; break; }
+        for (int k = j; k < n; k++) if (normal[k]) { rv = res[k]; has_r = 1; break; }
+        for (int k = i; k < j; k++) {
+            if (count <= 2) res[k] = !has_l ? rv : !has_r ? lv : ((k - (i - 1)) <= (j - k) ? lv : rv);
+            else if (has_l && has_r) res[k] = lv + (rv - lv) / (count + 1) * (k - i + 1);
+            else if (has_l) res[k] = lv;
+            else if (has_r) res[k] = rv;
+        }
+        i = j;
+    }
+    for (int i = 0; i < n; i++) out[i] = (int)res[i];
+    free(dp); free(par); free(normal); free(res);
+}
+
+typedef struct { int *ids, *classes, *raw, *fixed; float *logits; int nids, nts; double enc_s, dec_s; } AsAligned;
+
+static void as_free_aligned(AsAligned *a){ free(a->ids); free(a->classes); free(a->raw); free(a->fixed); free(a->logits); memset(a, 0, sizeof *a); }
+
+/* Aligns `words` (the units the text was cut into, by the caller) with the audio: out->fixed [2 * nwords] is start, end in milliseconds for each. */
+static int as_align(const Asr *m, const float *pcm, int n, const char *const *words, int nw, AsAligned *out, char *err, size_t errn){
+    memset(out, 0, sizeof *out);
+    if (!m->aligner) { snprintf(err, errn, "this model is not a forced aligner"); return -1; }
+    if (nw < 1) { snprintf(err, errn, "there are no words to align"); return -1; }
+    if ((double)n / AS_SR > AS_ALIGN_MAX_S) { snprintf(err, errn, "the audio is %.0f s long; the aligner takes up to %.0f s", (double)n / AS_SR, AS_ALIGN_MAX_S); return -1; }
+    double t0 = as_now();
+    int T = 0;
+    float *mel = as_mel(pcm, n, &T);
+    if (!mel) { snprintf(err, errn, "the audio is shorter than one frame"); return -1; }
+    int nf = 0;
+    float *enc = as_encode(m, mel, T, &nf, NULL);
+    free(mel);
+    out->enc_s = as_now() - t0;
+    t0 = as_now();
+    size_t tl = 32;
+    for (int i = 0; i < nw; i++) tl += strlen(words[i]) + 24;
+    char *tail = (char *)malloc(tl);
+    size_t at = 0;
+    at += (size_t)snprintf(tail + at, tl - at, "<|audio_end|>");
+    for (int i = 0; i < nw; i++) at += (size_t)snprintf(tail + at, tl - at, "%s<timestamp><timestamp>", words[i]);
+    char *nrm = NULL; size_t nl = 0;
+    if (q38_nfc_normalize(tail, at, &nrm, &nl) != 0) { nrm = strdup(tail); nl = at; }
+    free(tail);
+    int cap = (int)nl + nf + 64;
+    int *ids = (int *)malloc((size_t)cap * sizeof(int));
+    int n_ids = 0;
+    ids[n_ids++] = m->audio_start;
+    for (int i = 0; i < nf; i++) ids[n_ids++] = m->audio_pad;
+    n_ids += tok_encode((Tok *)&m->tok, nrm, (int)nl, ids + n_ids, cap - n_ids);
+    free(nrm);
+    const int D = m->D, Hk = m->Hk, hd = m->hd;
+    AsCache C;
+    C.cap = n_ids; C.len = 0;
+    C.k = (float **)calloc((size_t)m->nl, sizeof(float *)); C.v = (float **)calloc((size_t)m->nl, sizeof(float *));
+    for (int i = 0; i < m->nl; i++) { C.k[i] = (float *)malloc((size_t)n_ids * Hk * hd * sizeof(float)); C.v[i] = (float *)malloc((size_t)n_ids * Hk * hd * sizeof(float)); }
+    float *cs = (float *)malloc((size_t)n_ids * hd * sizeof(float)), *sn = (float *)malloc((size_t)n_ids * hd * sizeof(float));
+    acd_rope_table(cs, sn, n_ids, hd, m->theta);
+    float *x = (float *)malloc((size_t)n_ids * D * sizeof(float));
+    int slot = 0, nts = 0;
+    for (int i = 0; i < n_ids; i++) {
+        if (ids[i] == m->audio_pad && slot < nf) { memcpy(x + (size_t)i * D, enc + (size_t)slot * D, (size_t)D * sizeof(float)); slot++; }
+        else as_embed_row(m, ids[i], x + (size_t)i * D);
+        if (ids[i] == m->ts_id) nts++;
+    }
+    free(enc);
+    int on_card = 0;
+#ifdef COLI_VULKAN
+    if (as_vk.chain && as_vk_setup(&as_vk_dec, m)) on_card = as_vk_reserve(&as_vk_dec, m, (size_t)n_ids, (size_t)n_ids, cs, sn) && as_vk_run(&as_vk_dec, m, x, n_ids, 0, NULL, x);
+#endif
+    if (!on_card) as_decoder_rows(m, &C, x, n_ids, 0, cs, sn);
+    float *rows = (float *)malloc((size_t)(nts ? nts : 1) * D * sizeof(float));
+    int r = 0;
+    for (int i = 0; i < n_ids; i++) if (ids[i] == m->ts_id) { memcpy(rows + (size_t)r * D, x + (size_t)i * D, (size_t)D * sizeof(float)); r++; }
+    acd_rmsnorm(rows, rows, nts, D, m->norm, m->eps);
+    float *logits = (float *)malloc((size_t)(nts ? nts : 1) * m->nhead * sizeof(float));
+    acd_lin(logits, rows, nts, &m->head);
+    out->classes = (int *)malloc((size_t)(nts ? nts : 1) * sizeof(int));
+    out->raw = (int *)malloc((size_t)(nts ? nts : 1) * sizeof(int));
+    out->fixed = (int *)malloc((size_t)(nts ? nts : 1) * sizeof(int));
+    for (int i = 0; i < nts; i++) {
+        const float *l = logits + (size_t)i * m->nhead;
+        int best = 0;
+        for (int j = 1; j < m->nhead; j++) if (l[j] > l[best]) best = j;
+        out->classes[i] = best;
+        out->raw[i] = best * m->ts_ms;
+    }
+    as_fix_timestamps(out->raw, nts, out->fixed);
+    out->ids = ids; out->nids = n_ids; out->nts = nts; out->logits = logits;
+    out->dec_s = as_now() - t0;
+    for (int i = 0; i < m->nl; i++) { free(C.k[i]); free(C.v[i]); }
+    free(C.k); free(C.v); free(cs); free(sn); free(x); free(rows);
+    if (nts != 2 * nw) { snprintf(err, errn, "internal: %d timestamp positions for %d words", nts, nw); as_free_aligned(out); return -1; }
+    return 0;
+}
+
+static char **as_read_words(const char *path, int *count){
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char **w = NULL;
+    int n = 0, cap = 0;
+    char line[4096];
+    while (fgets(line, sizeof line, f)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
+        if (!len) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 64; w = (char **)realloc(w, (size_t)cap * sizeof(char *)); }
+        w[n++] = strdup(line);
+    }
+    fclose(f);
+    *count = n;
+    return w;
 }
 
 /* ------------------------------------------------------------------------------------------------ the answer */
@@ -1250,9 +1399,47 @@ static char *as_read_line(int *too_long){
 /*   READY {"model","task":"transcribe","sample_rate":16000,"max_seconds":..,"layers":..}
  *   TRANSCRIBE {"id","wav":PATH,"language":NAME|"","context":TEXT,"max_new":N}
  *   TEXT {"id","language","text","tokens","pieces","audio_seconds","seconds","truncated"}      ERROR {"id","message"} */
+static void as_serve_align(const Asr *m, const char *body){
+    jval *j = json_parse_checked(body);
+    if (!j || j->t != J_OBJ) { as_error("", "ALIGN needs a JSON object"); if (j) json_free(j); return; }
+    jval *jid = json_get(j, "id"), *jw = json_get(j, "wav"), *jwords = json_get(j, "words");
+    const char *id = jid && jid->t == J_STR ? jid->str : "";
+    char err[512] = "";
+    if (!jw || jw->t != J_STR) as_error(id, "wav must be the path of a 16 kHz WAV file");
+    else if (!jwords || jwords->t != J_ARR || jwords->len < 1) as_error(id, "words must be a list of the words to align");
+    else {
+        int ok = 1;
+        for (int i = 0; i < jwords->len; i++) if (jwords->kids[i]->t != J_STR || !*jwords->kids[i]->str) ok = 0;
+        int n = 0;
+        float *pcm = NULL;
+        if (!ok) as_error(id, "every word must be a non-empty string");
+        else if (!(pcm = as_read_wav(jw->str, &n, err, sizeof err))) as_error(id, err);
+        else {
+            const double t0 = as_now();
+            const char **words = (const char **)malloc((size_t)jwords->len * sizeof(char *));
+            for (int i = 0; i < jwords->len; i++) words[i] = jwords->kids[i]->str;
+            AsAligned al;
+            if (as_align(m, pcm, n, words, jwords->len, &al, err, sizeof err)) as_error(id, err);
+            else {
+                printf("ALIGNED {\"id\":\""); as_escape(id);
+                printf("\",\"starts\":[");
+                for (int i = 0; i < jwords->len; i++) printf("%s%d", i ? "," : "", al.fixed[2 * i]);
+                printf("],\"ends\":[");
+                for (int i = 0; i < jwords->len; i++) printf("%s%d", i ? "," : "", al.fixed[2 * i + 1]);
+                printf("],\"audio_seconds\":%.3f,\"seconds\":%.3f}\n", (double)n / AS_SR, as_now() - t0);
+                fflush(stdout);
+                as_free_aligned(&al);
+            }
+            free(words);
+        }
+        free(pcm);
+    }
+    json_free(j);
+}
+
 static int as_serve(const Asr *m, const char *name){
     printf("READY {\"model\":\""); as_escape(name);
-    printf("\",\"task\":\"transcribe\",\"sample_rate\":%d,\"piece_seconds\":%d,\"layers\":%d,\"encoder_layers\":%d,\"device\":\"%s\"}\n", AS_SR, (int)as_max_piece(), m->nl, m->el, as_device());
+    printf("\",\"task\":\"%s\",\"sample_rate\":%d,\"piece_seconds\":%d,\"layers\":%d,\"encoder_layers\":%d,\"device\":\"%s\"}\n", m->aligner ? "align" : "transcribe", AS_SR, m->aligner ? (int)AS_ALIGN_MAX_S : (int)as_max_piece(), m->nl, m->el, as_device());
     fflush(stdout);
     for (;;) {
         int too_long;
@@ -1260,6 +1447,12 @@ static int as_serve(const Asr *m, const char *name){
         if (!line) break;
         if (too_long) { as_error("", "the request line is too long"); free(line); continue; }
         if (!*line) { free(line); continue; }
+        if (!strncmp(line, "ALIGN ", 6)) {
+            if (m->aligner) as_serve_align(m, line + 6); else as_error("", "this model transcribes: it does not align (ALIGN is for a forced aligner)");
+            free(line);
+            continue;
+        }
+        if (m->aligner && !strncmp(line, "TRANSCRIBE ", 11)) { as_error("", "this model is a forced aligner: it does not transcribe (it takes ALIGN)"); free(line); continue; }
         if (strncmp(line, "TRANSCRIBE ", 11)) { as_error("", "unknown message"); free(line); continue; }
         jval *j = json_parse_checked(line + 11);
         if (!j || j->t != J_OBJ) { as_error("", "TRANSCRIBE needs a JSON object"); if (j) json_free(j); free(line); continue; }
@@ -1302,7 +1495,7 @@ static const char *as_name_of(const char *dir){
 static const char *USAGE = "usage: qwen3asr --model DIR (--wav FILE [--language NAME] [--context TEXT] [--max-new N] [--ref REFDIR] | --serve) [--threads N]\n";
 
 int main(int argc, char **argv){
-    const char *dir = NULL, *wav = NULL, *language = NULL, *context = "", *ref = NULL;
+    const char *dir = NULL, *wav = NULL, *language = NULL, *context = "", *ref = NULL, *words_file = NULL;
     int max_new = 0, serve = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) dir = argv[++i];
@@ -1311,6 +1504,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--context") && i + 1 < argc) context = argv[++i];
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) ref = argv[++i];
+        else if (!strcmp(argv[i], "--words-file") && i + 1 < argc) words_file = argv[++i];
         else if (!strcmp(argv[i], "--serve")) serve = 1;
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
 #ifdef _OPENMP
@@ -1337,6 +1531,42 @@ int main(int argc, char **argv){
     int n = 0;
     float *pcm = as_read_wav(wav, &n, err, sizeof err);
     if (!pcm) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }
+    if (m->aligner) {                                              /* a forced aligner: the words come from a file, one a line */
+        int nw = 0;
+        char **words = words_file ? as_read_words(words_file, &nw) : NULL;
+        if (!words || nw < 1) { fprintf(stderr, "qwen3asr: a forced aligner needs --words-file FILE (one word a line)\n"); return 1; }
+        AsAligned al;
+        if (as_align(m, pcm, n, (const char *const *)words, nw, &al, err, sizeof err)) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }
+        for (int i = 0; i < nw; i++) printf("%.2f %.2f %s\n", al.fixed[2 * i] / 1000.0, al.fixed[2 * i + 1] / 1000.0, words[i]);
+        fprintf(stderr, "qwen3asr: %d words, %.1f s of audio: encoder %.2f s, decoder %.2f s\n", nw, (double)n / AS_SR, al.enc_s, al.dec_s);
+        if (ref) {
+            char rp[4300];
+            size_t got = 0;
+            snprintf(rp, sizeof rp, "%s/input_ids.i32", ref);
+            int *ri = as_load_i32(rp, &got);
+            if (ri) { printf("prompt ids: %s (%d here, %zu in the reference)\n", got == (size_t)al.nids && !memcmp(ri, al.ids, got * 4) ? "identical" : "DIFFERENT", al.nids, got); free(ri); }
+            snprintf(rp, sizeof rp, "%s/classes.i32", ref);
+            ri = as_load_i32(rp, &got);
+            if (ri) {
+                int diff = 0;
+                for (size_t i = 0; i < got && i < (size_t)al.nts; i++) diff += ri[i] != al.classes[i];
+                printf("classes: %d of %d differ (%zu in the reference)\n", diff, al.nts, got);
+                free(ri);
+            }
+            snprintf(rp, sizeof rp, "%s/fixed_ms.i32", ref);
+            ri = as_load_i32(rp, &got);
+            if (ri) {
+                int diff = 0;
+                for (size_t i = 0; i < got && i < (size_t)al.nts; i++) diff += ri[i] != al.fixed[i];
+                printf("fixed times: %d of %d differ (%zu in the reference)\n", diff, al.nts, got);
+                free(ri);
+            }
+            snprintf(rp, sizeof rp, "%s/logits.f32", ref);
+            float *rl = as_load_f32(rp, 0, &got);
+            if (rl) { if (got == (size_t)al.nts * m->nhead) as_compare("logits", al.logits, rl, got); else printf("logits: reference has %zu values, here %d\n", got, al.nts * m->nhead); free(rl); }
+        }
+        return 0;
+    }
     if (!ref) {
         AsResult r;
         if (as_transcribe(m, pcm, n, language, context, max_new, &r, err, sizeof err)) { fprintf(stderr, "qwen3asr: %s\n", err); return 1; }

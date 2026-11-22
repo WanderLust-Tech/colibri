@@ -27,6 +27,7 @@ import image_engine                 # the qwenimage serve protocol, PNG and requ
 import music_engine                 # the acestep serve protocol, WAV and request rules
 import embedding_engine             # the qwen3embed serve protocol and the request rules of POST /v1/embeddings and /v1/rerank
 import asr_engine                   # the qwen3asr serve protocol and POST /v1/audio/transcriptions rules for it
+import align_engine                 # the same engine on a forced aligner: POST /v1/audio/alignments
 import speech_engine                # the qwen3tts serve protocol and POST /v1/audio/speech rules for it
 import voices                       # saved voices for the cloning (Base) speech models
 import media_meta                   # the settings written inside a finished picture or song
@@ -6421,6 +6422,11 @@ def is_transcription_engine(engine):
     return getattr(engine, "modality", "text") == "transcription"
 
 
+def is_alignment_engine(engine):
+    """True when the speech engine is a forced aligner (Qwen3-ForcedAligner: the same executable, its READY line says task "align")."""
+    return is_transcription_engine(engine) and (getattr(engine, "info", None) or {}).get("task") == "align"
+
+
 def is_speech_engine(engine):
     """True when the server fronts a speech-synthesis engine (Qwen3-TTS): decided by the engine object."""
     return getattr(engine, "modality", "text") == "speech"
@@ -6436,6 +6442,8 @@ def engine_purpose(engine):
         return f"it makes embeddings (POST {EMBEDDINGS_ENDPOINT})"
     if is_rerank_engine(engine):
         return f"it ranks documents (POST {RERANK_ENDPOINT})"
+    if is_alignment_engine(engine):
+        return f"it places the words of a text in speech (POST {ALIGN_ENDPOINT})"
     if is_transcription_engine(engine):
         return f"it transcribes speech (POST {TRANSCRIBE_ENDPOINT})"
     if is_speech_engine(engine):
@@ -6573,6 +6581,7 @@ def parse_multipart_music(content_type, raw):
 # base64 works too). A Gemma 4 E2B or E4B hears the file; a clip over what the model takes at once (30 s) is cut at its
 # quiet places and each piece is transcribed in turn.
 TRANSCRIBE_ENDPOINT = "/v1/audio/transcriptions"
+ALIGN_ENDPOINT = "/v1/audio/alignments"
 # POST /v1/audio/speech, OpenAI's shape (JSON: model, input, voice, response_format): the text spoken by a Qwen3-TTS speaker, the audio
 # in the body. Rules in speech_engine.py.
 SPEECH_ENDPOINT = "/v1/audio/speech"
@@ -6760,7 +6769,13 @@ class APIServer(ThreadingHTTPServer):
             entry["rerank"] = {key: info.get(key) for key in RERANK_OPTION_KEYS}
             if info.get("device"):
                 entry["rerank"]["device"] = info["device"]
-        if is_transcription_engine(self.engine):
+        if is_alignment_engine(self.engine):
+            info = getattr(self.engine, "info", None) or {}
+            entry["alignment"] = {"sample_rate": info.get("sample_rate"), "max_seconds": align_engine.MAX_SECONDS, "languages": list(align_engine.LANGUAGES),
+                                  "formats": list(align_engine.FORMATS)}
+            if info.get("device"):
+                entry["alignment"]["device"] = info["device"]
+        elif is_transcription_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["transcription"] = {"sample_rate": info.get("sample_rate"), "piece_seconds": info.get("piece_seconds"),
                                       "max_seconds": TRANSCRIBE_MAX_SECONDS, "languages": list(asr_engine.LANGUAGES),
@@ -6824,6 +6839,8 @@ class APIServer(ThreadingHTTPServer):
             return ["embeddings"]
         if is_rerank_engine(self.engine):
             return ["rerank"]
+        if is_alignment_engine(self.engine):
+            return ["alignment"]
         if is_transcription_engine(self.engine):
             return ["transcription"]
         if is_speech_engine(self.engine):
@@ -7615,7 +7632,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     body, blobs = self.read_edit_request()
                 elif path == MUSIC_ENDPOINT:
                     body = self.read_music_request()
-                elif path == TRANSCRIBE_ENDPOINT:
+                elif path in (TRANSCRIBE_ENDPOINT, ALIGN_ENDPOINT):
                     body = self.read_transcription_request()
                 else:
                     body = self.read_json()
@@ -7671,6 +7688,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.music_generation(body, request_id)
             elif path == TRANSCRIBE_ENDPOINT:
                 self.audio_transcription(body, request_id)
+            elif path == ALIGN_ENDPOINT:
+                self.audio_alignment(body, request_id)
             elif path == SPEECH_ENDPOINT:
                 self.audio_speech(body, request_id)
             elif path == "/v1/images/generations":
@@ -8460,8 +8479,53 @@ class APIHandler(BaseHTTPRequestHandler):
     # POST /v1/audio/transcriptions for a speech-recognition model (Qwen3-ASR): the same request as for Gemma's audio tower, answered by
     # a dedicated engine. The upload is read, mixed to mono and resampled to 16 kHz here; the engine hears the whole clip (it cuts one
     # over 20 minutes itself) and says which language it heard.
+    # POST /v1/audio/alignments (an extension): when each word of a text is said in an audio file, by a forced aligner (Qwen3-ForcedAligner). The audio
+    # is read as for a transcription (WAV, MP3, and with ffmpeg more, up to 300 s); the text is cut into words here; the answer is the words with their
+    # start and end in seconds, or subtitles (srt, vtt) made of them.
+    def audio_alignment(self, body, request_id):
+        engine = self.server.engine
+        if not is_alignment_engine(engine):
+            raise APIError(400, f"`{self.server.model_id}` does not align text with speech: {engine_purpose(engine)}.", "model", "unsupported_endpoint")
+        data = body.get("file")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise APIError(400, "`file` is required: the audio, as a WAV or MP3 file (or any audio ffmpeg reads, when the server has one).",
+                           "file", "missing_required_parameter")
+        try:
+            request = align_engine.alignment_request(body)
+        except align_engine.EmbeddingRequestError as error:
+            raise APIError(400, str(error), error.param, "invalid_value")
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _sys.path.insert(0, str(_Path(__file__).resolve().parent / "tools"))
+            import gemma4_audio
+            samples = gemma4_audio.load_clip(bytes(data))
+        except ImportError as problem:
+            raise APIError(400, f"audio support needs numpy ({problem}).", "file")
+        except ValueError as problem:
+            raise APIError(400, str(problem), "file", "invalid_audio")
+        seconds = len(samples) / gemma4_audio.SAMPLE_RATE
+        if seconds > align_engine.MAX_SECONDS:
+            raise APIError(400, f"the file is {seconds:.0f} s long; the aligner takes up to {align_engine.MAX_SECONDS} s: cut it, or align it in parts.", "file", "invalid_audio")
+        with self.server.scheduler.admit(self.client_disconnected) as (queue_wait, _slot):
+            if not engine.alive:
+                raise APIError(503, f"The forced alignment engine is not running ({engine.dead or 'exited'}).", None, "engine_unavailable", "server_error")
+            try:
+                result = engine.align_samples(gemma4_audio.to_wav(samples), request["words"])
+            except align_engine.EmbeddingEngineError as error:
+                raise APIError(500, f"The forced alignment engine failed: {error}", None, "engine_error", "server_error") from None
+        headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
+        if request["format"] in ("srt", "vtt", "text"):
+            content_type, payload = align_engine.render_alignment(request, result)
+            self.send_bytes(200, payload, content_type, request_id, headers)
+        else:
+            self.send_json(200, align_engine.alignment_payload(request, result, seconds, self.server.model_id), request_id, headers)
+
     def transcribe_speech(self, body, request_id):
         engine = self.server.engine
+        if is_alignment_engine(engine):
+            raise APIError(400, f"`{self.server.model_id}` is a forced aligner: it places the words of a text in speech, it does not transcribe "
+                                f"(POST {ALIGN_ENDPOINT} with `text`; a speech recognition model transcribes).", "model", "unsupported_endpoint")
         data = body.get("file")
         if not isinstance(data, (bytes, bytearray)) or not data:
             raise APIError(400, "`file` is required: the audio, as a WAV or MP3 file (or any audio ffmpeg reads, when the server has one).",

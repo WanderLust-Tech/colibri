@@ -750,7 +750,7 @@ talker, code predictor and codec vocoder, and the cloning encoders' matrix produ
 |---|---|---|
 | `COLI_VOICES` | `~/colibri-voices` | Where the saved voices of the voice-cloning models are (`<name>/ref.wav` and `voice.json`); read by the gateway and the router, written by `coli voice` and `POST /v1/audio/voices`. |
 | `QWEN3ASR_MAX_PIECE_S` | `1200` | qwen3asr: the longest piece of audio transcribed in one go, in seconds (at least 2); longer audio is cut where it is quietest and the texts joined. |
-| `AS_FULL_ATTN` | off | qwen3asr: `1` attends over the whole clip in the audio encoder, as stock transformers does, instead of the checkpoint's windows of 800 mel frames (for comparing against it). |
+| `AS_FULL_ATTN` | off | qwen3asr: `1` attends over the whole clip in the audio encoder, as stock transformers does, instead of the checkpoint's windows of 800 mel frames (for comparing against it). Always on for the forced aligner (its reference is the stock code). |
 | `QT_DECODE_THREADS` | physical cores, at most 6 | qwen3tts: the thread team of the decode loop on the CPU (`--decode-threads`). |
 | `QT_MIMI_WINDOW` | `0` | qwen3tts: attention window, in frames, of the voice-cloning codec encoder's transformer; `0` is a plain causal mask, which is what the reference package applies (the config's 250 is not applied there). |
 | `QT_TEACH` | off | qwen3tts `--clone-wav ... --check DIR`: `1` makes the package's codes drive the run and reports how many were not the engine's own argmax. |

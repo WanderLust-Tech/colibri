@@ -240,6 +240,15 @@ CATALOG = (
         post_install=(("qwen3_tokenizer", "tokenizer.json"),),
         prebuilt_since="2.4.0", doc="docs/qwen3-asr.md"),
     CatalogModel(
+        id="qwen3-forcedaligner-0.6b", family="qwen3_asr", name="Qwen3-ForcedAligner-0.6B",
+        repo="Qwen/Qwen3-ForcedAligner-0.6B", disk_gb=1.9,
+        # the ASR 1.7B's audio encoder and a 0.6B decoder with a 5000-way head: one pass places each word of a transcript in time
+        ram_min_gb=4, ram_good_gb=6, dense_gb=1.9, rank=3, size_class="small",
+        modality="transcription", summary="word timestamps: where each word of a transcript is said (11 languages; for subtitles); it does not transcribe",
+        license_note="Apache-2.0",
+        post_install=(("qwen3_tokenizer", "tokenizer.json"),),
+        doc="docs/qwen3-aligner.md"),
+    CatalogModel(
         id="qwen3-asr-1.7b", family="qwen3_asr", name="Qwen3-ASR-1.7B",
         repo="Qwen/Qwen3-ASR-1.7B", disk_gb=4.7,
         ram_min_gb=7, ram_good_gb=10, dense_gb=4.7, rank=2, size_class="small",

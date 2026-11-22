@@ -52,17 +52,27 @@ def transcribe(a, api, upload, C):
         print(f"  {C.yel}usage: coli transcribe FILE [FILE ...] [--language en] [--context \"names, terms\"] [--model ID] [--verbose] [--json]{C.r}")
         return 1
     status = 0
+    timed = timed_format(a)
     try:
         model = choose_model(api, "transcription", a.model, "turns speech into text")
+        aligner = choose_model(api, "alignment", getattr(a, "aligner", None), "places words in speech") if timed else None
     except Refused as why:
         print(f"  {C.yel}{why}{C.r}")
         return 1
     for path in a.files:
         try:
             answer, text = one(a, api, upload, model, path)
+            if timed and text:
+                body = align_file(a, api, upload, aligner, path, text, timed[0])
         except Refused as why:
             print(f"  {C.yel}{path}: {why}{C.r}", file=sys.stderr if a.json else sys.stdout)
             status = 1
+            continue
+        if timed:
+            if not text:
+                print(f"  {C.dim}(nothing was heard in {excerpt(os.path.basename(path), 40)}){C.r}")
+            elif deliver_timed(a, path, body, timed[1], C):
+                status = 1
             continue
         if a.json:
             print(json.dumps(answer))
@@ -74,6 +84,77 @@ def transcribe(a, api, upload, C):
             print(f"  {C.dim}{os.path.basename(path)}  ({heard}){C.r}")
         print(text if text else f"  {C.dim}(nothing was heard in {excerpt(os.path.basename(path), 40)}){C.r}")
     return status
+
+
+TIMED_FORMATS = (("srt", "srt", ".srt"), ("vtt", "vtt", ".vtt"), ("words", "text", ".txt"))
+
+
+def timed_format(a):
+    """(response_format, suffix) the person asked for with --srt, --vtt or --words, or None."""
+    for flag, fmt, suffix in TIMED_FORMATS:
+        if getattr(a, flag, False):
+            return fmt, suffix
+    return None
+
+
+def align_file(a, api, upload, aligner, path, text, fmt):
+    """The aligner's answer for `text` said in the file at `path`, in the response format `fmt`: the body (text, or the JSON). Refused for what the person can act on."""
+    fields = {"model": aligner, "text": text, "response_format": fmt}
+    if getattr(a, "language", None):
+        fields["language"] = a.language
+    status, answer = upload("/v1/audio/alignments", fields, os.path.basename(path), read_audio(path))
+    if status is None:
+        raise Refused("nothing answers on that host and port: start the server (coli service start, or coli router)")
+    if status == 401:
+        raise Refused("the server wants an API key: --api-key, or COLI_API_KEY")
+    if status != 200:
+        error = (answer or {}).get("error") if isinstance(answer, dict) else None
+        message = error.get("message") if isinstance(error, dict) else error
+        raise Refused(f"the server said {status}: {message or 'no reason given'}")
+    return answer
+
+
+def deliver_timed(a, path, body, suffix, C):
+    """Print the aligned words, or write the subtitles next to the audio file (or to --out). Returns 0, or 1 for a file that cannot be written."""
+    text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
+    if suffix == ".txt" or getattr(a, "json", False):
+        print(text.rstrip("\n"))
+        return 0
+    target = getattr(a, "out", None) or os.path.splitext(path)[0] + suffix
+    try:
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except OSError as error:
+        print(f"  {C.yel}cannot write {target}: {error.strerror or error}{C.r}")
+        return 1
+    print(f"  {C.dim}wrote {target}{C.r}")
+    return 0
+
+
+def align(a, api, upload, C):
+    """coli align FILE (--text WORDS | --text-file FILE) [--srt | --vtt | --words | --json] [--language CODE] [--aligner ID] [--out FILE]
+
+    Where each word of a transcript you have is said in the audio, by the server's forced aligner (Qwen3-ForcedAligner): the words with their times by
+    default, `--srt` or `--vtt` for subtitles (written next to the audio, or to --out)."""
+    text = a.text
+    if getattr(a, "text_file", None):
+        try:
+            with open(a.text_file, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError as error:
+            print(f"  {C.yel}cannot read {a.text_file}: {error.strerror or error}{C.r}")
+            return 1
+    if not a.files or len(a.files) != 1 or not (text or "").strip():
+        print(f"  {C.yel}usage: coli align FILE (--text \"what is said\" | --text-file FILE) [--srt | --vtt | --words | --json] [--language en] [--aligner ID] [--out FILE]{C.r}")
+        return 1
+    chosen = timed_format(a) or ("verbose_json" if a.json else "text", ".txt")
+    try:
+        aligner = choose_model(api, "alignment", a.aligner, "places words in speech")
+        body = align_file(a, api, upload, aligner, a.files[0], text, chosen[0])
+    except Refused as why:
+        print(f"  {C.yel}{why}{C.r}")
+        return 1
+    return deliver_timed(a, a.files[0], body, chosen[1] if not a.json else ".json", C)
 
 
 FORMAT_OF_SUFFIX = {".wav": "wav", ".mp3": "mp3", ".flac": "flac", ".opus": "opus", ".ogg": "opus", ".aac": "aac", ".pcm": "pcm"}

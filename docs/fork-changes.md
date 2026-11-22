@@ -657,6 +657,13 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   JSON), the engine wrapper's `speak_stream` generator keeps the engine in step when a client hangs up, the router relays it unchanged. The stream
   is the one-piece speech to a few percent of its level (the codec's attention reaches 8 x 72 frames, a part sees 96), no step at the joins.
   `tests/test_tts_stream.py` (13), `StreamingTest` in `tests/test_qwen3tts_real.py` (4, CPU and card).
+- **Word timestamps: Qwen3-ForcedAligner** ([qwen3-aligner.md](qwen3-aligner.md)): `qwen3asr` on the aligner checkpoint (the ASR 1.7B's audio encoder, a 0.6B decoder, a 5000-way head;
+  one causal pass over `<|audio_start|> slots <|audio_end|> word <timestamp><timestamp> ...`, the argmax at each `<timestamp>` times 80 ms, then the reference's
+  `fix_timestamp`), `ALIGN`/`ALIGNED` in the engine protocol, `align_engine.py` (the reference's word rules, the engine wrapper, the request rules), `subtitles.py`
+  (SRT, VTT), `POST /v1/audio/alignments` (json, verbose_json, text, srt, vtt), the router's capability `alignment`, `coli align` and `coli transcribe --srt|--vtt|--words`,
+  registry (`forced_aligner` marker) and catalogue entries (`qwen3-forcedaligner-0.6b`). Held to the package: prompt ids identical, 0 of 44 and 0 of 132 classes
+  differ, logits to 1.4e-5, every millisecond identical, CPU and card (the encoder attends over the whole clip as the stock code does, not in windows); the decoder
+  pass on the card (`as_vk_run` returns every row's hidden state): 2.1 s to 0.26 s for 33 s. `tests/test_align.py` (33), `tests/test_qwen3aligner_real.py` (7 + 1).
 - **The voice loop** ([voice-loop.md](voice-loop.md)): speech in, a chat model's answer, speech out, chained over the server's three routes (transcriptions,
   streamed chat, streamed speech). `c/voice_loop.py` (stdlib: the three calls, the sentence splitter and the text cleaning for a voice, `VoiceLoop.turn`),
   `c/talk_cli.py` + `coli talk` (the microphone and the loudspeaker through ffmpeg/ffplay, a voice-activity detector, `--file`, `--text`, `--out`,

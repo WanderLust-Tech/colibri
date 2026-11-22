@@ -22,7 +22,7 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions -H "Authorization: Bearer $KE
 - **`prompt`** is context for the model (names, terms, what the recording is), up to 1000 characters; it goes into the system turn.
 - **`response_format`:** `json` (the default, `{"text", "usage": {"type": "duration", "seconds"}}`), `text`, or `verbose_json` (adds `task`,
   `language`, `duration` and one segment over the whole clip). `srt`, `vtt` and word timestamps are refused: this model gives none (Qwen's
-  forced aligner, a separate model, does; it is not built here). `temperature` is accepted and ignored: the model is decoded greedily.
+  forced aligner, a separate model, does: [qwen3-aligner.md](qwen3-aligner.md); `coli transcribe --srt` chains the two). `temperature` is accepted and ignored: the model is decoded greedily.
 - **Silence:** a clip with nothing in it answers an empty `text` without asking the model.
 - **Long audio:** the engine takes up to 20 minutes in one piece (the reference's own limit); a longer clip is cut at the quietest 100 ms
   within 5 s of the limit, and the pieces' texts are joined with a space (the reference joins with nothing, which glues two English words
@@ -111,5 +111,5 @@ word for word. A device that is missing, or a step that fails, leaves the CPU in
 
 - The convolutions' im2col and the first convolution are still on the CPU (0.6 s of the 70 s clip's encoder); the card's decoder reads the
   logits back each token rather than choosing on the device.
-- Word and segment timestamps (Qwen3-ForcedAligner-0.6B), streaming transcription, and a batch of requests at once.
+- Word times inside this route itself (they are [the aligner's](qwen3-aligner.md), a second model), streaming transcription, and a batch of requests at once.
 - Audio that is not 16 kHz is the gateway's job; the engine's own `--wav` reads 16 kHz PCM16 or float WAV only.

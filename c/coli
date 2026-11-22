@@ -3894,6 +3894,13 @@ def cmd_speak(a):
     return speech_cli.speak(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
                             lambda path,body:_api_fetch(a,path,body),C)
 
+def cmd_align(a):
+    """coli align FILE --text WORDS : when each word is said, from a running server's forced aligner (speech_cli.py, docs/qwen3-aligner.md)."""
+    banner("align")
+    import retrieval_cli, speech_cli
+    return speech_cli.align(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),
+                            lambda path,fields,filename,data:_api_upload(a,path,fields,filename,data),C)
+
 def cmd_talk(a):
     """coli talk : a spoken conversation through a running server's speech recognition, chat and speech models (talk_cli.py, docs/voice-loop.md)."""
     banner("talk")
@@ -4763,6 +4770,11 @@ def main():
     ptr.add_argument("--context",default=None,metavar="TEXT",help="names and terms that may come up (up to 1000 characters)")
     ptr.add_argument("--model",default=None,help="the speech recognition model (default: the first the server lists)")
     ptr.add_argument("--verbose",action="store_true",help="say the length and the language heard")
+    ptr.add_argument("--srt",action="store_true",help="write subtitles (FILE.srt): the words are timed by the forced aligner after they are heard")
+    ptr.add_argument("--vtt",action="store_true",help="write WebVTT subtitles (FILE.vtt), as --srt")
+    ptr.add_argument("--words",action="store_true",help="print each word with its start and end in seconds (the forced aligner times them)")
+    ptr.add_argument("--aligner",default=None,help="the forced aligner for --srt, --vtt and --words (default: the first the server lists)")
+    ptr.add_argument("--out",default=None,metavar="FILE",help="where --srt or --vtt writes (default: beside the audio file)")
     ptr.add_argument("--json",action="store_true",help="print the server's answer (verbose_json) as it is")
     ptr.add_argument("--host",default="127.0.0.1"); ptr.add_argument("--port",type=int,default=None)
     ptr.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
@@ -4780,6 +4792,19 @@ def main():
     psp.add_argument("--model",default=None,help="the speech synthesis model (default: the first the server lists)")
     psp.add_argument("--host",default="127.0.0.1"); psp.add_argument("--port",type=int,default=None)
     psp.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
+    pal=sub.add_parser("align",help="place the words of a transcript you have in an audio file, in time (the server's forced aligner, Qwen3-ForcedAligner)")
+    pal.add_argument("files",nargs="*",metavar="FILE",help="the audio file (WAV, MP3, and with ffmpeg more; up to 5 minutes)")
+    pal.add_argument("--text",default=None,metavar="WORDS",help="what is said in it")
+    pal.add_argument("--text-file",default=None,metavar="FILE",help="what is said in it, from a file")
+    pal.add_argument("--language",default=None,metavar="CODE",help="the language (en, zh, ja, ko, ...); only Japanese and Korean are cut into words differently")
+    pal.add_argument("--aligner",default=None,help="the forced aligner (default: the first the server lists)")
+    pal.add_argument("--srt",action="store_true",help="write subtitles (FILE.srt)")
+    pal.add_argument("--vtt",action="store_true",help="write WebVTT subtitles (FILE.vtt)")
+    pal.add_argument("--words",action="store_true",help="print each word with its start and end (the default)")
+    pal.add_argument("--json",action="store_true",help="print the server's answer (verbose_json) as it is")
+    pal.add_argument("--out",default=None,metavar="FILE",help="where --srt or --vtt writes (default: beside the audio file)")
+    pal.add_argument("--host",default="127.0.0.1"); pal.add_argument("--port",type=int,default=None)
+    pal.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     ptk=sub.add_parser("talk",help="a spoken conversation: microphone in, a chat model's answer spoken (speech recognition, chat and speech models of the server)")
     ptk.add_argument("files",nargs="*",metavar="FILE",help="audio files to say instead of using the microphone (one turn each)")
     ptk.add_argument("--text",default=None,metavar="WORDS",help="type the words instead of speaking them (one turn); the answer is still spoken")
@@ -4918,7 +4943,7 @@ def main():
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"talk":cmd_talk,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"talk":cmd_talk,"align":cmd_align,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

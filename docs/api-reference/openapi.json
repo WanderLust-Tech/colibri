@@ -2088,6 +2088,24 @@
         }
       }
     },
+    "/v1/audio/alignments": {
+      "post": {
+        "tags": ["Speech"],
+        "summary": "When each word of a text is said in an audio file",
+        "description": "A forced aligner (Qwen3-ForcedAligner; `GET /v1/models` lists it with the capability `alignment`) places the words of `text`, which is what is said in `file`, in time: start and end in seconds for each word, or subtitles. Up to 300 s of audio. Not a transcription: the words are given. A recogniser answers 400, and the aligner answers `/v1/audio/transcriptions` with 400.",
+        "operationId": "createAlignment",
+        "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+        "requestBody": { "required": true, "content": { "multipart/form-data": { "schema": { "type": "object", "required": ["file", "text"], "properties": {
+          "file": { "type": "string", "format": "binary", "description": "The audio (WAV, MP3, and with ffmpeg more), up to 300 s." },
+          "model": { "type": "string" },
+          "text": { "type": "string", "description": "What is said in the audio, up to 20000 characters." },
+          "language": { "type": "string", "description": "A name or ISO-639 code of Chinese, Cantonese, English, German, Spanish, French, Italian, Portuguese, Russian, Korean, Japanese; it decides how the text is cut into words." },
+          "response_format": { "type": "string", "enum": ["json", "verbose_json", "text", "srt", "vtt"], "default": "json" },
+          "max_chars": { "type": "number", "default": 42, "description": "srt and vtt: the longest line, 8 to 200." },
+          "max_seconds": { "type": "number", "default": 7, "description": "srt and vtt: the longest a line stays up, 1 to 30." } } } } } },
+        "responses": { "200": { "description": "`json`: {\"words\": [{\"word\", \"start\", \"end\"}]}; `verbose_json` adds task, model, language, duration, text; the others are text.", "content": { "application/json": { "schema": { "type": "object" } }, "text/vtt": { "schema": { "type": "string" } }, "application/x-subrip": { "schema": { "type": "string" } } } } }
+      }
+    },
     "/v1/audio/voices": {
       "get": {
         "tags": ["Router"],

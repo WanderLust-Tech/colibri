@@ -46,6 +46,7 @@ printed.
 | `mirror` | Plan, stage, or verify a usage-ranked partial model mirror (see [multidisk.md](multidisk.md)). |
 | `doctor` | Environment/health check (`--json` report, `--deep` strict preflight). |
 | `transcribe FILE...` | Text from a running server's speech recognition model (`--language`, `--context`, `--model`, `--verbose`, `--json`; [qwen3-asr.md](qwen3-asr.md)). |
+| `align FILE --text WORDS` | When each word of a transcript you have is said, from a running server's forced aligner (`--text-file`, `--srt`, `--vtt`, `--words`, `--json`, `--language`, `--aligner`, `--out`; [qwen3-aligner.md](qwen3-aligner.md)). `transcribe` takes `--srt`, `--vtt`, `--words`, `--aligner` and `--out` to time what it heard. |
 | `speak TEXT...` | Speech from a running server's speech model, written to a file (`--voice`, `--instruct`, `--language`, `--out`, `--format`, `--seed`, `--model`; `--reference FILE`, `--reference-text`, `--x-vector` to clone a voice from a clip; [qwen3-tts.md](qwen3-tts.md)). |
 | `voice list\|add NAME FILE\|remove NAME` | The saved voices of the voice-cloning models (`--text` says what the clip says, else the speech recognition model writes it down; `--no-text` skips that; `--json`). |
 | `talk [FILE...]` | A spoken conversation: microphone in, a chat model's answer spoken (`--text`, `--model`, `--asr`, `--tts`, `--voice`, `--language`, `--system`, `--max-tokens`, `--mic`, `--list-mics`, `--silence`, `--threshold`, `--out`, `--no-play`; [voice-loop.md](voice-loop.md)). |
