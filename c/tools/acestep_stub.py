@@ -40,8 +40,9 @@ Knobs (environment), all optional:
     ACESTEP_STUB_LOAD_DELAY  seconds before READY (default 0)
     ACESTEP_STUB_RATE        sample rate of the clips (default 48000; the tests use a low one to stay small)
     ACESTEP_STUB_NO_AUDIO_IN set to make it an older engine: READY without tasks, GEN fields ignored
-    ACESTEP_STUB_PLANNER     set to make it a checkpoint with the 5 Hz planner: READY says "planner", `plan` is accepted (it needs bpm, key and
-                             timesig), a "plan" stage of duration * 5 + 1 steps runs first, and AUDIO says how many codes were written
+    ACESTEP_STUB_PLANNER     set to make it a checkpoint with the 5 Hz planner: READY says "planner", `plan` is accepted, a "meta" stage (unless bpm, key,
+                             timesig and duration are all given) and a "plan" stage of duration * 5 + 1 steps run first, and AUDIO says how many codes
+                             were written and, after a "meta" stage, what the planner chose (a duration of 0 or none: 12 seconds)
     ACESTEP_STUB_GUIDED      set to make it a checkpoint with the base DiT too: READY says "guided", the tasks extract, lego and
                              complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
@@ -113,10 +114,6 @@ def check_plan(request, planner):
         return "the planner is not installed"
     if request.get("task", "text2music") != "text2music":
         return "the planner is for text to music, with no codes of your own"
-    key, signature = request.get("key"), request.get("timesig")
-    if not isinstance(request.get("bpm"), int) or request["bpm"] < 1 or not (isinstance(key, str) and key.strip()) or not (isinstance(signature, str) and signature.strip()):
-        return ("the planner needs bpm, key and time signature (and the duration): the model's own first phase, where it writes them, "
-                "is not built")
     if request.get("lm") not in (None, "0.6B", "1.7B", "4B"):
         return "lm must be 0.6B, 1.7B or 4B"
     return None
@@ -141,7 +138,7 @@ def check(request, audio_in=True, guided=False):
     if task in GUIDED_TASKS and dit == "turbo":
         return "extract, lego and complete need the base or SFT DiT"
     duration = request.get("duration", READY["default_duration"])
-    if (task == "text2music" or (task == "complete" and not request.get("src_path"))) and (not number(duration) or not 1 <= duration <= 600):
+    if (task == "text2music" or (task == "complete" and not request.get("src_path"))) and (not number(duration) or not 1 <= duration <= 600)             and not (request.get("plan") and number(duration) and duration <= 0):
         return "duration must be 1 to 600 seconds"
     steps = request.get("steps", 32 if dit != "turbo" else 8)
     top = 200 if dit != "turbo" else 20
@@ -282,13 +279,37 @@ def has_src(request):
     return bool(request.get("src_path"))
 
 
+PLANNED_DURATION = 12.0
+
+
+def song_duration(request):
+    """The seconds the song is: the request's, or what the planner picks when it is asked for none."""
+    duration = request.get("duration", 30)
+    if request.get("plan") and (duration is None or float(duration) <= 0):
+        return PLANNED_DURATION
+    return float(duration)
+
+
+def planner_meta(request):
+    """What the stub's planner chose, None when it was given all four and skips its first phase."""
+    given = (isinstance(request.get("bpm"), int) and request["bpm"] > 0 and bool((request.get("key") or "").strip()) and
+             bool((request.get("timesig") or "").strip()) and float(request.get("duration") or 0) > 0)
+    if given:
+        return None
+    caption = request.get("caption", "")
+    meta = {"bpm": request.get("bpm") or 100, "duration": song_duration(request), "keyscale": request.get("key") or "C major",
+            "timesignature": request.get("timesig") or "4", "language": "" if request.get("lm_language") is False else "unknown",
+            "caption": "" if request.get("lm_caption") is False else "A planned take on: " + caption}
+    return meta
+
+
 def plan(request, src_seconds):
     """(samples at 48 kHz asked for, latent frames run) as acg does it: text to music from the duration, audio from the
     source with a repaint's silence added; whole 1920-sample frames, never fewer than 128. Returns (want48, frames) or
     an error message."""
     task = request.get("task", "text2music")
     if task == "text2music" or (task == "complete" and not has_src(request)):
-        duration = round(float(request.get("duration", 30)), 1)
+        duration = round(song_duration(request), 1)
         want = int(duration * RATE48)
     else:
         n = int(src_seconds * RATE48)
@@ -470,8 +491,13 @@ def serve():
                 out.line("ERROR", {"id": rid, "message": "cancelled"})
                 continue
         plan_codes = 0
+        meta = None
         if request.get("plan"):
-            plan_codes = int(float(request.get("duration", 30)) * 5)
+            meta = planner_meta(request)
+            if meta:
+                out.line("PROGRESS", {"id": rid, "stage": "meta", "step": 0, "steps": 1})
+                out.line("PROGRESS", {"id": rid, "stage": "meta", "step": 1, "steps": 1})
+            plan_codes = int(song_duration(request) * 5)
             for i in range(plan_codes + 1):
                 out.line("PROGRESS", {"id": rid, "stage": "plan", "step": i, "steps": plan_codes + 1})
                 if poll():
@@ -503,7 +529,7 @@ def serve():
                            "task": request.get("task", "text2music"),
                            "lm": ("acestep-5Hz-lm-" + (request.get("lm") or "1.7B")) if plan_codes else "", "plan_codes": plan_codes,
                            "caption_tokens": len(caption.split()) + 20, "lyric_tokens": 15 if not lyrics_given else 40,
-                           "truncated": False, "peak": 0.5,
+                           "truncated": False, "peak": 0.5, **({"meta": meta} if meta else {}),
                            "timings": {"text": 0.0, "condition": 0.0, "denoise": round(time.monotonic() - started, 3), "decode": 0.0}},
                  pcm)
 

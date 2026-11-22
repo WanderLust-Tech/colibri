@@ -123,14 +123,15 @@ conversion and `TRUNK_RESIDENT_LAYERS`, so AirLLM adds little for those models.
   last layer is the mean and the scale, so 64 needs 128 channels): the audio-in fixture is a second, 7.8 MB one with a flat 128-wide encoder. It also found one
   real difference from upstream, unreachable with Qwen's tokenizer: when the text-to-music instruction tokenizes SHORTER than the cover one, upstream pads the
   non-cover prompt with pad tokens that its cross-attention does not mask (it builds that mask from the audio's, not the text's); the engine now does the same.
-- [~] **E3. The 5 Hz language-model planner (L). Half done 2026-11-22** ([acestep.md](acestep.md#the-5-hz-planner-a-language-model-writes-the-songs-structure-first)): the codes phase is
-  built and held to upstream's `LLMHandler` (prompts and codes identical, logits at 1e-6, on the real 1.7B and a tiny fixture; 6 cases of the codes into the music;
-  the sampler checked by a self-test; every mutant caught), through the engine, the protocol, the gateway (`thinking`, `lm_*`) and `coli music --plan`. It needs bpm, key,
-  time signature and duration in the request. Open: the first phase (the model writing the metadata under upstream's grammar, so that a bare caption is enough), the
-  planner's other jobs (understanding a clip, formatting), the 4B and 0.6B on real weights, a Vulkan path, `coli model install` of the planner, the dashboard's controls.
+- [x] **E3. The 5 Hz language-model planner (L). Done 2026-11-22** ([acestep.md](acestep.md#the-5-hz-planner-a-language-model-writes-the-song-first)): both phases, held to
+  upstream's `LLMHandler`. Phase 1 (the model writing the metadata under upstream's constrained decoder, so that a bare caption is enough: tempo, key, time signature,
+  duration, language and a rewritten caption) is identical to upstream's in every step of 7 cases on the real 1.7B (state, tokens let through, logits at 1e-6, the token), in its
+  token tables, its parse and its PyYAML-exact YAML (6229 strings, 1546 texts); phase 2 (the codes) and the codes into the music as before; through the engine, the protocol, the gateway
+  (`thinking`, `use_cot_caption`, `use_cot_language`, `lm_*`; the `meta` stage and `colibri.meta`) and `coli music --plan`. Open: the `genres` field (refused, not guessed), the planner's
+  other jobs (understanding a clip, formatting), the 4B and 0.6B on real weights, a Vulkan path (phase 1 is 0.13 s a token on the CPU), `coli model install` of the planner, the dashboard's controls.
 - [x] **E4. Lego, extract and complete tasks (L). Done 2026-11-22** ([acestep.md](acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete)): the base and SFT
   DiTs (guidance by APG or ADG against the null condition, up to 200 steps) and the three tasks, held to upstream's handler on 19 cases of the real base checkpoint
-  and the tiny fixture (30 of 30 mutants caught), through the engine, the protocol, the gateway (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`)
+  and the tiny fixture (29 of 30 mutants caught; the 30th needs a tokenizer whose cover and text instructions differ in length), through the engine, the protocol, the gateway (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`)
   and `coli music --extract/--lego/--complete`. Not done: `coli model install` of the base DiT (it goes in by hand), the dashboard's controls, the Heun and SDE samplers.
 - [x] **E5. Push `main` to the fork (S).** *Done 2026-11-10: the fork's `main` is at `0b51fd62`, level with local `main` and the live clone.* Ask before each push.
 

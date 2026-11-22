@@ -98,6 +98,29 @@ LM_CORPUS = [
     "unknown en zh ja ko fr de es it pt ru instrumental bpm timesignature keyscale duration minor major G A D F# Bb",
 ] * 4
 
+# --lm-text: the planner's first phase writes its metadata as text, and random weights never reach the end of a caption. So the tiny planner learns a few
+# metadata blocks (the prompts of the first phase's oracle cases and what a real planner answers them: a caption over several lines, the fields in upstream's
+# order), enough for its greedy decoding to walk every state of the decoder. The numbers are in the ranges the decoder allows. A few cases carry what the decoder's free states must handle: a continuation line indented by a
+# tab, a trailing space before a line break (one token that holds the break but does not start with it), a field name written with a capital, and a field
+# the decoder does not know after the caption.
+LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:"
+LM_TEXT_CASES = [      # caption, lyrics, bpm, caption as the planner writes it (one line each), duration, key and scale, language, time signature
+    ("bright ukulele and light percussion, summery", "[Instrumental]", 100,
+     ["A bright and cheerful ukulele-led instrumental track with an optimistic feel. The arrangement", "begins with a clean, fingerpicked ukulele melody and light shakers."], 20, "C major", "unknown", "4"),
+    ("warm indie folk with soft vocals", "[Verse 1]\nmorning light on the kitchen floor\n[Chorus]\nsing it back to me once more", 96,
+     ["A warm, intimate indie folk song with soft, breathy vocals over fingerpicked acoustic guitar."], 20, "G major", "en", "3"),
+    ("ミニマルなテクノ、深いベース", "[Instrumental]", 128,
+     ["An energetic, driving minimal techno track built on a punchy kick drum, a deep rolling bassline", "and sparse hypnotic percussion.", "\tThe mix stays dark and spacious."], 30, "A minor", "unknown", "4"),
+    ("slow cinematic strings", "[Instrumental]", 70,
+     ["A slow, sweeping cinematic piece for strings, with long swelling chords and a mournful solo cello."], 20, "D minor", "unknown", "4", {"duration_label": "Duration"}),
+    ("upbeat electronic dance music", "[Instrumental]", 128,
+     ["An upbeat electronic dance track with a four-on-the-floor kick, bright synth stabs: a pumping bassline ", "and a big build into the drop."], 20, "A minor", "unknown", "4"),
+    ("calm piano", "[Instrumental]", 66,
+     ["A calm solo piano piece with gentle, unhurried phrasing."], 20, "C major", "unknown", "4"),
+    ("heavy rock drums and a distorted guitar", "[Instrumental]", 140,
+     ["An aggressive rock instrumental driven by heavy drums and a heavily distorted guitar riff."], 20, "E minor", "unknown", "4", {"extra_field": "mood: heavy"}),
+]
+
 SILENCE_FRAMES = 1500   # 60 seconds at 25 Hz; the real file holds 15000 (10 minutes)
 
 # Strength of each VAE residual unit's output convolution. A random stack of 15 residual units with Snake
@@ -122,6 +145,54 @@ CORPUS = [
 # letters with at most one leading non-letter, ONE digit at a time (cl100k takes up to three), punctuation runs, newline and
 # whitespace runs. The tiny tokenizer has to split text the way the real one does, or a port tested on it proves nothing.
 QWEN_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
+
+
+def lm_text_target(case):
+    """What the planner writes for a case: the metadata block upstream's decoder stops after (no closing tag: the end token comes first)."""
+    _, _, bpm, caption_lines, duration, key, language, signature, *more = case
+    extra = more[0] if more else {}
+    wrapped = "caption: " + caption_lines[0] + "".join("\n" + ("" if line.startswith("\t") else "  ") + line for line in caption_lines[1:])
+    unknown = "\n" + extra["extra_field"] if "extra_field" in extra else ""
+    label = extra.get("duration_label", "duration")
+    return f"<think>\nbpm: {bpm}\n{wrapped}{unknown}\n{label}: {duration}\nkeyscale: {key}\nlanguage: {language}\ntimesignature: {signature}\n<|im_end|>"
+
+
+def train_lm_text(lm, lm_dir, seed, steps=1500):
+    """Teach the tiny planner LM_TEXT_CASES (cross entropy on the answer's tokens, the head being the embedding table), until it answers each by greedy decoding."""
+    import torch.nn.functional as F
+    from transformers import PreTrainedTokenizerFast
+    tok = PreTrainedTokenizerFast.from_pretrained(lm_dir)
+    torch.manual_seed(seed + 9)
+    data = []
+    for case in LM_TEXT_CASES:
+        case = case[:8]                                   # (the decoder's special cases are for lm_text_target)
+        prompt = tok.apply_chat_template([{"role": "system", "content": f"# Instruction\n{LM_INSTRUCTION}\n\n"},
+                                          {"role": "user", "content": f"# Caption\n{case[0]}\n\n# Lyric\n{case[1]}\n"}], tokenize=False, add_generation_prompt=True)
+        p = tok(prompt, add_special_tokens=False)["input_ids"]
+        t = tok(lm_text_target(LM_TEXT_CASES[len(data)]), add_special_tokens=False)["input_ids"]
+        data.append((torch.tensor(p + t), len(p)))
+    lm.train()
+    weight = lm.embed_tokens.weight
+    opt = torch.optim.Adam(lm.parameters(), lr=1e-2)
+    for step in range(steps):
+        opt.zero_grad()
+        loss = 0.0
+        for ids, n in data:
+            h = lm(input_ids=ids[None]).last_hidden_state[0]
+            loss = loss + F.cross_entropy(h[n - 1:-1] @ weight.T, ids[n:])
+        loss = loss / len(data)
+        loss.backward()
+        opt.step()
+        if loss.item() < 1e-3:
+            break
+    lm.eval()
+    with torch.no_grad():
+        hit = total = 0
+        for ids, n in data:
+            h = lm(input_ids=ids[None]).last_hidden_state[0]
+            pred = (h[n - 1:-1] @ weight.T).argmax(-1)
+            hit += int((pred == ids[n:]).sum()); total += len(ids) - n
+    print(f"tiny planner: {step + 1} steps, loss {loss.item():.4f}, {hit} of {total} answer tokens right by greedy decoding", file=sys.stderr)
 
 
 def make_lm_tokenizer(path):
@@ -255,6 +326,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("outdir")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--lm-text", action="store_true",
+                    help="with --lm: teach the tiny planner a few metadata blocks, so that its first phase (the metadata as text) reaches the end of its fields")
     ap.add_argument("--lm", action="store_true",
                     help="also a tiny 5 Hz planner (acestep-5Hz-lm-1.7B/: a Qwen3 with the audio codes in its vocabulary) for the planner's oracle")
     ap.add_argument("--base", action="store_true",
@@ -342,6 +415,8 @@ def main():
         torch.manual_seed(a.seed + 7)
         lm = Qwen3Model(lm_cfg)
         randomize(lm, a.seed + 8)
+        if a.lm_text:
+            train_lm_text(lm, lm_dir, a.seed)
         lm_cfg.dtype = "bfloat16"
         lm_cfg.architectures = ["Qwen3Model"]
         lm_cfg.save_pretrained(lm_dir)

@@ -44,11 +44,11 @@ MUTANTS = {
     # --- the prompts and the metadata ----------------------------------------------------------------------------------------------
     "no-user-input-text": ("acestep_lm.h", '#define ALM_NO_INPUT "NO USER INPUT"', '#define ALM_NO_INPUT "NO INPUT"'),
     "empty-thinking": ("acestep_lm.h", 'uncond ? "<think>\\n\\n</think>" : cot;', 'uncond ? "<think>\\n</think>" : cot;'),
-    "metadata-key-order": ("acestep_lm.h", '"<think>\\nbpm: %d\\nduration: %d\\nkeyscale: %s\\n", bpm, (int)duration, ks);', '"<think>\\nduration: %d\\nbpm: %d\\nkeyscale: %s\\n", (int)duration, bpm, ks);'),
-    "metadata-duration-rounded": ("acestep_lm.h", "bpm, (int)duration, ks);", "bpm, (int)(duration + 0.5), ks);"),
-    "metadata-slash-four-kept": ("acestep_lm.h", 'if (tl > 2 && !strcmp(ts + tl - 2, "/4")) ts[tl - 2] = 0;', ""),
-    "metadata-language-line-dropped": ("acestep_lm.h", 'if (lg) n += snprintf(out + n, cap - n, "language: %s\\n", lg);', ""),
-    "yaml-no-is-a-boolean": ("acestep_lm.h", '"yes", "no", "on", "off", "true", "false", "null", "y", "n", "~", NULL', '"yes", "on", "off", "true", "false", "null", "y", "n", "~", NULL'),
+    "metadata-key-order": ("acestep_meta.h", "    for (int f = 0; f < AMF_N; f++) {\n        if (!m->have[f] || !m->s[f]) continue;", "    for (int f = AMF_N - 1; f >= 0; f--) {\n        if (!m->have[f] || !m->s[f]) continue;"),
+    "metadata-duration-rounded": ("acestep_meta.h", 'snprintf(nb, sizeof nb, "%d", (int)duration); alm_meta_set(&m, AMF_DURATION, nb);', 'snprintf(nb, sizeof nb, "%d", (int)(duration + 0.5)); alm_meta_set(&m, AMF_DURATION, nb);'),
+    "metadata-slash-four-kept": ("acestep_meta.h", 'if (l >= 2 && !strcmp(v + l - 2, "/4"))', "if (0)"),
+    "metadata-language-line-dropped": ("acestep_meta.h", "if (language && *language) alm_meta_set(&m, AMF_LANGUAGE, language);", ""),
+    "yaml-no-is-a-boolean": ("acestep_meta.h", '"yes", "Yes", "YES", "no", "No", "NO", ', '"yes", "Yes", "YES", '),
     "instruction-text": ("acestep_lm.h", '#define ALM_INSTRUCTION "Generate audio semantic tokens based on the given conditions:"', '#define ALM_INSTRUCTION "Generate audio semantic tokens based on the conditions:"'),
     "prompt-without-the-separator-after-thinking": ("acestep_lm.h", 'snprintf(out + n, cap - n, "<|im_start|>assistant\\n%s\\n\\n", think);', 'snprintf(out + n, cap - n, "<|im_start|>assistant\\n%s\\n", think);'),
     # --- the sampler ---------------------------------------------------------------------------------------------------------------
@@ -65,7 +65,6 @@ MUTANTS = {
     "codes-song-keeps-the-text-to-music-instruction": ("acestep_gen.h", "const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;\n    const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;",
                                                        "const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;\n    const int A = d->acdim, task = rq->task;"),
     "codes-hints-not-the-cover-noise-start": ("acestep_gen.h", "memcpy(lat, hints, (size_t)T * A * sizeof(float));", ""),
-    "plan-codes-per-second": ("acestep_gen.h", "const int target = (int)(rq->duration * 5);", "const int target = (int)(rq->duration * 4);"),
 }
 
 

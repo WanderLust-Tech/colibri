@@ -3063,7 +3063,7 @@ class MusicProgress:
     """The live line under a generation:  ⠹ composing 3/8 · 41s · seed 1234  (one line, redrawn in place
     on a terminal; nothing at all when the output is a pipe)."""
     FRAMES = Spinner.FRAMES
-    STAGES = {"plan": "planning the structure", "encode": "reading the clip", "text": "reading the caption",
+    STAGES = {"meta": "writing the song's metadata", "plan": "planning the structure", "encode": "reading the clip", "text": "reading the caption",
               "condition": "preparing the conditioning", "denoise": "composing", "decode": "decoding the audio"}
 
     def __init__(self, stream, seed):
@@ -3183,6 +3183,11 @@ def music_audio_flags(a):
             if not getattr(a, "plan", False):
                 sys.exit(f"{C.yel}{flag} is for --plan{C.r} (the planner)")
             body[field] = getattr(a, dest)
+    for flag, dest, field in (("--no-lm-caption", "no_lm_caption", "use_cot_caption"), ("--no-lm-language", "no_lm_language", "use_cot_language")):
+        if getattr(a, dest, False):
+            if not getattr(a, "plan", False):
+                sys.exit(f"{C.yel}{flag} is for --plan{C.r} (the planner)")
+            body[field] = False
     if getattr(a, "adg", False):
         body["use_adg"] = True
     return body
@@ -3207,7 +3212,7 @@ def music_settings(a, prompt, info):
                 "complete_track_classes": "--tracks", "guidance_scale": "--guidance", "cfg_interval_start": "--cfg-start",
                 "cfg_interval_end": "--cfg-end", "use_adg": "--adg", "thinking": "--plan", "lm_model": "--lm",
                 "lm_temperature": "--lm-temperature", "lm_cfg_scale": "--lm-cfg", "lm_top_p": "--lm-top-p", "lm_top_k": "--lm-top-k",
-                "bpm": "--bpm", "key": "--key"}.get(
+                "use_cot_caption": "--no-lm-caption", "use_cot_language": "--no-lm-language", "bpm": "--bpm", "key": "--key"}.get(
                     error.param, f"--{error.param}" if error.param else "the request")
         sys.exit(f"{C.yel}{flag}: {error}{C.r}")
 
@@ -3229,6 +3234,7 @@ def generate_music(engine, request, out=None, stream=None):
                                  cover_strength=request.get("audio_cover_strength"), cover_noise=request.get("cover_noise_strength"),
                                  plan=request.get("thinking") or None, lm=request.get("lm_model"), lm_temperature=request.get("lm_temperature"),
                                  lm_cfg_scale=request.get("lm_cfg_scale"), lm_top_p=request.get("lm_top_p"), lm_top_k=request.get("lm_top_k"),
+                                 lm_caption=request.get("use_cot_caption"), lm_language=request.get("use_cot_language"),
                                  dit=request.get("dit"), guidance=request.get("guidance_scale"), cfg_start=request.get("cfg_interval_start"),
                                  cfg_end=request.get("cfg_interval_end"), adg=request.get("use_adg"), track=request.get("track_name"),
                                  tracks=",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None,
@@ -3260,6 +3266,13 @@ def generate_music(engine, request, out=None, stream=None):
     task = request.get("task") if request.get("task") != "text2music" else None
     print(f"  {C.dgray}└─ {result['samples']/result['sample_rate']:.1f}s · {task + ' · ' if task else ''}seed {result['seed']} · "
           f"{result['steps']} steps · {elapsed:.0f}s{(' (' + parts + ')') if parts else ''}{C.r}", file=stream)
+    meta = result.get("meta")
+    if isinstance(meta, dict):                                   # what the planner chose
+        said = ", ".join(f"{label} {meta[key]}" for label, key in (("tempo", "bpm"), ("key", "keyscale"), ("time signature", "timesignature"),
+                                                                  ("language", "language"), ("length", "duration")) if meta.get(key) not in (None, ""))
+        print(f"  {C.dgray}└─ the planner chose: {said}{C.r}", file=stream)
+        if meta.get("caption"):
+            print(f"  {C.dgray}   and described it as: {meta['caption']}{C.r}", file=stream)
     if result.get("truncated"):
         print(f"  {C.yel}the caption or the lyrics were longer than the model reads and were cut{C.r}", file=stream)
     print(f"  {C.grn}✓{C.r} saved {path}\n", file=stream)
@@ -4690,7 +4703,7 @@ def main():
     # Music models (ACE-Step): what to make. Ignored by text and image models; --steps and --seed are shared above.
     music_flags=(("--lyrics",dict(default=None,metavar="TEXT|@FILE",help="the lyrics (music models; default: instrumental); @FILE reads them from a file")),
                  ("--language",dict(default=None,metavar="CODE",help="language of the vocals, like en, zh, ja (music models; default: unknown)")),
-                 ("--duration",dict(type=float,default=None,metavar="S",help="seconds of music, 1 to 600 (music models; default 30)")),
+                 ("--duration",dict(type=float,default=None,metavar="S",help="seconds of music, 1 to 600 (music models; default 30, or the planner's choice with --plan)")),
                  ("--shift",dict(type=float,default=None,help="the sampler's timestep shift (music models; default 1)")),
                  ("--bpm",dict(type=int,default=None,help="tempo in beats per minute (music models; default: left to the model)")),
                  ("--key",dict(default=None,metavar="KEY",help='musical key, like "C Major" (music models)')),
@@ -4713,7 +4726,9 @@ def main():
                  ("--cfg-start",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule (1 = the start, 0 = the end) guidance begins to apply (default 0)")),
                  ("--cfg-end",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule guidance stops applying (default 1)")),
                  ("--adg",dict(action="store_true",help="with the base or sft DiT: angle-based guidance instead of APG")),
-                 ("--plan",dict(action="store_true",help="the 5 Hz planner writes the song's structure first and the music follows it (music models with acestep-5Hz-lm-1.7B); needs --bpm, --key and --time-signature")),
+                 ("--plan",dict(action="store_true",help="the 5 Hz planner writes the song's structure first and the music follows it (music models with acestep-5Hz-lm-1.7B); it writes whatever of --bpm, --key, --time-signature and --duration you do not give (and a caption for the music), and picks the length without --duration")),
+                 ("--no-lm-caption",dict(action="store_true",help="with --plan: keep the caption you gave for the music instead of the planner's rewrite of it")),
+                 ("--no-lm-language",dict(action="store_true",help="with --plan: do not have the planner write the language")),
                  ("--lm",dict(choices=["0.6B","1.7B","4B"],default=None,help="with --plan: which planner (default: the first the model has)")),
                  ("--lm-temperature",dict(type=float,default=None,metavar="X",help="with --plan: the planner's sampling temperature, 0 to 2 (default 0.85; 0 is greedy)")),
                  ("--lm-cfg",dict(type=float,default=None,metavar="X",help="with --plan: the planner's guidance, 0 to 20 (default 2)")),

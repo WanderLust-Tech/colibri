@@ -1677,6 +1677,26 @@ jobs:
           done
           ./acestep --lm-selftest 1
           python3 -m unittest -v tests.test_acestep_planner
+          # the planner's first phase: the model writes the song's metadata under upstream's constrained decoder. Its YAML emitter against PyYAML on a
+          # corpus of strings (wrapped, quoted, escaped), its token tables against the ones upstream's processor builds from the same tokenizer, and every
+          # step of the decoder (its state, the tokens it lets through with the model's logits at them, the token chosen), the metadata parsed from the
+          # text and, where the case goes on, phase 2's YAML and codes. A planner of random weights never ends its caption (the decoder's free states
+          # run to the 3500-token limit, which is a case of its own); one that learned a few metadata blocks (--lm-text) reaches every field.
+          export PYTHONUTF8=1
+          python3 tools/make_acestep_tiny.py acestep_tiny_text --lm --lm-text
+          python3 tools/acestep_ref_meta.py yaml "$PWD/acestep_tiny_yaml.json"
+          ./acestep --yaml-ref acestep_tiny_yaml.json
+          python3 tools/acestep_ref_meta.py parse "$PWD/acestep_tiny_parse.json"
+          ./acestep --parse-ref acestep_tiny_parse.json
+          python3 tools/acestep_ref_meta.py capture "$PWD/acestep_tiny_text" "$PWD/acestep_tiny_meta_ref"
+          python3 tools/acestep_ref_meta.py capture "$PWD/acestep_tiny_enc" "$PWD/acestep_tiny_meta_rand" --cases meta_dur8
+          ./acestep --model acestep_tiny_text --meta-trees acestep_tiny_meta_ref/trees.json
+          for case in $(ls acestep_tiny_meta_ref | grep '^meta_'); do
+            ./acestep --model acestep_tiny_text --meta-ref acestep_tiny_meta_ref/$case
+          done
+          ./acestep --model acestep_tiny_enc --meta-ref acestep_tiny_meta_rand/meta_dur8
+          ACESTEP_TINY_TEXT=acestep_tiny_text python3 -m unittest -v tests.test_acestep_planner_meta
+          python3 -m unittest -v tests.test_acestep_meta_mutants tests.test_acestep_lm_mutants
           # and each oracle can fail: the encoder's, the tokenizer's and the audio-in pipeline's mutants. A few can only be seen by
           # one fixture (the flat encoder has no widths to get wrong; the tiny tokenizer never clamps and never makes the
           # text-to-music instruction the longer), and each tool says which.
@@ -1684,8 +1704,13 @@ jobs:
           python3 tools/mutate_acestep_tok.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/cover_vocal --skip fsq-no-hard-clamp
           python3 tools/mutate_acestep_audioin.py acestep_tiny_enc acestep_tiny_task_ref/cover10 acestep_tiny_task_ref/cover_odd acestep_tiny_task_ref/cover_half acestep_tiny_task_ref/cover_noise acestep_tiny_task_ref/cover_ref acestep_tiny_task_ref/cover_short acestep_tiny_task_ref/cover_pad4 acestep_tiny_task_ref/ref_short acestep_tiny_task_ref/ref_long acestep_tiny_task_ref/repaint_mid acestep_tiny_task_ref/repaint_str acestep_tiny_task_ref/repaint_aggr acestep_tiny_task_ref/repaint_cons acestep_tiny_task_ref/repaint_tail acestep_tiny_task_ref/repaint_extend acestep_tiny_task_ref/repaint_lead acestep_tiny_task_ref/repaint_short --skip noncover-prompt-not-cut
           python3 tools/mutate_acestep_lm.py acestep_tiny_enc acestep_tiny_lm_ref/lm10 acestep_tiny_lm_ref/lm_vocal10 acestep_tiny_lm_ref/lm_cjk6 acestep_tiny_lm_ref/lm_nometa8 --codes acestep_tiny_task_ref/codes10 acestep_tiny_task_ref/codes_short acestep_tiny_task_ref/codes_odd acestep_tiny_task_ref/codes_half acestep_tiny_task_ref/codes_noise
+          M=acestep_tiny_meta_ref
+          # three mutants need tokens the tiny tokenizer never forms (a line break or a colon inside a longer token, an audio code as the top token after a
+          # line break): the real planner's cases (tools/acestep_ref_meta.py capture on the 1.7B) hold those
+          python3 tools/mutate_acestep_meta.py acestep_tiny_text --skip fsm-caption-argmax-over-text-only,fsm-caption-newline-detection,fsm-field-name-colon --yaml acestep_tiny_yaml.json --parse acestep_tiny_parse.json --trees $M/trees.json --cases $M/meta_bare $M/meta_vocal $M/meta_ja $M/meta_dur8 $M/meta_bpm_key6 $M/meta_nocap8 $M/meta_nolang10 --random-model acestep_tiny_enc --random-case acestep_tiny_meta_rand/meta_dur8
           B=acestep_tiny_base_ref
-          python3 tools/mutate_acestep_guided.py acestep_tiny_enc $B/b_t2m $B/b_t2m_shift3 $B/b_t2m_nocfg $B/b_t2m_interval $B/b_t2m_adg $B/b_t2m_steps40 $B/b_cover_half $B/b_extract $B/b_extract_default $B/b_lego $B/b_lego_tail $B/b_complete $B/b_complete_default $B/b_complete_longer
+          # one mutant needs a cover whose two instructions tokenize to different lengths (the real tokenizer does that; the tiny one does not)
+          python3 tools/mutate_acestep_guided.py acestep_tiny_enc $B/b_t2m $B/b_t2m_shift3 $B/b_t2m_nocfg $B/b_t2m_interval $B/b_t2m_adg $B/b_t2m_steps40 $B/b_cover_half $B/b_extract $B/b_extract_default $B/b_lego $B/b_lego_tail $B/b_complete $B/b_complete_default $B/b_complete_longer --skip cover-switch-keeps-the-null-condition
       - name: Every mutation of the decoder, of the DiT, of the text path and of the pipeline is caught by its oracle
         run: |
           cd c

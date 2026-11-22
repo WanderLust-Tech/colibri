@@ -51,12 +51,20 @@ class Rules(unittest.TestCase):
         r = request(thinking=True, lm_model="4B", lm_temperature=0, lm_cfg_scale=3.5, lm_top_p=0.5, lm_top_k=50, **META)
         self.assertEqual((r["lm_model"], r["lm_temperature"], r["lm_cfg_scale"], r["lm_top_p"], r["lm_top_k"]), ("4B", 0.0, 3.5, 0.5, 50))
 
-    def test_what_it_needs_is_named(self):
-        self.assertIn("`bpm`", refused("bpm", thinking=True, key="C Major", time_signature="4"))
-        self.assertIn("`key`", refused("key", thinking=True, bpm=100, time_signature="4"))
-        message = refused("bpm", thinking=True)
-        for field in ("`bpm`", "`key`", "`time_signature`", "first phase"):
-            self.assertIn(field, message)
+    def test_a_bare_caption_is_enough(self):
+        r = request(thinking=True)                                           # the planner's first phase writes the rest
+        self.assertEqual((r["thinking"], r["bpm"], r["key"], r["time_signature"], r["duration"]), (True, None, None, None, 0))
+        self.assertEqual(request(thinking=True, duration=45)["duration"], 45)
+        self.assertEqual(request(duration=45)["duration"], 45)
+        self.assertEqual(request()["duration"], 30)                           # no planner: the engine's default length
+
+    def test_what_the_first_phase_writes_can_be_turned_off(self):
+        r = request(thinking=True, use_cot_caption=False, use_cot_language=False)
+        self.assertEqual((r["use_cot_caption"], r["use_cot_language"]), (False, False))
+        self.assertEqual((request(thinking=True)["use_cot_caption"], request(thinking=True)["use_cot_language"]), (None, None))
+        for name in ("use_cot_caption", "use_cot_language"):
+            refused(name, thinking=True, **{name: "no"})
+            self.assertIn("thinking", refused(name, **{name: False}))
 
     def test_thinking_is_for_text_to_music_with_a_planner(self):
         self.assertIn("text to music", refused("thinking", thinking=True, task="cover", src_audio=make_wav(1.5), **META))
@@ -101,6 +109,40 @@ class Gateway(unittest.TestCase):
         status, out = self.song(prompt="calm piano", duration=2, seed=2)
         self.assertEqual((status, out["colibri"]["plan_codes"], out["colibri"]["lm"]), (200, 0, ""))
 
+    def test_a_bare_caption_gets_its_metadata_from_the_planner(self):
+        status, out = self.song(prompt="calm piano", thinking=True, seed=2)
+        self.assertEqual(status, 200, out)
+        meta = out["colibri"]["meta"]
+        self.assertEqual((meta["bpm"], meta["keyscale"], meta["timesignature"], meta["duration"]), (100, "C major", "4", 12.0))
+        self.assertEqual((meta["language"], meta["caption"]), ("unknown", "A planned take on: calm piano"))
+        self.assertEqual((out["colibri"]["plan_codes"], out["colibri"]["duration"]), (60, 12.0))          # the length the planner chose
+
+    def test_what_is_given_is_kept(self):
+        status, out = self.song(prompt="calm piano", thinking=True, seed=2, bpm=90, duration=4)
+        meta = out["colibri"]["meta"]
+        self.assertEqual((status, meta["bpm"], meta["duration"], out["colibri"]["plan_codes"]), (200, 90, 4.0, 20))
+
+    def test_all_four_given_skips_the_first_phase(self):
+        status, out = self.song(prompt="calm piano", thinking=True, seed=2, **META)
+        self.assertEqual(status, 200)
+        self.assertIsNone(out["colibri"].get("meta"))
+
+    def test_the_caption_and_the_language_can_be_kept(self):
+        status, out = self.song(prompt="calm piano", thinking=True, seed=2, use_cot_caption=False, use_cot_language=False)
+        meta = out["colibri"]["meta"]
+        self.assertEqual((status, meta["caption"], meta["language"]), (200, "", ""))
+
+    def test_the_meta_stage_comes_before_the_plan(self):
+        status, _, events = self.rig.stream(prompt="calm piano", thinking=True, seed=2, duration=4)
+        self.assertEqual(status, 200)
+        stages = []
+        for event in events:
+            data = event[1] if isinstance(event, tuple) else event
+            stage = (data or {}).get("stage") if isinstance(data, dict) else None
+            if stage and (not stages or stages[-1] != stage):
+                stages.append(stage)
+        self.assertEqual(stages[:3], ["meta", "plan", "text"], stages)
+
     def test_the_plan_stage_is_streamed_first(self):
         status, _, events = self.rig.stream(prompt="calm piano", thinking=True, seed=2, bpm=100, key="D minor", time_signature="3", duration=4)
         self.assertEqual(status, 200)
@@ -118,7 +160,7 @@ class Gateway(unittest.TestCase):
         self.assertNotEqual(a, b)                                           # the stub hashes the planner's settings into the clip, as the real one's audio depends on them
 
     def test_refusals_are_400s_that_name_the_field(self):
-        for body, param in ((dict(thinking=True), "bpm"), (dict(thinking=True, lm_temperature=5, **META), "lm_temperature"), (dict(lm_top_k=3), "lm_top_k")):
+        for body, param in ((dict(thinking=True, use_cot_caption="x"), "use_cot_caption"), (dict(thinking=True, lm_temperature=5, **META), "lm_temperature"), (dict(lm_top_k=3), "lm_top_k")):
             with self.subTest(param=param):
                 status, out = self.song(prompt="calm piano", **body)
                 self.assertEqual((status, out["error"]["param"]), (400, param), out)
@@ -166,8 +208,18 @@ class Coli(unittest.TestCase):
             self.coli.music_audio_flags(self.args(lm_temperature=0.5))
         self.assertIn("--lm-temperature is for --plan", str(caught.exception))
 
+    def test_what_the_planner_writes_can_be_turned_off(self):
+        body = self.coli.music_audio_flags(self.args(plan=True, no_lm_caption=True, no_lm_language=True))
+        self.assertEqual((body["use_cot_caption"], body["use_cot_language"]), (False, False))
+        body = self.coli.music_audio_flags(self.args(plan=True))
+        self.assertNotIn("use_cot_caption", body)
+        with self.assertRaises(SystemExit) as caught:
+            self.coli.music_audio_flags(self.args(no_lm_caption=True))
+        self.assertIn("--no-lm-caption is for --plan", str(caught.exception))
+
     def test_the_musics_progress_names_the_stage(self):
-        self.assertIn("plan", self.coli.MusicProgress.STAGES) if hasattr(self.coli, "MusicProgress") else None
+        for stage in ("meta", "plan"):
+            self.assertIn(stage, self.coli.MusicProgress.STAGES)
 
 
 if __name__ == "__main__":

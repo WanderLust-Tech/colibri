@@ -37,6 +37,7 @@ typedef struct {
     int eos;                           /* <|im_end|> */
     int rope_n; float *cs, *sn;        /* RoPE tables for positions 0 .. rope_n - 1 */
     char dir_name[64];
+    void *meta_tab; void (*meta_free)(void *);     /* the first phase's token tables (acestep_meta.h), built the first time */
 } AceLm;
 
 static void alm_free(AceLm *m){
@@ -47,6 +48,7 @@ static void alm_free(AceLm *m){
     }
     free(m->L); free(m->norm); free(m->embed); free(m->cs); free(m->sn);
     tok_free(&m->tok);
+    if (m->meta_tab && m->meta_free) m->meta_free(m->meta_tab);
     free(m);
 }
 
@@ -283,48 +285,6 @@ static void alm_logits(const AceLm *m, const float *h, int nr, const int *ids, i
 /* -------------------------------------------------------------------------------------------------------- prompts */
 
 static char *alm_dup(const char *s){ size_t n = strlen(s); char *p = (char *)malloc(n + 1); if (p) memcpy(p, s, n + 1); return p; }
-
-/* PyYAML's plain scalar for a string value: quoted with single quotes when YAML 1.1 would read it as something else. Enough for the values a
- * song's metadata has (a key and scale, a language code, a time signature); a value with a colon or a hash after a space, or a leading
- * indicator, is quoted as well. malloc'd. */
-static char *alm_yaml_scalar(const char *v){
-    static const char *const words[] = { "yes", "no", "on", "off", "true", "false", "null", "y", "n", "~", NULL };
-    int quote = !*v;
-    for (int i = 0; words[i]; i++) if (!strcasecmp(v, words[i])) quote = 1;
-    if (strchr("-?:,[]{}#&*!|>'\"%@`", *v)) quote = 1;
-    for (const char *p = v; *p; p++) if ((*p == ':' && (p[1] == ' ' || !p[1])) || (*p == '#' && p > v && p[-1] == ' ') || *p == '\n') quote = 1;
-    char *end; strtod(v, &end);
-    if (*v && !*end) quote = 1;                                           /* a number: kept a string by quotes */
-    size_t n = strlen(v);
-    char *out = (char *)malloc(n * 2 + 3), *w = out;
-    if (!out) return NULL;
-    if (quote) *w++ = '\'';
-    for (const char *p = v; *p; p++) { if (quote && *p == '\'') *w++ = '\''; *w++ = *p; }
-    if (quote) *w++ = '\'';
-    *w = 0;
-    return out;
-}
-
-/* The metadata as upstream's _format_metadata_as_cot writes it: "<think>\n" + the YAML of the given fields in key order + "\n</think>". The time
- * signature "N/4" is "N", and an all-digit string is a number. bpm, keyscale, timesignature and duration are required; language is
- * left out when NULL. malloc'd. */
-static char *alm_cot(int bpm, double duration, const char *keyscale, const char *language, const char *timesig){
-    char ts[32]; snprintf(ts, sizeof ts, "%s", timesig ? timesig : "");
-    size_t tl = strlen(ts);
-    if (tl > 2 && !strcmp(ts + tl - 2, "/4")) ts[tl - 2] = 0;
-    int digits = ts[0] != 0;
-    for (const char *p = ts; *p; p++) if (*p < '0' || *p > '9') digits = 0;
-    char *ks = alm_yaml_scalar(keyscale ? keyscale : ""), *lg = language && *language ? alm_yaml_scalar(language) : NULL;
-    char *tsv = digits ? alm_dup(ts) : alm_yaml_scalar(ts);
-    size_t cap = strlen(ks) + (lg ? strlen(lg) : 0) + strlen(tsv) + 256;
-    char *out = (char *)malloc(cap);
-    if (!out || !ks || !tsv) { free(out); free(ks); free(lg); free(tsv); return NULL; }
-    int n = snprintf(out, cap, "<think>\nbpm: %d\nduration: %d\nkeyscale: %s\n", bpm, (int)duration, ks);
-    if (lg) n += snprintf(out + n, cap - n, "language: %s\n", lg);
-    snprintf(out + n, cap - n, "timesignature: %s\n</think>", tsv);
-    free(ks); free(lg); free(tsv);
-    return out;
-}
 
 /* The codes phase's two prompts (upstream's build_formatted_prompt_with_cot, the training-aligned path): the chat template with the instruction as
  * the system turn, then the user's caption and lyrics (or, for the unconditional one, "NO USER INPUT") and the assistant turn left open after its

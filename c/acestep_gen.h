@@ -32,6 +32,7 @@
 #include "acestep_text.h"
 #include "acestep_audio.h"
 #include "acestep_lm.h"
+#include "acestep_meta.h"
 
 #define ACG_RATE 48000
 #define ACG_HOP 1920                   /* samples per latent frame: 25 latent frames a second */
@@ -387,12 +388,14 @@ typedef struct {
     const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
     const char *dit;                               /* turbo, base or sft; NULL or "": see ace_select_for */
     const int *codes; int ncodes;                  /* the planner's audio codes (0..63999): text to music from them, as upstream's cover of codes; ncodes 0 is none */
-    /* the planner (text to music only): the 5 Hz language model first writes the codes of the song's structure from the caption, the lyrics and the
-     * metadata below, which the DiT then takes as its context. bpm, key, timesig and duration must all be given (the model's own first phase, where it
-     * writes them, is not built). The callers set the sampling defaults upstream has: temperature 0.85, guidance 2, top-p 0.9, top-k off. */
+    /* the planner (text to music only): the 5 Hz language model first writes the song's metadata (the tempo, key, time signature, duration, language and a
+     * rewritten caption; whatever of bpm, key, timesig and duration is not given) and then the codes of its structure, which the DiT takes as its context.
+     * With all four given the first phase is skipped, as upstream skips it. A duration of 0 or less lets the model choose (10 to 600 seconds). The callers set
+     * the sampling defaults upstream has: temperature 0.85, guidance 2 (the codes only), top-p 0.9, top-k off. */
     int plan;
     const char *lm;                                /* 0.6B, 1.7B or 4B; NULL or "": the first the checkpoint has */
     double lm_temperature, lm_cfg_scale, lm_top_p; int lm_top_k;
+    int lm_caption_off, lm_language_off;           /* 1: do not have the model rewrite the caption (the DiT keeps yours), or write the language */
 } AceRequest;
 
 /* Taps: the oracle's view of what the stages made, by name ("noise", "timbre", "src_latents", "clean_src_latents", "context",
@@ -416,6 +419,9 @@ typedef struct {
     char dit[64];                                  /* the DiT that ran: acestep-v15-turbo, -base or -sft */
     char lm[64];                                   /* the planner that ran, "" without one */
     int plan_codes; double t_plan;                 /* the codes it wrote, and the seconds it took (the model's load included) */
+    int meta_run;                                  /* the planner's first phase ran: what it wrote follows */
+    int meta_bpm; double meta_duration;
+    char meta_key[48], meta_timesig[16], meta_language[48], meta_caption[2600];
     double guidance;                               /* the guidance scale applied (0 for the turbo DiT, or when it is 1 or less) */
 } AceInfo;
 
@@ -468,7 +474,8 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->lyrics && strlen(r->lyrics) > ACG_MAX_LYRIC_BYTES) { snprintf(err, errn, "lyrics longer than %d bytes", ACG_MAX_LYRIC_BYTES); return 1; }
     if (r->language && strlen(r->language) > 32) { snprintf(err, errn, "language is not a language code"); return 1; }
     if (r->task < ACG_TASK_TEXT2MUSIC || r->task > ACG_TASK_COMPLETE) { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return 1; }
-    if ((r->task == ACG_TASK_TEXT2MUSIC || (r->task == ACG_TASK_COMPLETE && !(r->src_path && *r->src_path))) && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS)) { snprintf(err, errn, "duration must be %g to %g seconds", ACG_MIN_SECONDS, ACG_MAX_SECONDS); return 1; }
+    if ((r->task == ACG_TASK_TEXT2MUSIC || (r->task == ACG_TASK_COMPLETE && !(r->src_path && *r->src_path))) && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS) &&
+        !(r->plan && r->duration <= 0)) { snprintf(err, errn, "duration must be %g to %g seconds", ACG_MIN_SECONDS, ACG_MAX_SECONDS); return 1; }
     if (r->steps < 1 || r->steps > ACG_MAX_STEPS) { snprintf(err, errn, "steps must be 1 to %d", ACG_MAX_STEPS); return 1; }
     if (!(r->shift > 0.0 && r->shift <= 10.0)) { snprintf(err, errn, "shift must be above 0 and at most 10"); return 1; }
     if (r->bpm < 0 || r->bpm > 1000) { snprintf(err, errn, "bpm must be 0 (not given) to 1000"); return 1; }
@@ -482,7 +489,6 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->ref_path && strlen(r->ref_path) > 4000) { snprintf(err, errn, "ref path too long"); return 1; }
     if (r->plan) {
         if (r->task != ACG_TASK_TEXT2MUSIC || r->ncodes > 0) { snprintf(err, errn, "the planner is for text to music, with no codes of your own"); return 1; }
-        if (r->bpm < 1 || act_blank(r->key) || act_blank(r->timesig)) { snprintf(err, errn, "the planner needs bpm, key and time signature (and the duration): the model's own first phase, where it writes them, is not built"); return 1; }
         if (!(r->lm_cfg_scale >= 0 && r->lm_cfg_scale <= 20) || !(r->lm_temperature >= 0 && r->lm_temperature <= 2) || !(r->lm_top_p >= 0 && r->lm_top_p <= 1) || r->lm_top_k < 0 || r->lm_top_k > 100000) {
             snprintf(err, errn, "lm_temperature must be 0 to 2, lm_cfg_scale 0 to 20, lm_top_p 0 to 1 and lm_top_k a whole number"); return 1; }
     } else if (r->lm && *r->lm) { snprintf(err, errn, "lm is for the planner (plan)"); return 1; }
@@ -697,25 +703,74 @@ static int acg_plan_step(int step, const float *cond, const float *unc, int toke
     return 0;
 }
 
+/* The first phase writes an unknown number of tokens (the caption is free): one frame at the start, one at the end, and the stop request is heard at every token. */
+typedef struct { const AceHooks *h; int stopped; } AcgMetaCtx;
+static int acg_meta_step(void *ud, int step){
+    AcgMetaCtx *c = (AcgMetaCtx *)ud;
+    if (step == 0 && c->h && c->h->progress) c->h->progress(c->h->ud, "meta", 0, 1);
+    if (c->h && c->h->cancelled && c->h->cancelled(c->h->ud)) { c->stopped = 1; return 1; }
+    return 0;
+}
+
 static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn);
 
-/* The planner's half of a request: the 5 Hz model writes the codes (upstream's codes phase of generate_with_stop_condition with the metadata given), then
- * the request runs again with them, as a cover of codes. */
+/* The planner's half of a request: upstream's generate_with_stop_condition. Phase 1, unless all of bpm, key, time signature and duration are given: the 5 Hz
+ * model writes the metadata under the constrained decoder, with no guidance. Phase 2: the model writes the codes under a prompt that carries that metadata as
+ * YAML. Then the request runs again with them, as a cover of codes, with the metadata the user did not give taken from phase 1 and the caption it rewrote. */
 static int ace_plan_and_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, float **pcm, AceInfo *info, char *err, size_t errn){
     double t0 = acg_now();
     AceLm *lm = ace_planner(e, rq->lm, err, errn);
     if (!lm) return 1;
-    const int target = (int)(rq->duration * 5);                                         /* upstream: int(duration * 5) codes, a second being 5 */
-    if (target < 5 || target > ACG_MAX_CODES) { snprintf(err, errn, "the duration asks for %d codes: 1 to %d seconds", target, ACG_MAX_CODES / 5); return 1; }
-    const char *plan_language = "unknown", *lyrics = rq->lyrics;                       /* what the planner is told, with the handler's words for nothing */
-    if (rq->language && *rq->language) plan_language = rq->language;
+    const char *lyrics = rq->lyrics;                                        /* what the planner is told, with the handler's words for nothing */
     if (!lyrics) lyrics = "[Instrumental]";
-    char *cot = alm_cot(rq->bpm, rq->duration, rq->key, plan_language, rq->timesig);
-    char *pc = cot ? alm_prompt(rq->caption, lyrics, cot, 0) : NULL, *pu = cot ? alm_prompt(rq->caption, lyrics, cot, 1) : NULL;
-    int nc = 0, nu = 0;
-    int *ic = pc ? alm_tokenize(lm, pc, &nc) : NULL, *iu = pu ? alm_tokenize(lm, pu, &nu) : NULL;
-    int *codes = (int *)malloc((size_t)target * sizeof(int));
+    const int user_bpm = rq->bpm > 0 ? rq->bpm : 0, user_dur = rq->duration > 0 ? (int)rq->duration : 0;
+    const int has_key = !act_blank(rq->key), has_ts = !act_blank(rq->timesig);
+    const int has_all = user_bpm && has_key && has_ts && user_dur > 0;
+    AlmMeta meta; memset(&meta, 0, sizeof meta);
+    AceRequest r2 = *rq;
+    char *cot = NULL, *pc = NULL, *pu = NULL;
+    int *ic = NULL, *iu = NULL, *codes = NULL;
     int rc = 1;
+    if (!has_all) {
+        char *p1 = alm_meta_prompt(rq->caption, lyrics);
+        int np = 0; int *ip = p1 ? alm_tokenize(lm, p1, &np) : NULL;
+        if (!ip) { free(p1); snprintf(err, errn, "out of memory"); goto out; }
+        AlmAsk ask = { user_bpm, has_key ? rq->key : NULL, has_ts ? rq->timesig : NULL, user_dur, !rq->lm_caption_off, !rq->lm_language_off };
+        AlmSample sm = { rq->lm_temperature, 1.0, rq->lm_top_k, rq->lm_top_p, rq->seed ? rq->seed : 1 };   /* no guidance in this phase: upstream turns it off */
+        AcgMetaCtx mc = { h, 0 };
+        const int got = alm_generate_meta(lm, ip, np, &ask, &sm, &meta, NULL, NULL, acg_meta_step, &mc, NULL, err, errn);
+        free(p1); free(ip);
+        if (got == -2 || mc.stopped) { rc = 2; snprintf(err, errn, "cancelled"); goto out; }
+        if (got < 0) goto out;
+        if (h && h->progress) h->progress(h->ud, "meta", 1, 1);
+        static const char *const what[AMF_N] = { "tempo", "caption", "duration", "key", "language", "time signature" };
+        const int needed[] = { AMF_BPM, AMF_DURATION, AMF_KEYSCALE, AMF_TIMESIG };
+        for (int i = 0; i < 4; i++) {
+            const int f = needed[i];
+            const int given = f == AMF_BPM ? user_bpm > 0 : f == AMF_DURATION ? user_dur > 0 : f == AMF_KEYSCALE ? has_key : has_ts;
+            if (!given && !(meta.have[f] && meta.s[f][0])) { snprintf(err, errn, "the planner did not write the song's %s (it wrote %d tokens that do not hold it)", what[f], got); goto out; }
+        }
+        if (!user_bpm) r2.bpm = atoi(meta.s[AMF_BPM]);
+        if (!has_key) r2.key = meta.s[AMF_KEYSCALE];
+        if (!has_ts) r2.timesig = meta.s[AMF_TIMESIG];
+        if (!user_dur) r2.duration = (double)atoi(meta.s[AMF_DURATION]);
+        if (!rq->lm_caption_off && meta.have[AMF_CAPTION]) r2.caption = meta.s[AMF_CAPTION];             /* upstream: use_cot_caption puts the model's caption in the DiT's prompt */
+        cot = ame_cot(&meta);
+        info->meta_run = 1;
+        info->meta_bpm = r2.bpm; info->meta_duration = r2.duration;
+        snprintf(info->meta_key, sizeof info->meta_key, "%s", r2.key ? r2.key : "");
+        snprintf(info->meta_timesig, sizeof info->meta_timesig, "%s", r2.timesig ? r2.timesig : "");
+        snprintf(info->meta_language, sizeof info->meta_language, "%s", meta.have[AMF_LANGUAGE] ? meta.s[AMF_LANGUAGE] : "");
+        snprintf(info->meta_caption, sizeof info->meta_caption, "%s", meta.have[AMF_CAPTION] ? meta.s[AMF_CAPTION] : "");
+    } else {
+        cot = alm_cot(rq->bpm, rq->duration, rq->key, NULL, rq->timesig);                                /* the metadata as given: no language line, as upstream's has none */
+    }
+    const int target = (int)(r2.duration * 5);                                          /* upstream: int(duration * 5) codes, a second being 5 */
+    if (target < 5 || target > ACG_MAX_CODES) { snprintf(err, errn, "the duration asks for %d codes: 1 to %d seconds", target, ACG_MAX_CODES / 5); goto out; }
+    pc = cot ? alm_prompt(rq->caption, lyrics, cot, 0) : NULL; pu = cot ? alm_prompt(rq->caption, lyrics, cot, 1) : NULL;
+    int nc = 0, nu = 0;
+    ic = pc ? alm_tokenize(lm, pc, &nc) : NULL; iu = pu ? alm_tokenize(lm, pu, &nu) : NULL;
+    codes = (int *)malloc((size_t)target * sizeof(int));
     if (!ic || !iu || !codes) { snprintf(err, errn, "out of memory"); goto out; }
     {
         AlmSample sm = { rq->lm_temperature, rq->lm_cfg_scale, rq->lm_top_k, rq->lm_top_p, rq->seed ? rq->seed : 1 };
@@ -723,14 +778,18 @@ static int ace_plan_and_generate(AceEngine *e, const AceRequest *rq, const AceHo
         int got = alm_generate_codes(lm, ic, nc, iu, nu, target, &sm, codes, acg_plan_step, &ctx, err, errn);
         if (got == -2 || ctx.stopped) { rc = 2; snprintf(err, errn, "cancelled"); goto out; }
         if (got < 1) { if (got == 0) snprintf(err, errn, "the planner wrote no codes"); goto out; }
-        AceRequest r2 = *rq;
         r2.plan = 0; r2.lm = NULL; r2.codes = codes; r2.ncodes = got;
         const double t_plan = acg_now() - t0;
+        AceInfo keep = *info;
         rc = ace_generate(e, &r2, h, pcm, info, err, errn);
         snprintf(info->lm, sizeof info->lm, "%s", lm->dir_name);
         info->plan_codes = got; info->t_plan = t_plan;
+        info->meta_run = keep.meta_run; info->meta_bpm = keep.meta_bpm; info->meta_duration = keep.meta_duration;
+        memcpy(info->meta_key, keep.meta_key, sizeof info->meta_key); memcpy(info->meta_timesig, keep.meta_timesig, sizeof info->meta_timesig);
+        memcpy(info->meta_language, keep.meta_language, sizeof info->meta_language); memcpy(info->meta_caption, keep.meta_caption, sizeof info->meta_caption);
     }
 out:
+    alm_meta_free(&meta);
     free(cot); free(pc); free(pu); free(ic); free(iu); free(codes);
     return rc;
 }

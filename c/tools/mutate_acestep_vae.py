@@ -63,6 +63,9 @@ def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h
     `extra` is more arguments for the engine (--dit acestep-v15-base for the guided DiT's oracles)."""
     refs = [refs] if isinstance(refs, str) else list(refs)
     shutil.copyfile(os.path.join(C_DIR, "acestep.c"), os.path.join(work, "acestep.c"))
+    for stale in os.listdir(work):                                 # an earlier mutant's copy of another header would shadow the real one
+        if stale.endswith(".h"):
+            os.remove(os.path.join(work, stale))
     with open(os.path.join(C_DIR, header), encoding="utf-8", newline="") as f:
         text = f.read()
     if source_edit:
@@ -75,13 +78,13 @@ def build_and_run(cc, work, model, refs, source_edit=None, header="acestep_vae.h
     exe = os.path.join(work, "acestep_mut.exe" if os.name == "nt" else "acestep_mut")
     cmd = [cc, "-O2", "-march=native", "-fopenmp", "-D_GNU_SOURCE", "-D_FILE_OFFSET_BITS=64", "-I", C_DIR,
            os.path.join(work, "acestep.c"), "-o", exe, "-lm"]
-    built = subprocess.run(cmd, capture_output=True, text=True)
+    built = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if built.returncode:
         return "build-failed", built.stderr[-400:]
     last = ""
     for ref in refs:
-        use_flag, target = ref if isinstance(ref, tuple) else (flag, ref)          # (oracle flag, reference) to mix oracles
-        run = subprocess.run([exe, "--model", model, *extra, use_flag, target], capture_output=True, text=True)
+        use_flag, target, *other = ref if isinstance(ref, tuple) else (flag, ref)  # (oracle flag, reference[, model]) to mix oracles and models
+        run = subprocess.run([exe, "--model", other[0] if other else model, *extra, use_flag, target], capture_output=True, text=True, encoding="utf-8", errors="replace")
         last = run.stderr.strip().splitlines()[-1] if run.stderr.strip() else ""
         if run.returncode != 0:
             return "fail", f"{use_flag[2:]} {os.path.basename(target)}: {last}"

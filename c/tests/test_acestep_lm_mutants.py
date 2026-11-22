@@ -39,7 +39,7 @@ class Mutants(unittest.TestCase):
 
     def test_the_families_the_oracle_must_cover_are_all_present(self):
         names = " ".join(mut.MUTANTS)
-        for family in ("decode", "prefill", "attention", "final-norm", "head", "guidance", "end-token", "prompt", "metadata", "yaml", "top-k", "top-p", "temperature", "fsq", "hints", "plan"):
+        for family in ("decode", "prefill", "attention", "final-norm", "head", "guidance", "end-token", "prompt", "metadata", "yaml", "top-k", "top-p", "temperature", "fsq", "hints"):
             self.assertIn(family, names)
 
 

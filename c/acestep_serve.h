@@ -178,7 +178,9 @@ static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, s
     if (acs_string(j, "language", &rq->language, err, errn) < 0) return -1;
     if (acs_string(j, "key", &rq->key, err, errn) < 0) return -1;
     if (acs_string(j, "timesig", &rq->timesig, err, errn) < 0) return -1;
+    int dur_given;
     if ((r = acs_number(j, "duration", &rq->duration, err, errn)) < 0) return -1;
+    dur_given = r;
     if ((r = acs_number(j, "shift", &rq->shift, err, errn)) < 0) return -1;
     if ((r = acs_number(j, "steps", &x, err, errn)) < 0) return -1;
     if (r) { if (x != floor(x) || fabs(x) > 1e6) { snprintf(err, errn, "steps must be a whole number"); return -1; } rq->steps = (int)x; steps_given = 1; }
@@ -201,9 +203,12 @@ static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, s
         else if (!strcmp(task, "complete")) rq->task = ACG_TASK_COMPLETE;
         else { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return -1; }
     }
-    /* the 5 Hz planner: write the song's structure first (needs bpm, key, timesig and duration) */
+    /* the 5 Hz planner: write the song's metadata (whatever of bpm, key, timesig and duration is not given) and structure first */
     { jval *pl = json_get(j, "plan"); if (pl && pl->t != J_NULL) { if (pl->t != J_BOOL) { snprintf(err, errn, "plan must be true or false"); return -1; } rq->plan = pl->boolean; } }
+    if (rq->plan && !dur_given) rq->duration = 0;                      /* the planner chooses the length when it is not told one */
     if (acs_string(j, "lm", &rq->lm, err, errn) < 0) return -1;
+    { jval *b = json_get(j, "lm_caption"); if (b && b->t != J_NULL) { if (b->t != J_BOOL) { snprintf(err, errn, "lm_caption must be true or false"); return -1; } rq->lm_caption_off = !b->boolean; } }
+    { jval *b = json_get(j, "lm_language"); if (b && b->t != J_NULL) { if (b->t != J_BOOL) { snprintf(err, errn, "lm_language must be true or false"); return -1; } rq->lm_language_off = !b->boolean; } }
     if (acs_number(j, "lm_temperature", &rq->lm_temperature, err, errn) < 0) return -1;
     if (acs_number(j, "lm_cfg_scale", &rq->lm_cfg_scale, err, errn) < 0) return -1;
     if (acs_number(j, "lm_top_p", &rq->lm_top_p, err, errn) < 0) return -1;
@@ -311,12 +316,20 @@ static int acs_serve(AceEngine *e){
                 printf("\",\"sample_rate\":%d,\"channels\":%d,\"samples\":%d,\"bytes\":%zu,\"seed\":%llu,\"steps\":%d,\"shift\":%g,\"duration\":%.3f,"
                        "\"frames\":%d,\"caption_tokens\":%d,\"lyric_tokens\":%d,\"truncated\":%s,\"peak\":%.4f,"
                        "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,\"lm\":\"%s\",\"plan_codes\":%d,"
-                       "\"timings\":{\"plan\":%.2f,\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}}\n",
+                       "\"timings\":{\"plan\":%.2f,\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}",
                        e->vae->rate, e->vae->ach, info.samples, bytes, (unsigned long long)rq.seed, rq.steps, rq.shift,
                        (double)info.samples / e->vae->rate, info.frames, info.caption_tokens, info.lyric_tokens,
                        info.caption_cut || info.lyric_cut ? "true" : "false", info.peak,
                        (const char *const[]){ "text2music", "cover", "repaint", "extract", "lego", "complete" }[rq.task], info.src_seconds, info.dit, info.guidance, info.lm, info.plan_codes,
                        info.t_plan, info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
+                if (info.meta_run) {                                  /* what the planner's first phase wrote */
+                    printf(",\"meta\":{\"bpm\":%d,\"duration\":%g,\"keyscale\":\"", info.meta_bpm, info.meta_duration); acs_escape(info.meta_key);
+                    printf("\",\"timesignature\":\""); acs_escape(info.meta_timesig);
+                    printf("\",\"language\":\""); acs_escape(info.meta_language);
+                    printf("\",\"caption\":\""); acs_escape(info.meta_caption);
+                    printf("\"}");
+                }
+                printf("}\n");
                 fwrite(s16, 1, bytes, stdout);
                 putchar('\n');
                 fflush(stdout);

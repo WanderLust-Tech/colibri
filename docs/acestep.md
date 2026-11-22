@@ -324,8 +324,7 @@ What the engine does differently from upstream, each on purpose:
 - **A clip under 128 frames** (5.12 s) is made on 128 and cut to its length, as in text to music.
 - **A repaint that ends before it starts** is refused; upstream quietly regenerates the whole clip.
 
-Not built, and said so: the planner's first phase (the model writing the metadata itself). The tasks that need the base or SFT checkpoints (lego,
-extract, complete) and the planner's codes phase are in the next sections.
+The tasks that need the base or SFT checkpoints (lego, extract, complete) and the 5 Hz planner (the metadata, then the codes) are in the next sections.
 
 Cost, 24-core i9, a 10 s clip: reading and encoding the source 1.9 s, the tokenizer and detokenizer 2 s on top of the condition
 for a cover, so a cover is about 16 s against 11 s for text to music; a 30 s reference adds 5 s. The encoder (0.4 GB) and the
@@ -399,7 +398,7 @@ or schedule is wrong by 1e-1 to 1.
 
 `tools/mutate_acestep_guided.py` breaks the code one line at a time (APG's momentum, its norm cut and its projection, ADG's angle and clip, the schedule's
 shift and length, the null condition, the interval, the guidance default, a lego hiding its span, an extract with a silent context, each instruction and the
-track's case) and every one of its 30 mutants is caught on the tiny fixture. The hub's `modeling_acestep_v15_base.py` is older than upstream's and spells the
+track's case) and 29 of its 30 mutants are caught on the tiny fixture (the 30th, keeping the first prompt's null condition after the cover switch, needs a cover and a text instruction that tokenize to different lengths, as the real tokenizer's do and the tiny one's do not). The hub's `modeling_acestep_v15_base.py` is older than upstream's and spells the
 guidance argument `diffusion_guidance_sale`, so a capture made with it ignores `guidance_scale` and runs every case at 7: the capture tool refuses a checkpoint
 whose modeling code is not upstream's at the pinned commit.
 
@@ -418,67 +417,84 @@ python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 base_ref wavs --d
 python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base_ref/b_lego ...
 ```
 
-## The 5 Hz planner: a language model writes the song's structure first
+## The 5 Hz planner: a language model writes the song first
 
 ACE-Step's optional planner (`acestep-5Hz-lm-0.6B`, `-1.7B`, `-4B`; the 1.7B is in the main repository, the others are separate) is a Qwen3 decoder with the
-audio codes added to its vocabulary: ids from `<|audio_code_0|>` up, the 64000 codes of the audio tokenizer's quantizer, 5 a second. Given the caption, the
-lyrics and the song's metadata it writes the codes of the song's coarse structure, and the DiT takes their hints (the detokenizer's output, as for a cover's
-source) as its context where a clip would have been: upstream's handler turns text to music with `audio_code_string` into a cover of those codes. Songs made
-this way follow a structure; plain text to music makes it up as it denoises.
+audio codes added to its vocabulary: ids from `<|audio_code_0|>` up, the 64000 codes of the audio tokenizer's quantizer, 5 a second. Given the caption and the lyrics
+it plans in two phases, as upstream's `generate_with_stop_condition` does. **Phase 1** writes the song's metadata as a YAML block inside `<think>`: the tempo, a
+rewritten caption, the duration, the key and scale, the language and the time signature. **Phase 2** writes the codes of the song's coarse structure under a prompt
+that carries that block, and the DiT takes their hints (the detokenizer's output, as for a cover's source) as its context where a clip would have been: upstream's
+handler turns text to music with `audio_code_string` into a cover of those codes. Songs made this way follow a structure; plain text to music makes it up as it denoises.
 
 **Using it.** The checkpoint needs `acestep-5Hz-lm-1.7B/` beside the DiT (`huggingface-cli download ACE-Step/Ace-Step1.5 --include "acestep-5Hz-lm-1.7B/*"
---local-dir <model>`; `coli model install` leaves it out, 3.5 GB, and does not yet offer it). Then `acestep --plan --bpm 120 --key "C Major" --timesig 4
---duration 30 ...`, `coli music "..." --plan --bpm 120 --key "C Major" --time-signature 4 --duration 30`, or `POST /v1/audio/music` with `thinking: true` and
-the same fields (`lm_model`, `lm_temperature`, `lm_cfg_scale`, `lm_top_p`, `lm_top_k` for the model and its sampling; upstream's defaults are 0.85, 2, 0.9, off).
-The request streams a `plan` stage of `duration * 5 + 1` steps before the usual ones, and `colibri` in the answer says the planner that ran and the codes it wrote.
-READY's `planner` says what is installed.
+--local-dir <model>`; `coli model install` leaves it out, 3.5 GB, and does not yet offer it). **A bare caption is enough:** `acestep --caption "bright ukulele" --plan
+--out song.wav`, `coli music "bright ukulele" --plan`, or `POST /v1/audio/music` with `thinking: true`. Whatever of `bpm`, `key`, `time_signature` and `duration` you
+give the model is told as written; it writes the rest, picks the length (10 to 600 s) when there is no `duration`, rewrites the caption the DiT follows (`--no-lm-caption`,
+`use_cot_caption: false` keeps yours) and writes the language (`--no-lm-language`, `use_cot_language: false`). With all four of the tempo, key, time signature and duration
+given, phase 1 is skipped, as it is upstream. `lm_model`, `lm_temperature`, `lm_cfg_scale`, `lm_top_p`, `lm_top_k` choose the model and its sampling (upstream's defaults are
+0.85, 2, 0.9, off; phase 1 runs without guidance, as upstream's does, so the scale is the codes' only). The request streams a `meta` stage (phase 1: how many tokens it
+takes is not known, so one frame at the start and one at the end), then a `plan` stage of `duration * 5 + 1` steps, then the usual ones; `colibri` in the answer says the
+planner that ran, the codes it wrote and, after phase 1, what it chose (`colibri.meta`: tempo, key, time signature, language, duration and the rewritten caption). READY's `planner`
+says what is installed.
 
-**What is built, and what is not.** Upstream plans in two phases: the model first writes the metadata itself (the tempo, key, time signature, duration, language and a
-rewritten caption, under a grammar that keeps each value valid), then the codes. This is the second phase, with the metadata given: **the request must carry `bpm`,
-`key`, `time_signature` and `duration`** (a missing one is refused by name, with that reason), and the model writes only the codes. The first phase is the open
-part (it is 2300 lines of finite-state grammar upstream, with the genre trie and checks on the logits). Also not built: the planner's other jobs (describing a clip
-from its codes, formatting a caption or lyrics, writing a song from a one-line query), and the Vulkan path for the language model (the decode is the CPU's).
+**What is built, and what is not.** Both phases, held to upstream (below). Two things of upstream's are replicated as they are, strange as they look: the language the model
+writes goes only into phase 2's prompt, not to the DiT (upstream looks for a `vocal_language` key that the parse never makes), and the DiT's key is the model's lowercase
+`C major`. **Not built:** the `genres` field (upstream skips it in this phase; a model that writes `genres:` after the caption is refused, not guessed at), the planner's other
+jobs (describing a clip from its codes, formatting a caption or lyrics, writing a song from a one-line query) and the Vulkan path for the language model (the decode is the CPU's).
+Upstream limits the duration the model may write to what the GPU can hold (240 s on a CPU, 480 s, up to 600 s); this engine allows 600 s (`ame_max_duration`).
 
-**How it runs.** The two prompts of the codes phase (the conditional one, with the caption, the lyrics and the metadata as a YAML block inside `<think>`, and the
-unconditional one, `NO USER INPUT` with an empty `<think>`, which guidance subtracts) are tokenized, each goes in in one pass, and from there both sequences advance a
-token at a time as one batch of two rows, so each weight is read once. The logits are taken only at the 64000 codes and the end token (the head is the embedding table,
-and nothing else may be sampled), guided as `uncond + scale * (cond - uncond)`, the end token blocked until `duration * 5` codes are out and then the only choice, then
-top-k, top-p and the temperature. Cost on the 24-core CPU for the 1.7B: 0.22 s a token, so 6.6 s for 30 codes (a 6 s song), 33 s for a 30 s song, and the prompt is a
-second; the weights are 3.5 GB resident, and the two caches 0.8 GB for 1000 codes.
+**How phase 1 runs.** The prompt (the chat template with the caption and the lyrics, the assistant turn left open) goes in in one pass, and one sequence advances a token at
+a time under upstream's decoder, a state machine (`constrained_logits_processor.py`, 2300 lines there, `acestep_meta.h` here) that forces the field names (`bpm:`, `caption:`,
+`duration:` ... as the tokens the tokenizer spells them in), lets through only the digits that keep a value in range (a table of every valid value's tokens: 30 to 300 for the tempo,
+10 to 600 for the duration, 70 key and scales, 51 languages, 2, 3, 4 or 6), takes the language as the model's top choice among those that start one, writes a value the caller gave
+token by token, and leaves the caption free but for the audio codes and the backtick, until the model writes a line that is not indented and the name of the next field after it
+(or 512 tokens). The model's head is read only at the tokens the machine lets through: a few for a value, 153203 for the caption. After the time signature the machine forces the end
+token (upstream never writes `</think>`). Then the text is parsed as upstream parses it (a field a non-indented line with a colon, a value that line's rest and the indented lines
+after it; the caption's lines flattened to one) and written back as PyYAML writes it for phase 2: 80 columns, plain, single-quoted or double-quoted as PyYAML chooses for each
+string, which needs its analysis of the string, its implicit resolvers (a string that would read back as a bool, a number, a timestamp is quoted) and its three scalar writers. Cost
+on the 24-core CPU for the 1.7B: 0.13 s a token, 22 s for a 172-token block with a 120-token caption; then phase 2 as before (0.2 s a token, two rows).
 
-**What is held to upstream, and how.** `tools/acestep_ref_lm.py capture` runs upstream's own `LLMHandler.generate_with_stop_condition` on the CPU in float32 (the codes
-phase, the metadata given, the temperature 0, since torch's `multinomial` has no reproduction) and records the two prompts' ids, the model's raw logits at the codes
-and the end token at every step, and the codes. `acestep --lm-ref CASE` runs the engine from the same caption, lyrics and metadata and compares: the prompts' token ids
-(identical), the logits of both sequences at every step, and the codes (identical).
+**What is held to upstream, and how.** Phase 2 and the sampler as before (`acestep_ref_lm.py`, `--lm-ref`, `--lm-selftest`). For phase 1, `tools/acestep_ref_meta.py`:
 
-| | the real 1.7B (4 cases: an instrumental, one with lyrics, one in Japanese, one with no language) | the tiny fixture (`make_acestep_tiny.py --audio-in --lm`) |
+- `capture` runs upstream's own `LLMHandler` on the CPU in float32 at temperature 0 (torch's `multinomial` has no reproduction) and records, for every step of phase 1, the
+  decoder's state, the tokens it let through with the model's raw logit at each (the highest 64 when it lets nearly everything through), and the token chosen; the text the model
+  wrote, the metadata parsed from it, the YAML of phase 2's prompt and, for the cases that go on, phase 2's prompts and codes; and the token tables the processor builds from the tokenizer.
+  `acestep --meta-ref CASE` runs the engine from the same inputs and compares every one; `--meta-trees` compares the tables (every prefix of every value and what may follow it,
+  the tokens of every fixed string).
+- `yaml` writes a corpus of 6229 strings (what a caption can look like, and every kind of string a plain scalar must not be mistaken for: `1.5e+3`, `.Inf`, timestamps with zones,
+  `--- x`, a byte order mark ...) with what `yaml.dump({"caption": s}, allow_unicode=True)` writes for each; `acestep --yaml-ref` compares byte for byte.
+- `parse` writes 1546 texts a model might write (crafted, and random lines) with what `parse_lm_output` makes of each and what `_format_metadata_as_cot` writes for that;
+  `acestep --parse-ref` compares both.
+
+| | the real 1.7B (7 cases: bare, with lyrics, in Japanese, and four with some of the metadata given, or the caption or language turned off) | the tiny fixture |
 |---|---|---|
-| the two prompts | token ids identical | identical |
-| the logits, every step of both sequences | 5e-7 to 1.2e-6 of their norm, 2.4e-4 at one value (logits are in the tens) | 1e-7 |
-| the codes | 50, 50, 30 and 40 of 50, 50, 30 and 40 identical | identical |
+| the token tables (tempo 302 prefixes, duration 242 at upstream's CPU limit, key 106, language 53, time signature 6, the fixed strings) | identical | identical |
+| phase 1's prompt | token ids identical | identical |
+| every step: state, how many tokens let through, which, the token chosen | identical in all 172, 119, 169, 157, 127, 29 and 156 steps | identical; and the 3500 steps of a planner that never ends its caption |
+| the logits at those tokens | 1e-6 of their norm overall; 1.2e-5 at the worst step (a caption token, logits in the tens) | 6e-7 |
+| the metadata parsed, phase 2's YAML (the captions wrap over lines), the prompts, the codes | identical (40, 30, 40 and 50 codes) | identical |
+| the YAML emitter on 6229 strings; the parse on 1546 texts | identical | identical |
 
-The sampler is what the oracle cannot reach, so `acestep --lm-selftest 1` checks it on logits made up so that the answer is known: top-k keeps ties with the k-th
-largest and nothing else, top-p keeps the smallest prefix whose cumulative probability BEFORE the next token has not passed p and always the first, a temperature of 0
-is an argmax and 1 draws from the softmax (30000 draws within 1.2% of it), minus infinity is never drawn, a seed repeats; and the prompt and the YAML (a duration cut to
-whole seconds, `3/4` as `3`, Norwegian's `no` quoted as YAML 1.1 quotes it). So the sampling is upstream's in what it does but not bit for bit: another stream of
-random numbers, the same distribution.
+The sampler (temperature, top-k, top-p) is what the oracle cannot reach, as before: the cases run at temperature 0. The tiny fixture's planner (`make_acestep_tiny.py --lm --lm-text`)
+has learned a few metadata blocks (a caption over several lines, a tab-indented one, a trailing space before a break, a capitalised field name, a field the decoder does not know), so that
+its greedy decoding walks every state of the machine; random weights never end a caption.
 
-The other half, the codes into the music, is held to the handler by 6 cases with `audio_code_string` (50 codes, 20 under the 128-frame floor, 45 for 9.07 s, with lyrics,
-with `audio_cover_strength` 0.5, with `cover_noise_strength` 0.3): the context (the codes' hints, padded from the silence latent when short), the final latents and the audio
-agree to 6e-7 of the norm on the tiny fixture and to 7e-5 (the latents, 2e-3 at one value) on the real checkpoint, with the cover instruction, the prompt's duration cut to
-whole seconds and a song as long as its codes (5 frames each, 128 at least). `tools/mutate_acestep_lm.py` breaks the code one line at a time (the head norms, RoPE, the
-attention's scale and grouping and window, the final norm, the head's rows, the guidance, the end token, the prompts and the YAML, the sampler's filters and draw, the FSQ's
-digits and the padding) and every mutant is caught.
+`tools/mutate_acestep_meta.py` breaks acestep_meta.h one line at a time (the YAML width, quoting, escapes and every resolver; the parse; the tables' ranges and tokenization rules;
+what ends a caption, which field follows, what is injected, what is forced; the loop) and 67 of 67 mutants are caught; three more need tokens the tiny tokenizer never forms (a line break or a
+colon inside a longer token, an audio code as the top token after a line break) are left to the real planner's cases.
 
 ```sh
 cd c && make acestep
-./acestep --model ~/models/ace-step-1.5 --caption "bright ukulele" --plan --bpm 120 --key "C Major" --timesig 4 --duration 30 --out planned.wav
-python3 tools/acestep_ref_lm.py capture ~/models/ace-step-1.5 lm_ref                     # upstream's LLMHandler, 4 cases
+./acestep --model ~/models/ace-step-1.5 --caption "bright ukulele" --plan --out planned.wav          # the model picks tempo, key, length and the rest
+./acestep --model ~/models/ace-step-1.5 --caption "bright ukulele" --plan --duration 30 --bpm 120 --out planned.wav
+python3 tools/acestep_ref_meta.py capture ~/models/ace-step-1.5 meta_ref                            # upstream's LLMHandler, 7 cases
+./acestep --model ~/models/ace-step-1.5 --meta-trees meta_ref/trees.json
+./acestep --model ~/models/ace-step-1.5 --meta-ref meta_ref/meta_dur8
+python3 tools/acestep_ref_meta.py yaml yaml.json && ./acestep --yaml-ref yaml.json
+python3 tools/acestep_ref_meta.py parse parse.json && ./acestep --parse-ref parse.json
+python3 tools/acestep_ref_lm.py capture ~/models/ace-step-1.5 lm_ref                                 # phase 2 given the metadata, as before
 ./acestep --model ~/models/ace-step-1.5 --lm-ref lm_ref/lm10
 ./acestep --lm-selftest 1
-python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 task_ref wavs --cases codes10,codes_short   # the codes into the music
-./acestep --model ~/models/ace-step-1.5 --gen-ref task_ref/codes10
-python3 tools/mutate_acestep_lm.py ~/models/ace-step-1.5 lm_ref/lm10 lm_ref/lm_vocal10 --codes task_ref/codes10 task_ref/codes_short
 ```
 
 ## In colibri

@@ -67,6 +67,7 @@
 #include "acestep_tok.h"
 #include "acestep_text.h"
 #include "acestep_lm.h"           /* the 5 Hz planner: caption and lyrics to audio codes */
+#include "acestep_meta.h"         /* its first phase: the metadata, written under upstream's constrained decoder */
 #include "acestep_gen.h"          /* the three networks joined: a request in, audio out */
 #include "acestep_serve.h"        /* and its line protocol */
 
@@ -78,6 +79,10 @@ static void usage(void){
         "       acestep --model DIR --tok-ref FILE.json | --text-ref REFDIR\n"
         "       acestep --model DIR --gen-ref REFDIR [--wav OUT.wav]\n"
         "       acestep --model DIR --lm-ref REFDIR [--lm 1.7B]      the planner (tools/acestep_ref_lm.py)\n"
+        "       acestep --model DIR --meta-ref REFDIR [--lm 1.7B]    the planner's first phase (tools/acestep_ref_meta.py)\n"
+        "       acestep --model DIR --meta-trees FILE [--lm 1.7B]    its token tables against upstream's (OUTDIR/trees.json)\n"
+        "       acestep --yaml-ref FILE                              the YAML emitter against PyYAML (tools/acestep_ref_meta.py yaml)\n"
+        "       acestep --parse-ref FILE                             the parse of the model's text and its YAML against upstream's (tools/acestep_ref_meta.py parse)\n"
         "       acestep --model DIR --caption TEXT --plan --bpm N --key K --timesig T --duration S --out FILE.wav [--lm 0.6B|1.7B|4B] [--lm-temperature X]\n"
         "               [--lm-cfg X] [--lm-top-p X] [--lm-top-k N]    the 5 Hz planner writes the song's structure first (needs bpm, key, timesig and duration)\n"
         "       acestep --model DIR --caption TEXT --out FILE.wav [--lyrics TEXT] [--language CODE] [--duration S] [--steps N]\n"
@@ -1135,6 +1140,8 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     if (rq.task != ACG_TASK_TEXT2MUSIC) { FILE *t = fopen(src_path, "rb"); if (t) { fclose(t); rq.src_path = src_path; } }      /* a complete may have none */
     /* the base DiT: guidance and the tracks (the capture keeps the caller's `_track` and `_classes` in its parameters) */
     jval *gs = json_get(p, "guidance_scale"); rq.guidance = gs && gs->t == J_NUM ? gs->num : 0;
+    { const char *cn = root ? json_str(root, "case") : NULL; size_t cl = cn ? strlen(cn) : 0;
+      if (cl >= 8 && !strcmp(cn + cl - 8, "_default")) rq.guidance = 0; }            /* a case named for the default leaves the scale unset (the engine's is 7, the handler's too) */
     rq.cfg_start = acd_json_num(p, "cfg_interval_start", 0); rq.cfg_end = acd_json_num(p, "cfg_interval_end", 1);
     if (rq.cfg_end >= 1) rq.cfg_end = 0;
     { jval *ad = json_get(p, "use_adg"); rq.adg = ad && ad->t == J_BOOL && ad->boolean; }
@@ -1280,9 +1287,50 @@ static int lm_step(int step, const float *cond, const float *unc, int token, voi
     return 0;
 }
 
+/* The codes half of the planner's oracle: the two prompts that carry `cot` (their ids, exactly), then the codes phase run free from them at temperature 0, its logits over the
+ * audio codes and the end token compared at every step, and the codes themselves. */
+static void lm_codes_check(AceLm *m, shards *Rp, const char *caption, const char *lyrics, const char *cot, double seconds, double cfg_scale, int *fails_out, int *checks_out){
+    char err[512] = "";
+    int fails = 0, checks = 0;
+    char *pc = alm_prompt(caption, lyrics, cot, 0), *pu = alm_prompt(caption, lyrics, cot, 1);
+    int nc = 0, nu = 0;
+    int *ic = alm_tokenize(m, pc, &nc), *iu = alm_tokenize(m, pu, &nu);
+    for (int k = 0; k < 2; k++) {
+        const int *ids = k ? iu : ic; const int n = k ? nu : nc;
+        int64_t rn = 0; float *want = ref_tensor(Rp, k ? "prompt.uncond" : "prompt.cond", &rn, NULL, NULL);
+        int bad = !want || rn != n;
+        for (int i = 0; !bad && i < n; i++) if ((int)want[i] != ids[i]) { fprintf(stderr, "[lm-oracle] %s prompt: token %d is %d, the handler's %d\n", k ? "unconditional" : "conditional", i, ids[i], (int)want[i]); bad = 1; }
+        if (!want || rn != n) fprintf(stderr, "[lm-oracle] %s prompt: %d tokens, the handler's %lld\n", k ? "unconditional" : "conditional", n, (long long)rn);
+        fprintf(stderr, "[lm-oracle] %-28s %d tokens %s\n", k ? "unconditional prompt" : "conditional prompt", n, bad ? "<-- FAIL" : "identical");
+        fails += bad; checks++;
+        free(want);
+    }
+    int64_t ncodes = 0; float *rc = ref_tensor(Rp, "codes", &ncodes, NULL, NULL);
+    int *rcodes = (int *)malloc((size_t)(ncodes > 0 ? ncodes : 1) * sizeof(int));
+    for (int64_t i = 0; i < ncodes; i++) rcodes[i] = (int)rc[i];
+    free(rc);
+    const int target = (int)(seconds * 5);
+    int *codes = (int *)malloc((size_t)(target > 0 ? target : 1) * sizeof(int));
+    LmTap tap = { Rp, rcodes, (int)ncodes, 0, 0, 0, -1, 0 };
+    AlmSample sm = { 0.0, cfg_scale, 0, 0.0, 1 };
+    const double t0 = now();
+    int got = alm_generate_codes(m, ic, nc, iu, nu, target, &sm, codes, lm_step, &tap, err, sizeof err);
+    double dt = now() - t0;
+    fails += tap.fails; checks += tap.checks;
+    if (got < 0) { fprintf(stderr, "[lm-oracle] generation failed: %s\n", err); fails++; checks++; }
+    else {
+        int same = got == (int)ncodes;
+        for (int i = 0; same && i < got; i++) if (codes[i] != rcodes[i]) same = 0;
+        fprintf(stderr, "[lm-oracle] %-28s %d codes, the handler's %lld: %s (%.1fs, %.2f s a token)\n", "the codes", got, (long long)ncodes, same ? "identical" : "<-- FAIL", dt, dt / (got + 1));
+        fails += !same; checks++;
+    }
+    free(pc); free(pu); free(ic); free(iu); free(rcodes); free(codes);
+    *fails_out += fails; *checks_out += checks;
+}
+
 static int run_lm_oracle(const char *model, const char *refdir, const char *lm_name){
     g_tag = "lm-oracle";
-    char path[4300], err[512] = "";
+    char path[4300];
     snprintf(path, sizeof path, "%s/%s", model, lm_name);
     shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
     if (R.n == 0) { fprintf(stderr, "[lm-oracle] no safetensors in %s\n", refdir); return 2; }
@@ -1305,39 +1353,8 @@ static int run_lm_oracle(const char *model, const char *refdir, const char *lm_n
     fprintf(stderr, "[lm-oracle] %s: %d layers, %d wide, %d tokens in the vocabulary, loaded in %.1fs (%.2f GB)\n", m->dir_name, m->nl, m->D, m->vocab, now() - t0, m->wbytes / 1e9);
     int fails = 0, checks = 0;
     char *cot = alm_cot((int)acd_json_num(md, "bpm", 0), acd_json_num(md, "duration", seconds), json_str(md, "keyscale"), json_str(md, "language"), json_str(md, "timesignature"));
-    char *pc = alm_prompt(caption, lyrics, cot, 0), *pu = alm_prompt(caption, lyrics, cot, 1);
-    int nc = 0, nu = 0;
-    int *ic = alm_tokenize(m, pc, &nc), *iu = alm_tokenize(m, pu, &nu);
-    for (int k = 0; k < 2; k++) {
-        const int *ids = k ? iu : ic; const int n = k ? nu : nc;
-        int64_t rn = 0; float *want = ref_tensor(&R, k ? "prompt.uncond" : "prompt.cond", &rn, NULL, NULL);
-        int bad = !want || rn != n;
-        for (int i = 0; !bad && i < n; i++) if ((int)want[i] != ids[i]) { fprintf(stderr, "[lm-oracle] %s prompt: token %d is %d, the handler's %d\n", k ? "unconditional" : "conditional", i, ids[i], (int)want[i]); bad = 1; }
-        if (!want || rn != n) fprintf(stderr, "[lm-oracle] %s prompt: %d tokens, the handler's %lld\n", k ? "unconditional" : "conditional", n, (long long)rn);
-        fprintf(stderr, "[lm-oracle] %-28s %d tokens %s\n", k ? "unconditional prompt" : "conditional prompt", n, bad ? "<-- FAIL" : "identical");
-        fails += bad; checks++;
-        free(want);
-    }
-    int64_t ncodes = 0; float *rc = ref_tensor(&R, "codes", &ncodes, NULL, NULL);
-    int *rcodes = (int *)malloc((size_t)(ncodes > 0 ? ncodes : 1) * sizeof(int));
-    for (int64_t i = 0; i < ncodes; i++) rcodes[i] = (int)rc[i];
-    free(rc);
-    const int target = (int)(seconds * 5);
-    int *codes = (int *)malloc((size_t)(target > 0 ? target : 1) * sizeof(int));
-    LmTap tap = { &R, rcodes, (int)ncodes, 0, 0, 0, -1, 0 };
-    AlmSample sm = { 0.0, cfg_scale, 0, 0.0, 1 };
-    t0 = now();
-    int got = alm_generate_codes(m, ic, nc, iu, nu, target, &sm, codes, lm_step, &tap, err, sizeof err);
-    double dt = now() - t0;
-    fails += tap.fails; checks += tap.checks;
-    if (got < 0) { fprintf(stderr, "[lm-oracle] generation failed: %s\n", err); fails++; checks++; }
-    else {
-        int same = got == (int)ncodes;
-        for (int i = 0; same && i < got; i++) if (codes[i] != rcodes[i]) same = 0;
-        fprintf(stderr, "[lm-oracle] %-28s %d codes, the handler's %lld: %s (%.1fs, %.2f s a token)\n", "the codes", got, (long long)ncodes, same ? "identical" : "<-- FAIL", dt, dt / (got + 1));
-        fails += !same; checks++;
-    }
-    free(cot); free(pc); free(pu); free(ic); free(iu); free(rcodes); free(codes);
+    lm_codes_check(m, &R, caption, lyrics, cot, seconds, cfg_scale, &fails, &checks);
+    free(cot);
     alm_free(m); json_free(root); free(meta_text); st_destroy(&R);
     if (fails) { fprintf(stderr, "[lm-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
     fprintf(stderr, "[lm-oracle] all %d comparison(s) within their limits (logits: rel %.0e, abs %.0e)\n", checks, LM_REL, LM_ABS);
@@ -1437,6 +1454,312 @@ static int run_lm_selftest(void){
 }
 
 /* acestep --model DIR --caption TEXT --out FILE.wav ...: one clip, no protocol. */
+/* ----------------------------------------------------------------------- the planner's first phase: its oracles -- */
+
+static char *slurp_file(const char *path){
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+    char *t = (char *)malloc(len > 0 ? (size_t)len + 1 : 1);
+    if (!t || len <= 0 || len > (256L << 20) || fread(t, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(t); return NULL; }
+    fclose(f);
+    t[len] = 0;
+    return t;
+}
+
+/* The YAML emitter against PyYAML (tools/acestep_ref_meta.py yaml): for every string of the corpus, yaml.dump({"caption": s}, allow_unicode=True) byte for byte. */
+static int run_yaml_oracle(const char *file){
+    g_tag = "yaml-oracle";
+    char *text = slurp_file(file);
+    jval *root = text ? json_parse_checked(text) : NULL;
+    if (!root || root->t != J_ARR) { fprintf(stderr, "[yaml-oracle] %s is not a corpus (tools/acestep_ref_meta.py yaml)\n", file); json_free(root); free(text); return 2; }
+    int fails = 0, quoted = 0, wrapped = 0, doubled = 0;
+    for (int i = 0; i < root->len; i++) {
+        jval *it = root->kids[i];
+        const char *in = json_str(it, "in"), *want = json_str(it, "out");
+        if (!in || !want) { fails++; continue; }
+        AmeItem item = { "caption", in, 0, 0 };
+        char *got = ame_yaml_dump(&item, 1);
+        if (!got || strcmp(got, want)) {
+            if (fails < 8) fprintf(stderr, "[yaml-oracle] <-- FAIL for %.80s\n    want %.200s\n    got  %.200s\n", in, want, got ? got : "(none)");
+            fails++;
+        }
+        quoted += strstr(want, "caption: '") != NULL; doubled += strstr(want, "caption: \"") != NULL; wrapped += strchr(strchr(want, '\n') + 1, '\n') != NULL;
+        free(got);
+    }
+    fprintf(stderr, "[yaml-oracle] %d strings: %d plain, %d single-quoted, %d double-quoted, %d wrapped over lines; %d differ from PyYAML%s\n", root->len,
+            root->len - quoted - doubled, quoted, doubled, wrapped, fails, fails ? "  <-- FAIL" : "");
+    json_free(root); free(text);
+    return fails ? 1 : 0;
+}
+
+/* A tokenizer's worth of an AceLm: the token tables only need that. */
+static AceLm *meta_stub(const char *lm_dir, char *err, size_t errn){
+    AceLm *m = (AceLm *)calloc(1, sizeof *m);
+    char path[4400];
+    snprintf(path, sizeof path, "%s/tokenizer.json", lm_dir);
+    FILE *f = fopen(path, "rb");
+    if (!m || !f) { snprintf(err, errn, "no tokenizer in %.300s", lm_dir); free(m); if (f) fclose(f); return NULL; }
+    fclose(f);
+    tok_load(&m->tok, path);
+    m->audio0 = tok_id_of(&m->tok, "<|audio_code_0|>");
+    m->eos = tok_id_of(&m->tok, "<|im_end|>");
+    snprintf(path, sizeof path, "%s/config.json", lm_dir);
+    char *ct = slurp_file(path); jval *cj = ct ? json_parse_checked(ct) : NULL;
+    m->vocab = cj ? acd_json_int(cj, "vocab_size", 0) : 0;
+    json_free(cj); free(ct);
+    if (m->vocab < 1000 || m->audio0 < 0 || m->eos < 0) { snprintf(err, errn, "the tokenizer or the config of %.300s does not fit", lm_dir); tok_free(&m->tok); free(m); return NULL; }
+    return m;
+}
+static void meta_stub_free(AceLm *m){ if (m->meta_tab && m->meta_free) m->meta_free(m->meta_tab); tok_free(&m->tok); free(m); }
+
+/* The token tables against the ones upstream's processor builds from the same tokenizer (trees.json): every prefix of every value and the tokens that may follow it,
+ * the tokens that spell the fixed strings, and the newline, end and backtick tokens. */
+static int meta_check_tree(const char *name, jval *want, const AmeTree *t, int nl){
+    int fails = 0, rows = 0;
+    for (int i = 0; want && i < want->len; i++) {
+        jval *row = want->kids[i], *pre = row->kids[0], *nx = row->kids[1];
+        int prefix[AME_MAXSEQ + 4], pl = pre->len, got[AME_MAXSEQ * 8 + 8], has;
+        for (int k = 0; k < pl && k < AME_MAXSEQ + 4; k++) prefix[k] = (int)pre->kids[k]->num;
+        const int gn = ame_tree_next(t, nl, prefix, pl, got, (int)(sizeof got / sizeof *got), &has);
+        int ok = has && gn == nx->len;
+        for (int k = 0; ok && k < gn; k++) if (got[k] != (int)nx->kids[k]->num) ok = 0;
+        if (!ok) { if (fails < 4) fprintf(stderr, "[meta-trees] %s: after a prefix of %d tokens: %d tokens may follow here, upstream's %d\n", name, pl, gn, nx->len); fails++; }
+        rows++;
+    }
+    int mine = 0;                                          /* the prefixes mine has: each distinct one once */
+    for (int i = 0; i < t->n; i++)
+        for (int l = 0; l <= t->len[i]; l++) {
+            int seen = 0;
+            for (int j = 0; j < i && !seen; j++) if (t->len[j] >= l && !memcmp(t->seq[j], t->seq[i], (size_t)l * sizeof(int))) seen = 1;
+            if (!seen) mine++;
+        }
+    if (mine != rows) { fprintf(stderr, "[meta-trees] %s: %d prefixes, upstream's %d\n", name, mine, rows); fails++; }
+    fprintf(stderr, "[meta-trees] %-14s %5d prefixes %s\n", name, rows, fails ? "<-- FAIL" : "identical");
+    return fails;
+}
+
+static int run_meta_trees(const char *model, const char *file, const char *lm_name){
+    g_tag = "meta-trees";
+    char path[4300], err[512] = "";
+    snprintf(path, sizeof path, "%s/%s", model, lm_name);
+    AceLm *m = meta_stub(path, err, sizeof err);
+    if (!m) { fprintf(stderr, "[meta-trees] %s\n", err); return 2; }
+    char *text = slurp_file(file);
+    jval *root = text ? json_parse_checked(text) : NULL;
+    if (!root) { fprintf(stderr, "[meta-trees] cannot read %s\n", file); meta_stub_free(m); free(text); return 2; }
+    ame_max_duration = (int)acd_json_num(root, "max_duration", 600);
+    double t0 = now();
+    AmeTab *t = ame_tab(m, err, sizeof err);
+    if (!t) { fprintf(stderr, "[meta-trees] %s\n", err); json_free(root); free(text); meta_stub_free(m); return 1; }
+    fprintf(stderr, "[meta-trees] the tables took %.2fs\n", now() - t0);
+    int fails = 0;
+    fails += meta_check_tree("bpm", json_get(root, "bpm"), &t->bpm, t->nl);
+    fails += meta_check_tree("duration", json_get(root, "duration"), &t->dur, t->nl);
+    fails += meta_check_tree("keyscale", json_get(root, "keyscale"), &t->key, t->nl);
+    fails += meta_check_tree("language", json_get(root, "language"), &t->lang, t->nl);
+    fails += meta_check_tree("timesignature", json_get(root, "timesignature"), &t->ts, t->nl);
+    jval *fx = json_get(root, "fixed");
+    for (int s = 0; s < AMS_N; s++) {
+        if (!AMS_FIXED[s]) continue;
+        jval *w = fx ? json_get(fx, AMS_NAMES[s]) : NULL, *steps = w ? json_get(w, "allowed_by_step") : NULL;
+        int bad = !steps || steps->len != t->nfixed[s];
+        for (int k = 0; !bad && k < steps->len; k++) if (steps->kids[k]->len != 1 || (int)steps->kids[k]->kids[0]->num != t->fixed[s][k]) bad = 1;
+        fprintf(stderr, "[meta-trees] %-14s %d tokens %s\n", AMS_NAMES[s], t->nfixed[s], bad ? "<-- FAIL" : "identical");
+        fails += bad;
+    }
+    const int nl = (int)acd_json_num(root, "newline", -1), eos = (int)acd_json_num(root, "eos", -1), bt = (int)acd_json_num(root, "backtick", -1);
+    jval *ac = json_get(root, "audio_codes");
+    int bad = nl != t->nl || eos != t->eos || bt != t->backtick || !ac || ac->len != 3 || (int)ac->kids[0]->num != m->audio0 || (int)ac->kids[1]->num != m->audio0 + ALM_CODES - 1 || (int)ac->kids[2]->num != ALM_CODES;
+    fprintf(stderr, "[meta-trees] %-14s newline %d, end %d, backtick %d, audio codes %d..%d %s\n", "special tokens", t->nl, t->eos, t->backtick, m->audio0, m->audio0 + ALM_CODES - 1, bad ? "<-- FAIL" : "identical");
+    fails += bad;
+    json_free(root); free(text); meta_stub_free(m);
+    if (fails) { fprintf(stderr, "[meta-trees] %d table(s) differ from upstream's\n", fails); return 1; }
+    fprintf(stderr, "[meta-trees] every table is upstream's\n");
+    return 0;
+}
+
+/* The first phase against upstream's handler (tools/acestep_ref_meta.py capture): phase 1's prompt (exactly), then phase 1 run from it at temperature 0, every step
+ * compared with the handler's -- the decoder's state, how many tokens it let through (and which, with the model's logit at each, or the highest 64 when it lets
+ * nearly everything through), the token chosen -- and the metadata parsed from what the model wrote. For a case that goes on to phase 2: the YAML of its prompt, the
+ * prompts' ids, and the codes under them (lm_codes_check). */
+#define META_REL 3e-5          /* the first phase reads a 217204-wide head through 28 layers: float noise of 1e-5 a step is what two summation orders do */
+typedef struct { shards *R; jval *steps; int nsteps, fails, checks, diverged, worst_step; double worst_rel, sse, ssw; } MetaTap;
+
+static void meta_trace(void *ud, int step, int state, int n, const int *ids, const float *raw, int tok){
+    MetaTap *t = (MetaTap *)ud;
+    if (t->diverged) return;
+    t->checks++;
+    if (step >= t->nsteps) { fprintf(stderr, "[meta-oracle] step %d: the handler stopped after %d\n", step, t->nsteps); t->fails++; t->diverged = 1; return; }
+    jval *js = t->steps->kids[step];
+    const char *rs = json_str(js, "state");
+    const int rn = (int)acd_json_num(js, "n", -1), rtok = (int)acd_json_num(js, "tok", -2);
+    if (!rs || strcmp(rs, AMS_NAMES[state])) { fprintf(stderr, "[meta-oracle] step %d: this engine is in %s, the handler in %s\n", step, AMS_NAMES[state], rs ? rs : "?"); t->fails++; t->diverged = 1; return; }
+    if (rn != n) { fprintf(stderr, "[meta-oracle] step %d (%s): %d tokens let through, the handler's %d\n", step, rs, n, rn); t->fails++; t->diverged = 1; return; }
+    char ni[32], nv[32]; int64_t m1 = 0, m2 = 0;
+    snprintf(ni, sizeof ni, "s%d.idx", step); snprintf(nv, sizeof nv, "s%d.val", step);
+    float *ri = ref_tensor(t->R, ni, &m1, NULL, NULL), *rv = ref_tensor(t->R, nv, &m2, NULL, NULL);
+    if (!ri || !rv || m1 != m2 || m1 < 1) { fprintf(stderr, "[meta-oracle] step %d: no logits recorded\n", step); t->fails++; t->diverged = 1; free(ri); free(rv); return; }
+    double se = 0, sw = 0, emax = 0, peak = 0;
+    int bad = 0;
+    for (int64_t k = 0; k < m1 && !bad; k++) {
+        const int id = (int)ri[k];
+        int at = -1;
+        if (n <= 2048) { at = (int)k < n && ids[k] == id ? (int)k : -1; }
+        else { int lo = 0, hi = n - 1; while (lo <= hi) { int mid = (lo + hi) / 2; if (ids[mid] == id) { at = mid; break; } if (ids[mid] < id) lo = mid + 1; else hi = mid - 1; } }
+        if (at < 0) { fprintf(stderr, "[meta-oracle] step %d (%s): token %d is not among those this engine lets through\n", step, rs, id); bad = 1; break; }
+        const double d = (double)raw[at] - rv[k];
+        se += d * d; sw += (double)rv[k] * rv[k];
+        if (fabs(d) > emax) emax = fabs(d);
+        if (fabs((double)rv[k]) > peak) peak = fabs((double)rv[k]);
+    }
+    const double rel = sw > 0 ? sqrt(se / sw) : sqrt(se);
+    t->sse += se; t->ssw += sw;
+    if (rel > t->worst_rel) { t->worst_rel = rel; t->worst_step = step; }
+    if (!bad && ((m1 >= 8 && rel > META_REL) || emax > LM_ABS * (peak > 1.0 ? peak : 1.0))) { fprintf(stderr, "[meta-oracle] step %d (%s): the logits differ: max|err| %.3e, rel %.3e <-- FAIL\n", step, rs, emax, rel); bad = 1; }
+    if (!bad && tok != rtok) { fprintf(stderr, "[meta-oracle] step %d (%s): chose %d, the handler %d <-- FAIL\n", step, rs, tok, rtok); bad = 1; }
+    if (bad) { t->fails++; t->diverged = 1; }
+    free(ri); free(rv);
+}
+
+static int meta_field_check(jval *md, const AlmMeta *got, int *checks){
+    int fails = 0;
+    for (int f = 0; f < AMF_N; f++) {
+        jval *w = md ? json_get(md, AMF_KEYS[f]) : NULL;
+        char want[16384] = "";
+        const int have = w && w->t != J_NULL;
+        if (have) { if (w->t == J_NUM) snprintf(want, sizeof want, "%lld", (long long)w->num); else snprintf(want, sizeof want, "%s", w->str ? w->str : ""); }
+        const int same = have == got->have[f] && (!have || !strcmp(want, got->s[f]));
+        if (!same) {
+            fprintf(stderr, "[meta-oracle] %s: this engine has %s%.120s, the handler %s%.120s <-- FAIL\n", AMF_KEYS[f], got->have[f] ? "" : "(none) ", got->have[f] ? got->s[f] : "", have ? "" : "(none) ", want);
+            if (have && got->have[f]) {
+                size_t k = 0; while (got->s[f][k] && want[k] && got->s[f][k] == want[k]) k++;
+                fprintf(stderr, "    first difference at byte %zu (%zu and %zu bytes long): this engine \"%.40s\", the handler \"%.40s\"\n", k, strlen(got->s[f]), strlen(want), got->s[f] + k, want + k);
+            }
+        }
+        fails += !same; (*checks)++;
+    }
+    return fails;
+}
+
+static int run_meta_oracle(const char *model, const char *refdir, const char *lm_name){
+    g_tag = "meta-oracle";
+    char path[4300], err[512] = "";
+    snprintf(path, sizeof path, "%s/%s", model, lm_name);
+    shards R; memset(&R, 0, sizeof R); st_init(&R, refdir);
+    if (R.n == 0) { fprintf(stderr, "[meta-oracle] no safetensors in %s\n", refdir); return 2; }
+    char jpath[4300]; snprintf(jpath, sizeof jpath, "%s/ref.json", refdir);
+    char *jt = slurp_file(jpath); jval *root = jt ? json_parse_checked(jt) : NULL;
+    const char *caption = json_str(root, "caption"), *lyrics = json_str(root, "lyrics");
+    jval *um = root ? json_get(root, "user_metadata") : NULL, *fl = root ? json_get(root, "flags") : NULL, *steps = root ? json_get(root, "steps") : NULL, *md = root ? json_get(root, "metadata") : NULL;
+    if (!root || !caption || !lyrics || !steps || steps->t != J_ARR || !md) { fprintf(stderr, "[meta-oracle] ref.json is not a case of tools/acestep_ref_meta.py\n"); json_free(root); free(jt); st_destroy(&R); return 2; }
+    ame_max_duration = (int)acd_json_num(root, "max_duration", 600);
+    double t0 = now();
+    AceLm *m = alm_load(path);
+    if (!m) { json_free(root); free(jt); st_destroy(&R); return 2; }
+    fprintf(stderr, "[meta-oracle] %s: loaded in %.1fs\n", m->dir_name, now() - t0);
+    int fails = 0, checks = 0;
+    AlmAsk ask; memset(&ask, 0, sizeof ask);
+    char ukey[64] = "", uts[16] = "";
+    if (um) {
+        ask.bpm = (int)acd_json_num(um, "bpm", 0); ask.duration = (int)acd_json_num(um, "duration", 0);
+        if (json_str(um, "keyscale")) { snprintf(ukey, sizeof ukey, "%s", json_str(um, "keyscale")); ask.key = ukey; }
+        if (json_str(um, "timesignature")) { snprintf(uts, sizeof uts, "%s", json_str(um, "timesignature")); ask.timesig = uts; }
+    }
+    ask.caption = fl && json_get(fl, "use_cot_caption") ? json_get(fl, "use_cot_caption")->boolean : 1;
+    ask.language = fl && json_get(fl, "use_cot_language") ? json_get(fl, "use_cot_language")->boolean : 1;
+    char *p1 = alm_meta_prompt(caption, lyrics);
+    int np = 0; int *ip = alm_tokenize(m, p1, &np);
+    {
+        int64_t rn = 0; float *want = ref_tensor(&R, "prompt1", &rn, NULL, NULL);
+        int bad = !want || rn != np;
+        for (int i = 0; !bad && i < np; i++) if ((int)want[i] != ip[i]) { fprintf(stderr, "[meta-oracle] phase 1 prompt: token %d is %d, the handler's %d\n", i, ip[i], (int)want[i]); bad = 1; }
+        if (want && rn != np) fprintf(stderr, "[meta-oracle] phase 1 prompt: %d tokens, the handler's %lld\n", np, (long long)rn);
+        fprintf(stderr, "[meta-oracle] %-28s %d tokens %s\n", "phase 1 prompt", np, bad ? "<-- FAIL" : "identical");
+        fails += bad; checks++;
+        free(want);
+    }
+    MetaTap tap = { &R, steps, steps->len, 0, 0, 0, -1, 0, 0, 0 };
+    AlmSample sm = { 0.0, 1.0, 0, 0.0, 1 };
+    AlmMeta meta; memset(&meta, 0, sizeof meta);
+    t0 = now();
+    int got = alm_generate_meta(m, ip, np, &ask, &sm, &meta, meta_trace, &tap, NULL, NULL, NULL, err, sizeof err);
+    const double dt = now() - t0;
+    fails += tap.fails; checks += tap.checks;
+    if (got < 0) { fprintf(stderr, "[meta-oracle] phase 1 failed: %s\n", err); fails++; checks++; }
+    else {
+        const int same = got == steps->len;
+        fprintf(stderr, "[meta-oracle] %-28s %d tokens in %.1fs (%.2f s a token), the handler's %d: %s; logits worst rel %.2e at step %d, overall %.2e\n", "phase 1", got, dt, dt / (got > 0 ? got : 1),
+                steps->len, same ? "same length" : "<-- FAIL", tap.worst_rel, tap.worst_step, tap.ssw > 0 ? sqrt(tap.sse / tap.ssw) : 0.0);
+        fails += !same; checks++;
+        fails += meta_field_check(md, &meta, &checks);
+        char *cot = ame_cot(&meta);
+        const char *want_cot = json_str(root, "cot");
+        if (json_get(root, "phase2") && json_get(root, "phase2")->boolean) {
+            const int ok = cot && want_cot && !strcmp(cot, want_cot);
+            fprintf(stderr, "[meta-oracle] %-28s %s\n", "phase 2's YAML", ok ? "identical" : "<-- FAIL");
+            if (!ok) fprintf(stderr, "    want %.400s\n    got  %.400s\n", want_cot ? want_cot : "(none)", cot ? cot : "(none)");
+            fails += !ok; checks++;
+            const double seconds = ask.duration > 0 ? (double)ask.duration : (meta.have[AMF_DURATION] ? atof(meta.s[AMF_DURATION]) : 0.0);
+            if (cot && seconds > 0) lm_codes_check(m, &R, caption, lyrics, cot, seconds, acd_json_num(root, "cfg_scale", 2.0), &fails, &checks);
+        }
+        free(cot);
+    }
+    alm_meta_free(&meta);
+    free(p1); free(ip);
+    alm_free(m); json_free(root); free(jt); st_destroy(&R);
+    if (fails) { fprintf(stderr, "[meta-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
+    fprintf(stderr, "[meta-oracle] all %d comparison(s) within their limits (logits: rel %.0e, abs %.0e)\n", checks, META_REL, LM_ABS);
+    return 0;
+}
+
+/* The parse of the model's text and the YAML of phase 2's prompt against upstream's own parse_lm_output and _format_metadata_as_cot (tools/acestep_ref_meta.py parse): for every
+ * text of the corpus (what a model might write, crafted and random), the metadata dict it makes and the YAML it writes for that dict. */
+static int meta_fields_equal(jval *md, const AlmMeta *got){
+    for (int f = 0; f < AMF_N; f++) {
+        jval *w = md ? json_get(md, AMF_KEYS[f]) : NULL;
+        const int have = w && w->t != J_NULL;
+        if (have != got->have[f]) return 0;
+        if (!have) continue;
+        char want[8192] = "";
+        if (w->t == J_NUM) snprintf(want, sizeof want, "%lld", (long long)w->num); else snprintf(want, sizeof want, "%s", w->str ? w->str : "");
+        if (strcmp(want, got->s[f])) return 0;
+    }
+    return 1;
+}
+
+static int run_parse_oracle(const char *file){
+    g_tag = "parse-oracle";
+    char *text = slurp_file(file);
+    jval *root = text ? json_parse_checked(text) : NULL;
+    if (!root || root->t != J_ARR) { fprintf(stderr, "[parse-oracle] %s is not a corpus (tools/acestep_ref_meta.py parse)\n", file); json_free(root); free(text); return 2; }
+    int bad_parse = 0, bad_cot = 0, withmeta = 0;
+    for (int i = 0; i < root->len; i++) {
+        jval *it = root->kids[i];
+        const char *in = json_str(it, "text"), *want_cot = json_str(it, "cot");
+        jval *md = json_get(it, "metadata");
+        AlmMeta got; memset(&got, 0, sizeof got);
+        ame_parse(in ? in : "", &got);
+        if (md && md->len) withmeta++;
+        if (!meta_fields_equal(md, &got)) {
+            if (bad_parse < 5) { fprintf(stderr, "[parse-oracle] <-- FAIL: the metadata of %.100s differs\n", in ? in : ""); for (int f = 0; f < AMF_N; f++) if (got.have[f]) fprintf(stderr, "    %s: %.100s\n", AMF_KEYS[f], got.s[f]); }
+            bad_parse++;
+        }
+        if (want_cot) {
+            char *cot = ame_cot(&got);
+            if (!cot || strcmp(cot, want_cot)) {
+                if (bad_cot < 5) fprintf(stderr, "[parse-oracle] <-- FAIL: the YAML for %.100s\n    want %.240s\n    got  %.240s\n", in ? in : "", want_cot, cot ? cot : "(none)");
+                bad_cot++;
+            }
+            free(cot);
+        }
+        alm_meta_free(&got);
+    }
+    fprintf(stderr, "[parse-oracle] %d texts (%d with metadata): %d parse differently, %d write other YAML%s\n", root->len, withmeta, bad_parse, bad_cot, bad_parse || bad_cot ? "  <-- FAIL" : "");
+    json_free(root); free(text);
+    return bad_parse || bad_cot ? 1 : 0;
+}
+
 static int run_make(const char *model, AceRequest *rq, const char *out){
     char err[512] = "";
     if (ace_check(rq, err, sizeof err)) { fprintf(stderr, "acestep: %s\n", err); return 2; }
@@ -1455,6 +1778,8 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
     int rc = ace_generate(e, rq, NULL, &pcm, &info, err, sizeof err);
     if (rc) { fprintf(stderr, "acestep: %s\n", err); ace_close(e); return 1; }
     if (write_wav16(out, pcm, (size_t)info.samples, e->vae->ach, e->vae->rate)) { fprintf(stderr, "acestep: cannot write %s\n", out); free(pcm); ace_close(e); return 1; }
+    if (info.meta_run) fprintf(stderr, "[acestep] the planner chose: tempo %d, key %s, time signature %s, language %s, %g s; caption: %s\n", info.meta_bpm, info.meta_key, info.meta_timesig,
+                               info.meta_language[0] ? info.meta_language : "(not written)", info.meta_duration, info.meta_caption[0] ? info.meta_caption : "(not rewritten)");
     if (info.plan_codes) fprintf(stderr, "[acestep] the planner (%s) wrote %d codes in %.1fs\n", info.lm, info.plan_codes, info.t_plan);
     fprintf(stderr, "[acestep] wrote %s: %.2f s of %d Hz stereo in %.1fs (text %.1f, condition %.1f, denoise %.1f, decode %.1f)%s\n", out,
             (double)info.samples / e->vae->rate, e->vae->rate, now() - t0, info.t_text, info.t_cond, info.t_denoise, info.t_decode,
@@ -1465,9 +1790,10 @@ static int run_make(const char *model, AceRequest *rq, const char *out){
 
 int main(int argc, char **argv){
     const char *model = NULL, *vae_ref = NULL, *dit_ref = NULL, *tok_ref = NULL, *text_ref = NULL, *gen_ref = NULL, *venc_ref = NULL, *cover_ref = NULL, *wav = NULL, *dump = NULL, *out = NULL;
-    int chunk = 256, overlap = 64, serve = 0, make = 0, steps_given = 0, dcw_given = 0;
+    int chunk = 256, overlap = 64, serve = 0, make = 0, steps_given = 0, dcw_given = 0, duration_given = 0;
     const char *lm_ref = NULL, *lm_name = "acestep-5Hz-lm-1.7B";
     int lm_selftest = 0;
+    const char *meta_ref = NULL, *meta_trees = NULL, *yaml_ref = NULL, *parse_ref = NULL;
     AceRequest rq; memset(&rq, 0, sizeof rq);
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
     rq.lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq.lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq.lm_top_p = ACS_DEFAULT_LM_TOP_P;
@@ -1478,6 +1804,10 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--gen-ref") && v) { gen_ref = v; i++; }
         else if (!strcmp(a, "--lm-ref") && v) { lm_ref = v; i++; }
         else if (!strcmp(a, "--lm-selftest") && v) { lm_selftest = 1; i++; }
+        else if (!strcmp(a, "--meta-ref") && v) { meta_ref = v; i++; }
+        else if (!strcmp(a, "--meta-trees") && v) { meta_trees = v; i++; }
+        else if (!strcmp(a, "--yaml-ref") && v) { yaml_ref = v; i++; }
+        else if (!strcmp(a, "--parse-ref") && v) { parse_ref = v; i++; }
         else if (!strcmp(a, "--lm") && v) {
             static char lm_dir[80];
             snprintf(lm_dir, sizeof lm_dir, "%s%s", strncmp(v, "acestep-", 8) ? "acestep-5Hz-lm-" : "", v);
@@ -1496,7 +1826,9 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--key") && v) { rq.key = v; i++; }
         else if (!strcmp(a, "--timesig") && v) { rq.timesig = v; i++; }
         else if (!strcmp(a, "--bpm") && v) { rq.bpm = atoi(v); i++; }
-        else if (!strcmp(a, "--duration") && v) { rq.duration = atof(v); i++; }
+        else if (!strcmp(a, "--duration") && v) { rq.duration = atof(v); duration_given = 1; i++; }
+        else if (!strcmp(a, "--no-lm-caption")) rq.lm_caption_off = 1;
+        else if (!strcmp(a, "--no-lm-language")) rq.lm_language_off = 1;
         else if (!strcmp(a, "--steps") && v) { rq.steps = atoi(v); steps_given = 1; i++; }
         else if (!strcmp(a, "--shift") && v) { rq.shift = atof(v); i++; }
         else if (!strcmp(a, "--seed") && v) { rq.seed = (uint64_t)strtoull(v, NULL, 10); i++; }
@@ -1553,6 +1885,7 @@ int main(int argc, char **argv){
         if (!steps_given) rq.steps = 32;
         if (!dcw_given) rq.dcw = 0;
     }
+    if (rq.plan && !duration_given) rq.duration = 0;                      /* the planner chooses the length when it is not asked for one */
     if (serve + make + (gen_ref != NULL) > 1) { fprintf(stderr, "acestep: --serve, --caption and --gen-ref are separate modes\n"); return 2; }
     if (model && make && !rq.caption) rq.caption = "";                  /* a cover or a repaint needs no description: its style is the clip's */
     if (model && make && !out) { fprintf(stderr, "acestep: --caption, --cover, --repaint and --ref need --out FILE.wav\n"); return 2; }
@@ -1567,7 +1900,11 @@ int main(int argc, char **argv){
     if (model && make) return run_make(model, &rq, out);
     if (model && gen_ref) return run_gen_oracle(model, gen_ref, wav);
     if (lm_selftest) return run_lm_selftest();
+    if (yaml_ref) return run_yaml_oracle(yaml_ref);
+    if (parse_ref) return run_parse_oracle(parse_ref);
     if (model && lm_ref) return run_lm_oracle(model, lm_ref, lm_name);
+    if (model && meta_trees) return run_meta_trees(model, meta_trees, lm_name);
+    if (model && meta_ref) return run_meta_oracle(model, meta_ref, lm_name);
     if (!model || (!vae_ref && !venc_ref && !cover_ref && !dit_ref && !tok_ref && !text_ref)) { usage(); return 2; }
     int rc = 0;
     if (tok_ref) rc = run_tok_oracle(model, tok_ref);

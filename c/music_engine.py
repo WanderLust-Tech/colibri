@@ -13,7 +13,7 @@ header of c/acestep_serve.h, the same shape as the image engine's (image_engine.
                                      bpm, key, timesig, dcw; and for audio in: task, src_path, ref_path,
                                      repaint_start, repaint_end, repaint_mode, repaint_strength,
                                      cover_strength, cover_noise (paths are files this process wrote)
-    PROGRESS {...}                   any number: stage plan|encode|text|condition|denoise|decode, step, steps
+    PROGRESS {...}                   any number: stage meta|plan|encode|text|condition|denoise|decode, step, steps
     AUDIO {..."bytes":N} + N + \\n    16-bit little-endian PCM, channels interleaved, 48 kHz
     ERROR {...}                      the engine stays alive for the next GEN
     CANCEL {...}                     client; answered with ERROR "cancelled"
@@ -62,7 +62,7 @@ MAX_TIME_SIGNATURE = 8
 # stream, not a song, and is refused before a byte of it is allocated.
 MAX_FRAME_BYTES = 160 << 20
 _FRAMES = ("READY", "PROGRESS", "AUDIO", "ERROR")
-STAGES = ("plan", "encode", "text", "condition", "denoise", "decode")
+STAGES = ("meta", "plan", "encode", "text", "condition", "denoise", "decode")
 RESPONSE_FORMATS = (None, "b64_json", "wav")
 # Audio in. What the engine announces in READY wins (`tasks`, `audio_in`); these are the contract's own numbers.
 TASKS = ("text2music", "cover", "repaint", "extract", "lego", "complete")
@@ -279,7 +279,7 @@ class MusicEngine:
                  ref_audio=None, repaint_start=None, repaint_end=None, repaint_mode=None,
                  repaint_strength=None, cover_strength=None, cover_noise=None, dit=None, guidance=None,
                  cfg_start=None, cfg_end=None, adg=None, track=None, tracks=None, plan=None, lm=None,
-                 lm_temperature=None, lm_cfg_scale=None, lm_top_p=None, lm_top_k=None):
+                 lm_temperature=None, lm_cfg_scale=None, lm_top_p=None, lm_top_k=None, lm_caption=None, lm_language=None):
         """Run one GEN to its final frame and return the audio.
 
         Fields left as None are left out of the request, so the engine's own defaults apply (no lyrics
@@ -303,9 +303,11 @@ class MusicEngine:
         (angle-based guidance), and for the three tasks only they do: `task` "extract" or "lego" with a `track`
         (drums, bass, vocals ...), or "complete" with `tracks` (a comma-separated string of the tracks to add).
 
-        The planner: `plan` makes the 5 Hz language model write the song's structure (audio codes) from the caption, the lyrics and the
-        metadata first, and the DiT follow it; it needs `bpm`, `key`, `time_signature` and `duration` (the model's own first phase, where it
-        writes them, is not built). `lm` ("0.6B", "1.7B" or "4B") picks the model, `lm_temperature`, `lm_cfg_scale`, `lm_top_p` and `lm_top_k`
+        The planner: `plan` makes the 5 Hz language model write the song's structure (audio codes) first, and the DiT follow it. Of `bpm`,
+        `key`, `time_signature` and `duration` the model writes what is not given (a first phase: the metadata and a rewritten caption, a
+        `meta` stage, answered in `meta`), unless all four are given, which skips it; no `duration` lets the model pick 10 to 600 seconds
+        (send 0). `lm_caption` and `lm_language` (false) keep the model from rewriting the caption the DiT follows, or writing the
+        language. `lm` ("0.6B", "1.7B" or "4B") picks the model, `lm_temperature`, `lm_cfg_scale`, `lm_top_p` and `lm_top_k`
         its sampling (upstream's defaults: 0.85, 2, 0.9, off)."""
         request = {"caption": caption}
         for name, value in (("lyrics", lyrics), ("language", language), ("duration", duration), ("steps", steps),
@@ -313,7 +315,8 @@ class MusicEngine:
                             ("timesig", time_signature), ("dcw", dcw), ("dit", dit), ("guidance", guidance),
                             ("cfg_start", cfg_start), ("cfg_end", cfg_end), ("adg", adg), ("track", track),
                             ("tracks", tracks), ("plan", plan), ("lm", lm), ("lm_temperature", lm_temperature),
-                            ("lm_cfg_scale", lm_cfg_scale), ("lm_top_p", lm_top_p), ("lm_top_k", lm_top_k)):
+                            ("lm_cfg_scale", lm_cfg_scale), ("lm_top_p", lm_top_p), ("lm_top_k", lm_top_k),
+                            ("lm_caption", lm_caption), ("lm_language", lm_language)):
             if value is not None:
                 request[name] = value
         audio_in = (task not in (None, "text2music") or src_audio is not None or ref_audio is not None)
@@ -832,7 +835,8 @@ def music_request(body, info=None):
         raise MusicRequestError("`cfg_interval_end` must not be before `cfg_interval_start`.", "cfg_interval_end")
     thinking = body.get("thinking")
     planner = planner_info(info)
-    lm_options = {"lm_model": None, "lm_temperature": None, "lm_cfg_scale": None, "lm_top_p": None, "lm_top_k": None}
+    lm_options = {"lm_model": None, "lm_temperature": None, "lm_cfg_scale": None, "lm_top_p": None, "lm_top_k": None,
+                  "use_cot_caption": None, "use_cot_language": None}
     if thinking is not None and not isinstance(thinking, bool):
         raise MusicRequestError("`thinking` must be true or false.", "thinking")
     if thinking:
@@ -840,10 +844,6 @@ def music_request(body, info=None):
             raise MusicRequestError("`thinking` is for text to music: a cover, repaint, extract, lego or complete has its own clip to follow.", "thinking")
         if not planner["available"]:
             raise MusicRequestError("This music engine has no 5 Hz planner: install acestep-5Hz-lm-1.7B beside the DiT.", "thinking")
-        missing = [name for name in ("bpm", "key", "time_signature") if body.get(name) in (None, "")]
-        if missing:
-            raise MusicRequestError(f"`thinking` needs {', '.join('`%s`' % name for name in missing)} too: the planner's own first phase, where it "
-                                    "writes the tempo, key and time signature itself, is not built.", missing[0])
     for name, low, high, label in (("lm_temperature", 0, 2, "between 0 and 2"), ("lm_cfg_scale", 0, 20, "between 0 and 20"), ("lm_top_p", 0, 1, "between 0 and 1")):
         value = body.get(name)
         if value is not None:
@@ -859,6 +859,14 @@ def music_request(body, info=None):
         if not thinking:
             raise MusicRequestError("`lm_top_k` is for the planner (set `thinking`).", "lm_top_k")
         lm_options["lm_top_k"] = top_k
+    for name in ("use_cot_caption", "use_cot_language"):
+        value = body.get(name)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise MusicRequestError(f"`{name}` must be true or false.", name)
+            if not thinking:
+                raise MusicRequestError(f"`{name}` is for the planner (set `thinking`).", name)
+        lm_options[name] = value
     lm_model = body.get("lm_model")
     if lm_model is not None:
         if lm_model not in LMS:
@@ -876,9 +884,12 @@ def music_request(body, info=None):
             raise MusicRequestError("`use_adg` is for the base and SFT DiTs (set `dit`).", "use_adg")
     low, high = float(info["min_duration"]), float(info["max_duration"])
     duration = body.get("duration")
+    planner_picks = bool(thinking) and duration is None                 # no duration with the planner: the model chooses the length
     duration = info["default_duration"] if duration is None else duration
     if audio["task"] not in ("text2music", "complete") or (audio["task"] == "complete" and audio["src_audio"] is not None):
         duration = None                       # the clip's own length is the song's
+    elif planner_picks:
+        duration = 0
     elif not _number(duration) or not low <= duration <= high:
         raise MusicRequestError(f"`duration` must be a number of seconds between {low:g} and {high:g}.", "duration")
     steps = body.get("steps")
