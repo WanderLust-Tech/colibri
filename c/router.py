@@ -959,6 +959,10 @@ class Pool:
         env["PYTHONUTF8"] = "1"
         if self.worker_env is not None:
             env.update(self.worker_env(entry) or {})
+        window = context_window(self.settings, entry)
+        if window:
+            env[window[0]] = str(window[1])
+            log(f"`{entry['id']}` will have a context window of {window[1]} tokens (its own setting)")
         if self.gpu is not None or (self.settings is not None and self.settings.gpu(entry)):
             policy = self.gpu or gpu_mod.GpuPolicy()
             pinned = self.settings.gpu(entry) if self.settings is not None else None
@@ -2486,8 +2490,11 @@ class RouterHandler(BaseHTTPRequestHandler):
         out = []
         for entry in self.server.catalog.entries():
             worker = pool.get(entry["key"])
+            limits = context_limits(entry)
             row = {"id": entry["id"], "key": entry["key"], "name": entry["name"], "enabled": not self.disabled(entry),
                    "gpu": (settings.gpu(entry) if settings is not None else None) or "auto",
+                   "context": (settings.context(entry) if settings is not None else None),
+                   "context_max": limits[1] if limits else 0,
                    "state": worker.state if worker is not None else "idle"}
             if worker is not None and worker.gpu is not None:
                 row["running"] = worker.gpu.public()
@@ -2504,23 +2511,37 @@ class RouterHandler(BaseHTTPRequestHandler):
         if settings is None:
             raise ApiError(404, "This router has no model settings file.", "not_found")
         body, entry, param = self.management_request("/v1/models/settings")
-        enabled, gpu = body.get("enabled"), body.get("gpu")
-        if enabled is None and gpu is None:
-            raise ApiError(400, "Send `enabled` and/or `gpu`.", "invalid_request_error", "enabled")
+        enabled, gpu, context = body.get("enabled"), body.get("gpu"), body.get("context")
+        if enabled is None and gpu is None and context is None:
+            raise ApiError(400, "Send `enabled`, `gpu` and/or `context`.", "invalid_request_error", "enabled")
+        if context is not None:
+            if context in ("auto", "default", ""):
+                context = 0
+            limits = context_limits(entry)
+            if isinstance(context, bool) or not isinstance(context, int):
+                raise ApiError(400, "`context` must be a number of tokens, or \"auto\" for the default.", "invalid_request_error", "context")
+            if context and limits is None:
+                raise ApiError(400, f"`{entry['id']}` has no context window to set.", "invalid_request_error", "context")
+            if context and context < settings_mod.CONTEXT_MIN:
+                raise ApiError(400, f"`context` must be at least {settings_mod.CONTEXT_MIN} tokens.", "invalid_request_error", "context")
+            if context and context > limits[1]:
+                raise ApiError(400, f"`{entry['id']}` supports a context window of at most {limits[1]} tokens.", "invalid_request_error", "context")
         if enabled is not None and not isinstance(enabled, bool):
             raise ApiError(400, "`enabled` must be true or false.", "invalid_request_error", "enabled")
         if gpu is not None and gpu not in settings_mod.GPU_CHOICES:
             raise ApiError(400, "`gpu` must be one of " + ", ".join(settings_mod.GPU_CHOICES) + ".",
                            "invalid_request_error", "gpu")
         try:
-            record = settings_mod.update(settings.path, entry["id"], enabled=enabled, gpu=gpu)
+            before = settings.context(entry)
+            record = settings_mod.update(settings.path, entry["id"], enabled=enabled, gpu=gpu, context=context)
         except (settings_mod.SettingsError, OSError) as error:
             raise ApiError(500, f"The model settings file could not be changed: {error}", "settings_file_error")
         settings.reload()
         outcome = None
-        if enabled is False:
+        changed = context is not None and (context or None) != before          # a loaded worker keeps the window it started with: unload it
+        if enabled is False or changed:
             pool, key = self.server.pool, entry["key"]
-            outcome = pool.unload(key, "turned off")
+            outcome = pool.unload(key, "turned off" if enabled is False else "context window changed")
             if outcome == "busy":
                 worker = pool.get(key)
                 if worker is not None:
@@ -2528,7 +2549,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     pool.release_wake()
                 outcome = "unloading when idle"
         self.send_json(200, {"id": entry["id"], "key": entry["key"], "enabled": record.get("enabled", True),
-                             "gpu": record.get("gpu", "auto"), **({"unload": outcome} if outcome else {})})
+                             "gpu": record.get("gpu", "auto"), "context": record.get("context"), **({"unload": outcome} if outcome else {})})
 
     # ---- models fetched and removed through the API (model_installer.py, docs/model-install.md)
     def need_installer(self):
@@ -2680,6 +2701,27 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(404, f"No preset is called `{name.strip()}`.", "preset_not_found", "name")
         self.server.presets.reload()
         self.send_json(200, {"status": "deleted", "name": name.strip().lower()})
+
+
+def context_limits(entry):
+    """(the variable the model's engine reads its context window from, the most tokens its family supports), or None for a model with no context
+    window to set (a picture, music or speech model) or a family this registry does not know."""
+    try:
+        from family_registry import family_by_id
+        limits = family_by_id(entry["family"]).limits
+    except Exception:
+        return None
+    return (limits.context_env, limits.max_context) if limits.max_context > 1 and limits.context_env else None
+
+
+def context_window(settings, entry):
+    """(environment variable, tokens) for a model that has its own context window in the settings, else None. A window over the family's limit is
+    cut to it."""
+    wanted = settings.context(entry) if settings is not None else None
+    limits = context_limits(entry) if wanted else None
+    if not limits:
+        return None
+    return limits[0], min(wanted, limits[1])
 
 
 # ----------------------------------------------------------------------------- entry point

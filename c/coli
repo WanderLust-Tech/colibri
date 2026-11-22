@@ -4010,7 +4010,7 @@ def _cmd_model_files(a):
 
 def cmd_model(a):
     """Turn a model off or on, and pin where it runs (model_settings.py, docs/model-settings.md): `coli model`, `coli model
-    disable NAME`, `coli model enable NAME`, `coli model gpu NAME auto|vulkan|cpu`. A running `coli router` is asked; with none,
+    disable NAME`, `coli model enable NAME`, `coli model gpu NAME auto|vulkan|cpu`, `coli model context NAME TOKENS|auto`. A running `coli router` is asked; with none,
     the file is edited and the router reads it when it starts."""
     banner("model")
     if a.action in ("info","verify"):
@@ -4026,12 +4026,13 @@ def cmd_model(a):
         if status==401:
             print(f"  {C.yel}the server wants an API key:{C.r} --api-key, or COLI_API_KEY"); return 1
         if status==200 and body:
-            rows=[("MODEL","ON","RUNS ON","NOW")]
+            rows=[("MODEL","ON","RUNS ON","NOW","CONTEXT")]
             for m in body["data"]:
                 running=(m.get("running") or {}).get("mode")
                 rows.append((m["id"],"yes" if m["enabled"] else "off",m["gpu"] if m["gpu"]!="auto" else "auto",
-                             ({"vulkan":"on the GPU","cpu":"on the CPU"}.get(running,"loaded") if m["state"]=="ready" else "-")))
-            widths=[max(len(r[i]) for r in rows) for i in range(4)]
+                             ({"vulkan":"on the GPU","cpu":"on the CPU"}.get(running,"loaded") if m["state"]=="ready" else "-"),
+                             (str(m["context"]) if m.get("context") else "default") if m.get("context_max") else "-"))
+            widths=[max(len(r[i]) for r in rows) for i in range(5)]
             for r in rows: print("  "+"   ".join(c.ljust(widths[i]) for i,c in enumerate(r)).rstrip())
             policy=body.get("gpu_policy")
             if policy:
@@ -4051,12 +4052,17 @@ def cmd_model(a):
             print(f"    {model}: "+", ".join(f"{k}={'yes' if v is True else 'no' if v is False else v}" for k,v in record.items()))
         return 0
     if not a.name:
-        print(f"  {C.yel}name a model:{C.r} coli model {a.action} NAME"+(" auto|vulkan|cpu" if a.action=="gpu" else "")); return 1
+        print(f"  {C.yel}name a model:{C.r} coli model {a.action} NAME"+(" auto|vulkan|cpu" if a.action=="gpu" else " TOKENS|auto" if a.action=="context" else "")); return 1
     body={"model":a.name}
     if a.action=="gpu":
         if a.value not in model_settings.GPU_CHOICES:
             print(f"  {C.yel}where should it run?{C.r} coli model gpu {a.name} auto|vulkan|cpu"); return 1
         body["gpu"]=a.value
+    elif a.action=="context":
+        tokens=_context_tokens(a.value)
+        if tokens is None:
+            print(f"  {C.yel}how many tokens?{C.r} coli model context {a.name} 32768 (or 32k, or auto for the default; at least {model_settings.CONTEXT_MIN})"); return 1
+        body["context"]=tokens
     else:
         body["enabled"]=a.action=="enable"
     status,res=_api_call(a,"POST","/v1/models/settings",body)
@@ -4071,16 +4077,29 @@ def cmd_model(a):
             print(f"  {C.yel}no installed model is called {a.name}{C.r}"); return 1
         path=a.file or model_settings.default_path()
         try:
-            record=model_settings.update(path,entry["id"],enabled=body.get("enabled"),gpu=body.get("gpu"))
+            record=model_settings.update(path,entry["id"],enabled=body.get("enabled"),gpu=body.get("gpu"),context=body.get("context"))
         except (model_settings.SettingsError,OSError) as error:
             print(f"  {C.yel}{error}{C.r}"); return 1
         print(f"  {C.grn}✓{C.r} {entry['id']}: {'off' if record.get('enabled') is False else 'on'}, runs on {record.get('gpu','auto')}"
+              f"{', context '+str(record['context']) if record.get('context') else ''}"
               f"  (no server answers on {where}; the router reads {path} when it starts)"); return 0
+    if status==400 and isinstance(res,dict):
+        print(f"  {C.yel}{(res.get('error') or {}).get('message') or res}{C.r}"); return 1
     if status!=200:
         print(f"  {C.yel}could not change {a.name}:{C.r} HTTP {status} {res}"); return 1
-    note={"unloaded":", unloaded","unloading when idle":", it unloads when it has finished its request"}.get(res.get("unload"),"")
-    print(f"  {C.grn}✓{C.r} {res['id']}: {'on' if res['enabled'] else 'off'}, runs on {res['gpu']}{note}")
+    note={"unloaded":", unloaded (it starts again with the new setting when it is next asked for)","unloading when idle":", it unloads when it has finished its request"}.get(res.get("unload"),"")
+    window=f", context {res['context']}" if res.get("context") else ""
+    print(f"  {C.grn}✓{C.r} {res['id']}: {'on' if res['enabled'] else 'off'}, runs on {res['gpu']}{window}{note}")
     return 0
+
+def _context_tokens(value):
+    """A context window from what was typed: 32768, 32k, 128K, or auto (0, the default); None when it is not one."""
+    text=(value or "").strip().lower()
+    if text in ("auto","default"): return 0
+    try:
+        return int(float(text[:-1])*1024) if text.endswith("k") else int(text)
+    except ValueError:
+        return None
 
 def cmd_preset(a):
     """Named presets: a model with settings baked in, offered under a name of its own (presets.py, docs/presets.md).
@@ -4750,11 +4769,11 @@ def main():
     ppreset.add_argument("--keep-alive",default=None,metavar="TIME",help="add: how long its model stays loaded (10m, -1 for never)")
     ppreset.add_argument("--file",default=None,metavar="FILE",help="the presets file (default: the setup folder's presets.json)")
     pmodel=sub.add_parser("model",help="turn a model off or on, pin where it runs (CPU or graphics card), look inside one (info) or check its files (verify), fetch one (install) or remove one (uninstall); available lists what can be fetched")
-    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","info","verify","available","install","uninstall"))
+    pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","context","info","verify","available","install","uninstall"))
     pmodel.add_argument("-y","--yes",action="store_true",help="install, uninstall: do not ask (the size, the licence and what goes are still printed)")
     pmodel.add_argument("--quick",action="store_true",help="verify: sizes only, no checksums (fast on a slow drive)")
     pmodel.add_argument("name",nargs="?",default=None,metavar="MODEL")
-    pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu")
+    pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu; context: a number of tokens (32768, 32k) or auto")
     pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)
     pmodel.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pmodel.add_argument("--file",default=None,metavar="FILE",help="with no server running: the settings file (default: the setup folder's model-settings.json)")

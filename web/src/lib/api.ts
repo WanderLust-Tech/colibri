@@ -450,6 +450,10 @@ export interface ModelSettingRow {
   key: string
   enabled: boolean
   gpu: GpuChoice
+  /* The model's own context window in tokens, or null for the default. */
+  context?: number | null
+  /* The most its family supports; 0 for a model with no context window (a picture, a song, speech). */
+  context_max?: number
   state: string
   running?: GpuDecision
 }
@@ -471,13 +475,13 @@ export async function getModelSettings(baseUrl: string, apiKey: string, signal?:
 /* Turns a model off or on, and/or pins where it runs. Turning one off unloads it: at once when it is idle, or when it has
    finished what it is answering (`unload` says "unloading when idle"). */
 export async function setModelSettings(
-  baseUrl: string, apiKey: string, key: string, change: { enabled?: boolean; gpu?: GpuChoice }, signal?: AbortSignal,
-): Promise<{ enabled: boolean; gpu: GpuChoice; unload?: string }> {
+  baseUrl: string, apiKey: string, key: string, change: { enabled?: boolean; gpu?: GpuChoice; context?: number | "auto" }, signal?: AbortSignal,
+): Promise<{ enabled: boolean; gpu: GpuChoice; context?: number | null; unload?: string }> {
   const response = await fetch(endpoint(baseUrl, "models/settings"), {
     method: "POST", headers: headers(apiKey), body: JSON.stringify({ key, ...change }), signal,
   })
   if (!response.ok) throw new Error(await responseError(response))
-  return (await response.json()) as { enabled: boolean; gpu: GpuChoice; unload?: string }
+  return (await response.json()) as { enabled: boolean; gpu: GpuChoice; context?: number | null; unload?: string }
 }
 
 /* One row of GET /v1/presets: a preset of the router's file, whether it can be used, and why not. */

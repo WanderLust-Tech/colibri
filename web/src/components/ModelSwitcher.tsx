@@ -1,3 +1,4 @@
+import { contextChoices, contextLabel } from "@/lib/contextWindow"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { HardDrive, LoaderCircle } from "lucide-react"
 
@@ -138,7 +139,7 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
   }
 
   /* Router with settings only. Turning a model off unloads it, after the request it is answering. */
-  const change = async (entry: InstalledModel, what: { enabled?: boolean; gpu?: GpuChoice }) => {
+  const change = async (entry: InstalledModel, what: { enabled?: boolean; gpu?: GpuChoice; context?: number | "auto" }) => {
     setResult(null)
     setChanging(entry.key)
     try {
@@ -272,6 +273,16 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
                         {(["auto", "vulkan", "cpu"] as const).map((choice) => <option key={choice} value={choice}>{gpuLabel(choice)}</option>)}
                       </select>
                     </label>
+                    {(setting.context_max ?? 0) > 0 && (
+                      <label>
+                        <span>{t("models.context")}</span>
+                        <select className="model-select" aria-label={`${t("models.context")} ${model.name}`} title={t("models.contextHelp")} value={setting.context ?? 0}
+                          disabled={changing !== null} onChange={(event) => void change(model, { context: Number(event.target.value) || "auto" })}>
+                          {contextChoices(setting.context ?? null, setting.context_max ?? 0).map((tokens) =>
+                            <option key={tokens} value={tokens}>{tokens === 0 ? t("models.contextDefault") : contextLabel(tokens)}</option>)}
+                        </select>
+                      </label>
+                    )}
                     <Button type="button" size="sm" variant="secondary" disabled={changing !== null}
                       aria-label={`${t(enabled ? "models.turnOff" : "models.turnOn")} ${model.name}`}
                       onClick={() => void change(model, { enabled: !enabled })}>{t(enabled ? "models.turnOff" : "models.turnOn")}</Button>

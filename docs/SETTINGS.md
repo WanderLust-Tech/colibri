@@ -50,6 +50,7 @@ printed.
 | `speak TEXT...` | Speech from a running server's speech model, written to a file (`--voice`, `--instruct`, `--language`, `--out`, `--format`, `--seed`, `--model`; `--reference FILE`, `--reference-text`, `--x-vector` to clone a voice from a clip; [qwen3-tts.md](qwen3-tts.md)). |
 | `voice list\|add NAME FILE\|remove NAME` | The saved voices of the voice-cloning models (`--text` says what the clip says, else the speech recognition model writes it down; `--no-text` skips that; `--json`). |
 | `talk [FILE...]` | A spoken conversation: microphone in, a chat model's answer spoken (`--text`, `--model`, `--asr`, `--tts`, `--voice`, `--language`, `--system`, `--max-tokens`, `--mic`, `--list-mics`, `--silence`, `--threshold`, `--out`, `--no-play`; [voice-loop.md](voice-loop.md)). |
+| `model [list\|enable\|disable\|gpu\|context\|info\|verify\|available\|install\|uninstall] [MODEL] [VALUE]` | Per-model settings of a running router ([model-settings.md](model-settings.md)): off or on, pinned to the card or the CPU (`gpu NAME auto\|vulkan\|cpu`), its own context window (`context NAME 32k\|auto`); `list` shows them all with where each runs now. |
 | `preset` | Named presets: a model with settings baked in, offered under a name of its own (`add`, `rm`, `show`; see [presets.md](presets.md)). |
 | `settings` | The settings colibri reads, which are set here, and which that are set are read by nothing (see above). |
 | `tune` | Measure and save the fastest quality-preserving execution profile for this machine/model. |

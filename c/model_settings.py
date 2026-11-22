@@ -9,6 +9,8 @@
   enabled   false: the router does not load the model and answers a request for it with a 403 that says how to turn it on again.
             One that is loaded is unloaded (when it has finished what it is answering). Anything else, or no entry: enabled.
   gpu       "vulkan" or "cpu" pins where the model runs; "auto" (or no entry) follows the router's --gpu policy (gpu.py).
+  context   the model's own context window in tokens (at least 256, at most what its family supports): the router starts its worker with that in the
+            variable the family reads (CTX, or Q36_MAXT), whatever the router itself was started with. No entry: the family's default or the router's.
 
 `coli model enable|disable|gpu` writes the file, and the router reads it again whenever it changes, so nothing needs restarting.
 A model is named as it is everywhere else (its id, its key, its folder).
@@ -18,7 +20,8 @@ import os
 import threading
 
 GPU_CHOICES = ("auto", "vulkan", "cpu")
-KEYS = frozenset({"enabled", "gpu"})
+KEYS = frozenset({"enabled", "gpu", "context"})
+CONTEXT_MIN = 256
 FILE_LOCK = threading.Lock()
 
 
@@ -47,6 +50,8 @@ def _check(model, record):
         raise SettingsError(f"{model!r}: `enabled` must be true or false")
     if "gpu" in record and record["gpu"] not in GPU_CHOICES:
         raise SettingsError(f"{model!r}: `gpu` must be one of {', '.join(GPU_CHOICES)}")
+    if "context" in record and (isinstance(record["context"], bool) or not isinstance(record["context"], int) or record["context"] < CONTEXT_MIN):
+        raise SettingsError(f"{model!r}: `context` must be a whole number of tokens, at least {CONTEXT_MIN}")
     return record
 
 
@@ -64,11 +69,14 @@ def read(path):
     return {str(model): dict(_check(str(model), record)) for model, record in data.get("models", {}).items()}
 
 
-def update(path, model, enabled=None, gpu=None):
+def update(path, model, enabled=None, gpu=None, context=None):
     """Change one model's settings in the file (atomically). `enabled` True removes the switch (enabled is the default);
-    `gpu` "auto" removes the pin. A record left empty is removed. Returns the model's record as now stored."""
+    `gpu` "auto" removes the pin; `context` 0 removes the model's own window, a number sets it. A record left empty is removed. Returns the
+    model's record as now stored."""
     if gpu is not None and gpu not in GPU_CHOICES:
         raise SettingsError(f"gpu must be one of {', '.join(GPU_CHOICES)}")
+    if context is not None and (isinstance(context, bool) or not isinstance(context, int) or (context and context < CONTEXT_MIN)):
+        raise SettingsError(f"context must be 0 (the default) or a whole number of tokens, at least {CONTEXT_MIN}")
     with FILE_LOCK:
         models = read(path)
         record = dict(models.get(model, {}))
@@ -82,6 +90,11 @@ def update(path, model, enabled=None, gpu=None):
                 record.pop("gpu", None)
             else:
                 record["gpu"] = gpu
+        if context is not None:
+            if context == 0:
+                record.pop("context", None)
+            else:
+                record["context"] = context
         if record:
             models[model] = record
         else:
@@ -144,3 +157,8 @@ class ModelSettings:
     def all(self):
         self.reload()
         return {model: dict(record) for model, record in self._models.items()}
+
+    def context(self, entry):
+        """The model's own context window in tokens, or None (the family's default, or the router's environment)."""
+        value = self.record(entry).get("context")
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= CONTEXT_MIN else None

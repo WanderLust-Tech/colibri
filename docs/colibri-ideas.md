@@ -145,9 +145,10 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
 - [x] **H1. Unload an idle model to make room on the card (M). Done 2026-11-16** (router.md, "An idle model that holds the graphics card"; `COLI_CARD_EVICT=0` turns it off). The router picks card or CPU when a model loads, from the free
   memory; a model that sits idle on the card for its keep-alive makes the next one go to the CPU. It could unload the idle one first
   (the policy would have to know which models hold the card; Windows has no per-process figure, so it would track its own workers).
-- [ ] **H2. A context window per model (S-M).** `CTX` and `Q36_MAXT` are per engine family in the router's environment; the router
-  passes the same arguments to every worker. A `model-settings.json` field would give each model its own, and the model card
-  would say it from the first request.
+- [x] **H2. A context window per model (S-M). Done 2026-11-22** ([model-settings.md](model-settings.md)): a `context` field in `model-settings.json`
+  (`coli model context NAME 32k`, `POST /v1/models/settings`, a selector on the Model page); the router starts that model's worker with it, in the variable its
+  family reads, over the router's own `CTX`; a window the family cannot hold is refused, a changed window unloads the model. Not done: the model card saying the
+  served window before the first load (H3's remainder: the window it will have is now known from the settings, the family's default is not shown).
 - [x] **H3. Keep `context_length` for models that have not run since the engines announced it (S). Partly done 2026-11-16:** `details.context_length` in `/v1/models/installed` is the folder's own limit from config.json, shown on the Model page before a first load; the card's `context_length` (what the server serves) is still only known after a load. Today the card appears
   after the model's first load.
 - [x] **H4. Qwen-Image on Vulkan (M). Measured 2026-11-17** (qwen-image.md): on the RTX 5090 a 512x512, 8-step picture takes 10 s against the
@@ -159,9 +160,11 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   the engine did not send is left out, never shown as 0. Measured on Qwen3-Coder and Gemma E2B: cold 0, a continuation nearly all
   of the last prompt; after an edit to the system message Qwen reports 0 (all or nothing) and Gemma the part before the edit.
   Still to do: the VS Code extension showing it (the `cache:` log line could say "kept, N of M tokens").
-- [ ] **H5. VS Code extension (its own roadmap lists them):** `cache_slot` per chat so a long conversation is not read again each
-  turn; picture, audio and video attachments for the models whose card lists them; presets from the settings; the reasoning
-  switch per model; the key in SecretStorage.
+- [x] **H5. VS Code extension (its own roadmap lists them). Done, or decided against, by 2026-11-20** (0.13.0 and 0.14.0; the extension's README roadmap has the detail):
+  picture, audio and video attachments for the models whose card lists them, presets in the Models menu, the key in SecretStorage, and a model installer are built;
+  `cache_slot` per chat was decided against (Colibri places each turn by its message prefix and the engine already reuses what it has read; what broke that was
+  the extension changing the start of the prompt, fixed in 0.4.1); a per-model reasoning switch is not needed (the gateway turns `reasoning_effort` into each
+  model's own switch). What is left is the extension's own list: showing the reused tokens (H6), an editable diff, a preview for `run_command`.
 
 ## F. Considered and set aside
 
