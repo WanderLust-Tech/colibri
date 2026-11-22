@@ -3852,7 +3852,8 @@ def cmd_rerank(a):
     return retrieval_cli.rerank(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=retrieval_cli.MODEL_WAIT),C)
 
 def _api_upload(a, path, fields, filename, data, timeout=900):
-    """(status, parsed JSON) of a multipart/form-data POST of one file and some text fields, or (None, None) when nothing answers."""
+    """(status, parsed JSON) of a multipart/form-data POST of one file and some text fields, or (None, None) when nothing answers. An answer that is
+    not JSON (subtitles, plain text) comes back as its text."""
     import urllib.error, urllib.request, uuid
     boundary="----coli"+uuid.uuid4().hex
     parts=[]
@@ -3866,7 +3867,9 @@ def _api_upload(a, path, fields, filename, data, timeout=900):
     if getattr(a,"api_key",None): req.add_header("Authorization",f"Bearer {a.api_key}")
     try:
         with urllib.request.urlopen(req,timeout=timeout) as r:
-            return r.status,json.loads(r.read() or b"null")
+            raw=r.read()
+            try: return r.status,json.loads(raw or b"null")
+            except ValueError: return r.status,raw.decode("utf-8","replace")
     except urllib.error.HTTPError as error:
         try: return error.code,json.loads(error.read() or b"null")
         except ValueError: return error.code,None

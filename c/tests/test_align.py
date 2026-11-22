@@ -267,6 +267,44 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(card["capabilities"], ["transcription"])
 
 
+class RealUploadHelperTest(unittest.TestCase):
+    """`coli`'s own upload helper (not the tests' stand-in): subtitles are not JSON and must come back as text."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("coli_script", str(HERE.parent / "coli"))
+        spec = importlib.util.spec_from_loader("coli_script", loader)
+        cls.coli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.coli)
+        cls.gw = AlignHarness()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.close()
+
+    def upload(self, fmt):
+        a = SimpleNamespace(host="127.0.0.1", port=self.gw.port, api_key=KEY)
+        return self.coli._api_upload(a, "/v1/audio/alignments", {"model": "qwen3-forcedaligner-0.6b", "text": "One two. Three four.", "response_format": fmt},
+                                     "clip.wav", wav_bytes(2.0))
+
+    def test_srt_vtt_and_text_come_back_as_text_and_json_as_json(self):
+        status, body = self.upload("srt")
+        self.assertEqual((status, body.startswith("1\n00:00:00,000 --> ")), (200, True))
+        status, body = self.upload("vtt")
+        self.assertEqual((status, body.startswith("WEBVTT")), (200, True))
+        status, body = self.upload("text")
+        self.assertEqual((status, body.splitlines()[0]), (200, "0.00 0.30 One"))
+        status, body = self.upload("json")
+        self.assertEqual((status, [w["word"] for w in body["words"]]), (200, ["One", "two", "Three", "four"]))
+
+    def test_an_error_is_still_json(self):
+        a = SimpleNamespace(host="127.0.0.1", port=self.gw.port, api_key=KEY)
+        status, body = self.coli._api_upload(a, "/v1/audio/alignments", {"model": "qwen3-forcedaligner-0.6b", "text": "?!"}, "clip.wav", wav_bytes(1.0))
+        self.assertEqual((status, body["error"]["param"]), (400, "text"))
+
+
 class Plain:
     yel = dim = r = ""
 
