@@ -366,7 +366,10 @@ duration is always the source's, whatever `duration` says (upstream's `prepare_b
 turbo one in the checkpoint: `acestep-v15-base/` with `config.json`, `model.safetensors` and `silence_latent.pt` from
 `ACE-Step/acestep-v15-base`: `coli model install ace-step-1.5-base-dit` (an add-on of the catalog, [model install](model-install.md#from-the-terminal); the dashboard's
 install list has it too) or by hand with `huggingface-cli download ACE-Step/acestep-v15-base config.json model.safetensors silence_latent.pt --local-dir
-<model>/acestep-v15-base`. The engine never reads the Python files in that repository. The SFT DiT is not in the catalog.
+<model>/acestep-v15-base`. The engine never reads the Python files in that repository. The SFT DiT (`ACE-Step/acestep-v15-sft`, the same three files) is not in the catalog, and goes beside the others the same way.
+**The SFT DiT on real weights** (2026-11-23): all 19 guided cases of `tools/acestep_ref_audio.py tasks --dit acestep-v15-sft` (the base's list: guidance variants, extract, lego, complete, cover, repaint) captured from
+upstream's handler (the code beside the weights has to be upstream's at the pinned commit: copy `acestep/models/sft/*.py` there first) and held by `acestep --gen-ref DIR --dit sft`: all 19 within their limits on the CPU
+(the audio 5e-6 to 5.6e-5 of the norm from upstream's, the repaint 1.05e-3 against its limit of 2e-3) and on the card (the same, the `dcw` case 1.5e-4 against 5e-4).
 
 **Choosing.** A request names `dit` (`turbo`, `base` or `sft`); extract, lego and complete run on the base DiT (the SFT if there is no
 base) when it does not, and everything else on the turbo one. A guided DiT's defaults are upstream's: 32 steps (up to 200; the turbo takes
@@ -482,7 +485,10 @@ that carries that block, and the DiT takes their hints (the detokenizer's output
 handler turns text to music with `audio_code_string` into a cover of those codes. Songs made this way follow a structure; plain text to music makes it up as it denoises.
 
 **Using it.** The checkpoint needs `acestep-5Hz-lm-1.7B/` beside the DiT: `coli model install ace-step-1.5-planner-1.7b` (3.7 GB, an add-on of the catalog) or
-`huggingface-cli download ACE-Step/Ace-Step1.5 --include "acestep-5Hz-lm-1.7B/*" --local-dir <model>`. The 0.6B and 4B planners are not in the catalog. **A bare caption is enough:** `acestep --caption "bright ukulele" --plan
+`huggingface-cli download ACE-Step/Ace-Step1.5 --include "acestep-5Hz-lm-1.7B/*" --local-dir <model>`. The 0.6B and 4B planners are not in the catalog (`huggingface-cli download ACE-Step/acestep-5Hz-lm-0.6B --local-dir <model>/acestep-5Hz-lm-0.6B`, the 4B the same, two shards; ask for one with `--lm 0.6B`, `lm_model`).
+They are held to upstream on their real weights (2026-11-23): the same four `--lm-ref` cases and the seven `--meta-ref` cases of the 1.7B, captured from upstream's handler with `--lm acestep-5Hz-lm-0.6B` / `-4B`, and `--meta-trees`
+(every table upstream's for both tokenizers): the codes identical in every case on the CPU (0.12 s a token for the 0.6B, 0.28 s for the 4B; the metadata phase's logits within their limits in all seven), the logits 1e-6 of the norm from upstream's;
+on the card two of the four code cases each (0.02 and 0.06 s a token), the codes identical too. These two are saved as a Qwen3ForCausalLM, their tensors named `model.layers.N...` where the 1.7B's are `layers.N...`: the loader takes either (`tests/test_acestep_lm_prefix.py`). **A bare caption is enough:** `acestep --caption "bright ukulele" --plan
 --out song.wav`, `coli music "bright ukulele" --plan`, or `POST /v1/audio/music` with `thinking: true`. Whatever of `bpm`, `key`, `time_signature` and `duration` you
 give the model is told as written; it writes the rest, picks the length (10 to 600 s) when there is no `duration`, rewrites the caption the DiT follows (`--no-lm-caption`,
 `use_cot_caption: false` keeps yours) and writes the language (`--no-lm-language`, `use_cot_language: false`). With all four of the tempo, key, time signature and duration

@@ -50,8 +50,8 @@ weights and the silence latent). They install and uninstall like any other (`col
 * the music engine reads what is installed when it starts, so the router stops the parent's engine when an add-on has landed (one that
   is answering a request keeps going, and the add-on shows up once it has been stopped and started again: `coli stop ace-step-1.5`).
 
-`coli setup` never offers an add-on. The planner's 0.6B and 4B and the SFT DiT are not in the catalog: the 4B is two shards, and none of the
-three has been held to upstream on real weights.
+`coli setup` never offers an add-on. The planner's 0.6B and 4B and the SFT DiT are not in the catalog: the 4B is two shards, and the installer
+takes one folder of files. All three have been held to upstream on real weights (2026-11-23, [acestep.md](acestep.md)); they go in by hand.
 
 With `--host`, `--port` and `--api-key` (or `COLI_API_KEY`) the same commands manage the router of another machine: the files go
 into that machine's models folder.

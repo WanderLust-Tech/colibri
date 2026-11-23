@@ -696,7 +696,7 @@ the null condition), combined by APG, ADG or CFG, on a linspace schedule of up t
 - Around it: the gateway's fields (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`), `coli music --dit/--guidance/--extract/--lego/--complete`, the stub engine, docs and CI.
 - Checked against upstream's handler: 19 real whole generations on the base DiT plus the tiny fixture (`--gen-ref` with `--dit base`), and 30 of 30 mutants caught (`tools/mutate_acestep_guided.py`).
 - Cost on the CPU: 2.5 s a step (two calls), so 32 steps are 80 s and a 10 s song about 90 s. The card path (2.36) takes that to 8.5 s.
-- Not done: Heun and SDE samplers, the SFT DiT in the catalogue.
+- The SFT DiT on real weights (2026-11-23): all 19 guided cases against upstream, CPU and card (acestep.md). Not done: Heun and SDE samplers, the SFT DiT in the catalogue.
 
 ### 2.34 ACE-Step's 5 Hz planner (E3a `ace0df14`, `b87e92a0`; E3b `ef88997d`; pushed and live 2026-11-22)
 
@@ -710,7 +710,9 @@ its context. A bare caption is enough: `coli music "bright ukulele" --plan`, or 
 - Held to upstream: the real 1.7B on 4 codes cases and 7 metadata cases, step by step; the YAML emitter on 6,229 strings and the parser on 1,546 texts; a tiny planner fixture trained on metadata blocks
   (`make_acestep_tiny.py --lm --lm-text`); mutants 67 of 67 caught on the metadata path (3 skipped: the fixture cannot see them) and the codes path's own set.
 - Cost on the CPU: 0.22 s a token guided, a 10 s planned song 48 s. The card path (2.36) takes that to 13 s.
-- Not done: `genres` (upstream skips it in phase 1 too, so refusing it matches), the 0.6B and 4B planners on real weights.
+- The 0.6B and 4B planners, on real weights (2026-11-23): the planner's `--lm-ref` and `--meta-ref` cases captured from upstream for each, the codes identical, the logits at 1e-6 (the CPU; two code cases each on the card). One bug found: those checkpoints name their
+  tensors `model.layers.N...` and the loader knew only the 1.7B's `layers.N...`; it takes both now (`tests/test_acestep_lm_prefix.py`, which fails on the old loader with the error the real checkpoint gave).
+- Not done: `genres` (upstream skips it in phase 1 too, so refusing it matches).
 
 ### 2.35 ACE-Step add-ons in the installer, and the Music controls (`99ea6c0c`, `8873f60d`; pushed (`929ea3c1`) and live 2026-11-22)
 
@@ -782,7 +784,7 @@ Status as of today (the file itself has been brought into line with this):
 | D3 Try `TRUNK_RESIDENT_LAYERS` on the dense Qwen3.8-27B | open, S |
 | E1 Save finished songs | **done**, local only (see 2.4) |
 | E2 Audio-in cases in the small CI fixture | **done**, live (2026-11-21: `make_acestep_tiny.py --audio-in`) |
-| E3 ACE-Step's 5 Hz planner (1.7B, also 0.6B and 4B) | **done** for the 1.7B, live (2.34, and on the card 2.36); the 0.6B and 4B not tried on real weights; `genres` refused as upstream does |
+| E3 ACE-Step's 5 Hz planner (1.7B, also 0.6B and 4B) | **done** for the 1.7B, live (2.34, and on the card 2.36); the 0.6B and 4B held to upstream on real weights 2026-11-23; `genres` refused as upstream does |
 | E4 Lego, extract and complete tasks (need other checkpoints) | **done**, live (2.33; the base DiT is an add-on of the catalogue, 2.35); Heun and SDE samplers not built |
 | E5 Push `main` to the fork | **done** (the latest docs commits wait for your go-ahead) |
 | F (streaming the DiT from disk, LoRA training on streamed layers, AirLLM-style loading for MoE) | decided against |
@@ -803,7 +805,6 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: the 0.6B and 4B planners and the SFT DiT on real weights; Heun and SDE samplers; an add-on Remove button in the
-  VS Code extension. The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
+- **ACE-Step**: Heun and SDE samplers (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23; the extension's add-on Remove button is built, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.

@@ -90,21 +90,25 @@ static AceLm *alm_load(const char *dir){
     m->L = (AcdEncLayer *)calloc((size_t)m->nl, sizeof *m->L);
     if (!m->L) { snprintf(err, sizeof err, "out of memory"); goto fail; }
     int64_t shd[1] = {m->D};
+    /* the 1.7B's tensors are named `layers.N...`, the 0.6B's and the 4B's (saved as a Qwen3ForCausalLM) `model.layers.N...` */
+    const char *pf = st_find(&S, "model.embed_tokens.weight") ? "model." : "";
     for (int i = 0; i < m->nl; i++) {
         char p[300], nm[300];
-        snprintf(p, sizeof p, "layers.%d.self_attn", i);
+        snprintf(p, sizeof p, "%slayers.%d.self_attn", pf, i);
         if (acd_load_attn(&S, p, m->D, m->H, m->Hk, m->hd, &m->L[i].sa, &m->wbytes, err, sizeof err)) goto fail;
-        snprintf(nm, sizeof nm, "layers.%d.input_layernorm.weight", i);          if (!(m->L[i].ln1 = acd_read_f32(&S, nm, 1, shd, err, sizeof err))) goto fail;
-        snprintf(nm, sizeof nm, "layers.%d.post_attention_layernorm.weight", i); if (!(m->L[i].ln2 = acd_read_f32(&S, nm, 1, shd, err, sizeof err))) goto fail;
-        snprintf(p, sizeof p, "layers.%d.mlp", i);
+        snprintf(nm, sizeof nm, "%slayers.%d.input_layernorm.weight", pf, i);    if (!(m->L[i].ln1 = acd_read_f32(&S, nm, 1, shd, err, sizeof err))) goto fail;
+        snprintf(nm, sizeof nm, "%slayers.%d.post_attention_layernorm.weight", pf, i); if (!(m->L[i].ln2 = acd_read_f32(&S, nm, 1, shd, err, sizeof err))) goto fail;
+        snprintf(p, sizeof p, "%slayers.%d.mlp", pf, i);
         if (acd_load_mlp(&S, p, m->D, m->inter, &m->L[i].gate, &m->L[i].up, &m->L[i].down, &m->wbytes, err, sizeof err)) goto fail;
     }
-    if (!(m->norm = acd_read_f32(&S, "norm.weight", 1, shd, err, sizeof err))) goto fail;
-    st_tensor *te = st_find(&S, "embed_tokens.weight");
+    char nmn[64], nme[64];
+    snprintf(nmn, sizeof nmn, "%snorm.weight", pf); snprintf(nme, sizeof nme, "%sembed_tokens.weight", pf);
+    if (!(m->norm = acd_read_f32(&S, nmn, 1, shd, err, sizeof err))) goto fail;
+    st_tensor *te = st_find(&S, nme);
     if (!te || te->dtype != 0 || te->numel != (int64_t)m->vocab * m->D) { snprintf(err, sizeof err, "the embedding table is missing or not bf16"); goto fail; }
     m->embed = (uint16_t *)malloc((size_t)te->numel * 2);
     if (!m->embed) { snprintf(err, sizeof err, "out of memory"); goto fail; }
-    st_read_raw(&S, "embed_tokens.weight", m->embed, 1);
+    st_read_raw(&S, nme, m->embed, 1);
     m->wbytes += (size_t)te->numel * 2;
     st_destroy(&S); have_s = 0;
     snprintf(path, sizeof path, "%s/tokenizer.json", dir);
