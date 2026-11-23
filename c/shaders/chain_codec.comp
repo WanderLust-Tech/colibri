@@ -14,6 +14,11 @@
 // mode 4, clamp to [-1, 1]:              o[o_off + i] = clamp(x[x_off + i], -1, 1)
 // mode 5, a causal convolution to ONE channel, clamped (the vocoder's last layer), T positions (n = T): the taps [k][c] at
 //     tab[r + k*C + c], the bias at tab[a_off]:  o[o_off + t] = clamp(bias + sum x[x_off + (t - (K-1)*dil + k*dil)*C + c] * w[k][c], -1, 1)
+// mode 6, the taps of a SYMMETRIC convolution (ACE-Step's VAE, acestep_vae_vk.h; an im2col for vkc_matmul), zero outside [0, T), padding r:
+//     o[o_off + (t - t0)*K*C + k*C + c] = x[x_off + (t + k*dil - r)*C + c]  for 0 <= t + k*dil - r < T, else 0   (r = (K-1)*dil/2)
+// mode 7, that decoder's transposed convolution (kernel 2s, stride s, padding r = ceil(s/2)): x [C = Tin][2s*cout] (a GEMM's output, the taps
+//     [kk][cout] a row), o [Tin*s][cout]: o[o_off + pos*cout + co] = tab[a_off + co] + x[t1][kk][co] + x[t1 - 1][kk + s][co], with jp = pos + r,
+//     t1 = jp / s, kk = jp - t1*s, each term only when its row is in [0, Tin); n = Tin*s*cout; the push constants carry s in `K`.
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer XB { float x[]; };
@@ -55,6 +60,20 @@ void main() {
         o[p.o_off + i] = sum;
     } else if (p.mode == 3) {
         o[p.o_off + i] += tab[p.a_off + i % p.C];
+    } else if (p.mode == 6) {
+        int KC = p.K * p.C;
+        int tl = i / KC, rem = i - tl * KC;
+        int k = rem / p.C, c = rem - k * p.C;
+        int s = p.t0 + tl + k * p.dil - p.r;
+        o[p.o_off + i] = (s < 0 || s >= p.T) ? 0.0 : x[p.x_off + s * p.C + c];
+    } else if (p.mode == 7) {
+        int pos = i / p.cout, co = i - pos * p.cout;
+        int st = p.K, nz = 2 * st * p.cout;
+        int jp = pos + p.r, t1 = jp / st, kk = jp - t1 * st;
+        float sum = tab[p.a_off + co];
+        if (t1 < p.C) sum += x[p.x_off + t1 * nz + kk * p.cout + co];
+        if (t1 >= 1) sum += x[p.x_off + (t1 - 1) * nz + (kk + st) * p.cout + co];
+        o[p.o_off + i] = sum;
     } else if (p.mode == 4) {
         o[p.o_off + i] = clamp(x[p.x_off + i], -1.0, 1.0);
     } else {

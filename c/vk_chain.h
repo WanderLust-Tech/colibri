@@ -710,7 +710,8 @@ int vkc_vae_ready(void);
  * t0.. as an im2col row of K*C floats each, for vkc_matmul; 1: SnakeBeta of T*C values with exp(alpha) at tab[a_off + c] and
  * 1/(exp(beta)+1e-9) at tab[a_off + C + c]; 2: a transposed convolution's overlap-add (x [C = Tin][cout*K], stride r, bias at
  * tab[a_off]); 3: a bias per channel added in place; 4: clamp to [-1, 1]; 5: a causal convolution to one channel, clamped (taps at tab[r], bias at
- * tab[a_off]). Made on first use. */
+ * tab[a_off]); and, for ACE-Step's VAE (acestep_vae_vk.h), 6: the taps of a SYMMETRIC convolution (padding r, zero outside [0, T)) and 7: its transposed
+ * convolution's overlap-add (stride s in K, padding r, x [C = Tin][2s*cout]). Made on first use. */
 typedef struct { int mode, C, K, dil, T, t0, x_off, o_off, n, a_off, r, cout; } VkcCodec;
 int vkc_codec(VkcBuf *x, VkcBuf *o, VkcBuf *tab, const VkcCodec *p);
 int vkc_codec_ready(void);

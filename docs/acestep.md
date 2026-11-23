@@ -406,12 +406,24 @@ whose modeling code is not upstream's at the pinned commit.
 Cost on the real checkpoint (24-core i9), a 10 s clip: 2.5 s a step (two DiT calls), so 32 steps are 80 s of denoising and about 90 s in all, against 12 s for
 the turbo's eight; the base DiT adds 4.8 GB to the resident set once a request names it. On a Vulkan card (below) the base DiT's 32 steps are 5.7 s and the clip 8.5 s in all.
 
+```sh
+cd c && make acestep
+./acestep --model ~/models/ace-step-1.5 --dit base --caption "bright ukulele" --duration 10 --out base.wav               # 32 steps, guidance 7
+./acestep --model ~/models/ace-step-1.5 --extract song.wav --track drums --out drums.wav                                 # the base DiT is chosen
+./acestep --model ~/models/ace-step-1.5 --lego song.wav --track bass --from 8 --to 20 --out song-bass.wav
+./acestep --model ~/models/ace-step-1.5 --complete song.wav --tracks drums,bass --out full.wav
+coli music --extract song.wav --track drums                       # the same through the gateway's rules
+python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 base_ref wavs --dit acestep-v15-base
+./acestep --model ~/models/ace-step-1.5 --dit base --gen-ref base_ref/b_lego
+python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base_ref/b_lego ...
+```
+
 ## The DiT on the card
 
 Built with `VK=1` and started with `COLI_VULKAN=1`, the DiT's denoising steps run on the graphics card (`c/acestep_dit_vk.h`; `acd_forward` tries it first). The 24 layers of a
 step are one submission: the matrices (bf16, f32 arithmetic) go up once, when the first step runs (4.4 GB for the turbo DiT; the base one when a request names it), and a step
 uploads the patch embedding and the step's modulation, and brings back the hidden rows. The patch embedding, the output norm and the output projection are small and stay on the CPU, as do
-the text encoder, the condition encoders and the VAE. The ops are the chain's, shared with the planner and the image models: the adaptive norm is `vkc_norm` with the weight times
+the text encoder and the condition encoders (the VAE has its own card path, the next section). The ops are the chain's, shared with the planner and the image models: the adaptive norm is `vkc_norm` with the weight times
 `(1 + scale)` made on the host each step and the shift added onto a buffer of ones, the gates are `GATE_ADD`'s per-column factor, the self-attention's K and V projections go up with their rows
 repeated for each group of query heads (16 over 8: the attention shader reads full-width K and V) and the cross-attention's cached K and V are repeated the same way when a condition goes up (the condition
 and the null condition of a guided DiT are two slots), and the attention is the encoder shader's (a range of rows a query: the sliding window is `[i - 128, i + 128]`, the full layers and the cross-attention
@@ -426,17 +438,22 @@ is 5 times wider when the card ran the DiT. `COLI_VK_DIT=0` keeps the DiT on the
 so nothing is repeated: `ACESTEP_DIT_VK_FAULT=N` makes step N fail, once, to test it). `tests/test_acestep_dit_vk.py` holds the card to the CPU on the tiny guided fixture (turbo and base, a clip past
 the window, an odd length, a failing step, the switch), skipped without a VK build and a device.
 
-```sh
-cd c && make acestep
-./acestep --model ~/models/ace-step-1.5 --dit base --caption "bright ukulele" --duration 10 --out base.wav               # 32 steps, guidance 7
-./acestep --model ~/models/ace-step-1.5 --extract song.wav --track drums --out drums.wav                                 # the base DiT is chosen
-./acestep --model ~/models/ace-step-1.5 --lego song.wav --track bass --from 8 --to 20 --out song-bass.wav
-./acestep --model ~/models/ace-step-1.5 --complete song.wav --tracks drums,bass --out full.wav
-coli music --extract song.wav --track drums                       # the same through the gateway's rules
-python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 base_ref wavs --dit acestep-v15-base
-./acestep --model ~/models/ace-step-1.5 --dit base --gen-ref base_ref/b_lego
-python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base_ref/b_lego ...
-```
+## The VAE on the card
+
+The last long step of a song was the VAE decode on the CPU (1.5 s for 10 s of music, 31 s for two minutes). Built with `VK=1` and started with `COLI_VULKAN=1`, each window of the
+tiled decode (up to 256 frames, upstream's tile) is one submission on the card (`c/acestep_vae_vk.h`; `acv_decode_ws` tries it first). The weights stay f32 (the fold of the weight
+norm is the CPU's, done at load: 0.33 GB on the card) and the ops are the chain's, the Qwen3-TTS codec's among them (`chain_codec.comp`): a convolution is an im2col tile (mode 6, new: the taps of a
+symmetric, dilated convolution, zero outside the window) into the chain's GEMM and the bias (mode 3); Snake is mode 1 (the argument reduced to [-pi, pi] first, as the codec's); a transposed
+convolution is one GEMM to `[T][2s * cout]` and mode 7 (new), a gather-add in which each output row takes the two taps the CPU's takes, in the same order; a residual unit's sum is the chain's `ADD`. A window of 256
+frames is 1.1 GB of activations; a window that would not fit in a 4 GB binding is the CPU's.
+
+On the 5090 a window of 256 frames decodes in 0.1 s (1.5 s on the CPU), a 10 s clip in 0.2 s and a 2-minute one in 1.7 s (30.8 s). A whole 10 s song is 3.3 s (text 0.5, condition 0.9, denoise 1.7, decode 0.2)
+against 5.1 s with the decode on the CPU, and a 2-minute song 10.4 s against 39.4 s. Held to upstream by the oracle the CPU is, `acestep --vae-ref` with COLI_VULKAN=1 on the real checkpoint, all 11 captured cases
+(every window of the 30-second clip, and its tiled whole): 3 to 6e-6 of the norm from upstream's audio on the 10 s clips (the CPU's 3e-6 to 6e-6; the limit is 2e-4), 3.4e-6 on the tiled 30 s one (the CPU's 2.6e-6),
+and a whole song differs from the CPU's by at most one step of the 16-bit sample. `COLI_VK_VAE=0` keeps the decode on the CPU. A card that is missing, a matrix that will not go up or a window that
+fails leaves that window to the CPU (a window has no state: `ACESTEP_VAE_VK_FAULT=N` makes window N fail, once, to test it), and a failure that loses the device takes the card off for the rest of the process.
+`tests/test_acestep_vae_vk.py` holds the card to the CPU on the tiny fixture with the DiT and the planner left on the CPU in both (a song, a 30 s clip of six windows, an odd length, a failing window,
+the switch), skipped without a VK build and a device. The condition encoders (0.9 s, 2.1 s planned) and the text encoder are what is left on the CPU of a song's time.
 
 ## The 5 Hz planner: a language model writes the song first
 

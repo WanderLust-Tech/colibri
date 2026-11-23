@@ -25,7 +25,7 @@ def make(model, name, env, *args):
     """One song through the CLI: (the samples, stderr)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, name + ".wav")
-        clean = {k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_DIT", "COLI_VK_LM", "ACESTEP_DIT_VK_FAULT")}
+        clean = {k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_DIT", "COLI_VK_LM", "COLI_VK_VAE", "ACESTEP_DIT_VK_FAULT")}
         done = subprocess.run([VK_EXE, "--model", model, "--caption", "calm piano", "--seed", "5", *args, "--out", out], env={**clean, **env},
                               capture_output=True, timeout=600)
         assert done.returncode == 0, done.stderr.decode("utf-8", "replace")[-800:]
@@ -84,7 +84,7 @@ class OnTheCard(unittest.TestCase):
         self.assertLess(rel(cpu, card), 1e-3)
 
     def test_the_switch_keeps_the_dit_on_the_cpu(self):
-        song, err = make(TINY, "off", {**self.CARD, "COLI_VK_DIT": "0"}, "--duration", "3", "--steps", "2")
+        song, err = make(TINY, "off", {**self.CARD, "COLI_VK_DIT": "0", "COLI_VK_VAE": "0"}, "--duration", "3", "--steps", "2")
         self.assertNotIn(ON_CARD, err)
         self.assertEqual(song, self.cpu)
 

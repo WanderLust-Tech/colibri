@@ -65,6 +65,12 @@ typedef struct {
     size_t wbytes;
 } AcVae;
 
+/* A window's decode on another device (acestep_vae_vk.h): called first by acv_decode_ws, which runs on the CPU when it answers 0. acv_free_hook hears of a decoder being freed. */
+typedef int (*AcvDecodeHook)(const AcVae *v, const float *z, int T, float *out);
+typedef void (*AcvFreeHook)(const AcVae *v);
+static AcvDecodeHook acv_decode_hook = NULL;
+static AcvFreeHook acv_free_hook = NULL;
+
 /* Scratch for one decode of up to maxT frames: three activation buffers, the im2col band, the product band. */
 typedef struct { float *buf[3], *col, *zb; size_t nbuf, ncol, nzb; int maxT; } AcvWork;
 
@@ -173,6 +179,7 @@ fail:
 
 static void acv_free(AcVae *v){
     if (!v) return;
+    if (acv_free_hook) acv_free_hook(v);
     acv_free_conv(&v->conv1); acv_free_conv(&v->conv2); acv_free_snake(&v->sn);
     for (int i = 0; i < v->nblk; i++) {
         AcvBlock *b = &v->blk[i];
@@ -392,6 +399,7 @@ static AcvWork *acv_work_new(const AcVae *v, int maxT){
 
 /* z [T][zdim] -> out [T*hop][ach], T <= w->maxT. */
 static void acv_decode_ws(const AcVae *v, AcvWork *w, const float *z, int T, float *out){
+    if (acv_decode_hook && acv_decode_hook(v, z, T, out)) return;                              /* on the card */
     float *x = w->buf[0], *nx = w->buf[1], *tmp = w->buf[2];
     acv_conv(&v->conv1, z, T, x, w->col);
     int64_t cur = T;

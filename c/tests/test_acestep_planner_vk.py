@@ -21,7 +21,7 @@ VK_EXE = os.environ.get("ACESTEP_VK_EXE")
 TEXT = os.environ.get("ACESTEP_TINY_TEXT")
 BARE = "bright ukulele and light percussion, summery"
 ON_CARD = b" on the card ("
-CARD = {"COLI_VULKAN": "1", "COLI_VK_DIT": "0"}          # the planner on the card and the DiT on the CPU, so that the song can be compared byte for byte
+CARD = {"COLI_VULKAN": "1", "COLI_VK_DIT": "0", "COLI_VK_VAE": "0"}          # the planner on the card, the DiT and the VAE on the CPU, so that the song can be compared byte for byte
 
 
 class Run(serve.Engine):
@@ -30,7 +30,7 @@ class Run(serve.Engine):
     def __init__(self, model, env):
         self.err = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([VK_EXE, "--model", model, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, bufsize=0,
-                                     env={**{k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_LM", "COLI_VK_DIT")}, **env})
+                                     env={**{k: v for k, v in os.environ.items() if k not in ("COLI_VULKAN", "COLI_VK_LM", "COLI_VK_DIT", "COLI_VK_VAE")}, **env})
         import queue
         import threading
         self.frames = queue.Queue()
