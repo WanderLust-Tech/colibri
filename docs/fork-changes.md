@@ -4,7 +4,8 @@ Written 2026-11-07 for the owner of this fork (WanderLust-Tech/colibri, used on 
 everything that differs from the checkout we started from, where each piece stands (built, merged, pushed, running),
 and what is still open, including the items in [colibri-ideas.md](colibri-ideas.md). Brought up to date on 2026-11-10
 (Gemma on the graphics card, video, the card-or-CPU choice, model settings, context windows, the VS Code extension), and
-again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and their graphics-card path, the models page).
+again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and their graphics-card path, the models page), and on 2026-11-23
+(ACE-Step's guided DiTs, its planner, the add-on installs and the Music controls, and the planner, DiT and VAE on the graphics card: 2.33 to 2.36).
 [models.md](models.md) lists every model and what it can do.
 
 ## 1. The baseline and how far we have moved
@@ -12,12 +13,12 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | | |
 |---|---|
 | Original checkout | `e0db083c`, upstream PR #2139 merged, 2026-10-17 (upstream v2.0.0 plus what followed) |
-| Local `main` now | the tip of `main`; on 2026-11-20 the fork has all of it (`git log origin/main..main` is empty) |
-| Size of the difference | 129 commits, 322 files, +81,836 / -5,995 lines (2026-11-20, before the models page) |
+| Local `main` now | the tip of `main`; on 2026-11-23 the fork has all of it (`git log origin/main..main` is empty) |
+| Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `98abb119` (pushed 2026-11-20); the models page lands after it |
-| Live server | clone `C:\Users\kp-mi\colibri` at `98abb119` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe` and `qwen3embed.exe` are the `VK=1` builds |
+| Fork's `main` | `47d8dd3a` (pushed 2026-11-22) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `47d8dd3a` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -52,6 +53,12 @@ the clone that serves port 8000):
 | Embeddings, `/v1/embeddings` (Qwen3-Embedding) | `feat/embeddings` | yes (`a6a2407a`) | yes | yes (2026-11-20), 2.23 |
 | Reranking, `/v1/rerank` (Qwen3-Reranker); shared start; `coli embed` and `coli rerank` | `feat/reranker`, `feat/rerank-prefix` | yes (`ea3f4bda`, `f29d170c`) | yes | yes (2026-11-20), 2.24, 2.25 |
 | Embeddings and reranking on the card (one Vulkan frame a forward) | `feat/embed-gpu` | yes (`d94a2a1b`, LF fix `98abb119`) | yes | yes (2026-11-20): `qwen3embed.exe` is the `VK=1` build; rerankers report `device: vulkan`, 2.26 |
+| Qwen3-ASR, Qwen3-TTS (cloning, streaming), the forced aligner, the voice loop | `feat/qwen3-speech` | yes | yes (`2bb8b51a`) | yes (2026-11-21), 2.31, 2.32 |
+| A context window per model (H2) | `285371c0` | yes | yes | yes (2026-11-21) |
+| ACE-Step guided DiTs (base, SFT) and the extract, lego and complete tasks (E4) | `feat/qwen3-speech` | yes (`0d801fbc`, `1b32b07a`) | yes | yes (2026-11-22, `a54c16d6`), 2.33 |
+| ACE-Step's 5 Hz planner: the codes (E3a) and the metadata (E3b) | `feat/qwen3-speech` | yes (`ace0df14`, `b87e92a0`, `ef88997d`) | yes | yes (2026-11-22), 2.34 |
+| ACE-Step add-ons in `coli model install`; the Music controls in the dashboard | `feat/qwen3-speech` | yes (`99ea6c0c`, `8873f60d`) | yes (`929ea3c1`) | yes (2026-11-22), 2.35 |
+| ACE-Step's planner, DiT and VAE on the Vulkan card | `feat/qwen3-speech` | yes (`929ea3c1`, `e903d6a0`, `47d8dd3a`) | yes | yes (2026-11-22): `acestep.exe` is the `VK=1` build; a 10 s song 2.8 s warm, 2.36 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
 Deployed 2026-11-07: the live clone was fast-forwarded to `main` by a local fetch, `gemma4.exe` built there, both Gemma
@@ -107,7 +114,7 @@ A new engine family, `acestep`, written in C from nothing, with every stage held
 that compares tensors, and mutation tools that prove each oracle can fail:
 
 - VAE decoder, DiT with condition encoders and the turbo sampler, Qwen3 text encoder and tokenizer, and the pipeline (the
-  seed is torch's, so a seed gives the clip upstream makes). 48 kHz stereo WAV, 1 to 600 s. No planner.
+  seed is torch's, so a seed gives the clip upstream makes). 48 kHz stereo WAV, 1 to 600 s. The base DiTs, the planner and the card paths came later (2.33 to 2.36).
 - Audio in: VAE encoder, audio tokenizer, WAV and MP3 loader (bundled `c/third_party/minimp3.h`). A reference clip, a cover,
   a repaint. Twenty whole generations match upstream.
 - `coli music`, `POST /v1/audio/music` (JSON, WAV, SSE progress, multipart), `coli info`, `coli plan`, `coli doctor`,
@@ -678,6 +685,62 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
   layer): an 11 s clip's codes in 0.34 s instead of 0.67 s; same codes (0 of 2208 differ).
 - **Not done**: the codec's first half and a fully resident encoder on the card; the 0.6B CustomVoice is installed and live (5 s of speech in 8 s through the router with the card free).
 
+### 2.33 ACE-Step's guided DiTs: base and SFT, extract, lego, complete (E4; `0d801fbc`, `1b32b07a`; pushed and live 2026-11-22)
+
+The turbo DiT has guidance distilled into it. The checkpoint's other DiTs (`acestep-v15-base`, `acestep-v15-sft`, the same network, `is_turbo` false) are guided when they sample: two calls a step (the condition and
+the null condition), combined by APG, ADG or CFG, on a linspace schedule of up to 200 steps (default 32, guidance 7). They also do three tasks the turbo one was not trained for: **extract** a track out of a clip,
+**lego** a track into a span of one, **complete** a partial track with others (`docs/acestep.md`, "The base and SFT DiTs").
+
+- Engine: `acd_load_variant` and the guided sampler in `acestep_dit.h`, several DiTs in one engine (`acestep_gen.h`; one opens at start and another loads the first time a request names it), the tasks in the
+  pipeline (a lego **shows** the span where a repaint hides it), the serve protocol (`dit`, `guidance`, `track`, `tracks`, ...).
+- Around it: the gateway's fields (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`), `coli music --dit/--guidance/--extract/--lego/--complete`, the stub engine, docs and CI.
+- Checked against upstream's handler: 19 real whole generations on the base DiT plus the tiny fixture (`--gen-ref` with `--dit base`), and 30 of 30 mutants caught (`tools/mutate_acestep_guided.py`).
+- Cost on the CPU: 2.5 s a step (two calls), so 32 steps are 80 s and a 10 s song about 90 s. The card path (2.36) takes that to 8.5 s.
+- Not done: Heun and SDE samplers, the SFT DiT in the catalogue.
+
+### 2.34 ACE-Step's 5 Hz planner (E3a `ace0df14`, `b87e92a0`; E3b `ef88997d`; pushed and live 2026-11-22)
+
+A Qwen3 decoder with the 64000 audio codes in its vocabulary (`acestep-5Hz-lm-1.7B`) writes the song first, in two phases as upstream's `generate_with_stop_condition` does. **Phase 1** writes the metadata (tempo,
+key, time signature, language, duration, a rewritten caption) as YAML inside `<think>`, under upstream's constrained decoder; **phase 2** writes the codes of the song's structure, and the DiT takes their hints as
+its context. A bare caption is enough: `coli music "bright ukulele" --plan`, or `thinking: true` on `POST /v1/audio/music`.
+
+- `c/acestep_lm.h` (the model, a tied head, the guided constrained codes sampler), `c/acestep_meta.h` (phase 1: a PyYAML-exact emitter and resolvers, a port of `parse_lm_output`, upstream's constrained-decoding
+  state machine and token tables). `--plan`, `thinking`, `lm_model`, `lm_temperature`, `lm_cfg_scale`, `lm_top_p`, `lm_top_k`, `use_cot_caption`, `use_cot_language`; a `meta` stage and `colibri.meta` in the answer;
+  with all of the tempo, key, time signature and duration given phase 1 is skipped, as upstream does; a duration of 0 lets the planner pick the length.
+- Held to upstream: the real 1.7B on 4 codes cases and 7 metadata cases, step by step; the YAML emitter on 6,229 strings and the parser on 1,546 texts; a tiny planner fixture trained on metadata blocks
+  (`make_acestep_tiny.py --lm --lm-text`); mutants 67 of 67 caught on the metadata path (3 skipped: the fixture cannot see them) and the codes path's own set.
+- Cost on the CPU: 0.22 s a token guided, a 10 s planned song 48 s. The card path (2.36) takes that to 13 s.
+- Not done: `genres` (upstream skips it in phase 1 too, so refusing it matches), the 0.6B and 4B planners on real weights.
+
+### 2.35 ACE-Step add-ons in the installer, and the Music controls (`99ea6c0c`, `8873f60d`; pushed (`929ea3c1`) and live 2026-11-22)
+
+- **Add-ons** (2.22's installer): catalogue entries with `into` (the parent model), `subdir`, `strip` and `check` install into a folder of an installed model: `ace-step-1.5-planner-1.7b` (3.7 GB) and
+  `ace-step-1.5-base-dit` (4.8 GB). The parent must be installed (`needs_parent`), an add-on has its own manifest, is removed by `{"id": ...}` on `/v1/models/uninstall` (refused while the parent is loaded),
+  `coli setup` never offers one, and the router stops an idle parent after an add-on lands so that it opens with the new files. Hand-made folders of the same names count as installed. The dashboard's installer
+  lists them (Add-ons installed, with Remove). Extension 0.15.0 installs them by id; it has no remove for one.
+- **The Music composer** (`MusicTurn.tsx`, `useMusic.ts`): Plan and Auto length chips, the DiT choice, guidance, Extract / Add a track / Complete, and the planner's metadata on the result. The `/v1/models` audio
+  block says which `dits` and `planner` are installed and whether `guided` is possible. `web/tests/music_guided_ui.py` drives it in headless Edge; vitest covers `music.ts` and `installs.ts`.
+- On the way: `make install` was missing five modules (`voices.py`, `voice_loop.py`, `talk_cli.py`, `align_engine.py`, `subtitles.py`), which made `test_install_closure` fail on `main`; fixed in the same commit.
+
+### 2.36 ACE-Step on the graphics card: the planner, the DiT, the VAE (`929ea3c1`, `e903d6a0`, `47d8dd3a`; pushed and live 2026-11-22)
+
+With `VK=1` and `COLI_VULKAN=1` the three big stages of a song run on the card, each as the chain's ops ([acestep.md](acestep.md), "On the card", "The DiT on the card", "The VAE on the card").
+`c/acestep_vk.h` opens the device for all three. Each stage is held to upstream by the oracle its CPU path is held to, each fails back to the CPU (the planner reruns the whole generation, the DiT and VAE a step or
+a window) and each has an off switch and a fault injection for its test.
+
+| Stage | File | Before (CPU) | On the 5090 | Held to upstream | Switch |
+|---|---|---|---|---|---|
+| Planner | `acestep_lm_vk.h` | 0.13 s a token unguided (0.22 guided), phase 1 22 s | 0.01 s a token, phase 1 2 s | the 7 + 4 real cases identical, logits 1.9e-5 | `COLI_VK_LM=0` |
+| DiT | `acestep_dit_vk.h` | 1.5 s a step | 0.1 s a step; the base's 32 guided steps 5.7 s | 11 turbo + 19 base real cases; one limit widened 5x (the 40-step guided latents, 1.9e-4) | `COLI_VK_DIT=0` |
+| VAE | `acestep_vae_vk.h` | 1.5 s per 256-frame window; 31 s for 2 minutes | 0.1 s; 1.7 s for 2 minutes | all 11 `--vae-ref` cases, 3 to 6e-6 (limit 2e-4) | `COLI_VK_VAE=0` |
+
+Through the live router: a 10 s song 2.8 s warm (4.4 s before the VAE moved), a 2-minute song 18.7 s (10.4 s from the command line; 39.4 s with the VAE still on the CPU), an 8 s planned clip 11.4 s and an 8 s clip on the base DiT 12.0 s (each includes loading the planner or the base DiT). The card holds the planner (3.7 GB), the turbo DiT (4.4 GB), the base DiT when a request names it (4.8 GB) and the VAE (0.33 GB), plus about 1.1 GB of activations a decode window. The
+shader `chain_codec.comp` gained two modes for the VAE (a symmetric convolution's im2col and this decoder's transposed-convolution gather-add); the TTS codec that shares it still answers.
+Tests: `test_acestep_planner_vk.py` (4), `test_acestep_dit_vk.py` (6), `test_acestep_vae_vk.py` (5), skipped without a `VK=1` build and a device; each pins the other stages to the CPU so a song compares byte for byte or
+within a few 1e-5.
+
+Still on the CPU: the text encoder (0.5 s) and the condition encoders (0.9 s, 2.1 s with the planner), the patch embedding and the DiT's output projection (small).
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -716,9 +779,9 @@ Status as of today (the file itself has been brought into line with this):
 | D2 Free pipeline stages | already in the engine (`COLI_IMG_TE=stage`, about 14 s per new prompt); not needed on 64 GB |
 | D3 Try `TRUNK_RESIDENT_LAYERS` on the dense Qwen3.8-27B | open, S |
 | E1 Save finished songs | **done**, local only (see 2.4) |
-| E2 Audio-in cases in the small CI fixture | open, S |
-| E3 ACE-Step's 5 Hz planner (1.7B, also 0.6B and 4B) | open, L |
-| E4 Lego, extract and complete tasks (need other checkpoints) | open, L |
+| E2 Audio-in cases in the small CI fixture | **done**, live (2026-11-21: `make_acestep_tiny.py --audio-in`) |
+| E3 ACE-Step's 5 Hz planner (1.7B, also 0.6B and 4B) | **done** for the 1.7B, live (2.34, and on the card 2.36); the 0.6B and 4B not tried on real weights; `genres` refused as upstream does |
+| E4 Lego, extract and complete tasks (need other checkpoints) | **done**, live (2.33; the base DiT is an add-on of the catalogue, 2.35); Heun and SDE samplers not built |
 | E5 Push `main` to the fork | **done** (the latest docs commits wait for your go-ahead) |
 | F (streaming the DiT from disk, LoRA training on streamed layers, AirLLM-style loading for MoE) | decided against |
 
@@ -728,7 +791,7 @@ Status as of today (the file itself has been brought into line with this):
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
 - **Qwen-Image editing**: Linux, ASan and UBSan runs; a real edit at the 1024
   reference (the chain with an edit prefix was checked on the card 2026-11-21, 2.29); translated READMEs (it, ja, zh, id) for editing.
-- **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; ACE-Step has no Vulkan path. Making room on the card **is
+- **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; ACE-Step's planner, DiT and VAE run on it (2.36), its text and condition encoders do not. Making room on the card **is
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
   Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small
@@ -738,7 +801,7 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: rebuild `acestep.exe` in the live clone if audio in is wanted (see section 1); the upstream handler once rewrote
-  files in `ace-step-1.5` (weights untouched); the 1.7B planner weights sit in that folder unused.
+- **ACE-Step**: the text and condition encoders on the card (0.5 s and 0.9 s of a song's 2.8 s); the 0.6B and 4B planners and the SFT DiT on real weights; Heun and SDE samplers; an add-on Remove button in the
+  VS Code extension. The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.
