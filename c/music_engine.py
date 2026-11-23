@@ -279,7 +279,8 @@ class MusicEngine:
                  ref_audio=None, repaint_start=None, repaint_end=None, repaint_mode=None,
                  repaint_strength=None, cover_strength=None, cover_noise=None, dit=None, guidance=None,
                  cfg_start=None, cfg_end=None, adg=None, track=None, tracks=None, plan=None, lm=None,
-                 lm_temperature=None, lm_cfg_scale=None, lm_top_p=None, lm_top_k=None, lm_caption=None, lm_language=None):
+                 lm_temperature=None, lm_cfg_scale=None, lm_top_p=None, lm_top_k=None, lm_caption=None, lm_language=None,
+                 sampler=None, infer=None, vnorm=None, vema=None):
         """Run one GEN to its final frame and return the audio.
 
         Fields left as None are left out of the request, so the engine's own defaults apply (no lyrics
@@ -303,6 +304,11 @@ class MusicEngine:
         (angle-based guidance), and for the three tasks only they do: `task` "extract" or "lego" with a `track`
         (drums, bass, vocals ...), or "complete" with `tracks` (a comma-separated string of the tracks to add).
 
+        The sampler (any DiT): `sampler` ("euler", the default, or "heun": two evaluations a step), `infer` ("ode", the default, or "sde": the
+        clean sample predicted and noised to the next level each step), `vnorm` (above 0: a velocity is cut to this times the norm of the
+        latents) and `vema` (0 to 1: the share of the last step's velocity mixed into this one), upstream's `sampler_mode`, `infer_method`,
+        `velocity_norm_threshold` and `velocity_ema_factor`.
+
         The planner: `plan` makes the 5 Hz language model write the song's structure (audio codes) first, and the DiT follow it. Of `bpm`,
         `key`, `time_signature` and `duration` the model writes what is not given (a first phase: the metadata and a rewritten caption, a
         `meta` stage, answered in `meta`), unless all four are given, which skips it; no `duration` lets the model pick 10 to 600 seconds
@@ -316,7 +322,8 @@ class MusicEngine:
                             ("cfg_start", cfg_start), ("cfg_end", cfg_end), ("adg", adg), ("track", track),
                             ("tracks", tracks), ("plan", plan), ("lm", lm), ("lm_temperature", lm_temperature),
                             ("lm_cfg_scale", lm_cfg_scale), ("lm_top_p", lm_top_p), ("lm_top_k", lm_top_k),
-                            ("lm_caption", lm_caption), ("lm_language", lm_language)):
+                            ("lm_caption", lm_caption), ("lm_language", lm_language), ("sampler", sampler), ("infer", infer),
+                            ("vnorm", vnorm), ("vema", vema)):
             if value is not None:
                 request[name] = value
         audio_in = (task not in (None, "text2music") or src_audio is not None or ref_audio is not None)
@@ -833,6 +840,26 @@ def music_request(body, info=None):
     if (cfg["cfg_interval_start"] is not None and cfg["cfg_interval_end"] is not None and cfg["cfg_interval_end"] > 0
             and cfg["cfg_interval_end"] < cfg["cfg_interval_start"]):
         raise MusicRequestError("`cfg_interval_end` must not be before `cfg_interval_start`.", "cfg_interval_end")
+    # the sampler: upstream's options for every DiT, off by default; an engine that does not announce them would ignore them, so it is refused here
+    sampler = {}
+    for name, choices in (("sampler_mode", ("euler", "heun")), ("infer_method", ("ode", "sde"))):
+        value = body.get(name)
+        if value is not None:
+            if value not in choices:
+                raise MusicRequestError(f"`{name}` must be \"{choices[0]}\" or \"{choices[1]}\".", name)
+            if not (info or {}).get("sampler"):
+                raise MusicRequestError(f"`{name}`: this music engine does not take sampler options; update the engine.", name)
+        sampler[name] = value
+    for name, high, label in (("velocity_norm_threshold", 100, "between 0 (off) and 100"), ("velocity_ema_factor", 1, "between 0 (off) and 1")):
+        value = body.get(name)
+        if value is not None:
+            if not _number(value) or not 0 <= value <= high:
+                raise MusicRequestError(f"`{name}` must be a number {label}.", name)
+            if not (info or {}).get("sampler"):
+                raise MusicRequestError(f"`{name}`: this music engine does not take sampler options; update the engine.", name)
+        sampler[name] = None if value is None else float(value)
+    if sampler["sampler_mode"] == "heun" and sampler["infer_method"] == "sde":
+        raise MusicRequestError("`sampler_mode` \"heun\" does not go with `infer_method` \"sde\" (upstream falls back to Euler): pick one.", "sampler_mode")
     thinking = body.get("thinking")
     planner = planner_info(info)
     lm_options = {"lm_model": None, "lm_temperature": None, "lm_cfg_scale": None, "lm_top_p": None, "lm_top_k": None,
@@ -930,7 +957,7 @@ def music_request(body, info=None):
             "time_signature": signature or None, "dcw": (None if guided else True) if dcw is None else dcw,
             "response_format": response_format, "dit": dit, "guided": guided,
             "guidance_scale": None if guidance is None else float(guidance), **cfg, "use_adg": adg,
-            "thinking": bool(thinking), **lm_options, **audio}
+            **sampler, "thinking": bool(thinking), **lm_options, **audio}
 
 
 # ---------------------------------------------------------------- WAV

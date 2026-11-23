@@ -76,6 +76,21 @@ def seeded_posterior(seed):
     ob.OobleckDiagonalGaussianDistribution.sample = sample
 
 
+def seeded_renoise(h, seed):
+    """Make the SDE step's noise (renoise called with no noise: torch.randn_like on the global generator, which nothing seeds) a draw from a
+    generator seeded with `seed`, one draw a step, in order: what the C engine does with its own."""
+    model = h.model
+    original = getattr(model, "_renoise_unseeded", None) or model.renoise
+    model._renoise_unseeded = original
+    gen = torch.Generator().manual_seed(seed)
+
+    def renoise(x, t, noise=None):
+        if noise is None:
+            noise = torch.randn(x.shape, generator=gen, dtype=x.dtype)
+        return original(x, t, noise)
+    model.renoise = renoise
+
+
 def load_wav(path):
     import soundfile as sf
     a, sr = sf.read(path, dtype="float32", always_2d=True)
@@ -172,6 +187,7 @@ def instruction_of(params):
     return TASK_INSTRUCTIONS[task]
 S48 = 48000
 VAE_SEED_XOR = 0x5EED0001          # the seed of the posterior draws is the request's seed xor this (acestep_gen.h ACG_VAE_SEED_XOR)
+SDE_SEED_XOR = 0x5EED5DE1          # the SDE sampler's noise draws: a generator seeded with the request's seed xor this (acestep_gen.h ACG_SDE_SEED_XOR)
 
 COMMON = dict(inference_steps=8, use_random_seed=False, seed=42, batch_size=1, dcw_enabled=True)
 INSTR = dict(captions="bright ukulele and light percussion, summery", lyrics="[Instrumental]", vocal_language="unknown")
@@ -214,6 +230,20 @@ TASKS = {
     "repaint_extend": ({**INSTR, "task_type": "repaint", "repainting_start": 8.0, "repainting_end": 12.0}, {"src": ("inst10", None)}),  # past the end: the clip is padded with silence
     "repaint_short": ({**INSTR, "task_type": "repaint", "repainting_start": 1.0, "repainting_end": 3.0}, {"src": ("inst10", 4.0)}),    # 100 frames: under the floor
     "repaint_lead": ({**INSTR, "task_type": "repaint", "repainting_start": -2.0, "repainting_end": 3.0}, {"src": ("inst10", None)}),    # before the start
+    # the sampler's options (the turbo): Heun, the SDE step, the velocity clamp and smoothing, and some of them with a repaint or a cover's renoised start
+    "s_heun": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun"}, {}),
+    "s_sde": ({**INSTR, "audio_duration": 10.0, "infer_method": "sde"}, {}),
+    "s_vnorm": ({**INSTR, "audio_duration": 10.0, "velocity_norm_threshold": 0.8}, {}),
+    "s_vema": ({**INSTR, "audio_duration": 10.0, "velocity_ema_factor": 0.3}, {}),
+    "s_heun_all": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun", "velocity_norm_threshold": 0.8, "velocity_ema_factor": 0.3}, {}),
+    "s_heun_sde": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun", "infer_method": "sde"}, {}),        # upstream warns and runs Euler on the ODE's twin, the SDE
+    "s_sde_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0, "infer_method": "sde"}, {"src": ("inst10", None)}),
+    "s_heun_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0, "sampler_mode": "heun"}, {"src": ("inst10", None)}),
+    "s_sde_cover_noise": ({**INSTR, "task_type": "cover", "cover_noise_strength": 0.3, "infer_method": "sde"}, {"src": ("inst10", None)}),
+    # at a shift other than 1 the turbo's schedule is bent, and a threshold that clamps only some steps (the ratio of the velocity's norm to the latents' grows from 1.0 to 3.6 over the 8 steps)
+    "s_sde_shift3": ({**INSTR, "audio_duration": 10.0, "infer_method": "sde", "shift": 3.0}, {}),
+    "s_vnorm_mid": ({**INSTR, "audio_duration": 10.0, "velocity_norm_threshold": 1.3}, {}),
+    "s_heun_mid": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun", "velocity_norm_threshold": 1.3, "velocity_ema_factor": 0.5}, {}),
 }
 
 
@@ -228,6 +258,22 @@ TASKS_BASE = {
     "b_t2m_adg": ({**INSTR, "audio_duration": 10.0, "use_adg": True}, {}),
     "b_t2m_dcw": ({**INSTR, "audio_duration": 10.0, "dcw_enabled": True}, {}),
     "b_t2m_steps40": ({**INSTR, "audio_duration": 6.0, "inference_steps": 40}, {}),        # past the turbo's 20: a linspace of 40
+    # the sampler's options on a guided DiT: Heun (whose corrector is plain CFG, or ADG above level 0), the SDE step (next level 1 - i/steps, not the shifted one),
+    # the velocity clamp and smoothing, and the guidance interval at the corrector's level
+    "b_heun": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "inference_steps": 8}, {}),
+    "b_heun_adg": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "use_adg": True, "inference_steps": 8}, {}),
+    "b_heun_interval": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "cfg_interval_start": 0.3, "cfg_interval_end": 0.8, "shift": 3.0, "inference_steps": 8}, {}),
+    "b_heun_nocfg": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "guidance_scale": 1.0, "inference_steps": 8}, {}),
+    "b_sde": ({**INSTR, "audio_duration": 6.0, "infer_method": "sde", "inference_steps": 8}, {}),
+    "b_sde_shift3": ({**INSTR, "audio_duration": 6.0, "infer_method": "sde", "shift": 3.0, "inference_steps": 8}, {}),
+    "b_vnorm": ({**INSTR, "audio_duration": 6.0, "velocity_norm_threshold": 0.8, "inference_steps": 8}, {}),
+    "b_vema": ({**INSTR, "audio_duration": 6.0, "velocity_ema_factor": 0.3, "inference_steps": 8}, {}),
+    "b_heun_all_dcw": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "velocity_norm_threshold": 0.8, "velocity_ema_factor": 0.3, "dcw_enabled": True, "inference_steps": 8}, {}),
+    "b_sde_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0, "infer_method": "sde", "inference_steps": 8}, {"src": ("inst10", None)}),
+    "b_vnorm_mid": ({**INSTR, "audio_duration": 6.0, "velocity_norm_threshold": 1.1, "inference_steps": 8}, {}),       # clamps the first steps (the ratio of the norms is 1.3 to 0.9)
+    "b_heun_mid": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "velocity_norm_threshold": 1.1, "velocity_ema_factor": 0.5, "inference_steps": 8}, {}),
+    "b_sde_repaint_shift3": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0, "infer_method": "sde", "shift": 3.0, "inference_steps": 8}, {"src": ("inst10", None)}),
+    "b_heun_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5, "sampler_mode": "heun", "inference_steps": 8}, {"src": ("inst10", None)}),
     "b_cover": ({**INSTR, "task_type": "cover"}, {"src": ("inst10", None)}),
     "b_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5}, {"src": ("inst10", None)}),      # the second half of the steps on the null condition of the text-to-music prompt
     "b_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
@@ -338,6 +384,7 @@ def capture_tasks(a):
         os.makedirs(d, exist_ok=True)
         rec.reset()
         seeded_posterior(common["seed"] ^ VAE_SEED_XOR)
+        seeded_renoise(h, common["seed"] ^ SDE_SEED_XOR)
         kw = {**common, **params}
         meta = {"case": name, "params": dict(kw)}
         kw["instruction"] = instruction_of(kw)

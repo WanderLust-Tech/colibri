@@ -45,6 +45,8 @@ Knobs (environment), all optional:
                              were written and, after a "meta" stage, what the planner chose (a duration of 0 or none: 12 seconds)
     ACESTEP_STUB_GUIDED      set to make it a checkpoint with the base DiT too: READY says "guided", the tasks extract, lego and
                              complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
+    ACESTEP_STUB_SAMPLER     set to make READY say "sampler": the options sampler (euler or heun), infer (ode or sde), vnorm and vema are accepted, and
+                             AUDIO says which sampler ran
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
 the denoising, __stub_garbage__ writes a stray stdout line first: the three failure shapes a front
 end has to survive.
@@ -147,6 +149,12 @@ def check(request, audio_in=True, guided=False):
     guidance = request.get("guidance", 0)
     if not number(guidance) or not 0 <= guidance <= 100:
         return "guidance must be 0 (the default) to 100"
+    if request.get("sampler", "euler") not in ("euler", "heun"):
+        return "sampler must be euler or heun"
+    if request.get("infer", "ode") not in ("ode", "sde"):
+        return "infer must be ode or sde"
+    if not number(request.get("vnorm", 0)) or not 0 <= request.get("vnorm", 0) <= 100 or not number(request.get("vema", 0)) or not 0 <= request.get("vema", 0) <= 1:
+        return "vnorm must be 0 (off) to 100 and vema 0 (off) to 1"
     shift = request.get("shift", 1)
     if not number(shift) or not 0 < shift <= 10:
         return "shift must be above 0 and at most 10"
@@ -377,7 +385,8 @@ def serve():
     out = Out()
     guided = bool(os.environ.get("ACESTEP_STUB_GUIDED")) and audio_in
     planner = bool(os.environ.get("ACESTEP_STUB_PLANNER"))
-    out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {}), **(PLANNER if planner else {})})
+    out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {}), **(PLANNER if planner else {}),
+                       **({"sampler": True} if os.environ.get("ACESTEP_STUB_SAMPLER") else {})})
     lines = queue.Queue()
 
     def reader():
@@ -526,6 +535,7 @@ def serve():
                            "duration": round(samples / rate, 3), "frames": frames,
                            "src_seconds": round(src_seconds, 3), "dit": "acestep-v15-" + guided_dit(request, guided),
                            "guidance": (request.get("guidance") or 7) if guided_dit(request, guided) != "turbo" else 0,
+                           "sampler": "sde" if request.get("infer") == "sde" else "heun" if request.get("sampler") == "heun" else "euler",
                            "task": request.get("task", "text2music"),
                            "lm": ("acestep-5Hz-lm-" + (request.get("lm") or "1.7B")) if plan_codes else "", "plan_codes": plan_codes,
                            "caption_tokens": len(caption.split()) + 20, "lyric_tokens": 15 if not lyrics_given else 40,

@@ -93,6 +93,9 @@ static void usage(void){
         "  --dit NAME  the DiT to run: acestep-v15-turbo (the default), acestep-v15-base or acestep-v15-sft. The base and SFT ones are guided\n"
         "              (--guidance X [--cfg-start T --cfg-end T] [--adg]), take up to 200 steps (default 32) and do three more tasks:\n"
         "               [--extract CLIP --track NAME] [--lego CLIP --track NAME [--from S] [--to S]] [--complete [CLIP] --tracks A,B]\n"
+        "  the sampler, any DiT (upstream's options, off by default): [--sampler heun] [--sde] [--vnorm X] [--vema X]\n"
+        "              Heun's second-order step (two DiT calls a step), the stochastic step (not with Heun), a cap on a step's velocity as X times the\n"
+        "              latents' norm (above 0) and a smoothing of it with the last step's (0 to 1)\n"
         "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/, and maybe acestep-v15-base/ and -sft/)\n"
         "  REFDIR  one case captured by tools/acestep_ref.py (REFDIR/ref.safetensors)\n");
 }
@@ -1052,6 +1055,17 @@ static int run_text_oracle(const char *model, const char *refdir){
  * context, mask, guidance or schedule is wrong by 1e-1 to 1. */
 #define GEN_GUIDED_REL 4e-3
 #define GEN_GUIDED_ABS 1e-1
+/* A guided DiT run with Heun or the SDE step (the sampler options): the loop amplifies a rounding-sized difference, and upstream does so to itself. Measured
+ * on the real base checkpoint with upstream (the captures of the b_heun, b_sde and b_sde_shift3 cases, run again with the input noise scaled by 1 + 1e-6): the
+ * final latents move by 8.6e-4, 1.5e-4 and 1.3e-3 of their norm (3.1e-2, 2.2e-3 and 4.6e-2 at one value) and the audio by 1.3e-4, 8e-5 and 6.5e-3 (8.8e-3
+ * at one sample); this engine's differ from upstream's by less (the CPU's latents: 5.0e-4, 3.0e-4 and 1.0e-4 of the norm; the card's 1.5e-4, 1.9e-4 and
+ * 1.7e-4). The SDE at a shift other than 1 is the worst: upstream noises to the level 1 - i/steps and asks the model about the shifted one, which is
+ * ill-conditioned. Held at 1.5 to 3 times upstream's own response, 4e-3 and 1e-1 for the latents, 1e-2 and 2e-2 for the audio; a wrong step is wrong by
+ * 1e-1 to 1 (tools/mutate_acestep_sampler.py). The turbo DiT's sampler cases (9 captured) are held to the tight limits: they agree to 1e-4 and better. */
+#define GEN_AMP_REL 4e-3
+#define GEN_AMP_ABS 1e-1
+#define GEN_AMP_AUDIO_REL 1e-2
+#define GEN_AMP_AUDIO_ABS 2e-2
 /* The DiT's steps on the card (acestep_dit_vk.h) are as exact per call as the CPU's (1e-6 of the norm against upstream's), but the sampler's 40 guided steps
  * carry a different rounding further: on the real base checkpoint's 40-step case the final latents are 1.9e-4 of their norm and 3.2e-3 at one value
  * from upstream's (the CPU's 5.7e-5 and 1.1e-3), the audio 1.7e-4 (limit 5e-4). The latents' limits are 5x wider when the card ran the DiT. */
@@ -1061,7 +1075,7 @@ static int dit_on_card(void){
 #endif
     return 0;
 }
-typedef struct { shards *R; int fails, checks, audio_in; float *fed; int guided; } GenTap;
+typedef struct { shards *R; int fails, checks, audio_in; float *fed; int guided; int amplified; } GenTap;
 
 /* ACESTEP_FEED_LATENTS=1: give the pipeline the handler's own source latents (in.clean_src_latents, or in.src_latents where there is
  * no span) instead of the ones our VAE encoder makes. The encoder's float32 error is then out of the comparison, and what is left is
@@ -1099,6 +1113,7 @@ static void gen_tap(void *ud, const char *name, const float *x, size_t n){
         if (!w) return;
         char label[96]; snprintf(label, sizeof label, "%s", name);
         if (m != (int64_t)n) { fprintf(stderr, "[gen-oracle] %-30s has %zu values, the handler's %lld\n", label, n, (long long)m); g->fails++; }
+        else if (map[i].encoded == 2 && g->amplified) g->fails += cmp_tol(label, x, w, n, GEN_AMP_REL, GEN_AMP_ABS);
         else if (map[i].encoded == 2) g->fails += cmp_tol(label, x, w, n, g->audio_in ? (g->guided ? GEN_GUIDED_REL : DIT_CHAIN_REL) : (dit_on_card() ? 5e-4 : 1e-4), g->audio_in ? (g->guided ? GEN_GUIDED_ABS : DIT_CHAIN_ABS) : (dit_on_card() ? 1e-2 : 2e-3));
         else if (map[i].encoded == 3) g->fails += cmp_tol(label, x, w, n, g->audio_in ? 1e-4 : 1e-5, g->audio_in ? 1e-3 : 1e-4);      /* the condition encoders, from the text and the timbre */
         else if (map[i].encoded == 4) g->fails += cmp_tol(label, x, w, n, 1e-6, 1e-6);       /* the silence latent and ones: copies */
@@ -1154,6 +1169,8 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     rq.cfg_start = acd_json_num(p, "cfg_interval_start", 0); rq.cfg_end = acd_json_num(p, "cfg_interval_end", 1);
     if (rq.cfg_end >= 1) rq.cfg_end = 0;
     { jval *ad = json_get(p, "use_adg"); rq.adg = ad && ad->t == J_BOOL && ad->boolean; }
+    { const char *sm = json_str(p, "sampler_mode"), *im = json_str(p, "infer_method"); rq.heun = sm && !strcmp(sm, "heun"); rq.sde = im && !strcmp(im, "sde"); }
+    rq.vnorm = acd_json_num(p, "velocity_norm_threshold", 0); rq.vema = acd_json_num(p, "velocity_ema_factor", 0);
     rq.track = json_str(p, "_track");
     { jval *cl = json_get(p, "_classes");
       if (cl && cl->t == J_ARR) for (int k = 0; k < cl->len; k++) if (cl->kids[k]->t == J_STR) { size_t m = strlen(tracks_buf); snprintf(tracks_buf + m, sizeof tracks_buf - m, "%s%s", m ? "," : "", cl->kids[k]->str); }
@@ -1224,7 +1241,7 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     }
 
     float *pcm = NULL; AceInfo info;
-    GenTap gt = { &R, 0, 0, audio_in, NULL, !e->dit->turbo };
+    GenTap gt = { &R, 0, 0, audio_in, NULL, !e->dit->turbo, !e->dit->turbo && (rq.heun || rq.sde) };
     AceHooks hk = { NULL, NULL, NULL, gen_tap, gen_feed };
     hk.ud = &gt;
     t0 = now();
@@ -1248,7 +1265,8 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
             float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)cmpn * ach * sizeof(float)), *got = (float *)malloc((size_t)cmpn * ach * sizeof(float));
             if (!want || !got) { fprintf(stderr, "out of memory\n"); exit(1); }
             for (int ch = 0; ch < ach; ch++) { memcpy(want + (size_t)ch * cmpn, aud + (size_t)ch * per, (size_t)cmpn * sizeof(float)); memcpy(got + (size_t)ch * cmpn, pl + (size_t)ch * info.samples, (size_t)cmpn * sizeof(float)); }
-            fails += cmp_tol("audio, end to end", got, want, (size_t)cmpn * ach, audio_in ? GEN_AUDIO_REL : GEN_REL, audio_in ? GEN_AUDIO_ABS : GEN_ABS); checks++;
+            const double a_rel = gt.amplified ? GEN_AMP_AUDIO_REL : audio_in ? GEN_AUDIO_REL : GEN_REL, a_abs = gt.amplified ? GEN_AMP_AUDIO_ABS : audio_in ? GEN_AUDIO_ABS : GEN_ABS;
+            fails += cmp_tol("audio, end to end", got, want, (size_t)cmpn * ach, a_rel, a_abs); checks++;
             free(pl); free(want); free(got);
         } else if (aud) {
             fprintf(stderr, "[gen-oracle] the handler's audio is %lld samples a channel and %d were asked for: expected %lld back, this engine made %d\n",
@@ -1263,7 +1281,7 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     ace_close(e); json_free(root); free(meta_text); st_destroy(&R);
     if (!checks) { fprintf(stderr, "[gen-oracle] nothing to compare in %s\n", refdir); return 2; }
     if (fails) { fprintf(stderr, "[gen-oracle] %d of %d comparison(s) FAILED\n", fails, checks); return 1; }
-    fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, audio_in ? GEN_AUDIO_REL : GEN_REL, audio_in ? GEN_AUDIO_ABS : GEN_ABS);
+    fprintf(stderr, "[gen-oracle] all %d comparison(s) within their limits (the audio: rel %.0e, abs %.0e)\n", checks, gt.amplified ? GEN_AMP_AUDIO_REL : audio_in ? GEN_AUDIO_REL : GEN_REL, gt.amplified ? GEN_AMP_AUDIO_ABS : audio_in ? GEN_AUDIO_ABS : GEN_ABS);
     return 0;
 }
 
@@ -1865,6 +1883,10 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--cfg-start") && v) { rq.cfg_start = atof(v); i++; }
         else if (!strcmp(a, "--cfg-end") && v) { rq.cfg_end = atof(v); i++; }
         else if (!strcmp(a, "--adg")) rq.adg = 1;
+        else if (!strcmp(a, "--sampler") && v) { if (!strcmp(v, "heun")) rq.heun = 1; else if (!strcmp(v, "euler")) rq.heun = 0; else { fprintf(stderr, "acestep: --sampler is euler or heun\n"); return 2; } i++; }
+        else if (!strcmp(a, "--sde")) rq.sde = 1;
+        else if (!strcmp(a, "--vnorm") && v) { rq.vnorm = atof(v); i++; }
+        else if (!strcmp(a, "--vema") && v) { rq.vema = atof(v); i++; }
         else if (!strcmp(a, "--from") && v) { rq.repaint_start = atof(v); i++; }
         else if (!strcmp(a, "--to") && v) { rq.repaint_end = atof(v); i++; }
         else if (!strcmp(a, "--repaint-mode") && v) {

@@ -380,8 +380,8 @@ gateway or `coli music` refuses the tasks, by name and with the remedy, when the
 momentum of -0.75, cut to a norm of 2.5 along the frames, and only its part orthogonal to the conditional velocity is added, scaled by
 guidance - 1. `use_adg` selects ADG, the angle-based form. `cfg_interval_start` and `cfg_interval_end` limit it to a part of the schedule
 (t from 1 down to 0; outside it the velocity is the conditional one alone). A guidance of 1 or less is off, and then the null branch is not
-evaluated. The schedule is `linspace(1, 0, steps + 1)` bent by `shift`, so its last step goes from t to 0. Not built: the Heun sampler,
-the SDE sampler, velocity-norm clamping and EMA smoothing (upstream's options, off by default), and flow-edit.
+evaluated. The schedule is `linspace(1, 0, steps + 1)` bent by `shift`, so its last step goes from t to 0. Not built: flow-edit. Heun, the SDE
+step and the velocity clamp and smoothing (upstream's options, off by default) are built, after the next section.
 
 **What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks MODEL_DIR OUT WAVDIR --dit acestep-v15-base` captures 19
 cases from upstream's own handler (CPU, float32): guidance on and off, the interval, ADG, DCW, shift 3, 40 steps, a cover (with and without
@@ -420,6 +420,34 @@ python3 tools/acestep_ref_audio.py tasks ~/models/ace-step-1.5 base_ref wavs --d
 ./acestep --model ~/models/ace-step-1.5 --dit base --gen-ref base_ref/b_lego
 python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base_ref/b_lego ...
 ```
+
+## The sampler options: Heun, the SDE step, the velocity clamp and smoothing
+
+Upstream's `generate_audio` has four options that every DiT, turbo or guided, takes and that are off by default: `sampler_mode` (`euler`, or `heun`), `infer_method` (`ode`, or `sde`), `velocity_norm_threshold` and
+`velocity_ema_factor`. This engine has them all (`acestep --sampler heun`, `--sde`, `--vnorm X`, `--vema X`; `coli music --sampler heun`, `--sde`, `--velocity-norm X`, `--velocity-ema X`; the gateway's
+`sampler_mode`, `infer_method`, `velocity_norm_threshold`, `velocity_ema_factor`; the engine's own names on the serve protocol are `sampler`, `infer`, `vnorm`, `vema`). `READY` says `"sampler": true`, and a gateway whose
+engine does not say so refuses the fields by name, since the engine would ignore them. The answer's `colibri.sampler` says which ran: `euler`, `heun` or `sde`.
+
+* **Heun** is a second-order step: an Euler step to the next level, the DiT evaluated there too, the two velocities averaged, and the step taken again from the start with the average (the trapezoid). Two evaluations a step, so
+  twice the time. The turbo DiT's last step still goes straight to the clean sample, so 8 steps are 15 evaluations; a guided DiT's last step goes from t to 0 and takes its corrector too. The corrector's guidance is the
+  plain CFG, not APG (whose momentum would move twice a step), or ADG while the level is above 0; the guidance interval is tested at the corrector's level.
+* **SDE** predicts the clean sample (x - v t) and noises it to the next level, `t x1 + (1 - t) x0`, with fresh noise each step. The turbo DiT noises to its schedule's next level and its last step goes straight to the clean sample;
+  **a guided DiT noises to 1 - (i + 1) / steps, not the schedule's level** (upstream's own: `shift` bends the level the model is asked about and not the one the sample is brought to), which this engine replicates, strange as it is.
+  The noise is a generator seeded with the request's seed xor `0x5EED5DE1`, drawn from once a step: upstream's is the global generator, which nothing seeds, so no seed reproduces it; the capture tool replaces it with a seeded one
+  and the engine's is torch's (`acg_randn_mt`), as the VAE encoder's posterior draws are. Heun with the SDE is not a thing upstream does either: it warns and runs the SDE, and so does the engine; the gateway and `coli music` refuse the pair.
+* **`velocity_norm_threshold`** (0, off, to 100): a step's velocity is cut to this times the norm of the latents (after guidance, before everything else). **`velocity_ema_factor`** (0, off, to 1): the velocity is
+  `(1 - f) v + f v_prev`, `v_prev` being the last step's (a Heun step's average).
+* DCW, if on, takes the clean sample from the single evaluation's velocity (not Heun's average), as upstream does. A repaint's injection puts its source back at the level the step ended at (for a guided SDE, the unshifted one).
+
+**What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks` captures the options' cases from upstream's own handler (the `s_*` cases for the turbo DiT: Heun, the SDE (at shift 1 and 3), the clamp (two thresholds), the smoothing, all of them, Heun
+with the SDE, the SDE and Heun on a repaint, the SDE from a cover's renoised start; with `--dit acestep-v15-base` the `b_*` sampler cases: Heun with APG, ADG, an interval and no guidance, the SDE with shift 1 and 3, the clamp, the smoothing,
+Heun with everything and DCW, the SDE on a repaint, Heun on a cover whose last steps drop the source, and thresholds that clamp only some steps), and `acestep --gen-ref` holds the whole generation to them. The 12 turbo cases agree to 1e-4 of the norm and better (the
+audio 1e-5 to 1e-4; the SDE ones carry the seeded noise exactly). The 14 base cases agree to the latents' 5e-6 to 3e-3 and the audio's 1e-5 to 1.4e-3, **which is more than the 1e-4 and 5e-4 of the other cases, and
+is upstream's own doing**: run again with its input noise scaled by 1 + 1e-6, upstream's latents move by 8.6e-4 (Heun), 1.5e-4 (the SDE) and 1.3e-3 (the SDE with shift 3) of their norm and its audio by 1.3e-4, 8e-5 and
+6.5e-3, more than the engine differs from it; the loop amplifies rounding. So a guided DiT's Heun and SDE cases are held to 4e-3 and 1e-1 for the latents and 1e-2 and 2e-2 for the audio (`GEN_AMP_*` in `acestep.c`), 1.5 to
+3 times upstream's own response, and a wrong step is wrong by 1e-1 to 1. The same cases on the card (`COLI_VULKAN=1`) pass as well. `tools/mutate_acestep_sampler.py` breaks the options' lines one at a time (the noise's seed and
+weights, the level it noises to, Heun's predictor, corrector, average and guidance, the clamp's norm and threshold, the smoothing's weights and state): 30 of 30 caught between the turbo cases and the base ones (a mutant only a guided DiT can show needs the base ones; a 31st, Heun taking precedence over the SDE, is equivalent and is not in the list). `tests/test_acestep_sampler.py` (the request rules, the gateway and `coli music`
+against the stub engine) and `tests/test_acestep_sampler_mutants.py` (every mutant's text still occurs) run without a checkpoint.
 
 ## The DiT on the card
 

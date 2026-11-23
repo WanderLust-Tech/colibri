@@ -795,6 +795,19 @@ typedef struct { int dcw; double dcw_low, dcw_high; } AcdSampleOpts;     /* upst
 /* Called after each DiT evaluation with the step, the latents it was given and the velocity: for oracles and progress. */
 typedef void (*AcdStepFn)(int step, int steps, const float *xt, const float *v, void *ud);
 
+/* DCW on a step's result `out`, from the predicted clean sample x - vd t: vd is the velocity of the single evaluation at t (a Heun
+ * step's average is not what upstream reconstructs the clean sample from). */
+static void acd_dcw_after(float *out, const float *x, const float *vd, float t, int T, int A, const AcdSampleOpts *o){
+    if (!o || !o->dcw) return;
+    const size_t N = (size_t)T * A;
+    float *den = (float *)malloc(N * sizeof(float));
+    if (!den) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
+    for (size_t k = 0; k < N; k++) den[k] = x[k] - vd[k] * t;                   /* the predicted clean sample */
+    /* the per-band strengths are Python doubles, t * scaler and (1 - t) * high_scaler, rounded to float32 once */
+    acd_dcw(out, den, T, A, (float)((double)t * o->dcw_low), (float)((1.0 - (double)t) * o->dcw_high));
+    free(den);
+}
+
 /* One sampler update. x are the latents the DiT was given at schedule position i of n, v its velocity; out receives the
  * next latents, or on the last position the clean ones (x - v t, straight to x0). With DCW, the result is then corrected
  * from the predicted clean sample x - v t. Split out so that an oracle can give it the handler's own x and v and compare
@@ -809,14 +822,7 @@ static void acd_sample_step(const float *x, const float *v, int i, int n, const 
         const float dt = (float)((double)t - (double)sched[i + 1]);
         for (size_t k = 0; k < N; k++) out[k] = x[k] - v[k] * dt;
     }
-    if (o && o->dcw) {
-        float *den = (float *)malloc(N * sizeof(float));
-        if (!den) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
-        for (size_t k = 0; k < N; k++) den[k] = x[k] - v[k] * t;                /* the predicted clean sample */
-        /* the per-band strengths are Python doubles, t * scaler and (1 - t) * high_scaler, rounded to float32 once */
-        acd_dcw(out, den, T, A, (float)((double)t * o->dcw_low), (float)((1.0 - (double)t) * o->dcw_high));
-        free(den);
-    }
+    acd_dcw_after(out, x, v, t, T, A, o);
 }
 
 /* Turbo sampling from noise [T][A]: Euler steps of the flow with DCW after each, the last step straight to x0.

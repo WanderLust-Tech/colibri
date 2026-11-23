@@ -696,7 +696,7 @@ the null condition), combined by APG, ADG or CFG, on a linspace schedule of up t
 - Around it: the gateway's fields (`dit`, `guidance_scale`, `track_name`, `complete_track_classes`), `coli music --dit/--guidance/--extract/--lego/--complete`, the stub engine, docs and CI.
 - Checked against upstream's handler: 19 real whole generations on the base DiT plus the tiny fixture (`--gen-ref` with `--dit base`), and 30 of 30 mutants caught (`tools/mutate_acestep_guided.py`).
 - Cost on the CPU: 2.5 s a step (two calls), so 32 steps are 80 s and a 10 s song about 90 s. The card path (2.36) takes that to 8.5 s.
-- The SFT DiT on real weights (2026-11-23): all 19 guided cases against upstream, CPU and card (acestep.md). Not done: Heun and SDE samplers, the SFT DiT in the catalogue.
+- The SFT DiT on real weights (2026-11-23): all 19 guided cases against upstream, CPU and card (acestep.md). Not done: the SFT DiT in the catalogue. The sampler options are 2.37.
 
 ### 2.34 ACE-Step's 5 Hz planner (E3a `ace0df14`, `b87e92a0`; E3b `ef88997d`; pushed and live 2026-11-22)
 
@@ -744,6 +744,18 @@ within a few 1e-5.
 
 With the encoders on the card (2026-11-23) a 10 s song takes **0.73 s** in a warm engine (1.83 s with them on the CPU; the first request, which loads the models and uploads the weights, 8.2 s), at a cost of 1.0 GB of the card for the text
 encoder and 1.3 GB for each DiT's lyric and timbre encoders. Still on the CPU: the tokenizer, the embedding tables, the patch embedding and the DiT's output projection (all small).
+
+### 2.37 ACE-Step's sampler options: Heun, the SDE step, the velocity clamp and smoothing (2026-11-23; built, not pushed)
+
+Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`heun`), `infer_method` (`sde`), `velocity_norm_threshold`, `velocity_ema_factor` (`docs/acestep.md`, "The sampler options").
+
+- Engine: the step loop in `ace_generate` (`acestep_gen.h`) takes them, `acd_dcw_after` split out of the sampler step (`acestep_dit.h`), `GEN` fields `sampler`, `infer`, `vnorm`, `vema`, `acestep --sampler/--sde/--vnorm/--vema`, `READY` says
+  `sampler`, the answer `sampler`. Around it: the gateway's four fields (any DiT; refused when the engine does not announce them), `coli music --sampler/--sde/--velocity-norm/--velocity-ema`, the stub engine, `docs/api.md`.
+- Replicated as upstream does it, strange as it is: a guided DiT's SDE noises to the level 1 - (i + 1) / steps and not the schedule's; Heun with the SDE runs the SDE; the turbo's last step goes straight to the clean sample whatever the method.
+- Checked against upstream's handler: 12 turbo cases (1e-4 of the norm and better) and 14 base cases (the CPU; 11 of them on the card too); the guided DiT's are held to wider limits (`GEN_AMP_*`) because upstream's own answer moves more than the engine's difference from it
+  when its input noise is nudged by 1e-6 (the loops amplify rounding: measured, in the docs). 30 of 30 mutants caught (`tools/mutate_acestep_sampler.py`); `tests/test_acestep_sampler.py` (13) and `tests/test_acestep_sampler_mutants.py` (4).
+- Cost: Heun is twice the evaluations a step (the corrector), the others cost what Euler does.
+- Not done: flow-edit (a sampler overlay upstream has) and a Music control for the options in the dashboard (the API and the CLI have them).
 
 ## 3. Planned and open
 
@@ -805,6 +817,6 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: Heun and SDE samplers (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23; the extension's add-on Remove button is built, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
+- **ACE-Step**: nothing is open but flow-edit and the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23, the sampler options are built, 2.37, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.

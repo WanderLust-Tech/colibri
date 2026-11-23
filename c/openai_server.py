@@ -6556,7 +6556,8 @@ def parse_multipart_edit(content_type, raw):
 _MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm", "lm_top_k")
 _MUSIC_FLOAT_FIELDS = ("duration", "shift", "repainting_start", "repainting_end", "repaint_strength",
                        "audio_cover_strength", "cover_noise_strength", "guidance_scale", "cfg_interval_start",
-                       "cfg_interval_end", "lm_temperature", "lm_cfg_scale", "lm_top_p")
+                       "cfg_interval_end", "lm_temperature", "lm_cfg_scale", "lm_top_p", "velocity_norm_threshold",
+                       "velocity_ema_factor")
 _MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg", "thinking", "use_cot_caption", "use_cot_language")
 # Body limits for audio in, from the clip caps: the pair may be 192 MiB, so a multipart body is that and a MiB of
 # fields; the same pair as base64 in a JSON body is 4/3 of it (the reason to send a file, not text, for a long clip).
@@ -8847,6 +8848,8 @@ class APIHandler(BaseHTTPRequestHandler):
                           "lm_cfg_scale": request.get("lm_cfg_scale"), "lm_top_p": request.get("lm_top_p"),
                           "lm_top_k": request.get("lm_top_k"), "lm_caption": request.get("use_cot_caption"),
                           "lm_language": request.get("use_cot_language")})
+        audio.update({"sampler": request.get("sampler_mode"), "infer": request.get("infer_method"),     # the sampler, any DiT
+                      "vnorm": request.get("velocity_norm_threshold"), "vema": request.get("velocity_ema_factor")})
         if request.get("guided") or request.get("dit"):         # the base and SFT DiTs: which, and how hard they are guided
             audio.update({"dit": request.get("dit"), "guidance": request.get("guidance_scale"),
                           "cfg_start": request.get("cfg_interval_start"), "cfg_end": request.get("cfg_interval_end"),
@@ -8864,7 +8867,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if wav is None:
             wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
-                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance", "lm", "plan_codes", "meta")
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance", "sampler", "lm", "plan_codes", "meta")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
                 "colibri": {**{key: result.get(key) for key in keys},

@@ -115,6 +115,22 @@ static void acg_randn_mt(AcgMt *m, size_t n, float *out){
     }
 }
 
+#define ACG_SDE_SEED_XOR 0x5EED5DE1u               /* the SDE sampler's noise: a generator seeded with the request's seed xor this, drawn from once a step */
+
+/* Upstream's velocity-norm clamp: v is scaled by min(1, threshold |x| / (|v| + 1e-10)), the norms over the whole [T][A] latent. */
+static void acg_vclamp(float *v, const float *x, size_t n, double threshold){
+    double vn = 0, xn = 0;
+    for (size_t k = 0; k < n; k++) { vn += (double)v[k] * v[k]; xn += (double)x[k] * x[k]; }
+    const double s = threshold * (sqrt(xn) + 1e-10) / (sqrt(vn) + 1e-10);
+    if (s < 1.0) { const float f = (float)s; for (size_t k = 0; k < n; k++) v[k] *= f; }
+}
+
+/* Upstream's velocity smoothing: v <- (1 - f) v + f prev. */
+static void acg_vema(float *v, const float *prev, size_t n, double f){
+    const float a = (float)(1.0 - f), b = (float)f;
+    for (size_t k = 0; k < n; k++) v[k] = a * v[k] + b * prev[k];
+}
+
 static void acg_randn(uint32_t seed, size_t n, float *out){
     AcgMt m; acg_mt_seed(&m, seed);
     acg_randn_mt(&m, n, out);
@@ -396,6 +412,11 @@ typedef struct {
     double guidance;                               /* classifier-free guidance scale; 0 is the default, 7; 1 or less turns it off */
     double cfg_start, cfg_end;                     /* the part of the schedule (t from 1 down to 0) guidance applies to; an end of 0 is 1 */
     int adg;                                       /* angle-based guidance instead of APG */
+    /* the sampler, any DiT (0 is upstream's default: Euler on the ODE, the velocity as it is): */
+    int heun;                                      /* Heun's second-order step (two evaluations a step); with `sde` upstream falls back to Euler, and so does this */
+    int sde;                                       /* the stochastic step: the clean sample predicted, then noised to the next level */
+    double vnorm;                                  /* velocity-norm clamp: above 0, a velocity is cut to this times the norm of the latents */
+    double vema;                                   /* velocity smoothing, 0 to 1: the share of the last step's velocity mixed into this one */
     const char *track;                             /* extract and lego: the track (drums, bass, vocals ...); NULL or "" is "the track" */
     const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
     const char *dit;                               /* turbo, base or sft; NULL or "": see ace_select_for */
@@ -511,6 +532,7 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->task != ACG_TASK_REPAINT && r->task != ACG_TASK_LEGO && (r->repaint_start != 0 || r->repaint_end != 0 || r->repaint_mode != 0 || r->repaint_strength != 0)) { snprintf(err, errn, "the repaint settings are for a repaint or a lego"); return 1; }
     if (!(r->guidance >= 0 && r->guidance <= 100)) { snprintf(err, errn, "guidance must be 0 (the default) to 100"); return 1; }
     if (!(r->cfg_start >= 0 && r->cfg_start <= 1) || !(r->cfg_end >= 0 && r->cfg_end <= 1) || (r->cfg_end > 0 && r->cfg_end < r->cfg_start)) { snprintf(err, errn, "the guidance interval must be 0 to 1, from before to after"); return 1; }
+    if (!(r->vnorm >= 0 && r->vnorm <= 100) || !(r->vema >= 0 && r->vema <= 1)) { snprintf(err, errn, "vnorm must be 0 (off) to 100 and vema 0 (off) to 1"); return 1; }
     if (r->track && *r->track && r->task != ACG_TASK_EXTRACT && r->task != ACG_TASK_LEGO) { snprintf(err, errn, "a track is for an extract or a lego; a complete takes tracks"); return 1; }
     if (r->tracks && *r->tracks && r->task != ACG_TASK_COMPLETE) { snprintf(err, errn, "tracks are for a complete"); return 1; }
     for (int k = 0; k < 2; k++) {
@@ -832,7 +854,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     char *cp = NULL, *cp2 = NULL, *lp = NULL;
     float *text = NULL, *text2 = NULL, *lyric = NULL, *timbre = NULL, *lat = NULL, *src = NULL, *ctx = NULL, *ctx2 = NULL, *noise = NULL;
     float *x = NULL, *nx = NULL, *v = NULL, *wav = NULL, *srcpcm = NULL, *planar = NULL, *refp = NULL, *refpcm = NULL;
-    float *vu = NULL, *vg = NULL, *mom = NULL;
+    float *vu = NULL, *vg = NULL, *mom = NULL, *xp = NULL, *v2 = NULL, *vd = NULL, *vprev = NULL, *vdraw = NULL;
     unsigned char *rmask = NULL;
     AcdCond *cond = NULL, *cond2 = NULL, *ncond = NULL, *ncond2 = NULL;
     int *lids = NULL;
@@ -1068,6 +1090,13 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         vu = (float *)malloc((size_t)T * A * sizeof(float)); vg = (float *)malloc((size_t)T * A * sizeof(float)); mom = (float *)calloc((size_t)T * A, sizeof(float));
         if (!vu || !vg || !mom) { snprintf(err, errn, "out of memory"); goto out; }
     }
+    const size_t NL = (size_t)T * A;
+    const int sde = rq->sde, heun = rq->heun && !rq->sde, clamp = rq->vnorm > 0, ema = rq->vema > 0;
+    int have_prev = 0;
+    AcgMt sde_mt;
+    if (heun) { xp = (float *)malloc(NL * sizeof(float)); v2 = (float *)malloc(NL * sizeof(float)); vd = (float *)malloc(NL * sizeof(float)); if (!xp || !v2 || !vd) { snprintf(err, errn, "out of memory"); goto out; } }
+    if (ema) { vprev = (float *)malloc(NL * sizeof(float)); if (!vprev) { snprintf(err, errn, "out of memory"); goto out; } }
+    if (sde) { vdraw = (float *)malloc(NL * sizeof(float)); if (!vdraw) { snprintf(err, errn, "out of memory"); goto out; } acg_mt_seed(&sde_mt, (uint32_t)rq->seed ^ ACG_SDE_SEED_XOR); }
     t0 = acg_now();
     for (int i = 0; i < n; i++) {
         ACG_PROGRESS("denoise", i, n);
@@ -1080,10 +1109,42 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
             else acd_apg(vg, v, vu, T, A, guidance, mom);
             memcpy(v, vg, (size_t)T * A * sizeof(float));
         }
-        acd_sample_step(x, v, i, n, sched, T, A, &so, nx);
+        if (clamp) acg_vclamp(v, x, NL, rq->vnorm);
+        if (ema && have_prev) acg_vema(v, vprev, NL, rq->vema);
+        const float t = sched[i];
+        const int to_x0 = d->turbo && i == n - 1;                          /* the turbo's last step goes straight to the clean sample, whatever the method */
+        float t_after = i < n - 1 ? sched[i + 1] : 0.0f;                   /* the level the step ends at (a repaint puts its source back at it) */
+        if (sde && !to_x0) {
+            /* predict the clean sample, then noise it to the next level. The turbo's next level is its schedule's; the guided DiTs' is
+             * 1 - (i + 1) / steps, NOT bent by the shift (upstream's own, replicated: see its generate_audio) */
+            const double tn = d->turbo ? (double)sched[i + 1] : 1.0 - (double)(i + 1) / (double)n;
+            acg_randn_mt(&sde_mt, NL, vdraw);
+            const float a = (float)tn, b = (float)(1.0 - tn);
+            for (size_t k = 0; k < NL; k++) nx[k] = a * vdraw[k] + b * (x[k] - v[k] * t);
+            acd_dcw_after(nx, x, v, t, T, A, &so);
+            t_after = (float)tn;
+        } else if (heun && !to_x0) {
+            /* Heun: an Euler step to the next level, the velocity evaluated there too, the two averaged (a trapezoid). The guided DiTs' last step
+             * goes to 0 this way as well; the corrector's guidance is plain CFG (APG's momentum would move twice a step), or ADG while the level is above 0 */
+            const float tn = sched[i + 1], dt = (float)((double)t - (double)tn);
+            memcpy(vd, v, NL * sizeof(float));
+            for (size_t k = 0; k < NL; k++) xp[k] = x[k] - v[k] * dt;
+            acd_forward(d, cur, xp, cur_ctx, T, tn, tn, v2);
+            if (use_cfg && tn >= cfg_s && tn <= cfg_e) {
+                acd_forward(d, ncur, xp, cur_ctx, T, tn, tn, vu);
+                if (rq->adg && tn > 0) acd_adg(vg, xp, v2, vu, T, A, tn, guidance);
+                else acd_cfg(vg, v2, vu, NL, guidance);
+                memcpy(v2, vg, NL * sizeof(float));
+            }
+            if (clamp) acg_vclamp(v2, xp, NL, rq->vnorm);
+            if (ema) acg_vema(v2, v, NL, rq->vema);
+            for (size_t k = 0; k < NL; k++) { v[k] = 0.5f * (v[k] + v2[k]); nx[k] = x[k] - v[k] * dt; }
+            acd_dcw_after(nx, x, vd, t, T, A, &so);
+        } else acd_sample_step(x, v, i, n, sched, T, A, &so, nx);
+        if (ema) { memcpy(vprev, v, NL * sizeof(float)); have_prev = 1; }
         float *s = x; x = nx; nx = s;
         if (repaint_like && i < n - 1 && i < cutoff) {                    /* outside the span the source, noised to the level the next step expects */
-            const float tn = sched[i + 1], a = tn, b = (float)(1.0 - (double)tn);
+            const float tn = t_after, a = tn, b = (float)(1.0 - (double)tn);
             for (int f = 0; f < T; f++)
                 if (!rmask[f])
                     for (int c = 0; c < A; c++) x[(size_t)f * A + c] = a * noise[(size_t)f * A + c] + b * lat[(size_t)f * A + c];
@@ -1115,7 +1176,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
 out:
     free(cp); free(cp2); free(lp); free(lids); free(text); free(text2); free(lyric); free(timbre); free(lat); free(src); free(ctx); free(ctx2);
     free(noise); free(x); free(nx); free(v); free(wav); free(srcpcm); free(planar); free(refp); free(refpcm); free(rmask);
-    free(vu); free(vg); free(mom);
+    free(vu); free(vg); free(mom); free(xp); free(v2); free(vd); free(vprev); free(vdraw);
     acd_cond_free(cond); acd_cond_free(cond2); acd_cond_free(ncond); acd_cond_free(ncond2);
     #undef ACG_STOP
     #undef ACG_PROGRESS

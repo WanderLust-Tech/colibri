@@ -3175,6 +3175,11 @@ def music_audio_flags(a):
             body[field] = getattr(a, dest)
     if getattr(a, "dit", None):
         body["dit"] = a.dit
+    for dest, field in (("sampler", "sampler_mode"), ("velocity_norm", "velocity_norm_threshold"), ("velocity_ema", "velocity_ema_factor")):
+        if getattr(a, dest, None) is not None:
+            body[field] = getattr(a, dest)
+    if getattr(a, "sde", False):
+        body["infer_method"] = "sde"
     if getattr(a, "plan", False):
         body["thinking"] = True
     for flag, dest, field in (("--lm", "lm", "lm_model"), ("--lm-temperature", "lm_temperature", "lm_temperature"), ("--lm-cfg", "lm_cfg", "lm_cfg_scale"),
@@ -3211,6 +3216,7 @@ def music_settings(a, prompt, info):
                 "cover_noise_strength": "--cover-noise", "task": "the task", "track_name": "--track",
                 "complete_track_classes": "--tracks", "guidance_scale": "--guidance", "cfg_interval_start": "--cfg-start",
                 "cfg_interval_end": "--cfg-end", "use_adg": "--adg", "thinking": "--plan", "lm_model": "--lm",
+                "sampler_mode": "--sampler", "infer_method": "--sde", "velocity_norm_threshold": "--velocity-norm", "velocity_ema_factor": "--velocity-ema",
                 "lm_temperature": "--lm-temperature", "lm_cfg_scale": "--lm-cfg", "lm_top_p": "--lm-top-p", "lm_top_k": "--lm-top-k",
                 "use_cot_caption": "--no-lm-caption", "use_cot_language": "--no-lm-language", "bpm": "--bpm", "key": "--key"}.get(
                     error.param, f"--{error.param}" if error.param else "the request")
@@ -3237,6 +3243,8 @@ def generate_music(engine, request, out=None, stream=None):
                                  lm_caption=request.get("use_cot_caption"), lm_language=request.get("use_cot_language"),
                                  dit=request.get("dit"), guidance=request.get("guidance_scale"), cfg_start=request.get("cfg_interval_start"),
                                  cfg_end=request.get("cfg_interval_end"), adg=request.get("use_adg"), track=request.get("track_name"),
+                                 sampler=request.get("sampler_mode"), infer=request.get("infer_method"),
+                                 vnorm=request.get("velocity_norm_threshold"), vema=request.get("velocity_ema_factor"),
                                  tracks=",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None,
                                  on_progress=progress.progress, interruptible=True, on_interrupt=progress.interrupted)
     except MusicCancelled:
@@ -4726,6 +4734,10 @@ def main():
                  ("--cfg-start",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule (1 = the start, 0 = the end) guidance begins to apply (default 0)")),
                  ("--cfg-end",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule guidance stops applying (default 1)")),
                  ("--adg",dict(action="store_true",help="with the base or sft DiT: angle-based guidance instead of APG")),
+                 ("--sampler",dict(choices=["euler","heun"],default=None,help="the sampler (music models): euler (the default) or heun, a second-order step that evaluates the DiT twice a step")),
+                 ("--sde",dict(action="store_true",help="the stochastic sampler (music models): the clean sample predicted and noised to the next level each step; not with --sampler heun")),
+                 ("--velocity-norm",dict(type=float,default=None,metavar="X",help="cut each step's velocity to X times the norm of the latents, 0 (the default) to 100 (music models)")),
+                 ("--velocity-ema",dict(type=float,default=None,metavar="X",help="mix X of the last step's velocity into this one, 0 (the default) to 1 (music models)")),
                  ("--plan",dict(action="store_true",help="the 5 Hz planner writes the song's structure first and the music follows it (music models with acestep-5Hz-lm-1.7B); it writes whatever of --bpm, --key, --time-signature and --duration you do not give (and a caption for the music), and picks the length without --duration")),
                  ("--no-lm-caption",dict(action="store_true",help="with --plan: keep the caption you gave for the music instead of the planner's rewrite of it")),
                  ("--no-lm-language",dict(action="store_true",help="with --plan: do not have the planner write the language")),
