@@ -36,6 +36,7 @@
 #ifdef COLI_VULKAN
 #include "acestep_dit_vk.h"           /* the DiT's steps on the card (acd_forward calls it first) */
 #include "acestep_vae_vk.h"           /* the VAE's windows on the card (acv_decode_ws calls it first) */
+#include "acestep_enc_vk.h"           /* the text and condition encoders' layers on the card (acd_encoder, act_encode) */
 #endif
 
 #define ACG_RATE 48000
@@ -279,6 +280,7 @@ static AceEngine *ace_open_dit(const char *model_dir, const char *dit_name, char
     if (!(e->vae = acv_load(path))) { snprintf(err, errn, "cannot load the VAE from %.400s", path); ace_close(e); return NULL; }
 #ifdef COLI_VULKAN
     avv_attach();
+    aev_attach();
 #endif
     snprintf(e->dit_name, sizeof e->dit_name, "%s", dit_name);
     if (ace_load_slot(e, dit_name, err, errn)) { ace_close(e); return NULL; }

@@ -722,10 +722,10 @@ its context. A bare caption is enough: `coli music "bright ukulele" --plan`, or 
   block says which `dits` and `planner` are installed and whether `guided` is possible. `web/tests/music_guided_ui.py` drives it in headless Edge; vitest covers `music.ts` and `installs.ts`.
 - On the way: `make install` was missing five modules (`voices.py`, `voice_loop.py`, `talk_cli.py`, `align_engine.py`, `subtitles.py`), which made `test_install_closure` fail on `main`; fixed in the same commit.
 
-### 2.36 ACE-Step on the graphics card: the planner, the DiT, the VAE (`929ea3c1`, `e903d6a0`, `47d8dd3a`; pushed and live 2026-11-22)
+### 2.36 ACE-Step on the graphics card: the planner, the DiT, the VAE, the encoders (`929ea3c1`, `e903d6a0`, `47d8dd3a`; pushed and live 2026-11-22; the encoders built 2026-11-23)
 
-With `VK=1` and `COLI_VULKAN=1` the three big stages of a song run on the card, each as the chain's ops ([acestep.md](acestep.md), "On the card", "The DiT on the card", "The VAE on the card").
-`c/acestep_vk.h` opens the device for all three. Each stage is held to upstream by the oracle its CPU path is held to, each fails back to the CPU (the planner reruns the whole generation, the DiT and VAE a step or
+With `VK=1` and `COLI_VULKAN=1` every stage of a song but the tokenizer and two small projections runs on the card, each as the chain's ops ([acestep.md](acestep.md), "On the card", "The DiT on the card", "The VAE on the card").
+`c/acestep_vk.h` opens the device for all of them. Each stage is held to upstream by the oracle its CPU path is held to, each fails back to the CPU (the planner reruns the whole generation, the DiT and VAE a step or
 a window) and each has an off switch and a fault injection for its test.
 
 | Stage | File | Before (CPU) | On the 5090 | Held to upstream | Switch |
@@ -733,13 +733,15 @@ a window) and each has an off switch and a fault injection for its test.
 | Planner | `acestep_lm_vk.h` | 0.13 s a token unguided (0.22 guided), phase 1 22 s | 0.01 s a token, phase 1 2 s | the 7 + 4 real cases identical, logits 1.9e-5 | `COLI_VK_LM=0` |
 | DiT | `acestep_dit_vk.h` | 1.5 s a step | 0.1 s a step; the base's 32 guided steps 5.7 s | 11 turbo + 19 base real cases; one limit widened 5x (the 40-step guided latents, 1.9e-4) | `COLI_VK_DIT=0` |
 | VAE | `acestep_vae_vk.h` | 1.5 s per 256-frame window; 31 s for 2 minutes | 0.1 s; 1.7 s for 2 minutes | all 11 `--vae-ref` cases, 3 to 6e-6 (limit 2e-4) | `COLI_VK_VAE=0` |
+| Text and condition encoders (the text encoder, the lyric and timbre encoders) | `acestep_enc_vk.h` | 0.4 s + 0.65 s + 0.13 s a song | about 1.1 s less a song (1.83 s to 0.73 s warm) | `--text-ref` 2.1e-6 (CPU 1.7e-6); 49 of 49 captured generations (`encoder_hidden` 2.0 to 2.6e-6) | `COLI_VK_ENC=0` |
 
 Through the live router: a 10 s song 2.8 s warm (4.4 s before the VAE moved), a 2-minute song 18.7 s (10.4 s from the command line; 39.4 s with the VAE still on the CPU), an 8 s planned clip 11.4 s and an 8 s clip on the base DiT 12.0 s (each includes loading the planner or the base DiT). The card holds the planner (3.7 GB), the turbo DiT (4.4 GB), the base DiT when a request names it (4.8 GB) and the VAE (0.33 GB), plus about 1.1 GB of activations a decode window. The
 shader `chain_codec.comp` gained two modes for the VAE (a symmetric convolution's im2col and this decoder's transposed-convolution gather-add); the TTS codec that shares it still answers.
-Tests: `test_acestep_planner_vk.py` (4), `test_acestep_dit_vk.py` (6), `test_acestep_vae_vk.py` (5), skipped without a `VK=1` build and a device; each pins the other stages to the CPU so a song compares byte for byte or
+Tests: `test_acestep_planner_vk.py` (4), `test_acestep_dit_vk.py` (6), `test_acestep_vae_vk.py` (5), `test_acestep_enc_vk.py` (5), skipped without a `VK=1` build and a device; each pins the other stages to the CPU so a song compares byte for byte or
 within a few 1e-5.
 
-Still on the CPU: the text encoder (0.5 s) and the condition encoders (0.9 s, 2.1 s with the planner), the patch embedding and the DiT's output projection (small).
+With the encoders on the card (2026-11-23) a 10 s song takes **0.73 s** in a warm engine (1.83 s with them on the CPU; the first request, which loads the models and uploads the weights, 8.2 s), at a cost of 1.0 GB of the card for the text
+encoder and 1.3 GB for each DiT's lyric and timbre encoders. Still on the CPU: the tokenizer, the embedding tables, the patch embedding and the DiT's output projection (all small).
 
 ## 3. Planned and open
 
@@ -791,7 +793,7 @@ Status as of today (the file itself has been brought into line with this):
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
 - **Qwen-Image editing**: Linux, ASan and UBSan runs; a real edit at the 1024
   reference (the chain with an edit prefix was checked on the card 2026-11-21, 2.29); translated READMEs (it, ja, zh, id) for editing.
-- **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; ACE-Step's planner, DiT and VAE run on it (2.36), its text and condition encoders do not. Making room on the card **is
+- **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; All of ACE-Step's stages run on it (2.36). Making room on the card **is
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
   Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small
@@ -801,7 +803,7 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: the text and condition encoders on the card (0.5 s and 0.9 s of a song's 2.8 s); the 0.6B and 4B planners and the SFT DiT on real weights; Heun and SDE samplers; an add-on Remove button in the
+- **ACE-Step**: the 0.6B and 4B planners and the SFT DiT on real weights; Heun and SDE samplers; an add-on Remove button in the
   VS Code extension. The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.

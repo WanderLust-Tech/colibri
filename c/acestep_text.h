@@ -132,6 +132,7 @@ typedef struct {
 
 static void act_free(AceText *m){
     if (!m) return;
+    if (acd_stack_free_hook && m->L) acd_stack_free_hook(m->L);
     free(m->embed); free(m->norm);
     for (int i = 0; m->L && i < m->nl; i++) {
         AcdEncLayer *e = &m->L[i];
@@ -306,6 +307,8 @@ static void act_layer(const AceText *m, const AcdEncLayer *l, float *x, int T, c
 static float *act_encode(const AceText *m, const int *ids, int n){
     float *x = act_embed(m, ids, n);
     if (!x) return NULL;
+    const AcdStackCfg sc = { m->hidden, m->heads, m->kv, m->hd, m->inter, 1, -1, m->eps, m->theta };
+    if (acd_stack_hook && acd_stack_hook(m->L, m->nl, &sc, x, n)) { acd_rmsnorm(x, x, n, m->hidden, m->norm, m->eps); return x; }      /* on the card */
     float *cs = (float *)malloc((size_t)n * m->hd * sizeof(float)), *sn = (float *)malloc((size_t)n * m->hd * sizeof(float));
     if (!cs || !sn) { fprintf(stderr, "acestep text: out of memory\n"); exit(1); }
     acd_rope_table(cs, sn, n, m->hd, m->theta);

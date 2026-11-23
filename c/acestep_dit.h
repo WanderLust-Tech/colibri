@@ -93,6 +93,14 @@ typedef int (*AcdForwardHook)(const AceDit *d, const AcdCond *c, const float *xt
 static AcdForwardHook acd_forward_hook = NULL;
 static void (*acd_free_hook)(const AceDit *d) = NULL;
 
+/* A stack of plain transformer layers (the condition encoders', and the text encoder's) on another device (acestep_enc_vk.h): called with x [T][D], the
+ * rows after the embedding, in place; 1 when it ran the layers (the caller then only does the final norm), 0 for the CPU. causal: each row sees the rows
+ * up to itself; else a layer with `sliding` sees the rows within `window` of it and the others all. acd_stack_free_hook hears of a stack being freed. */
+typedef struct { int D, H, Hk, hd, inter, causal, window; float eps, theta; } AcdStackCfg;
+typedef int (*AcdStackHook)(const void *layers, int nlayers, const AcdStackCfg *cfg, float *x, int T);
+static AcdStackHook acd_stack_hook = NULL;
+static void (*acd_stack_free_hook)(const void *layers) = NULL;
+
 /* ----------------------------------------------------------------- loading -- */
 
 static float *acd_read_f32(shards *S, const char *name, int rank, const int64_t *shape, char *err, size_t errn){
@@ -176,6 +184,7 @@ static void acd_free_lin(AcdLin *l){ free(l->own); free(l->b); memset(l, 0, size
 static void acd_free_attn(AcdAttn *a){ acd_free_lin(&a->q); acd_free_lin(&a->k); acd_free_lin(&a->v); acd_free_lin(&a->o); free(a->qn); free(a->kn); memset(a, 0, sizeof *a); }
 
 static void acd_free(AceDit *d){
+    if (d && acd_stack_free_hook) { if (d->lyric) acd_stack_free_hook(d->lyric); if (d->timbre) acd_stack_free_hook(d->timbre); }
     if (!d) return;
     if (acd_free_hook) acd_free_hook(d);
     acd_free_lin(&d->te.l1); acd_free_lin(&d->te.l2); acd_free_lin(&d->te.proj);
@@ -562,8 +571,11 @@ static float *acd_encoder(const AceDit *d, const float *tokens, int T, const Acd
     float *cs = (float *)malloc((size_t)T * d->hd * sizeof(float)), *sn = (float *)malloc((size_t)T * d->hd * sizeof(float));
     if (!x || !cs || !sn) { fprintf(stderr, "acestep dit: out of memory\n"); exit(1); }
     acd_lin(x, tokens, T, embed);
-    acd_rope_table(cs, sn, T, d->hd, d->theta);
-    for (int i = 0; i < nlayers; i++) acd_enc_layer(d, &layers[i], x, T, cs, sn);
+    const AcdStackCfg sc = { d->D, d->heads, d->kv, d->hd, d->inter, 0, d->window, d->eps, d->theta };
+    if (!(acd_stack_hook && acd_stack_hook(layers, nlayers, &sc, x, T))) {                    /* on the card */
+        acd_rope_table(cs, sn, T, d->hd, d->theta);
+        for (int i = 0; i < nlayers; i++) acd_enc_layer(d, &layers[i], x, T, cs, sn);
+    }
     acd_rmsnorm(x, x, T, d->D, norm, d->eps);
     free(cs); free(sn);
     return x;

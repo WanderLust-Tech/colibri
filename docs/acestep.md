@@ -423,7 +423,7 @@ python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base
 Built with `VK=1` and started with `COLI_VULKAN=1`, the DiT's denoising steps run on the graphics card (`c/acestep_dit_vk.h`; `acd_forward` tries it first). The 24 layers of a
 step are one submission: the matrices (bf16, f32 arithmetic) go up once, when the first step runs (4.4 GB for the turbo DiT; the base one when a request names it), and a step
 uploads the patch embedding and the step's modulation, and brings back the hidden rows. The patch embedding, the output norm and the output projection are small and stay on the CPU, as do
-the text encoder and the condition encoders (the VAE has its own card path, the next section). The ops are the chain's, shared with the planner and the image models: the adaptive norm is `vkc_norm` with the weight times
+the text encoder and the condition encoders and the VAE (each has its own card path, in the sections below). The ops are the chain's, shared with the planner and the image models: the adaptive norm is `vkc_norm` with the weight times
 `(1 + scale)` made on the host each step and the shift added onto a buffer of ones, the gates are `GATE_ADD`'s per-column factor, the self-attention's K and V projections go up with their rows
 repeated for each group of query heads (16 over 8: the attention shader reads full-width K and V) and the cross-attention's cached K and V are repeated the same way when a condition goes up (the condition
 and the null condition of a guided DiT are two slots), and the attention is the encoder shader's (a range of rows a query: the sliding window is `[i - 128, i + 128]`, the full layers and the cross-attention
@@ -453,7 +453,24 @@ against 5.1 s with the decode on the CPU, and a 2-minute song 10.4 s against 39.
 and a whole song differs from the CPU's by at most one step of the 16-bit sample. `COLI_VK_VAE=0` keeps the decode on the CPU. A card that is missing, a matrix that will not go up or a window that
 fails leaves that window to the CPU (a window has no state: `ACESTEP_VAE_VK_FAULT=N` makes window N fail, once, to test it), and a failure that loses the device takes the card off for the rest of the process.
 `tests/test_acestep_vae_vk.py` holds the card to the CPU on the tiny fixture with the DiT and the planner left on the CPU in both (a song, a 30 s clip of six windows, an odd length, a failing window,
-the switch), skipped without a VK build and a device. The condition encoders (0.9 s, 2.1 s planned) and the text encoder are what is left on the CPU of a song's time.
+the switch), skipped without a VK build and a device. The condition encoders and the text encoder, the rest of a song's time, have their own path (the next section).
+
+## The text and condition encoders on the card
+
+What was left of a song on the CPU was the encoders: Qwen3-Embedding's text encoder (0.4 s for a caption of 60 tokens) and the DiT's condition encoders, the **timbre** encoder (0.65 s: 4 layers over 750 frames of the
+reference clip, which for plain text to music is the fixed silence latent) and the **lyric** encoder (0.13 s: 8 layers). Built with `VK=1` and started with `COLI_VULKAN=1`, each of the three stacks of layers
+is one submission on the card (`c/acestep_enc_vk.h`; `acd_encoder` and `act_encode` try it first). They are one plain layer in three sizes: RMSNorm, grouped-query attention with a per-head norm on q and k and
+RoPE, RMSNorm, SwiGLU, each with its residual, no modulation. The ops are the DiT's: the matrices (bf16, f32 arithmetic) go up once, when a stack first runs; K and V go up with their rows repeated for each group
+of query heads; the attention is the encoder shader's, a range of keys a query row (`[0, i]` for the text encoder's causal attention, `[i - 128, i + 128]` for a sliding layer of the condition encoders,
+`[0, n - 1]` for a full one). The embeddings (the token table, the lyric and timbre input projections) and the final norm stay on the CPU. A stack is stateless: a missing device, a matrix that will not go up or a call
+that fails leaves that call to the CPU. The text encoder takes 1.0 GB of the card, the lyric and timbre encoders of each DiT 1.3 GB (the base DiT has its own pair).
+
+On the 5090, with the engine already warm (the first request loads the models and uploads the encoders' weights: 8.2 s against 7.8 s with the encoders on the CPU), a 10 s song is **0.73 s** from the request to the audio, against 1.83 s with the encoders on the CPU (the same song through
+the command line, which pays the uploads each time, is 2.5 s: text 0.4, condition 0.4, denoise 1.4, decode 0.2). Held to upstream by the oracles the CPU's are, with COLI_VULKAN=1 on the real checkpoint:
+`--text-ref` (the caption's hidden states 2.1e-6 of the norm from upstream's, the CPU's 1.7e-6), and `--gen-ref` on every captured generation, 49 of 49 (the encoders' joint output, `encoder_hidden`, is 2.0 to 2.6e-6 of the
+norm from upstream's against the CPU's 1.8e-6; the turbo, the base DiT's own encoders, a reference clip's timbre, a repaint, a lego, a cover). `COLI_VK_ENC=0` keeps the encoders on the CPU; `ACESTEP_ENC_VK_FAULT=N`
+makes the Nth call fail, once, to test it. `tests/test_acestep_enc_vk.py` holds the card to the CPU on the tiny fixture with the DiT, the VAE and the planner left on the CPU in both (a song, lyrics, the base
+DiT's pair of stacks, a failing call, the switch); three mutants (the causal range, the end and the start of the sliding window) each fail it.
 
 ## The 5 Hz planner: a language model writes the song first
 

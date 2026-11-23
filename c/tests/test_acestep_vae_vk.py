@@ -17,7 +17,7 @@ import wave
 VK_EXE = os.environ.get("ACESTEP_VK_EXE")
 TINY = os.environ.get("ACESTEP_TINY_C")
 ON_CARD = b"[VK] acestep vae: the decoder is on the card"
-DROP = ("COLI_VULKAN", "COLI_VK_DIT", "COLI_VK_LM", "COLI_VK_VAE", "ACESTEP_DIT_VK_FAULT", "ACESTEP_VAE_VK_FAULT")
+DROP = ("COLI_VULKAN", "COLI_VK_DIT", "COLI_VK_LM", "COLI_VK_VAE", "COLI_VK_ENC", "ACESTEP_DIT_VK_FAULT", "ACESTEP_VAE_VK_FAULT")
 
 
 def make(env, name, *args):
@@ -42,7 +42,7 @@ def rel(a, b):
 
 @unittest.skipUnless(VK_EXE and os.path.isfile(VK_EXE) and TINY and os.path.isdir(TINY), "needs ACESTEP_VK_EXE (a VK=1 build) and ACESTEP_TINY_C")
 class OnTheCard(unittest.TestCase):
-    CARD = {"COLI_VULKAN": "1", "COLI_VK_DIT": "0", "COLI_VK_LM": "0"}          # the DiT and the planner stay on the CPU: only the VAE is under test
+    CARD = {"COLI_VULKAN": "1", "COLI_VK_DIT": "0", "COLI_VK_LM": "0", "COLI_VK_ENC": "0"}          # the DiT, the planner and the encoders stay on the CPU: only the VAE is under test
 
     @classmethod
     def setUpClass(cls):

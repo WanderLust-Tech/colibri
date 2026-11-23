@@ -1807,6 +1807,7 @@ int main(int argc, char **argv){
 #ifdef COLI_VULKAN
     adv_attach();                      /* the DiT's steps go to the card when COLI_VULKAN says so and there is one */
     avv_attach();                      /* and so do the VAE's windows */
+    aev_attach();                      /* and the encoders' layers */
 #endif
     rq.duration = ACS_DEFAULT_DURATION; rq.steps = ACS_DEFAULT_STEPS; rq.shift = ACS_DEFAULT_SHIFT; rq.dcw = 1;
     rq.lm_temperature = ACS_DEFAULT_LM_TEMPERATURE; rq.lm_cfg_scale = ACS_DEFAULT_LM_CFG; rq.lm_top_p = ACS_DEFAULT_LM_TOP_P;
