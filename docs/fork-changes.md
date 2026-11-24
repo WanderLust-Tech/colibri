@@ -62,7 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
-| Upstream batch 3: 21 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes | no | no, 2.43 |
+| Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes | no | no, 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes | no | no, 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
@@ -846,10 +846,10 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 ### 2.43 Upstream batch 3: the Windows fixes that fit (branch `upstream-win`, 2026-11-25; built, merged into local main, not pushed or deployed)
 
 How the 142 upstream commits that mention Windows were sorted: each one's files were compared with what the fork has and has changed (27 touch only files the fork never
-changed, 37 touch files it did change, 78 touch files the fork does not have, mostly the CUDA, GGUF and engine-test files). Twenty-one went in, each cherry-picked with
+changed, 37 touch files it did change, 78 touch files the fork does not have, mostly the CUDA, GGUF and engine-test files). Twenty-two went in (21 at first, `cf14203f` after it was measured), each cherry-picked with
 `-x`, in date order, with its own tests run; the full Python suite was then compared with `main`.
 
-- **Taken (21)**: the converter tools on Windows (`convert_qwen38_experts_int4` without `os.pread`, `convert_qwen36`'s vision tower and memmap shard reader, and the int4
+- **Taken (22)**: the converter tools on Windows (`convert_qwen38_experts_int4` without `os.pread`, `convert_qwen36`'s vision tower and memmap shard reader, and the int4
   converter test that could not delete its temp directory on Windows); `coli stop` (a stop that needs no rights on the process, an ended process is stopped and not "Access
   is denied", and no "stopped" when it failed); `coli setup` (a stalled `curl.exe` download times out, an empty file completes without Windows curl, HTTP errors in the
   throughput probe are rejected, two test fixes); `fix(memory)` keeps a measured zero Windows commit headroom; a clear stop on an MSYS or Cygwin `gcc`; `qpack` refuses a
@@ -859,8 +859,13 @@ changed, 37 touch files it did change, 78 touch files the fork does not have, mo
   `81eaf807` (direct-read descriptors opened for overlapped I/O, `compat.h`). Their own C tests pass (`test_compat_direct`, `test_compat_overlapped`,
   `test_st_shared_read`), and `compat_pread` on Windows now creates one event per read. They take effect only when an engine is rebuilt; the Python changes take effect on
   the next router restart. Measure a model that reads from disk (Qwen3-Coder cold) before rebuilding the live engines.
-- **Held back, with reasons**: `cf14203f` (a hybrid CPU's OpenMP team is its performance cores: this machine reports 24 physical and 8 performance cores, so every engine that
-  calls `omp_tune.h` would drop from 24 threads to 8; upstream measured it on a 6 P + 8 E laptop CPU only, so measure here first); the Vulkan commits (`backend_vulkan.c`,
+- **`cf14203f`, a hybrid CPU's OpenMP team is its performance cores: measured here, taken** (2026-11-25). This machine reports 24 physical and 8 performance cores, so the team
+  goes from 24 threads to 8. Qwen3-Coder-30B behind a throwaway `coli serve` (`OMP_NUM_THREADS` 24 against 8, alternated twice, a 455-token prompt, 96 tokens, temperature 0,
+  the live engine build): on the CPU alone decode 16.1 tok/s against 12.5 (+29%, runs of 15.95, 16.21, 16.06, 16.33 against 12.37, 12.61, 12.47, 12.64) and the prompt read in
+  10.7 s against 14.1 s (+32%); with the card (`COLI_VULKAN=1`, all experts on the 5090) 19.5 tok/s and 1.09 s either way, no difference. So it helps whatever runs on the CPU (a
+  model the card cannot hold, or one it gave back) and costs nothing when the card has the model. It reaches the launcher (`resource_plan`) on the next router restart and the
+  engines when they are rebuilt.
+- **Held back, with reasons**: the Vulkan commits (`backend_vulkan.c`,
   `vk_chain.c`, the host pool on Windows: files the fork changed, and they touch what the Gemma and Qwen cards run on); the engines the fork carries but does not run
   (DeepSeek V4 and V4.1, Kimi K3, MiMo, GLM: the aligned-free, RAM-budget and engram-staging fixes cannot be run without their models); CUDA, GGUF (`gguf.h` is not in the
   fork), xdna, LoRA, FreeBSD, CI, release packaging and README commits; and three that do not apply (`5653e038`: the fork has no `i8r16_group2`, so there is no `grp2`
