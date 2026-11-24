@@ -745,7 +745,7 @@ within a few 1e-5.
 With the encoders on the card (2026-11-23) a 10 s song takes **0.73 s** in a warm engine (1.83 s with them on the CPU; the first request, which loads the models and uploads the weights, 8.2 s), at a cost of 1.0 GB of the card for the text
 encoder and 1.3 GB for each DiT's lyric and timbre encoders. Still on the CPU: the tokenizer, the embedding tables, the patch embedding and the DiT's output projection (all small).
 
-### 2.37 ACE-Step's sampler options: Heun, the SDE step, the velocity clamp and smoothing (2026-11-23; built, not pushed)
+### 2.37 ACE-Step's sampler options: Heun, the SDE step, the velocity clamp and smoothing (2026-11-23; pushed and live)
 
 Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`heun`), `infer_method` (`sde`), `velocity_norm_threshold`, `velocity_ema_factor` (`docs/acestep.md`, "The sampler options").
 
