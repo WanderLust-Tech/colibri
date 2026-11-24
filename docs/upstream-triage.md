@@ -76,7 +76,7 @@ the MiMo, MCP and history-JSON tests: a fix can apply cleanly and still depend o
 (`0d9f2972`, `97a656b5`), `282b789c` (touches the web dashboard too), `84a208ab` (line endings of a file both sides rewrote), `d1dea849` and `9de40423`
 (`coli`; small, conflict, not needed), `20951347` (the installer's state; the fork's installer is its own).
 
-- **Batch 2, the 26 recommended validation fixes: built 2026-11-25** (fork-changes 2.42), full suite compared with `main`: no regression. The WAV and image-engine hand port is next.
+- **Batch 2, the 26 recommended validation fixes and the WAV and image hand ports: built 2026-11-25** (fork-changes 2.42), full suite compared with `main`: no regression. The Qwen function-call recovery (`bf84d729`) is held back, with the reasons in 2.42.
 
 ## How to take things
 

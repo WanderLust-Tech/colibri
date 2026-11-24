@@ -62,7 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
-| Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`) | `upstream-picks` | yes | no | no, 2.42 |
+| Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes | no | no, 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
@@ -852,8 +852,18 @@ static path, malformed tool arguments and blocks, JSON limits as client errors),
 - **Checked**: the two C tests (`test_json`, `test_schema_gbnf`), the 586 Python tests in the modules the commits touch, then the **whole Python suite on the
   branch and on a clean `main`**: 4,428 tests against 4,393, the same 13 failures in both (they fail on `main` too: the two DeepSeek V4.1 encoding tests and
   eleven that need what this machine lacks), so the 35 new tests pass and nothing regressed.
-- **Not taken**: the engines the fork does not run, the WAV and image-engine hardening (they conflict: a hand port is next), and the fixes that rest on an earlier
-  upstream commit (list in the triage doc).
+- **Batch 2b, the hand ports** (the same day, `upstream-picks`): the WAV reader is upstream's final `decode_wav_mono16k` dropped in whole (the fork's copy was identical
+  to upstream's at the fork point, so the five WAV commits were one change; the cherry-picks had only conflicted because they were taken one by one out of
+  order), with upstream's `test_wav_audio.py` (18) and two tests of ours for a RIFF size larger than the file or too small for the form type, which upstream's tests
+  did not cover (found by breaking the check on purpose). In this fork that decoder only feeds the Inkling DMel audio path (`input_audio` parts), so this is
+  insurance, not a fix for anything the fork runs. The image checkpoint's tensor layouts are validated before planning (`cafc1ba8`, applied as a patch, its
+  doctor test added by hand). The PNG inflation bound of `a097db37` was already in the fork (`25c72a0e`): only the end-of-stream check (a deflate stream missing its
+  end is refused even at the right size) and the tests are new. The full suite again: 4,452 tests against `main`'s 4,393, the same 13 failures, none new.
+- **Not taken**: the engines the fork does not run, and the fixes that rest on an earlier upstream commit (list in the triage doc). **Held back: `bf84d729`,
+  "recover valid Qwen function calls"**: it also adds a `QwenToolStream` class that replaces the marker suppression in three places of the streaming path
+  (where the fork's tool-call progress hooks in), makes the parse stricter (a call with an unknown tool, an unknown or missing parameter or a wrong type is dropped), and
+  recovers a bare `<function=...>` block only when the whole reply is nothing but function blocks, which is not what Qwen3-Coder does (prose, then a call; the
+  VS Code extension salvages that itself). A change to the everyday model's tool path with no evidence it helps; look again with a live Qwen3-Coder trace.
 
 ## 3. Planned and open
 
