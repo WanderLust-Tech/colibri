@@ -66,6 +66,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 
 import numpy as np
@@ -214,6 +215,20 @@ class Geometry:
 
 # ---------- the release, read by offset ----------
 
+_pread_lock = threading.Lock()
+
+
+def _pread(fd, nbytes, offset):
+    """os.pread where the platform has it. Windows has none (Python 3.14 included):
+    there a seek and a read, under a lock, since they move the descriptor's offset."""
+    pread = getattr(os, "pread", None)
+    if pread is not None:
+        return pread(fd, nbytes, offset)
+    with _pread_lock:
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.read(fd, nbytes)
+
+
 def read_header(path):
     with open(path, "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
@@ -283,7 +298,7 @@ class Source:
             fd = self._fds[path] = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         out = bytearray()
         while len(out) < nbytes:
-            chunk = os.pread(fd, nbytes - len(out), offset + len(out))
+            chunk = _pread(fd, nbytes - len(out), offset + len(out))
             if not chunk:
                 raise IOError(f"{path}: short read at {offset + len(out)}")
             out += chunk
