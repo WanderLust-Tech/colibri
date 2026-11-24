@@ -855,10 +855,13 @@ changed, 37 touch files it did change, 78 touch files the fork does not have, mo
   throughput probe are rejected, two test fixes); `fix(memory)` keeps a measured zero Windows commit headroom; a clear stop on an MSYS or Cygwin `gcc`; `qpack` refuses a
   FIFO at `manifest.json` instead of hanging; `COLI_MMAP` and `TRUNK_RESIDENT_LAYERS` map shards on Windows too (the `colibri` engine); the OpenMP team binds one place
   per core and not per SMT thread; and three test-hygiene fixes (`test_cli_output`, C test binaries by absolute path, `test_ablate_mode`'s stderr capture).
-- **Taken, but an I/O path change that has not been measured on the fork's models**: `bf70afcc` (a shard's readers overlap through a second descriptor, `st.h`) and
+- **Taken; an I/O path change, measured neutral here** (2026-11-25): `bf70afcc` (a shard's readers overlap through a second descriptor, `st.h`) and
   `81eaf807` (direct-read descriptors opened for overlapped I/O, `compat.h`). Their own C tests pass (`test_compat_direct`, `test_compat_overlapped`,
   `test_st_shared_read`), and `compat_pread` on Windows now creates one event per read. They take effect only when an engine is rebuilt; the Python changes take effect on
-  the next router restart. Measure a model that reads from disk (Qwen3-Coder cold) before rebuilding the live engines.
+  the next router restart. Measured: Qwen3-Coder-30B started with all experts read from disk (`--cap 128`, the VK `qwen36`, `OMP_NUM_THREADS=8` both) by the live build and by a
+  build of this branch, the file cache pushed out first by reading 66 GB of other models, alternated twice: up in 15.2, 14.6 s (old) against 17.6, 15.3 s (new), the tier's warm
+  start 10.3, 9.8 against 9.8, 9.9 s; a warm-cache control 12.6 s for both. So no gain and no loss on this NVMe drive (a cold start costs only 2-3 s more than a warm one, the
+  disk is not what the start waits for); upstream built it for a drive that queues single-file reads, which this machine does not have.
 - **`cf14203f`, a hybrid CPU's OpenMP team is its performance cores: measured here, taken** (2026-11-25). This machine reports 24 physical and 8 performance cores, so the team
   goes from 24 threads to 8. Qwen3-Coder-30B behind a throwaway `coli serve` (`OMP_NUM_THREADS` 24 against 8, alternated twice, a 455-token prompt, 96 tokens, temperature 0,
   the live engine build): on the CPU alone decode 16.1 tok/s against 12.5 (+29%, runs of 15.95, 16.21, 16.06, 16.33 against 12.37, 12.61, 12.47, 12.64) and the prompt read in

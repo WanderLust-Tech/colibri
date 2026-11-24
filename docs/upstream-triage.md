@@ -77,7 +77,7 @@ the MiMo, MCP and history-JSON tests: a fix can apply cleanly and still depend o
 (`coli`; small, conflict, not needed), `20951347` (the installer's state; the fork's installer is its own).
 
 - **Batch 2, the 26 recommended validation fixes and the WAV and image hand ports: built 2026-11-25** (fork-changes 2.42), full suite compared with `main`: no regression. The Qwen function-call recovery (`bf84d729`) is held back, with the reasons in 2.42.
-- **Batch 3, the Windows fixes: built 2026-11-25** (fork-changes 2.43): 22 of the 142 commits that mention Windows were taken and tested one by one (the hybrid-CPU team size, measured on Qwen3-Coder: +29% decode on the CPU, neutral on the card); the rest are held back or do not apply, with the reasons in 2.43. The two I/O-path commits still want a measurement.
+- **Batch 3, the Windows fixes: built 2026-11-25** (fork-changes 2.43): 22 of the 142 commits that mention Windows were taken and tested one by one (the hybrid-CPU team size, measured on Qwen3-Coder: +29% decode on the CPU, neutral on the card); the rest are held back or do not apply, with the reasons in 2.43. The two I/O-path commits were measured neutral (cold start of Qwen3-Coder unchanged).
 
 ## How to take things
 
