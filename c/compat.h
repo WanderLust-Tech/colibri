@@ -141,10 +141,18 @@ static inline int compat_fadvise(int fd, off_t off, off_t len, int advice){
  * dal campo diventa un tirare a indovinare (#307: tre giri di ipotesi tra
  * tre persone perche' il codice vero non compariva da nessuna parte). */
 static __thread DWORD compat_pread_lasterr __attribute__((unused));
+/* A descriptor from compat_open_overlapped() is opened for overlapped I/O, so
+ * that the reads of several threads on it are in flight together: a synchronous
+ * handle takes them one at a time, whatever the thread count. A read on such a
+ * handle may return before it is done, and is then waited for on an event that
+ * belongs to this call -- the file handle itself is signalled by every thread's
+ * completions. On a synchronous handle the event is set and never needed. */
 static inline ssize_t compat_pread(int fd, void *buf, size_t n, off_t off){
     intptr_t osfh = _get_osfhandle(fd);
     if(osfh == -1 || osfh == -2){ errno = EBADF; return -1; }
     HANDLE h = (HANDLE)osfh;
+    HANDLE done = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if(!done){ compat_pread_lasterr = GetLastError(); errno = EIO; return -1; }
     size_t total = 0;
     while(total < n){
         size_t chunk = n - total;
@@ -152,18 +160,23 @@ static inline ssize_t compat_pread(int fd, void *buf, size_t n, off_t off){
         OVERLAPPED ov = {0};
         ov.Offset     = (DWORD)( (off + (off_t)total)        & 0xFFFFFFFFULL);
         ov.OffsetHigh = (DWORD)(((off + (off_t)total) >> 32) & 0xFFFFFFFFULL);
+        ov.hEvent     = done;
         DWORD rd = 0;
-        if(!ReadFile(h, (char*)buf + total, chunk32, &rd, &ov)){
+        BOOL ok = ReadFile(h, (char*)buf + total, chunk32, &rd, &ov);
+        if(!ok && GetLastError() == ERROR_IO_PENDING) ok = GetOverlappedResult(h, &ov, &rd, TRUE);
+        if(!ok){
             DWORD err = GetLastError();
             if(err == ERROR_HANDLE_EOF) break;  /* past EOF → return bytes read (0 if none, matching POSIX pread) */
             compat_pread_lasterr = err;         /* preserva il codice VERO per il report (#307) */
             if(err == ERROR_INVALID_HANDLE || err == ERROR_INVALID_FUNCTION) errno = EBADF;
             else errno = EIO;
+            CloseHandle(done);
             return -1;
         }
         total += rd;
         if(rd == 0 || rd < chunk32) break;  /* EOF or partial (file truncated) */
     }
+    CloseHandle(done);
     return (ssize_t)total;
 }
 #define pread(fd,buf,n,off) compat_pread(fd,buf,n,off)
@@ -286,6 +299,23 @@ static inline int compat_open_direct(const char *path){
     return fd;
 }
 
+/* --- compat_open_overlapped: a second descriptor for the reads that run together ---
+ * The CRT's open() gives a synchronous handle, which serves one read at a time
+ * whatever the thread count. A reader that finds a file's first descriptor
+ * taken reads through this one instead (st.h, st_shard_enter): opened with
+ * FILE_FLAG_OVERLAPPED, it lets any number of reads be in flight. -1 when it
+ * cannot be opened; the caller then keeps the one descriptor it has. */
+static inline int compat_open_overlapped_win(const char *path){
+    HANDLE h = CreateFileA(path, GENERIC_READ,
+                           FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    if(h == INVALID_HANDLE_VALUE) return -1;
+    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY|_O_BINARY);
+    if(fd < 0){ CloseHandle(h); return -1; }
+    return fd;
+}
+#define compat_open_overlapped(path) compat_open_overlapped_win(path)
+
 /* --- dimensione file da fd: GetFileSizeEx ---
  * La lseek(SEEK_END) del CRT ritorna -1 sui fd NO_BUFFERING (misurato su
  * UCRT): la dimensione si chiede direttamente al kernel. Funziona su
@@ -392,6 +422,12 @@ static inline char *compat_mkdtemp(char *tmpl){
 #endif
 #ifndef COMPAT_O_BINARY
 #define COMPAT_O_BINARY 0
+#endif
+
+/* --- compat_open_overlapped altrove: una pread posizionale concorre gia',
+ * non serve un secondo descrittore --- */
+#ifndef compat_open_overlapped
+#define compat_open_overlapped(path) (-1)
 #endif
 
 /* --- read-only file mapping -------------------------------------------------

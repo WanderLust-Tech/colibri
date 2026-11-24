@@ -60,7 +60,7 @@ void coli_st_index_close(ColiSafetensorsIndex *index) {
     st_mirror_reset(index);
     for (int i = 0; i < index->n; i++) free(index->t[i].name);
     for (int i = 0; i < index->nfd; i++) {
-        if (index->fds[i] >= 0) close(index->fds[i]);
+        if (index->fds[i] >= 0) { st_shard_pair(index->fds[i], -1); close(index->fds[i]); }
         if (index->dfds[i] >= 0) close(index->dfds[i]);
         free(index->paths[i]);
     }

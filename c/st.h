@@ -261,6 +261,58 @@ static void f16_to_f32_bulk(const uint16_t *src, float *dst, int64_t n) {
 }
 #endif
 
+/* ---- a shard's second descriptor: the reads that run together ----
+ * A shard is opened once and every thread preads that descriptor. On Windows a
+ * descriptor from open() is a synchronous handle, and the I/O manager serves
+ * one read at a time through it, whatever the thread count: the reads of an
+ * OpenMP team on one shard went to the drive in single file. So a shard may
+ * carry a second descriptor, opened for overlapped I/O (compat_open_overlapped;
+ * there is none elsewhere, where a positional pread already overlaps).
+ *
+ * The reader that finds the shard free takes it and reads through the first
+ * descriptor, exactly as before; a reader that finds it taken reads through the
+ * second. A lone reader therefore never leaves the path it always had -- an
+ * overlapped read is completed by another thread and costs a reader that is
+ * alone a wake-up it does not need -- and the readers of a team overlap.
+ *
+ * Indexed by fd, lock-free and static like the mappings further down, and for
+ * the same reason (st.h is also built without -pthread). A pair is set when
+ * its shard is opened and cleared when st.h closes it. */
+#define ST_MAX_PAIRED_FD 4096
+static int g_st_shard_ofd[ST_MAX_PAIRED_FD];             /* second descriptor + 1; 0 = none */
+static signed char g_st_shard_taken[ST_MAX_PAIRED_FD];
+
+/* Gives `fd` the second descriptor `ofd` (-1: none), closing the one it had. */
+static void st_shard_pair(int fd, int ofd) {
+    if (fd < 0 || fd >= ST_MAX_PAIRED_FD) { if (ofd >= 0) close(ofd); return; }
+    int old = __atomic_exchange_n(&g_st_shard_ofd[fd], ofd >= 0 ? ofd + 1 : 0, __ATOMIC_ACQ_REL) - 1;
+    if (old >= 0) close(old);
+}
+/* The descriptor this read goes through: `fd` itself if the shard was free
+ * (and is now taken), its second descriptor otherwise. */
+static int st_shard_enter(int fd) {
+    if (fd < 0 || fd >= ST_MAX_PAIRED_FD) return fd;
+    int ofd = __atomic_load_n(&g_st_shard_ofd[fd], __ATOMIC_ACQUIRE) - 1;
+    if (ofd < 0) return fd;
+    signed char unclaimed = 0;
+    return __atomic_compare_exchange_n(&g_st_shard_taken[fd], &unclaimed, (signed char)1,
+                                       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? fd : ofd;
+}
+static void st_shard_leave(int fd, int via) {
+    if (via != fd || fd < 0 || fd >= ST_MAX_PAIRED_FD) return;
+    if (__atomic_load_n(&g_st_shard_ofd[fd], __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_st_shard_taken[fd], (signed char)0, __ATOMIC_RELEASE);
+}
+/* One pread of a shard, through whichever of its descriptors is this read's. */
+static ssize_t st_pread_once(int fd, void *buf, size_t n, int64_t off) {
+    int via = st_shard_enter(fd);
+    ssize_t r = pread(via, buf, n, (off_t)off);
+    int saved = errno;
+    st_shard_leave(fd, via);
+    errno = saved;
+    return r;
+}
+
 static int st_open_fd(shards *S, const char *path) {
     for (int i = 0; i < S->nfd; i++) if (!strcmp(S->paths[i], path)) return S->fds[i];
     int fd = open(path, COMPAT_O_RDONLY);
@@ -270,6 +322,7 @@ static int st_open_fd(shards *S, const char *path) {
         coli_load_fail(coli_load_fail_kind_from_errno(saved), "fstat shard: %s", strerror(saved)); }
     S->paths[S->nfd] = strdup(path); S->fds[S->nfd] = fd;
     S->sizes[S->nfd] = (int64_t)sb.st_size;
+    st_shard_pair(fd, compat_open_overlapped(path));
 #ifdef O_DIRECT
     S->dfds[S->nfd] = open(path, COMPAT_O_RDONLY | O_DIRECT);   /* eager: lookup poi thread-safe */
 #elif defined(__APPLE__) || defined(_WIN32)
@@ -315,7 +368,7 @@ static int st_direct_fd_rep(shards *S, int fd, int rep) {
  * .coli_kv keep deriving from the primary alone. */
 static void st_mirror_reset(shards *S) {           /* re-init: drop every replica */
     for (int r = 0; r < S->nrep; r++) for (int i = 0; i < S->nfd; i++) {
-        if (S->mfds[r][i] >= 0) close(S->mfds[r][i]);
+        if (S->mfds[r][i] >= 0) { st_shard_pair(S->mfds[r][i], -1); close(S->mfds[r][i]); }
         if (S->mdfds[r][i] >= 0) close(S->mdfds[r][i]);
     }
     memset(S->nmirror, 0, sizeof(S->nmirror));
@@ -355,6 +408,7 @@ static int st_mirror_add(shards *S, const char *dir) {
             close(mfd); continue;
         }
         S->mfds[r][i] = mfd;
+        st_shard_pair(mfd, compat_open_overlapped(mp));
 #ifdef O_DIRECT
         S->mdfds[r][i] = open(mp, COMPAT_O_RDONLY | O_DIRECT);
 #elif defined(__APPLE__) || defined(_WIN32)
@@ -388,7 +442,7 @@ static void st_pread_full(int fd, void *buf, int64_t n, int64_t off, const char 
     while (got < n) {
         int64_t want = n - got;
         if (want > (int64_t)ST_PREAD_CHUNK) want = ST_PREAD_CHUNK;
-        ssize_t r = pread(fd, p + got, (size_t)want, off + got);
+        ssize_t r = st_pread_once(fd, p + got, (size_t)want, off + got);
         if (r < 0) {
             if (errno == EINTR) continue;
             int saved = errno;
@@ -893,7 +947,7 @@ static void st_destroy(shards *S) {
     if (!S) return;
     st_mirror_reset(S);
     for (int index = 0; index < S->nfd; index++) {
-        if (S->fds[index] >= 0) close(S->fds[index]);
+        if (S->fds[index] >= 0) { st_shard_pair(S->fds[index], -1); close(S->fds[index]); }
         if (S->dfds[index] >= 0 && S->dfds[index] != S->fds[index])
             close(S->dfds[index]);
         free(S->paths[index]);
