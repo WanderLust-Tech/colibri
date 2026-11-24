@@ -366,7 +366,7 @@ duration is always the source's, whatever `duration` says (upstream's `prepare_b
 turbo one in the checkpoint: `acestep-v15-base/` with `config.json`, `model.safetensors` and `silence_latent.pt` from
 `ACE-Step/acestep-v15-base`: `coli model install ace-step-1.5-base-dit` (an add-on of the catalog, [model install](model-install.md#from-the-terminal); the dashboard's
 install list has it too) or by hand with `huggingface-cli download ACE-Step/acestep-v15-base config.json model.safetensors silence_latent.pt --local-dir
-<model>/acestep-v15-base`. The engine never reads the Python files in that repository. The SFT DiT (`ACE-Step/acestep-v15-sft`, the same three files) is not in the catalog, and goes beside the others the same way.
+<model>/acestep-v15-base`. The engine never reads the Python files in that repository. The SFT DiT (`ACE-Step/acestep-v15-sft`, the same three files) is an add-on of the same kind (`ace-step-1.5-sft-dit`), and so are the planner's 0.6B and 4B (`ace-step-1.5-planner-0.6b`, `-4b`).
 **The SFT DiT on real weights** (2026-11-23): all 19 guided cases of `tools/acestep_ref_audio.py tasks --dit acestep-v15-sft` (the base's list: guidance variants, extract, lego, complete, cover, repaint) captured from
 upstream's handler (the code beside the weights has to be upstream's at the pinned commit: copy `acestep/models/sft/*.py` there first) and held by `acestep --gen-ref DIR --dit sft`: all 19 within their limits on the CPU
 (the audio 5e-6 to 5.6e-5 of the norm from upstream's, the repaint 1.05e-3 against its limit of 2e-3) and on the card (the same, the `dcw` case 1.5e-4 against 5e-4).

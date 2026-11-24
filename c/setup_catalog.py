@@ -210,6 +210,37 @@ CATALOG = (
         into="ace-step-1.5", subdir="acestep-5Hz-lm-1.7B", check=("config.json", "model.safetensors", "tokenizer.json"),
         prebuilt_since="2.1.0", doc="docs/acestep.md#the-5-hz-planner-a-language-model-writes-the-song-first"),
     CatalogModel(
+        id="ace-step-1.5-planner-0.6b", family="ace_step", name="ACE-Step 1.5 planner 0.6B",
+        repo="ACE-Step/acestep-5Hz-lm-0.6B", disk_gb=1.4,
+        # a Qwen3 0.6B decoder with the audio codes in its vocabulary, held as bf16: 1.3 GB on top of the model's 6.4
+        ram_min_gb=10, ram_good_gb=13, dense_gb=7.7, rank=4, size_class="small",
+        modality="audio", summary="add-on for ACE-Step 1.5: the smaller 5 Hz planner (0.6B: quicker, a rougher plan than the 1.7B); held to upstream on real weights",
+        license_note="MIT",
+        include=("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "added_tokens.json", "special_tokens_map.json", "chat_template.jinja"),
+        into="ace-step-1.5", subdir="acestep-5Hz-lm-0.6B", check=("config.json", "model.safetensors", "tokenizer.json"),
+        prebuilt_since="2.1.0", doc="docs/acestep.md#the-5-hz-planner-a-language-model-writes-the-song-first"),
+    CatalogModel(
+        id="ace-step-1.5-planner-4b", family="ace_step", name="ACE-Step 1.5 planner 4B",
+        repo="ACE-Step/acestep-5Hz-lm-4B", disk_gb=8.4,
+        # a Qwen3 4B decoder with the audio codes in its vocabulary, held as bf16 (two shards): 8.4 GB on top of the model's 6.4
+        ram_min_gb=18, ram_good_gb=22, dense_gb=14.8, rank=5, size_class="small",
+        modality="audio", summary="add-on for ACE-Step 1.5: the larger 5 Hz planner (4B: a better plan than the 1.7B, slower, two shards of weights); held to upstream on real weights",
+        license_note="MIT",
+        include=("config.json", "model-*.safetensors", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "added_tokens.json",
+                 "special_tokens_map.json", "chat_template.jinja"),
+        into="ace-step-1.5", subdir="acestep-5Hz-lm-4B", check=("config.json", "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "tokenizer.json"),
+        prebuilt_since="2.1.0", doc="docs/acestep.md#the-5-hz-planner-a-language-model-writes-the-song-first"),
+    CatalogModel(
+        id="ace-step-1.5-sft-dit", family="ace_step", name="ACE-Step 1.5 SFT DiT",
+        repo="ACE-Step/acestep-v15-sft", disk_gb=4.8,
+        # like the base DiT: 4.8 GB more in the resident set once a request names it
+        ram_min_gb=14, ram_good_gb=17, dense_gb=11.2, rank=6, size_class="small",
+        modality="audio", summary="add-on for ACE-Step 1.5: the SFT guided DiT (a second guided voice beside the base DiT, for the same tasks); held to upstream on real weights",
+        license_note="MIT",
+        include=("config.json", "model.safetensors", "silence_latent.pt"),
+        into="ace-step-1.5", subdir="acestep-v15-sft", check=("config.json", "model.safetensors", "silence_latent.pt"),
+        prebuilt_since="2.1.0", doc="docs/acestep.md#the-base-and-sft-dits-guidance-extract-lego-complete"),
+    CatalogModel(
         id="qwen3-embedding-0.6b", family="qwen3_embedding", name="Qwen3-Embedding-0.6B",
         repo="Qwen/Qwen3-Embedding-0.6B", disk_gb=1.2,
         # docs/embeddings.md: the weights are held as bf16 (1.2 GB), and a batch of texts needs a few hundred MB on top.
