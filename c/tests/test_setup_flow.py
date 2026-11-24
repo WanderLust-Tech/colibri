@@ -1367,15 +1367,27 @@ class ServerControl(HomeTestCase):
         patcher = mock.patch.dict(os.environ, {"FAKE_ENV_OUT": self.env_out, "EXTRA": "from-user"})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.pids = []              # pids start_server returned: known before the pidfile exists
         self.addCleanup(self.cleanup_server)
 
     def cleanup_server(self):
         pidfile = setup_flow.serve_pidfile(self.port)
+        pids = set(self.pids)
         try:
-            pid = int(Path(pidfile).read_text().split()[0])
-            os.kill(pid, 15)        # TerminateProcess on Windows: the handler never runs
-        except (OSError, ValueError):
+            pids.add(int(Path(pidfile).read_text().split()[0]))
+        except (OSError, ValueError, IndexError):   # IndexError: created, not yet written
             pass
+        for pid in pids:
+            try:
+                os.kill(pid, 15)    # TerminateProcess on Windows: the handler never runs
+            except OSError:
+                pass
+        # On Windows TerminateProcess returns before the process is gone, and a
+        # server that still has serve.log open keeps the folder from being removed.
+        deadline = time.time() + 10
+        while any(setup_flow._pid_alive(pid) for pid in pids) and time.time() < deadline:
+            time.sleep(0.05)
+        self.pids.clear()
         try:
             os.unlink(pidfile)      # so no stale pidfile outlives the test there
         except OSError:
@@ -1428,8 +1440,9 @@ class ServerControl(HomeTestCase):
         blocker.listen(1)
         self.addCleanup(blocker.close)
         with mock.patch.object(setup_flow, "_get_json", return_value=(None, None)):
-            setup_flow.start_server(self.cfg, background=True, open_browser=False,
-                                    out=lambda *_: None, wait=0.5)
+            status = setup_flow.start_server(self.cfg, background=True, open_browser=False,
+                                             out=lambda *_: None, wait=0.5)
+        self.pids.append(status["pid"])   # after half a second its pidfile may not be written yet
         moved = setup_flow.load_config()
         self.assertNotEqual(moved["port"], self.port)
         self.assertEqual(moved["args"][moved["args"].index("--port") + 1], str(moved["port"]))
