@@ -3686,6 +3686,9 @@ def _win_terminate(pid):
     try:
         if k32.TerminateProcess(handle,1): return None
         err=ctypes.get_last_error()
+        # an ended process whose object something still holds (a handle open
+        # anywhere) opens fine and then refuses the end with ERROR_ACCESS_DENIED
+        if not _pid_alive(pid): return None
         return f"{ctypes.FormatError(err).strip()} (WinError {err})"
     finally:
         k32.CloseHandle(handle)
