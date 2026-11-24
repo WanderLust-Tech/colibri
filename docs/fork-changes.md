@@ -62,6 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
+| Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`) | `upstream-picks` | yes | no | no, 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
@@ -840,6 +841,19 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Live check** (2026-11-25, Gemma 4 E2B through the router): no key is a 401; non-streaming gives `response`/`completed` with the text and usage; streaming arrives as the raw HTTP/1.0 body (`Connection: close`, no `Transfer-Encoding`) with the whole event sequence from `response.created` to `response.completed`.
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
+
+### 2.42 Upstream batch 2: 26 validation and robustness fixes (branch `upstream-picks`, 2026-11-25; built, merged into local main, not pushed or deployed)
+
+The review list and how it was found are in [upstream-triage.md](upstream-triage.md) (batch 2). Twenty-six upstream commits, each cherry-picked as its own commit with
+`-x` (the upstream hash is in the message): gateway request validation (10: NaN and Infinity in bodies, non-integer `n`, out-of-range integers, a NUL in a
+static path, malformed tool arguments and blocks, JSON limits as client errors), the JSON parser and the grammar behind JSON mode (7: `json.h`,
+`schema_gbnf.h`), images (5), the MCP server (2) and `coli` (2).
+
+- **Checked**: the two C tests (`test_json`, `test_schema_gbnf`), the 586 Python tests in the modules the commits touch, then the **whole Python suite on the
+  branch and on a clean `main`**: 4,428 tests against 4,393, the same 13 failures in both (they fail on `main` too: the two DeepSeek V4.1 encoding tests and
+  eleven that need what this machine lacks), so the 35 new tests pass and nothing regressed.
+- **Not taken**: the engines the fork does not run, the WAV and image-engine hardening (they conflict: a hand port is next), and the fixes that rest on an earlier
+  upstream commit (list in the triage doc).
 
 ## 3. Planned and open
 
