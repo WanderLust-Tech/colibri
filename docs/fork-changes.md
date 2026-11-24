@@ -877,8 +877,12 @@ Status as of today (the file itself has been brought into line with this):
   SecretStorage are in (0.13.0); the reasoning switch per model is not needed (the gateway translates `reasoning_effort`); and `cache_slot` was
   decided against on 2026-11-24: the gateway already places each turn by its message prefix (`SlotLedger`) and the engine reuses what it has
   read (a 15.6k-token continuation took 2.4-3.4 s, a cold start 159 s), and what had broken that was the extension changing the start of the
-  prompt, fixed in 0.4.1. A pinned slot only matters with `--kv-slots` above 1, which the router runs at 1. What is open is in the roadmap of
-  its README (an editable diff, `@file` mentions, a history list, streamed tool-call progress, extension-host tests).
+  prompt, fixed in 0.4.1. A pinned slot only matters with `--kv-slots` above 1, which the router runs at 1. From 0.17.0 to 0.24.0 (built
+  2026-11-24/25, `colibri-agent-connector-0.24.0.vsix`, not installed): `@file` mentions, an editable diff, warnings on shell commands, saved folder
+  grants, a chat history, tool-call progress (the gateway side is 2.40), extension-host tests and the untrusted-workspace message. Still open, all in
+  the roadmap of its README (`Roadmap`): a web search tool (skipped for now: needs a search source, a Brave key or a SearXNG address), the two
+  Amiga items (Hunk/ADF files, more tools; skipped), and under "Ideas, not committed to" inline explain/fix code actions, MCP resources and
+  prompts, and MCP servers that need OAuth.
 - **ACE-Step**: nothing is open but the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23 and are catalogue add-ons, the sampler options are built, 2.37, with their dashboard controls, flow-edit is built, 2.38, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.
