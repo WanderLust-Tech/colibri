@@ -70,7 +70,9 @@ SKIP_PREFIXES = (
 
 # The vision tower, converted since #1757: the same ViT in Qwen3.5/3.6/3.8, run by
 # the engine through qwen38_vision.h. Placed as ("vision", <name after visual.>).
-VISION_PREFIXES = ("model.visual.", "visual.")
+# "model.language_model.visual.": the same tower, as some finetune exports
+# (llmfan46/Qwen3.6-35B-A3B-uncensored-heretic) nest it under the language model's prefix.
+VISION_PREFIXES = ("model.visual.", "visual.", "model.language_model.visual.")
 
 _LAYER = re.compile(r"^layers\.(\d+)\.(.+)$")
 

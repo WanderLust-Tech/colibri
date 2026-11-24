@@ -237,6 +237,13 @@ class TensorKindsTest(unittest.TestCase):
                          sum(p[0] == "layer" for p in self._classify_all(
                              _concrete(QWEN38_2P4T))[1]))
 
+    def test_vision_tower_nested_under_the_language_model(self):
+        """Some finetune exports (llmfan46/Qwen3.6-35B-A3B-uncensored-heretic) put the
+        same tower under model.language_model.visual.; it is the vision tower too."""
+        self.assertEqual(classify("model.language_model.visual.blocks.0.attn.qkv.weight",
+                                  "model.language_model."),
+                         classify("model.visual.blocks.0.attn.qkv.weight", "model.language_model."))
+
     def test_tiny_fixture_per_expert_layout(self):
         prefix, placed = self._classify_all(_concrete(TINY_FIXTURE))
         self.assertEqual(prefix, "model.")

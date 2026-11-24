@@ -68,6 +68,38 @@ except ImportError as exc:
     sys.exit(f"Missing dependencies: {exc}. Install: pip install torch safetensors")
 
 
+class _MMapShard:
+    """One .safetensors file read through a numpy memmap: only the bytes of the
+    tensor asked for are paged in, and each tensor comes back as an owned torch copy."""
+    _DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "F64": torch.float64,
+           "I64": torch.int64, "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8,
+           "BOOL": torch.bool, "F8_E4M3": torch.float8_e4m3fn, "F8_E5M2": torch.float8_e5m2}
+
+    def __init__(self, path):
+        import numpy as np
+        with open(path, "rb") as f:
+            hlen = struct.unpack("<Q", f.read(8))[0]
+            self.header = json.loads(f.read(hlen))
+        self.header.pop("__metadata__", None)
+        self.base = 8 + hlen
+        self.mm = np.memmap(path, dtype=np.uint8, mode="r")
+
+    def keys(self):
+        return list(self.header)
+
+    def get_tensor(self, name):
+        e = self.header[name]
+        a, b = e["data_offsets"]
+        raw = self.mm[self.base + a:self.base + b]
+        t = torch.frombuffer(bytearray(raw), dtype=self._DT[e["dtype"]])
+        return t.reshape(e["shape"])
+
+    def __exit__(self, *exc):
+        mm, self.mm = self.mm, None
+        if mm is not None and getattr(mm, "_mmap", None) is not None:
+            mm._mmap.close()
+
+
 def quantize_row(w: torch.Tensor, bits: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Row-wise symmetric quantization to `bits` (2..8). Storage is int8 regardless of
     bits (engine dequantizes q*scale); for bits<8 values are confined to a smaller range."""
@@ -481,9 +513,9 @@ def main():
         shard = wm[name]
         ensure_shard(shard)
         if shard not in shard_handles:
-            # torch backend returns a native torch tensor (bf16 works natively);
-            # numpy backend returns a bf16 numpy array that torch.from_numpy rejects.
-            shard_handles[shard] = safe_open_pt(local_shards[shard], framework="pt")
+            # A numpy memmap instead of safe_open(framework="pt"), whose torch storage hit an access violation
+            # on Windows for a 49.7 GB shard with 34 GB RAM (torch 2.7 and 2.14, safetensors 0.6 and 0.8).
+            shard_handles[shard] = _MMapShard(local_shards[shard])
         return shard_handles[shard].get_tensor(name).contiguous()
 
     def evict_layer(i):
