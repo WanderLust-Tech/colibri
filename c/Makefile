@@ -17,6 +17,19 @@ DARWIN := $(findstring darwin,$(TRIPLET))
 LINUX  := $(findstring linux,$(TRIPLET))
 IS_WIN := $(MINGW)$(CYGWIN)
 
+# A gcc that targets the MSYS or Cygwin runtime (MSYS2's "MSYS" shell, or its plain
+# `gcc` package) is not a native Windows compiler: it does not define _WIN32, so
+# compat.h's Windows layer is skipped and the build dies on a POSIX call it cannot
+# find (getrusage in qwen36.c, #1979). Stop before compiling and say which compiler
+# to use. `make clean` still runs; ALLOW_MSYS_GCC=1 builds anyway.
+ifneq ($(CYGWIN)$(findstring msys,$(TRIPLET)),)
+ifneq ($(ALLOW_MSYS_GCC),1)
+ifneq ($(filter-out clean%,$(or $(MAKECMDGOALS),all)),)
+$(error $(DETECT_CC) builds for $(TRIPLET), the MSYS/Cygwin runtime, not for Windows itself. Open the "MSYS2 UCRT64" shell (not "MSYS2 MSYS"), install its MinGW compiler with `pacman -S --needed make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libgomp`, and check that `gcc -dumpmachine` says x86_64-w64-mingw32 (docs/windows.md))
+endif
+endif
+endif
+
 # Appended to every platform's flags, so a caller can add to the build without
 # replacing it. Overriding CFLAGS= on the command line would drop that
 # platform's OpenMP and -march flags, which is how a sanitizer run ends up
