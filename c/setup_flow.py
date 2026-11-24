@@ -1403,11 +1403,13 @@ def stop_server(cfg, out=print):
     text = (result.stdout + result.stderr).strip()
     lines = [re.sub(r"\x1b\[[0-9;]*m", "", line).strip() for line in text.splitlines()]
     # Keep what `coli stop` reports, not its banner.
-    keep = ("stopping", "stopped", "nothing running", "forced", "would stop")
+    keep = ("stopping", "stopped", "nothing running", "forced", "would stop", "could not stop",
+            "more rights")
     lines = [line for line in lines if any(word in line for word in keep)]
     for line in lines:
         out(f"  {line}")
-    return {"stopped": "nothing running" not in text, "output": "\n".join(lines)}
+    return {"stopped": result.returncode == 0 and "nothing running" not in text,
+            "output": "\n".join(lines)}
 
 
 def tail_file(path, lines=100):

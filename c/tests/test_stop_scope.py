@@ -85,6 +85,8 @@ class StopScopeTests(unittest.TestCase):
                 with mock.patch.object(coli, "banner"), \
                      mock.patch.object(coli, "serve_pidfile",
                                        return_value=os.path.join(tmp, "missing.pid")), \
+                     mock.patch.object(coli, "serve_stopfile",
+                                       return_value=os.path.join(tmp, "coli-serve-9123.stop")), \
                      mock.patch.object(coli.time, "sleep"), \
                      contextlib.redirect_stdout(io.StringIO()):
                     coli.cmd_stop(args)

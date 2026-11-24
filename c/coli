@@ -3619,6 +3619,92 @@ def cmd_chat(a):
     print(f"  {C.teal}goodbye{C.r} {C.dim}— the hummingbird returns to its nest{C.r} 🐦\n")
 
 def serve_pidfile(port): return os.path.join(tempfile.gettempdir(), f"coli-serve-{port}.pid")
+def serve_stopfile(port): return os.path.join(tempfile.gettempdir(), f"coli-serve-{port}.stop")
+
+# A stop that needs no rights on the process (#2091). `coli stop` puts this file
+# next to the pidfile and the serve, which watches for it, ends itself the way
+# SIGTERM ends it (the engine drained, its heat saved). Ending a process from
+# outside needs rights on it: a serve started from an administrator console
+# cannot be ended from a normal prompt on Windows (TerminateProcess and taskkill
+# are both denied), and before this `coli stop` said "stopped" all the same.
+def _stop_file_is_ours(path):
+    """A stop request from this user. The temp folder is shared on POSIX, so a file
+    another user put there is not one (Windows gives every user a %TEMP% of its own)."""
+    try: st=os.stat(path)
+    except OSError: return False
+    return not hasattr(os,"getuid") or st.st_uid==os.getuid()
+
+def _stop_self():
+    """End this serve the way its signal handlers do (openai_server.serve): SIGBREAK on
+    Windows, where a SIGTERM sent with os.kill is TerminateProcess, SIGTERM elsewhere.
+    Before the handlers are in place the default action ends the process, a stop too."""
+    if sys.platform=="win32": signal.raise_signal(signal.SIGBREAK)
+    else: os.kill(os.getpid(),signal.SIGTERM)
+
+def _watch_stop_file(path, on_stop, interval=0.5, done=None):
+    """Thread body: when this user's stop request appears, consume it and stop; return
+    as soon as `done` (a threading.Event) is set, the serve having ended on its own."""
+    while not (done is not None and done.is_set()):
+        if os.path.exists(path) and _stop_file_is_ours(path):
+            try: os.unlink(path)
+            except OSError: pass
+            on_stop(); return
+        if done is not None: done.wait(interval)
+        else: time.sleep(interval)
+
+def _request_stop(port, wait=2.0):
+    """Ask the serve on `port` to stop itself; True once it took the request (the file
+    is gone), False when nothing consumed it within `wait` seconds (a serve from before
+    the request existed, or one that is hung)."""
+    path=serve_stopfile(port)
+    try:
+        with open(path,"w") as f: f.write(f"{os.getpid()}\n")
+    except OSError: return False
+    deadline=time.time()+wait
+    while time.time()<deadline:
+        if not os.path.exists(path): return True
+        time.sleep(0.1)
+    try: os.unlink(path)          # not taken: leave no request for a later serve
+    except OSError: pass
+    return False
+
+def _win_terminate(pid):
+    """TerminateProcess with the one right it needs. os.kill asks PROCESS_ALL_ACCESS,
+    which a process may refuse while it grants PROCESS_TERMINATE. None, or why not."""
+    import ctypes
+    from ctypes import wintypes
+    PROCESS_TERMINATE, ERROR_INVALID_PARAMETER = 0x0001, 87
+    k32=ctypes.WinDLL("kernel32",use_last_error=True)
+    k32.OpenProcess.restype=wintypes.HANDLE
+    k32.OpenProcess.argtypes=(wintypes.DWORD,wintypes.BOOL,wintypes.DWORD)
+    k32.TerminateProcess.argtypes=(wintypes.HANDLE,wintypes.UINT)
+    k32.CloseHandle.argtypes=(wintypes.HANDLE,)
+    handle=k32.OpenProcess(PROCESS_TERMINATE,False,pid)
+    if not handle:
+        err=ctypes.get_last_error()
+        return None if err==ERROR_INVALID_PARAMETER else f"{ctypes.FormatError(err).strip()} (WinError {err})"
+    try:
+        if k32.TerminateProcess(handle,1): return None
+        err=ctypes.get_last_error()
+        return f"{ctypes.FormatError(err).strip()} (WinError {err})"
+    finally:
+        k32.CloseHandle(handle)
+
+def _terminate(pid):
+    """End `pid` now. None, or why it could not be ended. On Windows the least rights
+    first (_win_terminate), then taskkill, which ends the process tree."""
+    if sys.platform!="win32":
+        try: os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM)); return None
+        except ProcessLookupError: return None
+        except OSError as error: return str(error)
+    why=_win_terminate(pid)
+    if why is None: return None
+    try:
+        r=subprocess.run(["taskkill","/PID",str(pid),"/T","/F"],capture_output=True,text=True,timeout=30)
+    except (OSError,subprocess.SubprocessError) as error:
+        return f"{why}; taskkill: {error}"
+    if r.returncode==0: return None
+    return f"{why}; taskkill: {(r.stdout+r.stderr).strip() or f'exit {r.returncode}'}"
 
 def _serve_cmdline_matches_port(raw, port):
     argv=[part.decode("utf-8","replace") for part in raw.split(b"\0") if part]
@@ -3694,6 +3780,16 @@ def _cmd_serve(a):
     try:
         with open(serve_pidfile(a.port),"w") as f: f.write(f"{os.getpid()} {a.model}\n")
     except OSError: pass
+    # and the stop request `coli stop` leaves when it cannot end this process itself.
+    # The watcher ends with the serve: left running in a process that goes on (a test
+    # runner calling cmd_serve), a later `coli stop` of the same port would end that.
+    stopfile=serve_stopfile(a.port)
+    if _stop_file_is_ours(stopfile):           # one left from a stop that found no serve
+        try: os.unlink(stopfile)
+        except OSError: pass
+    served=threading.Event()
+    threading.Thread(target=_watch_stop_file,args=(stopfile,_stop_self),kwargs={"done":served},
+                     daemon=True,name="coli-stop-request").start()
     import openai_server
     openai_server.ARCH=arch
     model_id=serve_model_id(a)
@@ -3718,6 +3814,7 @@ def _cmd_serve(a):
               a.max_queue,a.queue_timeout,a.kv_slots,allowed_hosts=a.allowed_host,
               family=family,switch=switch)
     finally:
+        served.set()
         try: os.unlink(serve_pidfile(a.port))
         except OSError: pass
     return target
@@ -3733,8 +3830,16 @@ def _pid_alive(pid):
     were resident (#1049, reported with a reproduction on Windows 11 native).
     On win32 ask the OS directly instead."""
     if sys.platform != "win32":
-        try: os.kill(pid, 0); return True
+        try: os.kill(pid, 0)
         except OSError: return False
+        # A zombie answers kill(0) but is gone: it holds no memory, and only its
+        # parent can reap it, so cmd_stop's check that everything ended must not
+        # wait on it (Linux: state Z in /proc/<pid>/stat, after the command name).
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f: stat = f.read()
+            return stat[stat.rindex(b")") + 2:stat.rindex(b")") + 3] != b"Z"
+        except (OSError, ValueError):
+            return True
     import ctypes
     from ctypes import wintypes
     PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE = 0x1000, 259
@@ -3884,22 +3989,40 @@ def cmd_stop(a):
     launchers = [pid for pid, d in targets.items() if d.startswith("coli serve")]
     strays   = [pid for pid, d in targets.items() if not d.startswith("coli serve")]
     deadline = time.time() + 30.0
-    for pid in launchers:
-        try: os.kill(pid, signal.SIGTERM)
-        except OSError: pass
+    # The serve's own stop first (_request_stop): it needs no rights on the process.
+    # On Windows a SIGTERM is TerminateProcess, no drain, so it is sent only to a
+    # serve that did not take the request; elsewhere SIGTERM is the same graceful
+    # stop and goes along with it.
+    asked = bool(launchers) and _request_stop(a.port)
+    if sys.platform != "win32" or not asked:
+        for pid in launchers:
+            try: os.kill(pid, signal.SIGTERM)
+            except OSError: pass
     while time.time() < deadline and any(_pid_alive(p) for p in launchers):
         time.sleep(0.25)
     for pid in strays:
         try: os.kill(pid, signal.SIGTERM)   # normally already gone with the launcher
         except OSError: pass
     time.sleep(2.0)
+    why = {}
     for pid in targets:
-        # signal.SIGKILL does not exist on win32 and AttributeError is not OSError,
-        # so the bare `except OSError` let it escape and abort the command AFTER
-        # the SIGTERMs above (#1049). Line 752 in this file already uses the
-        # getattr form; os.kill(SIGTERM) is TerminateProcess on Windows anyway.
-        try: os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM)); print(f"  {pid}: forced")
-        except OSError: pass       # gia' morto: bene
+        if not _pid_alive(pid): continue   # gia' morto: bene
+        error = _terminate(pid)
+        if error is None: print(f"  {pid}: forced")
+        else: why[pid] = error
+    deadline = time.time() + 10.0
+    while time.time() < deadline and any(_pid_alive(p) for p in targets):
+        time.sleep(0.25)
+    left = [pid for pid in targets if _pid_alive(pid)]
+    if left:
+        # Saying "stopped" here left a multi-GB engine running behind a message that
+        # it was gone (#2091): the failure is the answer.
+        for pid in left:
+            print(f"  {C.yel}could not stop {pid}{C.r} ({targets[pid]}): {why.get(pid, 'still running')}")
+        if why and sys.platform == "win32":
+            print("  it runs with more rights than this prompt (started from an administrator console?): "
+                  "run coli stop from a prompt like the one that started it")
+        sys.exit(1)
     try: os.unlink(pf)
     except OSError: pass
     print(f"  {C.grn}✓ stopped{C.r} — RAM released")
