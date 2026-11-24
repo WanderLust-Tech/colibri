@@ -71,7 +71,13 @@ CARD_SETTLE_S = 10.0                # how long to wait for the card to show its 
 PROMOTE_MIN_IDLE = 20.0             # seconds it must have been idle (a model in a burst of requests is left alone)
 PROMOTE_MIN_AGE = 60.0              # seconds it must have been running, so a model is not stopped soon after it loaded
 PROMOTE_MARGIN = 1.25               # the card must have this much of the model's size free, beyond the reserve
-PROMOTE_MODALITIES = ("embedding", "rerank")   # only models that load in a few seconds: a big one costs more to reload than the card saves
+PROMOTE_MODALITIES = ("embedding", "rerank")   # models that load in a few seconds: a reload costs less than the card saves
+# A chat model costs more to put back on the card (it is stopped, loads again on the next request and loses its conversation cache),
+# so it waits longer, and only when its reload is not slow. It is the one that gains most from the card (Qwen3-Coder: 3 to 18 tokens a second).
+PROMOTE_CHAT_MODALITIES = ("text",)
+PROMOTE_CHAT_MIN_IDLE = 300.0       # seconds a chat model must have been idle (a conversation that pauses to think is left alone)
+PROMOTE_CHAT_MAX_RELOAD_S = 120.0   # its measured (or guessed) load time must not be longer than this
+PROMOTE_PROMISE_TTL = 900.0         # seconds a card is held for a model stopped to move onto it (it loads on its next request)
 RELOAD_BYTES_PER_S = 150e6          # what a model never timed is assumed to load at (a slow disk): only used to compare
 STOP_GRACE = 25.0                   # seconds a worker gets to save its state before it is killed
 CARD_FALLBACK_S = 1800.0            # after a start on the graphics card failed, the model starts on the CPU for this long
@@ -717,7 +723,8 @@ class Pool:
                  fallback_memory=CARD_FALLBACK_S, pressure_floor=None, pressure_min_idle=PRESSURE_MIN_IDLE,
                  pressure_cooldown=PRESSURE_COOLDOWN, peak_sample=PEAK_SAMPLE_S, watch_pressure=True,
                  card_evict=True, card_min_idle=CARD_MIN_IDLE, card_settle=CARD_SETTLE_S, card_demote=True,
-                 card_promote=True, promote_min_idle=PROMOTE_MIN_IDLE, promote_min_age=PROMOTE_MIN_AGE):
+                 card_promote=True, promote_min_idle=PROMOTE_MIN_IDLE, promote_min_age=PROMOTE_MIN_AGE,
+                 promote_chat=True, promote_chat_min_idle=PROMOTE_CHAT_MIN_IDLE, promote_chat_max_reload=PROMOTE_CHAT_MAX_RELOAD_S):
         self.catalog = catalog
         self.gpu = gpu                                   # gpu.GpuPolicy, or None: the environment is left as it is
         self.settings = settings                         # model_settings.ModelSettings, or None
@@ -736,7 +743,10 @@ class Pool:
         self.card_evict, self.card_min_idle, self.card_settle = card_evict, card_min_idle, card_settle
         self.card_demote = card_demote                # give the card back and keep the model running, where its engine can
         self.card_promote, self.promote_min_idle, self.promote_min_age = card_promote, promote_min_idle, promote_min_age
-        self.promotions = {"stops": 0, "last": None}
+        self.promote_chat, self.promote_chat_min_idle = promote_chat, promote_chat_min_idle
+        self.promote_chat_max_reload = promote_chat_max_reload
+        self.promotions = {"stops": 0, "chat_stops": 0, "last": None}
+        self._promised = {}                              # key -> (GB, until): a model stopped to load on the card, which holds its room
         self.watch_pressure = watch_pressure              # the reaper's loop calls relieve(); a test that calls it itself turns this off
         self.pressure = {"stops": 0, "last": None}
         self._relief_until = 0.0
@@ -1186,11 +1196,15 @@ class Pool:
 
     def promote(self, now=None):
         """Give a model back the card it could not have. A model that started on the CPU only because the card was full (its
-        decision says so: not pinned, not a failed start) stays there until it unloads, which is half an hour by default. When the
-        card has room for it now (what the policy asks of a new model, and its size with some margin) and it is idle, it is
-        stopped, and the next request loads it on the card. Only the models in PROMOTE_MODALITIES (they load in seconds), only
-        when `--gpu auto`, and never one that has not run for promote_min_age seconds or has been used within promote_min_idle,
-        so a model does not bounce. Returns the model stopped, or None."""
+        decision says so: not pinned, not a failed start), or that gave the card back to another (demoted), stays there until it
+        unloads, which is half an hour by default. When the card has room for it now (what the policy asks of a new model, and its
+        size with some margin) and it is idle, it is stopped, and the next request loads it on the card. Only when `--gpu auto`,
+        and never one that has not run for promote_min_age seconds or has been used within its idle wait, so a model does not bounce.
+        The models in PROMOTE_MODALITIES (they load in seconds) wait promote_min_idle. A chat model (PROMOTE_CHAT_MODALITIES) costs a
+        slow reload and its conversation cache, so it waits promote_chat_min_idle and is moved only when its reload takes no longer
+        than promote_chat_max_reload (`promote_chat=False` leaves chat models alone). A model stopped for the card holds its room
+        until it loads (or PROMOTE_PROMISE_TTL passes), so two models are not stopped for one free card. Returns the model stopped,
+        or None."""
         policy = self.gpu
         if not self.card_promote or self.closed or policy is None or policy.mode != "auto":
             return None
@@ -1198,29 +1212,49 @@ class Pool:
         seen = policy.memory()
         if seen is None:
             return None
-        usable = seen[0] - policy.reserve_gb
         with self.cv:
-            chosen = None
+            for key in [k for k, (_, until) in self._promised.items() if until <= now or k in self.workers]:
+                del self._promised[key]
+            held = sum(gb for gb, _ in self._promised.values())
+            usable = seen[0] - policy.reserve_gb - held
+            chosen, chat = None, False
             for w in self.workers.values():
-                decision = w.gpu
-                if (w.state != "ready" or w.inflight or not w.alive() or w.card or w.demoted
-                        or w.entry.get("modality") not in PROMOTE_MODALITIES
-                        or decision is None or not decision.room
-                        or now - w.last_used < self.promote_min_idle or now - w.started < self.promote_min_age):
+                if w.state != "ready" or w.inflight or not w.alive() or w.card or now - w.started < self.promote_min_age:
+                    continue
+                modality = w.entry.get("modality")
+                remembered = self.fallbacks.get(w.key)
+                if remembered is not None and now < remembered[0]:
+                    continue                                 # a start on the card failed lately: the next start is on the CPU anyway
+                if modality in PROMOTE_MODALITIES:
+                    if w.demoted or w.gpu is None or not w.gpu.room or now - w.last_used < self.promote_min_idle:
+                        continue
+                    this_chat = False
+                elif modality in PROMOTE_CHAT_MODALITIES and self.promote_chat:
+                    if not w.demoted and (w.gpu is None or not w.gpu.room):
+                        continue                             # on the CPU by choice (pinned, or the card failed): not for the card to say
+                    if now - w.last_used < self.promote_chat_min_idle or self.reload_seconds(w) > self.promote_chat_max_reload:
+                        continue
+                    this_chat = True
+                else:
                     continue
                 size = max(w.resident, w.entry.get("size_bytes") or 0) / 2**30
                 if usable < max(policy.min_gb, size * PROMOTE_MARGIN):
                     continue
-                if chosen is None or w.last_used < chosen.last_used:
-                    chosen = w
+                # the quick models go first (a reload costs little), then the one idle longest
+                if chosen is None or (this_chat, w.last_used) < (chat, chosen.last_used):
+                    chosen, chat = w, this_chat
             if chosen is None:
                 return None
             chosen.state = "stopping"
             chosen.settled.clear()
+            self._promised[chosen.key] = (max(chosen.resident, chosen.entry.get("size_bytes") or 0) / 2**30 * PROMOTE_MARGIN,
+                                          now + PROMOTE_PROMISE_TTL)
         self.promotions["stops"] += 1
-        self.promotions["last"] = {"model": chosen.entry["id"], "free_gb": round(seen[0], 1), "at": int(time.time())}
-        self._stop(chosen, f"the graphics card has room for it now ({seen[0]:.1f} GB free) and it started on the CPU because "
-                           f"the card was full; it loads on the card when it is next asked for")
+        self.promotions["chat_stops"] += 1 if chat else 0
+        self.promotions["last"] = {"model": chosen.entry["id"], "free_gb": round(seen[0], 1), "at": int(time.time()), "chat": chat}
+        was = "it gave the card back to another model" if chosen.demoted else "it started on the CPU because the card was full"
+        self._stop(chosen, f"the graphics card has room for it now ({seen[0]:.1f} GB free) and {was}; "
+                           f"it loads on the card when it is next asked for")
         return chosen.entry["id"]
 
     def close(self):
@@ -2789,7 +2823,8 @@ def serve(*, host="127.0.0.1", port=8000, api_key=None, roots=None, models=(), k
                 make_job=openai_server._win_kill_on_close_job, gpu=policy, settings=settings,
                 pressure_floor=pressure_floor(), card_evict=os.environ.get("COLI_CARD_EVICT", "1").strip().lower() not in ("0", "false", "no", "off"),
                 card_demote=os.environ.get("COLI_CARD_DEMOTE", "1").strip().lower() not in ("0", "false", "no", "off"),
-                card_promote=os.environ.get("COLI_CARD_PROMOTE", "1").strip().lower() not in ("0", "false", "no", "off"))
+                card_promote=os.environ.get("COLI_CARD_PROMOTE", "1").strip().lower() not in ("0", "false", "no", "off"),
+                promote_chat=os.environ.get("COLI_CARD_PROMOTE_CHAT", "1").strip().lower() not in ("0", "false", "no", "off"))
     gate = Gate(max_queue=max_queue, timeout=queue_timeout, parallel=parallel_models)
     presets = presets_mod.Presets(presets_path or presets_mod.default_path(), log=log)
     if request_log_path:

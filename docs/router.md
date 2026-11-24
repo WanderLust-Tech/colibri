@@ -166,6 +166,16 @@ stopped, and the next request loads it on the card. `/health` shows what it did 
 the CPU (23.5 s for 64 texts of 230 tokens, against 1.13 s on the card); once the card had room the router unloaded it and the next
 request loaded it there.
 
+**A chat model gets the card back too, after a long idle.** The same look each second now also covers a chat model that is on the CPU
+because the card was full when it loaded, or because it gave the card back to another model (demoted, above). Putting it on the card
+costs more than for an embedding model: it is stopped, loads again when it is next asked for (its conversation cache is lost) and the
+first answer waits for that. So it must have been idle for 5 minutes (a conversation that pauses is left alone), have run for a minute,
+and take no more than 2 minutes to load (its measured load time, the slowest of the last three; a guess from its size for one never
+timed), and the card must have room for its size with a quarter more. A model stopped for the card holds that room until it loads
+(or 15 minutes pass), so two models are not stopped for one free card. A model pinned to the CPU, one whose start on the card failed
+lately and one that is answering stay as they are. `/health` counts them under `router.card_promote.chat_stops`, and `last.chat` says
+whether the last one was a chat model. `COLI_CARD_PROMOTE_CHAT=0` leaves chat models alone and keeps the rest.
+
 ## Background jobs
 
 `Prefer: respond-async` on a picture or song request makes it a job: the router answers `202` with an id and makes the render apart from the

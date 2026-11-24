@@ -61,6 +61,7 @@ the clone that serves port 8000):
 | ACE-Step's planner, DiT and VAE on the Vulkan card | `feat/qwen3-speech` | yes (`929ea3c1`, `e903d6a0`, `47d8dd3a`) | yes | yes (2026-11-22): `acestep.exe` is the `VK=1` build; a 10 s song 2.8 s warm, 2.36 |
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
+| A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes | no | no, 2.39 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
@@ -543,7 +544,7 @@ Its own folder (`C:\code\colibri-vscode-extension\colibri-agent-connector`, no c
 - **`Pool.promote`** (`c/router.py`, called by the reaper beside `relieve`): an idle embedding or reranking model whose start on the CPU was
   because the card was full (`gpu.Decision.room`, set by the `auto` policy only) is stopped when the card has room for it, so the next
   request loads it on the card. It must have been idle 20 s and running 60 s, and the card must have the policy's reserve plus its size
-  with a quarter more. Chat models, pinned models, failed starts, models on the card and demoted ones are never touched. `/health`:
+  with a quarter more. Chat models, pinned models, failed starts, models on the card and demoted ones are not touched (chat and demoted ones are, since 2.39). `/health`:
   `router.card_promote`; `COLI_CARD_PROMOTE=0` turns it off.
 - **Tests:** `tests/test_router_promote.py` (12: the move, a full card, a model too big for what is free, a model answering, too soon after
   use and after start, pinned or failed starts, a model on the card or demoted, chat models, the switches, `/health`, and the reaper doing
@@ -775,6 +776,26 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
   with nothing widened, 3 more mutants caught; and the dashboard's Edit mode (clip, what it is now, its lyrics, the window, the averages, "Keep the structure"). Not built: `cover-nofsq` (no such task here). Live since 2026-11-24 (VK `acestep.exe` rebuilt, `web/dist` rebuilt, router restarted): a cover flow-edit of a 10 s clip through the gateway took 8.1 s warm and `/v1/models` says `flow_edit_cover`. The Edit mode's layout has not been looked at in a browser.
 - Also 2026-11-23, with it: a cover's `audio_cover_strength` of 0 is allowed (the prompt leads from the first step, as upstream's `int(steps * 0)`); the engine read a given 0 as "not given" before (`cover_zero` in `AceRequest`), held to upstream on `cover_zero` (turbo) and `b_cover_zero` (base).
 
+### 2.39 A chat model gets the card back (2026-11-24; built, merged into local main, not pushed or deployed)
+
+- **The gap** (named in 3.4): a chat model that started on the CPU because the card was full, or that gave the card back to another model
+  (Qwen3-Coder: about 3 tokens a second there, 18 on the card), stayed on the CPU until the idle timer unloaded it, half an hour by default,
+  even when the card had been free for a long time.
+- **`Pool.promote`** now also takes `text` models (`PROMOTE_CHAT_MODALITIES`): idle 5 minutes (`PROMOTE_CHAT_MIN_IDLE`; a quick model still 20 s),
+  running a minute, a measured or guessed reload of at most 120 s (`PROMOTE_CHAT_MAX_RELOAD_S`), and the card must have its size with a quarter
+  more. A model that gave the card back (`demoted`) qualifies without the "card was why" decision. It is stopped, loads on the card on the next
+  request, and loses its conversation cache: that is the price, and why it waits longer.
+- **Two guards the small models did not need**: a model stopped for the card holds its room until it loads or 15 minutes pass
+  (`_promised`), so two models are not stopped for one free card; and a model whose start on the card failed lately (`fallbacks`) is left on the
+  CPU, where its next start would go anyway. Quick models are taken before chat models, then the longest idle.
+- `COLI_CARD_PROMOTE_CHAT=0` turns off the chat part; `COLI_CARD_PROMOTE=0` the whole thing. `/health`: `router.card_promote.chat_stops`, and
+  `last.chat`.
+- **Tests**: `tests/test_router_promote.py` has 20 (8 new: the long idle, the switch, a slow reload, a demoted model getting the card,
+  a demoted model while the card is full, pinned and failed starts, two models for one card, the promise ending on load and by time);
+  9 mutations of the new rules each break at least one. The 200 other router tests and the 41 GPU tests pass.
+- Not built: putting the card back to a model without a stop (the engine would build the card tier again while running, which means the shared
+  `vk_tier.c`; not worth the risk), and demoting engines other than `qwen36`.
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -829,8 +850,8 @@ Status as of today (the file itself has been brought into line with this):
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
   Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small
-  model that started on the CPU gets the card when it frees up (2.28). What is not built: putting a demoted model or a chat model back on
-  the card when it is freed (they stay where they are until they unload, 30 minutes by default), and demoting engines other than `qwen36`.
+  model that started on the CPU gets the card when it frees up (2.28). A chat model, or a demoted one, gets it after 5 idle minutes (2.39, built,
+  not deployed). What is not built: putting the card back without a stop, and demoting engines other than `qwen36`.
 - **Context**: E4B and the 26B show no `context_length` until they have run once; a per-model window would need a per-model setting
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
