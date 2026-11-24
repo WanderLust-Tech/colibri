@@ -159,6 +159,14 @@ puts everything back: it switches to the file's model (or the first model of tha
 fills the prompt and the controls, and leaves the rest as it was. Send it for the same render, or change the seed for a
 variation. It is a button because dropping a picture in image mode already attaches it for editing.
 
+## Editing a clip toward a new description
+
+When the music engine does flow-edit (the composer then has an Edit mode next to Cover), choose "Edit", pick the clip, and fill two things: the line above the prompt says **what the clip is now** (its caption, in the
+words you would use for a prompt; and, in the box below it, its lyrics if it has any), and the prompt says **what it should become**. The clip keeps its length and much of its character; the new description bends it. Two small
+fields beside the chips set the part of the work that is an edit (0 to 1: a narrow window changes the clip lightly and leaves the rest to ordinary denoising) and the noise draws averaged a step (1 to 16: steadier, at that many times the work).
+"Keep the structure" runs the edit on a cover's context, so the tune stays and the sound changes. A reference clip works here too. An edit takes the plain Euler step: the Sampler chip is not shown for it, the velocity cap and smoothing are.
+Details: `docs/acestep.md`, "Flow-edit".
+
 ## The sampler of a song
 
 When the music engine takes upstream's sampler options (the composer then shows them), a Sampler chip picks the step: Euler (the plain one), Heun (a second,

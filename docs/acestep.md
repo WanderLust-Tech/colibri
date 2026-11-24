@@ -453,7 +453,7 @@ against the stub engine) and `tests/test_acestep_sampler_mutants.py` (every muta
 
 Upstream's flow-edit is not a task but an overlay on text to music (`GenerationParams.flow_edit_morph`): given a clip, a description of what the clip *is* and a description of what it should *become*, it moves the clip's
 latents along the difference between what the DiT says about the two, instead of making music from noise. The clip keeps its length, its tempo and a good deal of its character; the new caption and lyrics bend it. This engine has it
-(`acestep --edit CLIP --caption NEW --edit-caption OLD [--edit-lyrics TEXT] [--n-min X] [--n-max X] [--n-avg N]`; `coli music --edit CLIP --edit-caption OLD`; the gateway's `src_audio` with `flow_edit_morph`, `flow_edit_source_caption`,
+(`acestep --edit CLIP [--edit-cover] --caption NEW --edit-caption OLD [--edit-lyrics TEXT] [--n-min X] [--n-max X] [--n-avg N]`; `coli music --edit CLIP --edit-caption OLD`; the gateway's `src_audio` with `flow_edit_morph`, `flow_edit_source_caption`,
 `flow_edit_source_lyrics`, `flow_edit_n_min`, `flow_edit_n_max`, `flow_edit_n_avg`; on the serve protocol `morph`, `edit_caption`, `edit_lyrics`, `n_min`, `n_max`, `n_avg`). `READY` says `"flow_edit": true` (`/v1/models` passes it on as
 `audio.flow_edit`, and a gateway whose engine does not say so refuses the request by name, since the engine would read the clip as something else), and the answer's `colibri.flow_edit` says whether the song was one.
 
@@ -465,8 +465,15 @@ target alone is denoised from the edit (`zt` laid on the clip noised at that lev
 `n_avg` times the evaluations (a guided DiT's step is then four evaluations, the turbo's two). The noise is torch's generator seeded with the request's seed, one draw per average and one for the switch, in order, so a seed repeats.
 
 What it does not take, and why. A flow-edit is Euler on the plain guidance: DCW is not part of it (upstream leaves it out, and so does this, silently, as upstream), and Heun, the SDE step, ADG and the planner are refused by name, where upstream
-ignores them with a log line, so a run never differs from its request unseen. The velocity clamp and smoothing are part of it (per trajectory). The turbo DiT takes it (guidance is baked in), and so do the base and SFT ones. Not built: the cover
-variant (upstream's overlay also runs on a cover's LM-codes context), and a control for it in the dashboard (the API and the CLI have it).
+ignores them with a log line, so a run never differs from its request unseen. The velocity clamp and smoothing are part of it (per trajectory). The turbo DiT takes it (guidance is baked in), and so do the base and SFT ones. A flow-edit takes
+no `cover_strength` or `cover_noise` either (upstream's overlay leaves them out), refused by name.
+
+**On a cover's context.** Upstream's overlay also runs on a cover (`task_type` cover with `flow_edit_morph`). The only difference is the audio context both branches share: text to music hands the DiT the silence latent, a cover hands it what a
+cover does, the clip's latents through the audio tokenizer and detokenizer (what survives of the clip's structure), with the cover's instruction in both prompts. The edit then bends a clip whose structure the DiT keeps hearing, so the tune stays and
+the sound changes: a closer edit than the silence one. Ask for it with `task` cover and `flow_edit_morph` on the gateway, `--edit-cover` with `--edit` on `coli music` and `acestep`, the dashboard's "Keep the structure" chip in its Edit mode. `READY` says
+`"flow_edit_cover": true` (`/v1/models`: `audio.flow_edit_cover`), and a gateway whose engine does not say so refuses a cover flow-edit by name, since the older engine would run it on silence. Held to upstream's handler on three more captured cases: `s_fe_cover`
+(turbo), `b_fe_cover` (base, 0 to 0.7 of the schedule) and `b_fe_cover_lyrics` (base, lyrics on both sides, 0.1 to 0.8): the cover's hints (the context) to 2e-7 of their norm, the final latents to 1.6e-5 to 8.2e-5 and the audio to 1.1e-5 to 7.4e-5, with nothing widened. Three mutants
+(the context taken as the raw clip, as silence, and the source prompt on the text-to-music instruction) are caught on the turbo case and on the base ones. Not built: `cover-nofsq` (upstream's variant without the quantiser; this engine has no such task).
 
 **What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks` captures flow-edit cases from upstream's own handler (`flowedit_generate_audio` through `generate_music`; the recorder takes the overlay's inputs, the source and
 target conditions and its final latents): `s_fe` and `s_fe_window` for the turbo DiT and, with `--dit acestep-v15-base`, `b_fe` (the whole schedule), `b_fe_window` (0.2 to 0.7, so the switch to the target alone), `b_fe_avg` (two draws), `b_fe_nocfg`,
