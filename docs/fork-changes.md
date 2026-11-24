@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `47d8dd3a` (pushed 2026-11-22) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `47d8dd3a` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
+| Fork's `main` | `90ca977b` (pushed 2026-11-24) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `90ca977b` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
