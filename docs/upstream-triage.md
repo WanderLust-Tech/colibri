@@ -39,6 +39,43 @@ and a `desktop/` shell.
 
 - **Batch 1, the Responses API: done and live 2026-11-25** (branch `upstream-picks`, merged into `main` as `37dfdb44`; fork-changes 2.41). Not yet run with a real Codex.
 
+## Batch 2: validation and robustness fixes, the review list (2026-11-25)
+
+How it was found: the 60 scoped upstream fixes (`fix(audio|image|images|mcp|json|schema|api|tools|serve|cli|usage)`) were cherry-picked one at a
+time, in date order, into a throwaway worktree off `main`; after each, the test modules that commit touches were run; a commit that did not apply, or whose
+tests failed, was dropped. (The two DeepSeek V4.1 tests `test_case1_*` and `test_case2_*` already fail on `main` and were not counted.) Result: **35 apply
+and pass, 5 apply but break a test (they rest on an unpicked earlier commit), 20 conflict.** Applying every fix "that applies" blindly would have broken
+the MiMo, MCP and history-JSON tests: a fix can apply cleanly and still depend on one that was not taken.
+
+**Recommended to take (26, all apply and pass)**
+
+- Gateway request validation (10): `dedda914` falsey non-array `tools`; `5e6e5635` out-of-range integers; `d57f0d54` non-integer `n`/`best_of`; `66355b09`
+  JSON limits are client errors; `22999fca` non-finite strict tool arguments; `eb82d7f9` misplaced Anthropic tool blocks; `7c0146fa` NaN and Infinity in
+  request bodies; `b3574515` non-string text part in a continued assistant turn; `dc08a7f7` a static path with NUL is a 404; `4156a055` an Optional string
+  tool argument stays a string.
+- JSON and the grammar behind JSON mode (7): `52dfdc4f`, `c3858b30`, `d54b7003`, `164ed3c1`, `e64185c8` (`schema_gbnf.h`), `ae0654d6`, `934b5f51` (`json.h`).
+- Images (5): `872dde1e` automatic file names reserved before they are published; `4c74554c` VAE weights counted as resident float32;
+  `9dd0c766` unpaired surrogate prompts; `16ed632c` boolean width or height; `49f53e0a` complete quoted image paths in `coli`.
+- MCP server (2): `bef3fabd`, `4628ab7e`. CLI (2): `6630672b`, `e45d1eb4`.
+
+**Apply and pass, but for engines or tools the fork does not run (9): optional**: `d148eb16` OLMoE, `58a28b51` Kimi, `cbbad148` and `87933353` DeepSeek V4.1,
+`690bb5ef` Inkling; `f085485d`, `5ca2b801`, `1b72c4d2`, `f55a9c58` (usage and placement analysis tools).
+
+**Conflict, worth a hand port (relevant to what the fork serves)**
+
+- **WAV hardening (5)**: `8d667a77` truncated chunks and incomplete frames (applies but its test needs the rest), `6b4a4187` extensible WAV by subformat GUID,
+  `5901bedb` non-finite samples, `59cb4b1d` chunks past the declared RIFF size, `6cd33e65` a trailing odd chunk. They all edit the gateway's WAV reader, which
+  the fork's audio work (ASR, Gemma audio) also changed. Port as one piece, with upstream's `test_wav_audio.py`.
+- **Images (2)**: `a097db37` bound PNG inflation, `cafc1ba8` validate checkpoint tensor layouts (`image_engine.py`, which the fork changed).
+- **Qwen function calls (1)**: `bf84d729` recover valid Qwen function calls (`openai_server.py`): the fork's everyday chat model is Qwen3-Coder; look at what it
+  recovers before deciding.
+- **MCP**: `21bb2079` keeps the stdio session alive after JSON nesting errors, but its test fails here, so it rests on an earlier upstream change; look at it with the
+  gateway's `d7c9d18f` (history JSON error policy) and `d114b9bb` (CORS on metrics), which fail the same way.
+
+**Leave**: everything for Muse, GLM-5.3 and MiMo (`4b4f9520`, `6e2fc7bf`, `1261e334`, `30385c22`, `ebc1efac`, `4d848a9c`, `df227c89`), the logprobs channel work
+(`0d9f2972`, `97a656b5`), `282b789c` (touches the web dashboard too), `84a208ab` (line endings of a file both sides rewrote), `d1dea849` and `9de40423`
+(`coli`; small, conflict, not needed), `20951347` (the installer's state; the fork's installer is its own).
+
 ## How to take things
 
 1. A branch `upstream-picks` off `main`, one batch at a time, each ending in the test suite and a merge to `main` only when it is green.
