@@ -4,7 +4,7 @@ import { generateMusic, generatesMusic, listModelInfo, musicFields, musicLimits,
 import { chatTurns } from "./images"
 import {
   DEFAULT_MUSIC_LIMITS, MAX_CLIP_BYTES, MUSIC_LANGUAGES, acceptedClip, clampDuration, clampMusicSteps, clampUnit, clipProblem, lyricBytes,
-  guidanceValid, isGuidedTask, musicFileName, musicProgressFraction, offersTask, repaintValid, runsGuided, songClock, stepLimits, validDuration, validLanguage,
+  guidanceValid, isGuidedTask, musicFileName, musicProgressFraction, offersTask, optionalUnit, optionalValue, repaintValid, runsGuided, songClock, stepLimits, validDuration, validLanguage,
 } from "./music"
 import en from "../i18n/en"
 
@@ -266,6 +266,7 @@ const TEMPLATES: Record<string, string[]> = {
   "music.source.add": ["cover", "repaint", "extract", "lego", "complete"],
   "music.track": ["any", "woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"],
   "music.dit": ["base", "sft"],
+  "music.sampler": ["heun", "sde"],
   "music.repaint.mode": ["balanced", "conservative", "aggressive"],
 }
 
@@ -420,6 +421,35 @@ describe("the planner and the guided DiTs", () => {
     expect(musicFields({ ...base, plan: true }, false)).toMatchObject({ thinking: true, duration: 30 })
     expect(musicFields(base, false)).not.toHaveProperty("thinking")
     expect(musicFields({ ...base, auto: true }, false)).toHaveProperty("duration")             // a length left to nobody
+  })
+
+  it("sends the sampler options under upstream's names, and nothing for the plain step or an off value", () => {
+    expect(musicFields({ ...base, sampler: "heun" }, false)).toMatchObject({ sampler_mode: "heun" })
+    expect(musicFields({ ...base, sampler: "heun" }, false)).not.toHaveProperty("infer_method")
+    expect(musicFields({ ...base, sampler: "sde" }, false)).toMatchObject({ infer_method: "sde" })
+    expect(musicFields({ ...base, sampler: "sde" }, false)).not.toHaveProperty("sampler_mode")
+    expect(musicFields({ ...base, vnorm: 1.5, vema: 0.4 }, false)).toMatchObject({ velocity_norm_threshold: 1.5, velocity_ema_factor: 0.4 })
+    const plain = musicFields({ ...base, vnorm: 0, vema: 0 }, false)
+    for (const name of ["sampler_mode", "infer_method", "velocity_norm_threshold", "velocity_ema_factor"]) expect(plain).not.toHaveProperty(name)
+  })
+
+  it("offers the sampler only when the engine says it takes it", () => {
+    expect(musicLimits({ sampler: true })!.sampler).toBe(true)
+    expect(musicLimits({ sampler: false })!.sampler).toBeUndefined()
+    expect(musicLimits({})!.sampler).toBeUndefined()
+  })
+
+  it("reads the cap and the smoothing fields: empty is off, otherwise inside 0 to the limit", () => {
+    expect(optionalUnit("", 100)).toBe(true)
+    expect(optionalUnit(" ", 1)).toBe(true)
+    expect(optionalUnit("1.5", 100)).toBe(true)
+    expect(optionalUnit("100", 100)).toBe(true)
+    expect(optionalUnit("101", 100)).toBe(false)
+    expect(optionalUnit("1.2", 1)).toBe(false)
+    expect(optionalUnit("-0.1", 1)).toBe(false)
+    expect(optionalUnit("abc", 1)).toBe(false)
+    expect(optionalValue("")).toBe(0)
+    expect(optionalValue("0.5")).toBe(0.5)
   })
 
   it("sends the DiT, its guidance, a track, the tracks to complete with and a lego's span", () => {

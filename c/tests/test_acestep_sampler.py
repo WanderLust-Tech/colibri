@@ -113,6 +113,11 @@ class Gateway(unittest.TestCase):
         status, out = self.song(prompt="calm piano", duration=2, sampler_mode="heun", infer_method="sde")
         self.assertEqual(status, 400)
 
+    def test_the_model_card_says_the_engine_takes_them(self):
+        status, _, raw = self.rig.request("/v1/models", method="GET")
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(raw)["data"][0]["audio"]["sampler"], True)
+
     def test_the_form_fields_of_a_multipart_request_are_read_as_numbers(self):
         import openai_server
         for name in ("velocity_norm_threshold", "velocity_ema_factor"):
@@ -129,6 +134,11 @@ class Plain(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.rig.close()
+
+    def test_the_model_card_says_it_does_not(self):
+        status, _, raw = self.rig.request("/v1/models", method="GET")
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(raw)["data"][0]["audio"]["sampler"], False)
 
     def test_refused_with_the_reason(self):
         status, _, raw = self.rig.music(prompt="calm piano", duration=2, sampler_mode="heun")

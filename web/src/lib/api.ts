@@ -247,6 +247,7 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
       defaultGuidance: number(guided.default_guidance, 7), tracks: strings(guided.tracks),
     }
   }
+  if (info.sampler === true) limits.sampler = true
   return limits.minDuration <= limits.maxDuration ? limits : undefined
 }
 
@@ -1212,7 +1213,14 @@ export interface MusicLimits {
      checkpoint has one; and the guided DiTs, with the tracks they work on. */
   planner?: { lms: string[]; defaultLm: string }
   guided?: { dits: MusicDit[]; defaultSteps: number; maxSteps: number; defaultGuidance: number; tracks: string[] }
+  /* The engine takes upstream's sampler options (Heun, the SDE step, the velocity clamp and smoothing), for any DiT. */
+  sampler?: boolean
 }
+
+/* The sampler: the plain Euler step (not sent), Heun's second-order one, or the stochastic one. `vnorm` caps a step's velocity as a multiple of the
+   latents' norm (above 0), `vema` smooths it with the last step's (above 0, up to 1); each is left out when off. */
+export type MusicSampler = "heun" | "sde"
+export interface MusicSamplerOptions { sampler?: MusicSampler; vnorm?: number; vema?: number }
 
 /* What the planner chose for a song (colibri.meta): the tempo, the key and scale, the time signature, the language, the length
    and the caption it rewrote for the DiT. Any of it may be missing. */
@@ -1258,6 +1266,9 @@ export interface GeneratedMusic {
   auto?: boolean
   dit?: MusicDit
   guidance?: number
+  sampler?: MusicSampler
+  vnorm?: number
+  vema?: number
   track?: string
   tracks?: string[]
   /* What came back: the planner's choices and the codes it wrote, and the DiT that ran. */
@@ -1292,6 +1303,9 @@ export interface GenerateMusicOptions {
   auto?: boolean
   dit?: MusicDit
   guidance?: number
+  sampler?: MusicSampler
+  vnorm?: number
+  vema?: number
   track?: string
   tracks?: string[]
   signal: AbortSignal
@@ -1326,6 +1340,10 @@ export function musicFields(options: GenerateMusicOptions, stream: boolean) {
   if (options.plan) fields.thinking = true
   if (options.dit) fields.dit = options.dit
   if (options.guidance !== undefined) fields.guidance_scale = options.guidance
+  if (options.sampler === "heun") fields.sampler_mode = "heun"
+  if (options.sampler === "sde") fields.infer_method = "sde"
+  if (options.vnorm) fields.velocity_norm_threshold = options.vnorm
+  if (options.vema) fields.velocity_ema_factor = options.vema
   if ((task === "extract" || task === "lego") && options.track) fields.track_name = options.track
   if (task === "complete" && options.tracks?.length) fields.complete_track_classes = options.tracks.join(",")
   if (task === "lego" && options.repaint) {
@@ -1476,6 +1494,9 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
     ...(options.plan ? { plan: true, ...(options.auto ? { auto: true } : {}) } : {}),
     ...(options.dit ? { dit: options.dit } : {}),
     ...(options.guidance !== undefined ? { guidance: options.guidance } : {}),
+    ...(options.sampler ? { sampler: options.sampler } : {}),
+    ...(options.vnorm ? { vnorm: options.vnorm } : {}),
+    ...(options.vema ? { vema: options.vema } : {}),
     ...(options.track ? { track: options.track } : {}),
     ...(options.tracks?.length ? { tracks: options.tracks } : {}),
     ...(info?.meta && typeof info.meta === "object" ? { meta: info.meta } : {}),

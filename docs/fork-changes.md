@@ -755,7 +755,8 @@ Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`
 - Checked against upstream's handler: 12 turbo cases (1e-4 of the norm and better) and 14 base cases (the CPU; 11 of them on the card too); the guided DiT's are held to wider limits (`GEN_AMP_*`) because upstream's own answer moves more than the engine's difference from it
   when its input noise is nudged by 1e-6 (the loops amplify rounding: measured, in the docs). 30 of 30 mutants caught (`tools/mutate_acestep_sampler.py`); `tests/test_acestep_sampler.py` (13) and `tests/test_acestep_sampler_mutants.py` (4).
 - Cost: Heun is twice the evaluations a step (the corrector), the others cost what Euler does.
-- Not done: flow-edit (a sampler overlay upstream has) and a Music control for the options in the dashboard (the API and the CLI have them).
+- The dashboard's Music composer has them (when `/v1/models` says `audio.sampler`, which the gateway takes from the engine's `READY`): a Sampler chip (Euler, Heun, SDE) and two fields, the velocity cap (0 to 100) and its smoothing (0 to 1), empty for off; the song's line says what ran.
+- Not done: flow-edit (a sampler overlay upstream has).
 
 ## 3. Planned and open
 
@@ -817,6 +818,6 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: nothing is open but flow-edit and the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23, the sampler options are built, 2.37, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
+- **ACE-Step**: nothing is open but flow-edit and the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23, the sampler options are built, 2.37, with their dashboard controls, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.

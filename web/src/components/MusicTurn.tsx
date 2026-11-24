@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
-import { AudioLines, Blocks, Clock, Copy, Cpu, Dices, Download, Footprints, Gauge, Languages, Layers, Mic, Music2, Paintbrush, Repeat2, RefreshCw, RotateCcw, Scissors, SlidersHorizontal, Sparkles, Upload, X } from "lucide-react"
+import { Activity, AudioLines, Blocks, Clock, Copy, Cpu, Dices, Download, Footprints, Gauge, Languages, Layers, Mic, Music2, Paintbrush, Repeat2, RefreshCw, RotateCcw, Scissors, SlidersHorizontal, Sparkles, Upload, Waves, X, Zap } from "lucide-react"
 
-import type { GeneratedMusic, MusicDit, MusicLimits, MusicTask, RepaintMode } from "@/lib/api"
+import type { GeneratedMusic, MusicDit, MusicLimits, MusicSampler, MusicTask, RepaintMode } from "@/lib/api"
 import { duration as formatSeconds, elapsedClock } from "@/lib/images"
 import {
   MAX_CLIP_BYTES, MUSIC_LANGUAGES, clampDuration, clampMusicSteps, lyricBytes, musicProgressFraction, songClock, validDuration,
@@ -100,6 +100,7 @@ export function MusicResultCard({ song, copied, busy, onDownload, onCopySeed, on
     meta.timesignature ? t("music.meta.signature", { n: meta.timesignature === "6" ? "6/8" : `${meta.timesignature}/4` }) : "",
     meta.language && meta.language !== "unknown" ? meta.language : "",
   ].filter(Boolean) : []
+  const samplerFacts = [song.sampler && t(`music.sampler.${song.sampler}`), song.vnorm && t("music.result.vnorm", { n: song.vnorm }), song.vema && t("music.result.vema", { n: song.vema })].filter(Boolean).join(" · ")
   const ran = song.ranDit && song.ranDit !== "turbo" ? t("music.result.dit", { dit: song.ranDit }) + (song.guidance !== undefined ? ` · ${t("music.result.guidance", { n: song.guidance })}` : "") : ""
   return <div className="image-turn music-turn">
     {/* the browser's own player: seeking, volume and keyboard control come with it */}
@@ -110,6 +111,7 @@ export function MusicResultCard({ song, copied, busy, onDownload, onCopySeed, on
       <span>{t("image.meta.steps", { n: song.steps })}</span>
       <span>{t("image.meta.seed", { seed: song.seed })}</span>
       {ran && <span>{ran}</span>}
+      {samplerFacts && <span>{samplerFacts}</span>}
       {song.seconds != null && <span title={breakdown}>{formatSeconds(song.seconds, locale)}</span>}
       {song.truncated && <span className="music-cut" title={t("music.truncatedHelp")}>{t("music.truncated")}</span>}
     </p>
@@ -142,7 +144,7 @@ export function MusicStoppedCard({ request, finish, busy, onRetry }: { request: 
    controls and the chat's reasoning chip sit. A typed value counts as soon as it is valid, so
    sending straight from a field uses what is on screen; leaving the field puts an invalid one
    inside the range. */
-export function MusicControls({ limits, task, onTask, planner, guided, cover, repaint, hasReference, onReferenceFile, duration, steps, seed, seedValid, language, lyricsOpen, lyricsFilled, onDuration, onSteps, onSeed, onLanguage, onLyrics }: {
+export function MusicControls({ limits, task, onTask, planner, guided, sampler, cover, repaint, hasReference, onReferenceFile, duration, steps, seed, seedValid, language, lyricsOpen, lyricsFilled, onDuration, onSteps, onSeed, onLanguage, onLyrics }: {
   limits: MusicLimits
   task: MusicTask
   onTask: (task: MusicTask) => void
@@ -153,6 +155,11 @@ export function MusicControls({ limits, task, onTask, planner, guided, cover, re
     dits: MusicDit[]; dit: MusicDit | ""; on: boolean; onDit: (dit: MusicDit | "") => void
     guidance: string; guidanceOk: boolean; onGuidance: (text: string) => void
     track: string; onTrack: (name: string) => void; tracks: string[]; complete: string[]; onComplete: (names: string[]) => void
+  }
+  /* The sampler options (any DiT), when the engine takes them: the step, and the velocity cap and its smoothing (empty is off). */
+  sampler: {
+    available: boolean; step: MusicSampler | ""; onStep: (step: MusicSampler | "") => void
+    vnorm: string; vnormOk: boolean; onVnorm: (text: string) => void; vema: string; vemaOk: boolean; onVema: (text: string) => void
   }
   cover: { strength: string; noise: string; onStrength: (text: string) => void; onNoise: (text: string) => void }
   repaint: {
@@ -228,6 +235,26 @@ export function MusicControls({ limits, task, onTask, planner, guided, cover, re
       <input aria-label={t("music.guidance")} aria-invalid={!guided.guidanceOk} inputMode="decimal" className="music-unit" value={guided.guidance}
         onChange={(event) => guided.onGuidance(event.target.value)} />
     </label>}
+    {sampler.available && <>
+      <label className="image-chip" title={t("music.sampler.help")}>
+        <Waves aria-hidden="true" />
+        <select aria-label={t("music.sampler")} value={sampler.step} onChange={(event) => sampler.onStep(event.target.value as MusicSampler | "")}>
+          <option value="">{t("music.sampler.euler")}</option>
+          <option value="heun">{t("music.sampler.heun")}</option>
+          <option value="sde">{t("music.sampler.sde")}</option>
+        </select>
+      </label>
+      <label className={cn("image-chip", !sampler.vnormOk && "invalid")} title={t("music.sampler.vnormHelp")}>
+        <Zap aria-hidden="true" />
+        <input aria-label={t("music.sampler.vnorm")} aria-invalid={!sampler.vnormOk} inputMode="decimal" className="music-unit" value={sampler.vnorm}
+          placeholder={t("music.sampler.off")} onChange={(event) => sampler.onVnorm(event.target.value)} />
+      </label>
+      <label className={cn("image-chip", !sampler.vemaOk && "invalid")} title={t("music.sampler.vemaHelp")}>
+        <Activity aria-hidden="true" />
+        <input aria-label={t("music.sampler.vema")} aria-invalid={!sampler.vemaOk} inputMode="decimal" className="music-unit" value={sampler.vema}
+          placeholder={t("music.sampler.off")} onChange={(event) => sampler.onVema(event.target.value)} />
+      </label>
+    </>}
     {(task === "extract" || task === "lego") && <label className="image-chip" title={t("music.track.help")}>
       <Layers aria-hidden="true" />
       <select aria-label={t("music.track")} value={guided.track} onChange={(event) => guided.onTrack(event.target.value)}>

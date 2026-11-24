@@ -868,6 +868,8 @@ export default function App() {
                 planner={{ available: music.hasPlanner, on: music.plan, auto: music.lengthAuto, onToggle: () => music.setPlan(!music.plan), onAuto: () => music.setLengthAuto(!music.lengthAuto) }}
                 guided={{ dits: music.dits, dit: music.dit, on: music.guided, onDit: music.setDit, guidance: music.guidance, guidanceOk: music.guidanceOk, onGuidance: music.setGuidance,
                   track: music.track, onTrack: music.setTrack, tracks: music.limits.guided?.tracks ?? [], complete: music.completeTracks, onComplete: music.setCompleteTracks }}
+                sampler={{ available: music.hasSampler, step: music.sampler, onStep: music.setSampler, vnorm: music.vnorm, vnormOk: music.vnormOk, onVnorm: music.setVnorm,
+                  vema: music.vema, vemaOk: music.vemaOk, onVema: music.setVema }}
                 cover={{ strength: music.coverStrength, noise: music.coverNoise, onStrength: music.setCoverStrength, onNoise: music.setCoverNoise }}
                 repaint={{ from: music.repaintFrom, to: music.repaintTo, mode: music.repaintMode, strength: music.repaintStrength, spanOk: music.spanOk,
                   onFrom: music.setRepaintFrom, onTo: music.setRepaintTo, onMode: music.setRepaintMode, onStrength: music.setRepaintStrength }}

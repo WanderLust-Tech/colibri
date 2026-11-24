@@ -6768,6 +6768,7 @@ class APIServer(ThreadingHTTPServer):
                                          "temperature": planner["temperature"], "cfg_scale": planner["cfg_scale"], "top_p": planner["top_p"]}
             entry["audio"]["guided"] = {"available": bool(guided["available"]), "default_steps": guided["default_steps"], "max_steps": guided["max_steps"],
                                         "default_guidance": guided["default_guidance"], "tracks": list(guided.get("tracks") or music_engine.TRACK_NAMES)}
+            entry["audio"]["sampler"] = bool(info.get("sampler"))         # Heun, the SDE step, the velocity clamp and smoothing: the engine takes them
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}

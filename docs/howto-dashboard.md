@@ -159,6 +159,13 @@ puts everything back: it switches to the file's model (or the first model of tha
 fills the prompt and the controls, and leaves the rest as it was. Send it for the same render, or change the seed for a
 variation. It is a button because dropping a picture in image mode already attaches it for editing.
 
+## The sampler of a song
+
+When the music engine takes upstream's sampler options (the composer then shows them), a Sampler chip picks the step: Euler (the plain one), Heun (a second,
+corrected look at every step: twice the time) or SDE (fresh noise at every step). Two small fields beside it cap a step's change at that many times the size of
+the music so far (0 to 100) and smooth it with the last step's (0 to 1); empty means off. The song's line under the player says which was used, and "again"
+keeps them. Details: `docs/acestep.md`, "The sampler options".
+
 A file from somewhere else, or made by a server started with `COLI_MEDIA_META=0`, says "That file carries no Colibri settings"
 and changes nothing. The file is read in the browser; nothing is uploaded. The settings travel with the file, so sharing it
 shares the prompt; `COLI_MEDIA_META=0` on the server leaves them out.

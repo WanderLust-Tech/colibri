@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react"
 
-import { generateMusic, type ChatMessage, type GeneratedMusic, type MusicDit, type MusicLimits, type MusicTask, type RepaintMode } from "./api"
+import { generateMusic, type ChatMessage, type GeneratedMusic, type MusicDit, type MusicLimits, type MusicSampler, type MusicTask, type RepaintMode } from "./api"
 import { parseSeed, randomSeed } from "./images"
 import {
   DEFAULT_MUSIC_LIMITS, clampDuration, clampMusicSteps, clampUnit, clipProblem, guidanceValid, isGuidedTask, lyricBytes, musicFileName, offersTask,
-  repaintValid, runsGuided, stepLimits, validDuration, validLanguage, type ClipProblem, type MusicRun,
+  optionalUnit, optionalValue, VNORM_MAX, repaintValid, runsGuided, stepLimits, validDuration, validLanguage, type ClipProblem, type MusicRun,
 } from "./music"
 import { setFinish } from "./transcript"
 
@@ -89,6 +89,10 @@ export function useMusic(env: MusicEnvironment) {
   const [chosenDit, setDit] = useState<MusicDit | "">("")
   const [guidedSteps, setGuidedSteps] = useState(() => Number(read("colibri.musicGuidedSteps", "")) || 32)
   const [guidance, setGuidance] = useState("7")
+  /* the sampler (any DiT): the step, and the velocity cap and smoothing (empty: off) */
+  const [sampler, setSampler] = useState<MusicSampler | "">("")
+  const [vnorm, setVnorm] = useState("")
+  const [vema, setVema] = useState("")
   const [track, setTrack] = useState("")
   const [completeTracks, setCompleteTracks] = useState<string[]>([])
   /* The files of each turn, by its id, for the buttons that make it again: kept in the page, not in the transcript. */
@@ -109,6 +113,10 @@ export function useMusic(env: MusicEnvironment) {
   const activeSteps = guided ? guidedSteps : steps
   const setActiveSteps = guided ? setGuidedSteps : setSteps
   const guidanceValue = number(guidance)
+  const hasSampler = mode && limits.sampler === true
+  const vnormOk = optionalUnit(vnorm, VNORM_MAX)
+  const vemaOk = optionalUnit(vema, 1)
+  const samplerOk = !hasSampler || (vnormOk && vemaOk)
 
   useEffect(() => {
     try {
@@ -154,7 +162,7 @@ export function useMusic(env: MusicEnvironment) {
   /* A completion may start from the description alone; the other clip tasks need the clip. */
   const clipsOk = (task === "text2music" || task === "complete" ? !source || !sourceProblem : source !== null && !sourceProblem) && !referenceProblem
   const needsLength = (task === "text2music" && !auto) || (task === "complete" && !source)
-  const guidedOk = !guided || (guidanceValid(guidanceValue) && (task !== "complete" || completeTracks.length > 0))
+  const guidedOk = (!guided || (guidanceValid(guidanceValue) && (task !== "complete" || completeTracks.length > 0))) && samplerOk
 
   /* The values the next song is made with: the remembered ones, put inside the range of the
      model that is selected now (another music model may allow less). */
@@ -187,6 +195,7 @@ export function useMusic(env: MusicEnvironment) {
         ...(request.task ? { task: request.task } : {}),
         ...(request.plan ? { plan: true } : {}), ...(request.auto ? { auto: true } : {}), ...(request.dit ? { dit: request.dit } : {}),
         ...(request.guidance !== undefined ? { guidance: request.guidance } : {}),
+        ...(request.sampler ? { sampler: request.sampler } : {}), ...(request.vnorm ? { vnorm: request.vnorm } : {}), ...(request.vema ? { vema: request.vema } : {}),
         ...(request.track ? { track: request.track } : {}), ...(request.tracks?.length ? { tracks: request.tracks } : {}),
         ...(files?.source ? { source: files.source } : {}), ...(files?.reference ? { reference: files.reference } : {}),
         ...(request.repaint ? { repaint: request.repaint } : {}), ...(request.cover ? { cover: request.cover } : {}),
@@ -219,6 +228,9 @@ export function useMusic(env: MusicEnvironment) {
     ...(planning ? { plan: true, ...(auto ? { auto: true } : {}) } : {}),
     ...(dit ? { dit } : {}),
     ...(guided ? { guidance: guidanceValue } : {}),
+    ...(hasSampler && sampler ? { sampler } : {}),
+    ...(hasSampler && optionalValue(vnorm) > 0 ? { vnorm: optionalValue(vnorm) } : {}),
+    ...(hasSampler && optionalValue(vema) > 0 ? { vema: optionalValue(vema) } : {}),
     ...((task === "extract" || task === "lego") && track ? { track } : {}),
     ...(task === "complete" && completeTracks.length ? { tracks: completeTracks } : {}),
     ...(lyrics.trim() ? { lyrics } : {}), ...(language ? { language } : {}),
@@ -291,6 +303,7 @@ export function useMusic(env: MusicEnvironment) {
     task, audioIn, source, reference, sourceProblem, referenceProblem, spanOk,
     repaintFrom, repaintTo, repaintMode, repaintStrength, coverStrength, coverNoise,
     hasPlanner, plan, planning, lengthAuto, auto, dits, dit, guided, guidance, guidanceOk: guidanceValid(guidanceValue), track, completeTracks, needsLength,
+    hasSampler, sampler, vnorm, vema, vnormOk, vemaOk, setSampler, setVnorm, setVema,
     setPlan, setLengthAuto, setDit, setGuidance, setTrack, setCompleteTracks,
     setDuration, setSteps: setActiveSteps, setLanguage, setSeedText, setLyrics, setTask,
     setRepaintFrom, setRepaintTo, setRepaintMode, setRepaintStrength, setCoverStrength, setCoverNoise,

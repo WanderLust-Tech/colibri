@@ -139,6 +139,11 @@ export function stepLimits(limits: MusicLimits, guided: boolean): MusicLimits {
 /* A guidance scale typed into its field: 0 to 100 (upstream's range; 1 or less is off). */
 export const guidanceValid = (value: number) => Number.isFinite(value) && value >= 0 && value <= 100
 
+/* The sampler's two numbers, typed into their fields: empty is off (0), else a number from 0 to `max` (the velocity cap: 100, its smoothing: 1). */
+export const optionalUnit = (text: string, max: number) => text.trim() === "" || (Number.isFinite(Number(text)) && Number(text) >= 0 && Number(text) <= max)
+export const optionalValue = (text: string) => (text.trim() === "" ? 0 : Number(text))
+export const VNORM_MAX = 100
+
 /* A name that says what the file is and which seed makes it again. */
 export function musicFileName(prompt: string, seed: number) {
   const words = prompt.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")

@@ -425,7 +425,7 @@ python3 tools/mutate_acestep_guided.py ~/models/ace-step-1.5 base_ref/b_t2m base
 
 Upstream's `generate_audio` has four options that every DiT, turbo or guided, takes and that are off by default: `sampler_mode` (`euler`, or `heun`), `infer_method` (`ode`, or `sde`), `velocity_norm_threshold` and
 `velocity_ema_factor`. This engine has them all (`acestep --sampler heun`, `--sde`, `--vnorm X`, `--vema X`; `coli music --sampler heun`, `--sde`, `--velocity-norm X`, `--velocity-ema X`; the gateway's
-`sampler_mode`, `infer_method`, `velocity_norm_threshold`, `velocity_ema_factor`; the engine's own names on the serve protocol are `sampler`, `infer`, `vnorm`, `vema`). `READY` says `"sampler": true`, and a gateway whose
+`sampler_mode`, `infer_method`, `velocity_norm_threshold`, `velocity_ema_factor`; the engine's own names on the serve protocol are `sampler`, `infer`, `vnorm`, `vema`). `READY` says `"sampler": true` (the gateway's `/v1/models` passes it on as `audio.sampler`, and the dashboard's Music composer shows its Sampler chip and the two fields only then), and a gateway whose
 engine does not say so refuses the fields by name, since the engine would ignore them. The answer's `colibri.sampler` says which ran: `euler`, `heun` or `sde`.
 
 * **Heun** is a second-order step: an Euler step to the next level, the DiT evaluated there too, the two velocities averaged, and the step taken again from the start with the average (the trapezoid). Two evaluations a step, so
