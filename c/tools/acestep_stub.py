@@ -47,6 +47,8 @@ Knobs (environment), all optional:
                              complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
     ACESTEP_STUB_SAMPLER     set to make READY say "sampler": the options sampler (euler or heun), infer (ode or sde), vnorm and vema are accepted, and
                              AUDIO says which sampler ran
+    ACESTEP_STUB_FLOWEDIT    set to make READY say "flow_edit": a text-to-music request with morph and a source clip (src_path) is a flow-edit; the clip's length is the
+                             song's, edit_caption, edit_lyrics, n_min, n_max and n_avg are accepted, and AUDIO says "flow_edit": true
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
 the denoising, __stub_garbage__ writes a stray stdout line first: the three failure shapes a front
 end has to survive.
@@ -140,7 +142,7 @@ def check(request, audio_in=True, guided=False):
     if task in GUIDED_TASKS and dit == "turbo":
         return "extract, lego and complete need the base or SFT DiT"
     duration = request.get("duration", READY["default_duration"])
-    if (task == "text2music" or (task == "complete" and not request.get("src_path"))) and (not number(duration) or not 1 <= duration <= 600)             and not (request.get("plan") and number(duration) and duration <= 0):
+    if not request.get("morph") and (task == "text2music" or (task == "complete" and not request.get("src_path"))) and (not number(duration) or not 1 <= duration <= 600)             and not (request.get("plan") and number(duration) and duration <= 0):
         return "duration must be 1 to 600 seconds"
     steps = request.get("steps", 32 if dit != "turbo" else 8)
     top = 200 if dit != "turbo" else 20
@@ -172,8 +174,20 @@ def check(request, audio_in=True, guided=False):
     src, ref = request.get("src_path"), request.get("ref_path")
     if task not in ("text2music", "complete") and not (isinstance(src, str) and src):
         return "%s needs a source clip (src)" % {"cover": "a cover", "repaint": "a repaint", "extract": "an extract", "lego": "a lego"}[task]
-    if task == "text2music" and isinstance(src, str) and src:
-        return ("a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference "
+    if request.get("morph"):
+        if task != "text2music" or request.get("plan") or not (isinstance(src, str) and src):
+            return "a flow-edit is a text-to-music overlay on a clip (src): no other task and no planner" if isinstance(src, str) and src else "a flow-edit needs the clip it edits (src)"
+        if request.get("sampler") == "heun" or request.get("infer") == "sde" or request.get("adg"):
+            return "a flow-edit takes the plain Euler step: no Heun, SDE or ADG"
+        nmin, nmax, navg = request.get("n_min", 0), request.get("n_max", 0), request.get("n_avg", 1)
+        if not number(nmin) or not number(nmax) or not 0 <= nmin <= 1 or not 0 <= nmax <= 1 or (nmax > 0 and nmax < nmin):
+            return "the flow-edit window must be 0 to 1, from before to after (n_min, n_max)"
+        if isinstance(navg, bool) or not isinstance(navg, int) or not 1 <= navg <= 16:
+            return "n_avg must be 1 to 16"
+    elif any(request.get(k) for k in ("edit_caption", "edit_lyrics", "n_min", "n_max", "n_avg")):
+        return "the source caption, source lyrics, n_min, n_max and n_avg are for a flow-edit"
+    elif task == "text2music" and isinstance(src, str) and src:
+        return ("a source clip is for a cover, a repaint, an extract, a lego or a complete (or a flow-edit); for text to music, give a reference "
                 "clip (ref) to take its style")
     if (src is not None and not isinstance(src, str)) or (isinstance(src, str) and len(src) > 4000):
         return "src path too long"
@@ -316,7 +330,7 @@ def plan(request, src_seconds):
     source with a repaint's silence added; whole 1920-sample frames, never fewer than 128. Returns (want48, frames) or
     an error message."""
     task = request.get("task", "text2music")
-    if task == "text2music" or (task == "complete" and not has_src(request)):
+    if (task == "text2music" and not request.get("morph")) or (task == "complete" and not has_src(request)):
         duration = round(song_duration(request), 1)
         want = int(duration * RATE48)
     else:
@@ -386,7 +400,8 @@ def serve():
     guided = bool(os.environ.get("ACESTEP_STUB_GUIDED")) and audio_in
     planner = bool(os.environ.get("ACESTEP_STUB_PLANNER"))
     out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {}), **(PLANNER if planner else {}),
-                       **({"sampler": True} if os.environ.get("ACESTEP_STUB_SAMPLER") else {})})
+                       **({"sampler": True} if os.environ.get("ACESTEP_STUB_SAMPLER") else {}),
+                       **({"flow_edit": True} if os.environ.get("ACESTEP_STUB_FLOWEDIT") else {})})
     lines = queue.Queue()
 
     def reader():
@@ -536,6 +551,7 @@ def serve():
                            "src_seconds": round(src_seconds, 3), "dit": "acestep-v15-" + guided_dit(request, guided),
                            "guidance": (request.get("guidance") or 7) if guided_dit(request, guided) != "turbo" else 0,
                            "sampler": "sde" if request.get("infer") == "sde" else "heun" if request.get("sampler") == "heun" else "euler",
+                           "flow_edit": bool(request.get("morph")),
                            "task": request.get("task", "text2music"),
                            "lm": ("acestep-5Hz-lm-" + (request.get("lm") or "1.7B")) if plan_codes else "", "plan_codes": plan_codes,
                            "caption_tokens": len(caption.split()) + 20, "lyric_tokens": 15 if not lyrics_given else 40,

@@ -72,7 +72,7 @@ MUTANTS = {
     "injection-skipped": ("if (repaint_like && i < n - 1 && i < cutoff) {", "if (repaint_like && i < n - 1 && i < 0) {"),
     "injection-after-the-last-step": ("if (repaint_like && i < n - 1 && i < cutoff) {", "if (repaint_like && i < cutoff) {"),
     "injection-cutoff-truncated": ("const int cutoff = (int)acg_pyround(inject * n);", "const int cutoff = (int)(inject * n);"),
-    "injection-time": ("const float tn = sched[i + 1], a = tn, b = (float)(1.0 - (double)tn);", "const float tn = sched[i], a = tn, b = (float)(1.0 - (double)tn);"),
+    "injection-time": ("const float tn = t_after, a = tn, b = (float)(1.0 - (double)tn);", "const float tn = sched[i], a = tn, b = (float)(1.0 - (double)tn);"),
     "injection-inside-the-span": ("                if (!rmask[f])\n                    for (int c = 0; c < A; c++) x[(size_t)f * A + c] = a * noise", "                if (rmask[f])\n                    for (int c = 0; c < A; c++) x[(size_t)f * A + c] = a * noise"),
     "boundary-blend-skipped": ("if (repaint_like && cf_frames > 0) acg_blend_boundary(x, lat, rmask, T, A, cf_frames);", "if (repaint_like && cf_frames > 100) acg_blend_boundary(x, lat, rmask, T, A, cf_frames);"),
     "boundary-ramp-direction": ("for (int t = fs; t < left; t++) m[t] = acg_ramp(0.f, 1.f, left - fs, t - fs);", "for (int t = fs; t < left; t++) m[t] = acg_ramp(1.f, 0.f, left - fs, t - fs);"),

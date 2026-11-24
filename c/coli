@@ -3133,8 +3133,9 @@ def music_audio_flags(a):
     clip's length is the song's."""
     cover, repaint, ref = getattr(a, "cover", None), getattr(a, "repaint", None), getattr(a, "ref", None)
     extract, lego, complete = getattr(a, "extract", None), getattr(a, "lego", None), getattr(a, "complete", None)
+    edit = getattr(a, "edit", None)
     tasks = [flag for flag, value in (("--cover", cover), ("--repaint", repaint), ("--extract", extract), ("--lego", lego),
-                                      ("--complete", complete)) if value is not None]
+                                      ("--complete", complete), ("--edit", edit)) if value is not None]
     if len(tasks) > 1:
         sys.exit(f"{C.yel}{' and '.join(tasks)} are separate tasks:{C.r} a cover makes the whole clip again in a new style, "
                  f"a repaint makes only a span of it again, an extract pulls one track out, a lego adds one in a span, a complete "
@@ -3145,8 +3146,13 @@ def music_audio_flags(a):
                            ("--track", "track", extract or lego), ("--tracks", "tracks", complete is not None or None)):
         if getattr(a, dest, None) is not None and not ok:
             sys.exit(f"{C.yel}{flag} is for {'--cover FILE' if 'cover' in dest else '--repaint or --lego FILE' if dest.startswith('repaint') else '--extract or --lego FILE' if dest == 'track' else '--complete'}{C.r}")
-    if (cover or repaint or extract or lego) and getattr(a, "duration", None) is not None:
-        sys.exit(f"{C.yel}--duration does not apply to a {tasks[0][2:]}:{C.r} the clip's own length is the song's")
+    for flag, dest in (("--edit-caption", "edit_caption"), ("--edit-lyrics", "edit_lyrics"), ("--n-min", "n_min"), ("--n-max", "n_max"), ("--n-avg", "n_avg")):
+        if getattr(a, dest, None) is not None and not edit:
+            sys.exit(f"{C.yel}{flag} is for --edit FILE{C.r} (a flow-edit of a clip)")
+    if edit and (getattr(a, "sampler", None) == "heun" or getattr(a, "sde", False) or getattr(a, "adg", False) or getattr(a, "plan", False)):
+        sys.exit(f"{C.yel}--edit takes the plain Euler step:{C.r} no --sampler heun, --sde, --adg or --plan")
+    if (cover or repaint or extract or lego or edit) and getattr(a, "duration", None) is not None:
+        sys.exit(f"{C.yel}--duration does not apply to {'an edit' if edit else 'a ' + tasks[0][2:]}:{C.r} the clip's own length is the song's")
     if complete and getattr(a, "duration", None) is not None:
         sys.exit(f"{C.yel}--duration does not apply to a complete of a clip:{C.r} the clip's own length is the song's")
     body = {}
@@ -3163,6 +3169,10 @@ def music_audio_flags(a):
         body.update(task="lego", src_audio=music_clip(a, "--lego", lego), track_name=getattr(a, "track", None),
                     repainting_start=getattr(a, "repaint_from", None), repainting_end=getattr(a, "repaint_to", None),
                     repaint_mode=getattr(a, "repaint_mode", None), repaint_strength=getattr(a, "repaint_strength", None))
+    if edit:
+        body.update(flow_edit_morph=True, src_audio=music_clip(a, "--edit", edit), flow_edit_source_caption=getattr(a, "edit_caption", None),
+                    flow_edit_source_lyrics=getattr(a, "edit_lyrics", None), flow_edit_n_min=getattr(a, "n_min", None),
+                    flow_edit_n_max=getattr(a, "n_max", None), flow_edit_n_avg=getattr(a, "n_avg", None))
     if complete is not None:
         body.update(task="complete", complete_track_classes=getattr(a, "tracks", None))
         if complete:
@@ -3209,7 +3219,7 @@ def music_settings(a, prompt, info):
     try:
         return music_request({k: v for k, v in body.items() if v is not None}, info)
     except MusicRequestError as error:
-        source = next((f"--{name}" for name in ("cover", "repaint", "extract", "lego", "complete") if getattr(a, name, None) is not None), "--repaint")
+        source = next((f"--{name}" for name in ("cover", "repaint", "extract", "lego", "complete", "edit") if getattr(a, name, None) is not None), "--repaint")
         flag = {"prompt": "the prompt", "time_signature": "--time-signature", "src_audio": source, "reference_audio": "--ref",
                 "repainting_start": "--from", "repainting_end": "--to", "repaint_mode": "--repaint-mode",
                 "repaint_strength": "--repaint-strength", "audio_cover_strength": "--cover-strength",
@@ -3218,7 +3228,9 @@ def music_settings(a, prompt, info):
                 "cfg_interval_end": "--cfg-end", "use_adg": "--adg", "thinking": "--plan", "lm_model": "--lm",
                 "sampler_mode": "--sampler", "infer_method": "--sde", "velocity_norm_threshold": "--velocity-norm", "velocity_ema_factor": "--velocity-ema",
                 "lm_temperature": "--lm-temperature", "lm_cfg_scale": "--lm-cfg", "lm_top_p": "--lm-top-p", "lm_top_k": "--lm-top-k",
-                "use_cot_caption": "--no-lm-caption", "use_cot_language": "--no-lm-language", "bpm": "--bpm", "key": "--key"}.get(
+                "use_cot_caption": "--no-lm-caption", "use_cot_language": "--no-lm-language", "bpm": "--bpm", "key": "--key",
+                "flow_edit_morph": "--edit", "flow_edit_source_caption": "--edit-caption", "flow_edit_source_lyrics": "--edit-lyrics",
+                "flow_edit_n_min": "--n-min", "flow_edit_n_max": "--n-max", "flow_edit_n_avg": "--n-avg"}.get(
                     error.param, f"--{error.param}" if error.param else "the request")
         sys.exit(f"{C.yel}{flag}: {error}{C.r}")
 
@@ -3245,6 +3257,8 @@ def generate_music(engine, request, out=None, stream=None):
                                  cfg_end=request.get("cfg_interval_end"), adg=request.get("use_adg"), track=request.get("track_name"),
                                  sampler=request.get("sampler_mode"), infer=request.get("infer_method"),
                                  vnorm=request.get("velocity_norm_threshold"), vema=request.get("velocity_ema_factor"),
+                                 morph=True if request.get("morph") else None, edit_caption=request.get("edit_caption"), edit_lyrics=request.get("edit_lyrics"),
+                                 n_min=request.get("n_min"), n_max=request.get("n_max"), n_avg=request.get("n_avg"),
                                  tracks=",".join(request["complete_track_classes"]) if request.get("complete_track_classes") else None,
                                  on_progress=progress.progress, interruptible=True, on_interrupt=progress.interrupted)
     except MusicCancelled:
@@ -4734,6 +4748,12 @@ def main():
                  ("--cfg-start",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule (1 = the start, 0 = the end) guidance begins to apply (default 0)")),
                  ("--cfg-end",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule guidance stops applying (default 1)")),
                  ("--adg",dict(action="store_true",help="with the base or sft DiT: angle-based guidance instead of APG")),
+                 ("--edit",dict(default=None,metavar="FILE",help="flow-edit this clip toward the prompt and lyrics (music models with flow-edit): --edit-caption says what the clip is, --n-min and --n-max the part of the schedule that is edited, --n-avg the draws averaged a step; the clip's length is the song's")),
+                 ("--edit-caption",dict(default=None,metavar="TEXT",help="with --edit: what the clip is (its caption); the edit moves from this description to the prompt")),
+                 ("--edit-lyrics",dict(default=None,metavar="TEXT",help="with --edit: the clip's lyrics (default none)")),
+                 ("--n-min",dict(type=float,default=None,metavar="X",help="with --edit: where in the schedule the edit begins, 0 (the default) to 1")),
+                 ("--n-max",dict(type=float,default=None,metavar="X",help="with --edit: where the edit ends and the new description is simply denoised, above 0 to 1 (default 1)")),
+                 ("--n-avg",dict(type=int,default=None,metavar="N",help="with --edit: average N noise draws a step, 1 (the default) to 16; slower, steadier")),
                  ("--sampler",dict(choices=["euler","heun"],default=None,help="the sampler (music models): euler (the default) or heun, a second-order step that evaluates the DiT twice a step")),
                  ("--sde",dict(action="store_true",help="the stochastic sampler (music models): the clean sample predicted and noised to the next level each step; not with --sampler heun")),
                  ("--velocity-norm",dict(type=float,default=None,metavar="X",help="cut each step's velocity to X times the norm of the latents, 0 (the default) to 100 (music models)")),

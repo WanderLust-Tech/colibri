@@ -420,6 +420,12 @@ typedef struct {
     const char *track;                             /* extract and lego: the track (drums, bass, vocals ...); NULL or "" is "the track" */
     const char *tracks;                            /* complete: the tracks to complete the input with, separated by commas */
     const char *dit;                               /* turbo, base or sft; NULL or "": see ace_select_for */
+    /* flow-edit (upstream's overlay on text to music): edit the clip `src_path` toward `caption` and `lyrics`, taking `edit_caption` and `edit_lyrics` as what the clip is
+     * (empty if NULL, as upstream's default). The window of the schedule that is edited, [edit_nmin, edit_nmax] (0 to 1; an nmax of 0 is 1, the default), and the
+     * draws averaged a step, edit_navg (0 is 1). A base or SFT DiT, or the turbo; Euler only. */
+    int morph;
+    const char *edit_caption, *edit_lyrics;
+    double edit_nmin, edit_nmax; int edit_navg;
     const int *codes; int ncodes;                  /* the planner's audio codes (0..63999): text to music from them, as upstream's cover of codes; ncodes 0 is none */
     /* the planner (text to music only): the 5 Hz language model first writes the song's metadata (the tempo, key, time signature, duration, language and a
      * rewritten caption; whatever of bpm, key, timesig and duration is not given) and then the codes of its structure, which the DiT takes as its context.
@@ -456,6 +462,7 @@ typedef struct {
     int meta_bpm; double meta_duration;
     char meta_key[48], meta_timesig[16], meta_language[48], meta_caption[2600];
     double guidance;                               /* the guidance scale applied (0 for the turbo DiT, or when it is 1 or less) */
+    int morph;                                     /* the request was a flow-edit */
 } AceInfo;
 
 /* Python's round(x, 1): the nearest decimal to the binary value, which printf does and x * 10 does not at a tie. */
@@ -507,7 +514,7 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (r->lyrics && strlen(r->lyrics) > ACG_MAX_LYRIC_BYTES) { snprintf(err, errn, "lyrics longer than %d bytes", ACG_MAX_LYRIC_BYTES); return 1; }
     if (r->language && strlen(r->language) > 32) { snprintf(err, errn, "language is not a language code"); return 1; }
     if (r->task < ACG_TASK_TEXT2MUSIC || r->task > ACG_TASK_COMPLETE) { snprintf(err, errn, "task must be text2music, cover, repaint, extract, lego or complete"); return 1; }
-    if ((r->task == ACG_TASK_TEXT2MUSIC || (r->task == ACG_TASK_COMPLETE && !(r->src_path && *r->src_path))) && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS) &&
+    if ((r->task == ACG_TASK_TEXT2MUSIC || (r->task == ACG_TASK_COMPLETE && !(r->src_path && *r->src_path))) && !r->morph && !(r->duration >= ACG_MIN_SECONDS && r->duration <= ACG_MAX_SECONDS) &&
         !(r->plan && r->duration <= 0)) { snprintf(err, errn, "duration must be %g to %g seconds", ACG_MIN_SECONDS, ACG_MAX_SECONDS); return 1; }
     if (r->steps < 1 || r->steps > ACG_MAX_STEPS) { snprintf(err, errn, "steps must be 1 to %d", ACG_MAX_STEPS); return 1; }
     if (!(r->shift > 0.0 && r->shift <= 10.0)) { snprintf(err, errn, "shift must be above 0 and at most 10"); return 1; }
@@ -517,7 +524,17 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     static const char *const task_names[6] = { "text to music", "a cover", "a repaint", "an extract", "a lego", "a complete" };
     const int needs_src = r->task != ACG_TASK_TEXT2MUSIC && r->task != ACG_TASK_COMPLETE;
     if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "%s needs a source clip (src)", task_names[r->task]); return 1; }
-    if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete; for text to music, give a reference clip (ref) to take its style"); return 1; }
+    if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path && !r->morph) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete (or a flow-edit); for text to music, give a reference clip (ref) to take its style"); return 1; }
+    if (r->morph) {
+        if (r->task != ACG_TASK_TEXT2MUSIC || r->plan || r->ncodes > 0) { snprintf(err, errn, "a flow-edit is a text-to-music overlay: no other task, no planner and no codes of your own"); return 1; }
+        if (!(r->src_path && *r->src_path)) { snprintf(err, errn, "a flow-edit needs the clip it edits (src)"); return 1; }
+        if (r->heun || r->sde || r->adg) { snprintf(err, errn, "a flow-edit takes the plain Euler step: no Heun, SDE or ADG"); return 1; }
+        if (!(r->edit_nmin >= 0 && r->edit_nmin <= 1) || !(r->edit_nmax >= 0 && r->edit_nmax <= 1) || (r->edit_nmax > 0 && r->edit_nmax < r->edit_nmin)) { snprintf(err, errn, "the flow-edit window must be 0 to 1, from before to after (n_min, n_max)"); return 1; }
+        if (r->edit_navg < 0 || r->edit_navg > 16) { snprintf(err, errn, "n_avg must be 1 to 16"); return 1; }
+        if ((r->edit_caption && strlen(r->edit_caption) > ACG_MAX_CAPTION_BYTES) || (r->edit_lyrics && strlen(r->edit_lyrics) > ACG_MAX_LYRIC_BYTES)) { snprintf(err, errn, "the flow-edit's source caption or lyrics are too long"); return 1; }
+    } else if ((r->edit_caption && *r->edit_caption) || (r->edit_lyrics && *r->edit_lyrics) || r->edit_nmin != 0 || r->edit_nmax != 0 || r->edit_navg != 0) {
+        snprintf(err, errn, "the source caption, source lyrics, n_min, n_max and n_avg are for a flow-edit"); return 1;
+    }
     if (r->src_path && strlen(r->src_path) > 4000) { snprintf(err, errn, "src path too long"); return 1; }
     if (r->ref_path && strlen(r->ref_path) > 4000) { snprintf(err, errn, "ref path too long"); return 1; }
     if (r->plan) {
@@ -729,6 +746,94 @@ static int ace_select_for(AceEngine *e, const AceRequest *rq, char *err, size_t 
     return 0;
 }
 
+/* Flow-edit (upstream's flowedit_sampling_loop, an overlay on text to music): edit a clip toward a new caption and lyrics. The clip's latents are the start (zt),
+ * and over the window [n_min, n_max] of the schedule each step noises the clip to the level (zs = (1 - t) clip + t noise), puts the edit on top of it
+ * (zg = zt + zs - clip), asks the DiT about both (the SOURCE prompt for zs, the TARGET prompt for zg, each with its own guidance momentum) and moves zt along
+ * V_tar - V_src; `navg` such draws, averaged, a step. After the window the target alone is denoised from the edit (xt: zt on top of the noised clip at that level).
+ * The noise is torch's generator seeded with the request's seed, one draw per average and one for the switch, in order. Euler only, and DCW is not part of it,
+ * as upstream. Returns 0, or 2 when cancelled. */
+static int acg_flow_edit(const AceDit *d, const AceRequest *rq, const AceHooks *h, int T, const float *lat, const float *ctx,
+                         AcdCond *cond_t, AcdCond *ncond_t, AcdCond *cond_s, AcdCond *ncond_s, int use_cfg, double guidance, double cfg_s, double cfg_e,
+                         const float *sched, int n, float *out){
+    const int A = d->acdim;
+    const size_t NL = (size_t)T * A;
+    const double nmax_d = rq->edit_nmax > 0 ? rq->edit_nmax : 1.0;
+    const int navg = rq->edit_navg > 0 ? rq->edit_navg : 1;
+    const int i_min = (int)((double)n * rq->edit_nmin), i_max = (int)((double)n * nmax_d);
+    const int clamp = rq->vnorm > 0, ema = rq->vema > 0;
+    enum { ZT, ZS, ZG, FN, VSS, VTS, DSS, DTS, VS, VT, VU, VG, MS, MT, RUN, PS, PT, XT, NBUF };
+    float *b[NBUF];
+    int rc = 1;
+    for (int k = 0; k < NBUF; k++) b[k] = (float *)calloc(NL, sizeof(float));
+    for (int k = 0; k < NBUF; k++) if (!b[k]) goto done;
+    {
+        AcgMt mt; acg_mt_seed(&mt, (uint32_t)rq->seed);
+        memcpy(b[ZT], lat, NL * sizeof(float));
+        int have_xt = 0, have_ps = 0, have_pt = 0;
+        for (int i = 0; i < n; i++) {
+            if (i < i_min) continue;
+            if (h && h->progress) h->progress(h->ud, "denoise", i, n);
+            if (h && h->cancelled && h->cancelled(h->ud)) { rc = 2; goto done; }
+            const float tc = sched[i], tp = i < n - 1 ? sched[i + 1] : 0.0f;
+            const double tcf = (double)tc;
+            const float dt = tp - tc, a1 = (float)(1.0 - tcf), a2 = (float)tcf;
+            const int now_cfg = use_cfg && tcf >= cfg_s && tcf <= cfg_e;      /* the guidance interval is tested at the step's own level */
+            if (i < i_max) {
+                memset(b[VSS], 0, NL * sizeof(float)); memset(b[VTS], 0, NL * sizeof(float));
+                memset(b[DSS], 0, NL * sizeof(float)); memset(b[DTS], 0, NL * sizeof(float));
+                for (int r = 0; r < navg; r++) {
+                    acg_randn_mt(&mt, NL, b[FN]);
+                    for (size_t k = 0; k < NL; k++) { b[ZS][k] = a1 * lat[k] + a2 * b[FN][k]; b[ZG][k] = b[ZT][k] + b[ZS][k] - lat[k]; }
+                    for (int br = 0; br < 2; br++) {                          /* 0: the source prompt on zs, 1: the target prompt on zg */
+                        float *z = br ? b[ZG] : b[ZS], *v = br ? b[VT] : b[VS], *mom = br ? b[MT] : b[MS], *dsum = br ? b[DTS] : b[DSS], *vsum = br ? b[VTS] : b[VSS];
+                        acd_forward(d, br ? cond_t : cond_s, z, ctx, T, tc, tc, v);
+                        if (now_cfg) {
+                            acd_forward(d, br ? ncond_t : ncond_s, z, ctx, T, tc, tc, b[VU]);
+                            for (size_t k = 0; k < NL; k++) dsum[k] += v[k] - b[VU][k];
+                            memcpy(b[RUN], mom, NL * sizeof(float));          /* every draw starts from the momentum the step began with */
+                            acd_apg(b[VG], v, b[VU], T, A, guidance, b[RUN]);
+                            memcpy(v, b[VG], NL * sizeof(float));
+                        }
+                        if (clamp) acg_vclamp(v, z, NL, rq->vnorm);
+                        for (size_t k = 0; k < NL; k++) vsum[k] += v[k];
+                    }
+                }
+                if (now_cfg) {                                                /* the momentum moves once a step, by the draws' average difference */
+                    const float fn = (float)navg;
+                    for (size_t k = 0; k < NL; k++) { b[MS][k] = b[DSS][k] / fn + (-0.75f) * b[MS][k]; b[MT][k] = b[DTS][k] / fn + (-0.75f) * b[MT][k]; }
+                }
+                const float fn = (float)navg;
+                for (size_t k = 0; k < NL; k++) { b[VSS][k] /= fn; b[VTS][k] /= fn; }
+                if (ema && have_ps) acg_vema(b[VSS], b[PS], NL, rq->vema);
+                if (ema && have_pt) acg_vema(b[VTS], b[PT], NL, rq->vema);
+                memcpy(b[PS], b[VSS], NL * sizeof(float)); memcpy(b[PT], b[VTS], NL * sizeof(float)); have_ps = have_pt = 1;
+                for (size_t k = 0; k < NL; k++) b[ZT][k] += dt * (b[VTS][k] - b[VSS][k]);
+            } else {
+                if (!have_xt) {
+                    acg_randn_mt(&mt, NL, b[FN]);
+                    for (size_t k = 0; k < NL; k++) b[XT][k] = b[ZT][k] + (a1 * lat[k] + a2 * b[FN][k]) - lat[k];
+                    have_xt = 1;
+                }
+                acd_forward(d, cond_t, b[XT], ctx, T, tc, tc, b[VT]);
+                if (now_cfg) {
+                    acd_forward(d, ncond_t, b[XT], ctx, T, tc, tc, b[VU]);
+                    acd_apg(b[VG], b[VT], b[VU], T, A, guidance, b[MT]);
+                    memcpy(b[VT], b[VG], NL * sizeof(float));
+                }
+                if (clamp) acg_vclamp(b[VT], b[XT], NL, rq->vnorm);
+                if (ema && have_pt) acg_vema(b[VT], b[PT], NL, rq->vema);
+                memcpy(b[PT], b[VT], NL * sizeof(float)); have_pt = 1;
+                for (size_t k = 0; k < NL; k++) b[XT][k] += dt * b[VT][k];
+            }
+        }
+        memcpy(out, have_xt ? b[XT] : b[ZT], NL * sizeof(float));
+        rc = 0;
+    }
+done:
+    for (int k = 0; k < NBUF; k++) free(b[k]);
+    return rc;
+}
+
 typedef struct { const AceHooks *h; int target; int stopped; } AcgPlanCtx;
 static int acg_plan_step(int step, const float *cond, const float *unc, int token, void *ud){
     AcgPlanCtx *c = (AcgPlanCtx *)ud;
@@ -841,6 +946,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     /* text to music with the planner's codes is what the handler turns into a cover (_resolve_generate_music_task): the cover instruction, and the
      * codes' own hints as the context where a cover's source would be heard */
     const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;
+    const int morph = rq->morph;                                                       /* flow-edit: text to music on a clip's latents, a silence context */
+    info->morph = morph;
     const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;
     const int repaint_like = task == ACG_TASK_REPAINT || task == ACG_TASK_LEGO;       /* a span is generated, the rest is the source put back */
     const int text_like = task == ACG_TASK_TEXT2MUSIC || (task == ACG_TASK_COMPLETE && !(rq->src_path && *rq->src_path));   /* no source: silence is the context */
@@ -856,7 +963,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     float *x = NULL, *nx = NULL, *v = NULL, *wav = NULL, *srcpcm = NULL, *planar = NULL, *refp = NULL, *refpcm = NULL;
     float *vu = NULL, *vg = NULL, *mom = NULL, *xp = NULL, *v2 = NULL, *vd = NULL, *vprev = NULL, *vdraw = NULL;
     unsigned char *rmask = NULL;
-    AcdCond *cond = NULL, *cond2 = NULL, *ncond = NULL, *ncond2 = NULL;
+    AcdCond *cond = NULL, *cond2 = NULL, *ncond = NULL, *ncond2 = NULL, *cond_s = NULL, *ncond_s = NULL;
+    float *text_s = NULL, *lyric_s = NULL; char *cps = NULL, *lps = NULL; int *lids_s = NULL; int sn = 0, sl = 0;
     int *lids = NULL;
     #define ACG_STOP() do { if (h && h->cancelled && h->cancelled(h->ud)) { rc = 2; snprintf(err, errn, "cancelled"); goto out; } } while (0)
     #define ACG_PROGRESS(stage, a, b) do { if (h && h->progress) h->progress(h->ud, stage, a, b); } while (0)
@@ -869,7 +977,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     double meta_duration = rq->duration, sp_start = 0, sp_end = 0;
     AcgMt vae_mt; acg_mt_seed(&vae_mt, (uint32_t)rq->seed ^ ACG_VAE_SEED_XOR);
     int src_silent = 0;
-    if (text_like) acg_clip(rq->duration, &T, &want_samples);
+    if (text_like && !morph) acg_clip(rq->duration, &T, &want_samples);
     else if (from_codes) {                                                     /* the codes' length is the song's: 5 frames a code, 128 at least */
         lat_frames = rq->ncodes * ACG_CODE_FRAMES;
         T = lat_frames < ACG_MIN_FRAMES ? ACG_MIN_FRAMES : lat_frames;
@@ -909,7 +1017,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     lat = (float *)malloc((size_t)T * A * sizeof(float));
     if (!lat) { snprintf(err, errn, "out of memory"); goto out; }
     if (from_codes) acg_silence_slice(e, T, lat);                              /* replaced by the codes' hints below, once the detokenizer is loaded */
-    else if (!text_like) {
+    else if (!text_like || morph) {
         /* the source's latents: the VAE encoder's posterior sample (a silent clip is the silence latent, as upstream treats it),
          * then silence to the floor of 128 frames */
         if (src_silent) acg_silence_slice(e, lat_frames, lat);
@@ -985,6 +1093,18 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         if (!text2) { snprintf(err, errn, "the text encoder failed"); goto out; }
         cn2 = enc2 > cn ? cn : enc2;
     }
+    if (morph) {
+        /* flow-edit's source side: the caption and lyrics that describe the clip, the same instruction, metadata and language as the target's */
+        int sids[ACT_CAPTION_MAX];
+        cps = act_caption_prompt(instruction, rq->edit_caption ? rq->edit_caption : "", bpm, rq->key, rq->timesig, meta_duration);
+        lps = act_lyric_prompt(rq->edit_lyrics ? rq->edit_lyrics : "", rq->language && *rq->language ? rq->language : "unknown");
+        lids_s = (int *)malloc(ACT_LYRIC_MAX * sizeof(int));
+        if (!cps || !lps || !lids_s) { snprintf(err, errn, "out of memory"); goto out; }
+        sn = act_tokenize(&e->tok, cps, ACT_CAPTION_MAX, sids); sl = act_tokenize(&e->tok, lps, ACT_LYRIC_MAX, lids_s);
+        text_s = act_encode(e->text, sids, sn);
+        lyric_s = act_embed(e->text, lids_s, sl);
+        if (!text_s || !lyric_s) { snprintf(err, errn, "the text encoder failed"); goto out; }
+    }
     info->t_text = acg_now() - t0;
     ACG_STOP();
 
@@ -998,6 +1118,12 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
         ncond = acd_cond_null(d, cond);
         if (cond2) ncond2 = acd_cond_null(d, cond2);
         if (!ncond || (cond2 && !ncond2)) { snprintf(err, errn, "the null condition failed"); goto out; }
+    }
+    if (morph) {
+        cond_s = acd_cond_new(d, text_s, sn, lyric_s, sl, timbre, ACG_TIMBRE_FRAMES);
+        if (!cond_s) { snprintf(err, errn, "the condition encoders failed"); goto out; }
+        if (use_cfg && !(ncond_s = acd_cond_null(d, cond_s))) { snprintf(err, errn, "the null condition failed"); goto out; }
+        ACG_TAP("edit_src_hidden", cond_s->enc, (size_t)cond_s->len * d->D);
     }
     ACG_TAP("timbre", timbre, (size_t)ACG_TIMBRE_FRAMES * A);
     ACG_TAP("encoder_hidden", cond->enc, (size_t)cond->len * d->D);
@@ -1035,7 +1161,8 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
             rmask[f] = 1;
         }
     } else memset(rmask, 1, (size_t)T);
-    ACG_TAP("src_latents", src, (size_t)T * A);
+    if (morph) { ACG_TAP("src_latents", lat, (size_t)T * A); ACG_TAP("ctx_src_latents", src, (size_t)T * A); }
+    else ACG_TAP("src_latents", src, (size_t)T * A);
     if (repaint_like) ACG_TAP("clean_src_latents", lat, (size_t)T * A);
     for (int f = 0; f < T; f++) {
         memcpy(ctx + (size_t)f * 2 * A, dit_src + (size_t)f * A, (size_t)A * sizeof(float));
@@ -1098,6 +1225,10 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     if (ema) { vprev = (float *)malloc(NL * sizeof(float)); if (!vprev) { snprintf(err, errn, "out of memory"); goto out; } }
     if (sde) { vdraw = (float *)malloc(NL * sizeof(float)); if (!vdraw) { snprintf(err, errn, "out of memory"); goto out; } acg_mt_seed(&sde_mt, (uint32_t)rq->seed ^ ACG_SDE_SEED_XOR); }
     t0 = acg_now();
+    if (morph) {
+        const int fr = acg_flow_edit(d, rq, h, T, lat, ctx, cond, ncond, cond_s, ncond_s, use_cfg, guidance, cfg_s, cfg_e, sched, n, x);
+        if (fr) { rc = fr; if (fr == 2) snprintf(err, errn, "cancelled"); else snprintf(err, errn, "the flow-edit failed"); goto out; }
+    } else
     for (int i = 0; i < n; i++) {
         ACG_PROGRESS("denoise", i, n);
         ACG_STOP();
@@ -1177,7 +1308,8 @@ out:
     free(cp); free(cp2); free(lp); free(lids); free(text); free(text2); free(lyric); free(timbre); free(lat); free(src); free(ctx); free(ctx2);
     free(noise); free(x); free(nx); free(v); free(wav); free(srcpcm); free(planar); free(refp); free(refpcm); free(rmask);
     free(vu); free(vg); free(mom); free(xp); free(v2); free(vd); free(vprev); free(vdraw);
-    acd_cond_free(cond); acd_cond_free(cond2); acd_cond_free(ncond); acd_cond_free(ncond2);
+    acd_cond_free(cond); acd_cond_free(cond2); acd_cond_free(ncond); acd_cond_free(ncond2); acd_cond_free(cond_s); acd_cond_free(ncond_s);
+    free(text_s); free(lyric_s); free(cps); free(lps); free(lids_s);
     #undef ACG_STOP
     #undef ACG_PROGRESS
     #undef ACG_TAP

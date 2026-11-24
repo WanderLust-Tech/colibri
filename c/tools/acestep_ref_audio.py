@@ -243,6 +243,9 @@ TASKS = {
     # at a shift other than 1 the turbo's schedule is bent, and a threshold that clamps only some steps (the ratio of the velocity's norm to the latents' grows from 1.0 to 3.6 over the 8 steps)
     "s_sde_shift3": ({**INSTR, "audio_duration": 10.0, "infer_method": "sde", "shift": 3.0}, {}),
     "s_vnorm_mid": ({**INSTR, "audio_duration": 10.0, "velocity_norm_threshold": 1.3}, {}),
+    # flow-edit: the clip (inst10, or less of it) edited toward the caption, over a window of the schedule (the turbo has no guidance; DCW is on and upstream leaves it out of the overlay)
+    "s_fe": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_source_lyrics": ""}, {"src": ("inst10", None)}),
+    "s_fe_window": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_min": 0.25, "flow_edit_n_max": 0.75}, {"src": ("inst10", None)}),
     "s_heun_mid": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun", "velocity_norm_threshold": 1.3, "velocity_ema_factor": 0.5}, {}),
 }
 
@@ -274,6 +277,14 @@ TASKS_BASE = {
     "b_heun_mid": ({**INSTR, "audio_duration": 6.0, "sampler_mode": "heun", "velocity_norm_threshold": 1.1, "velocity_ema_factor": 0.5, "inference_steps": 8}, {}),
     "b_sde_repaint_shift3": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0, "infer_method": "sde", "shift": 3.0, "inference_steps": 8}, {"src": ("inst10", None)}),
     "b_heun_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5, "sampler_mode": "heun", "inference_steps": 8}, {"src": ("inst10", None)}),
+    # flow-edit on a guided DiT: the source and target prompts each guided with a momentum of their own, the window, the averaged draws, the interval, the clamp and smoothing
+    "b_fe": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "inference_steps": 8}, {"src": ("inst10", None)}),
+    "b_fe_window": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_min": 0.2, "flow_edit_n_max": 0.7, "inference_steps": 10}, {"src": ("inst10", None)}),
+    "b_fe_avg": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_max": 0.6, "flow_edit_n_avg": 2, "inference_steps": 8}, {"src": ("inst10", 6.0)}),
+    "b_fe_nocfg": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "guidance_scale": 1.0, "flow_edit_n_max": 0.75, "inference_steps": 8}, {"src": ("inst10", 6.0)}),
+    "b_fe_interval": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "cfg_interval_start": 0.3, "cfg_interval_end": 0.8, "shift": 3.0, "flow_edit_n_max": 0.75, "inference_steps": 10}, {"src": ("inst10", 6.0)}),
+    "b_fe_vclamp": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "velocity_norm_threshold": 1.1, "velocity_ema_factor": 0.4, "flow_edit_n_min": 0.1, "flow_edit_n_max": 0.8, "inference_steps": 10}, {"src": ("inst10", 6.0)}),
+    "b_fe_lyrics": ({**VOCAL, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_source_lyrics": "[Verse 1]\nevening light on the kitchen floor", "flow_edit_n_max": 0.75, "inference_steps": 8}, {"src": ("long30", 8.0)}),
     "b_cover": ({**INSTR, "task_type": "cover"}, {"src": ("inst10", None)}),
     "b_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5}, {"src": ("inst10", None)}),      # the second half of the steps on the null condition of the text-to-music prompt
     "b_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
@@ -308,6 +319,9 @@ class AudioRecorder:
         self.t = self.rec.t
         self.calls = 0
         self.first = self.last = {}
+        self.snaps, self.morph = [], False
+        if hasattr(h.model, "flowedit_generate_audio"):      # a flow-edit does not call generate_audio: its inputs and its latents are this call's
+            base.Recorder._wrap(h.model, "flowedit_generate_audio", self.rec._generate_audio)
         tk, clean = h.model.tokenizer, base.clean
         # the tokenizer and detokenizer run inside every prepare_condition, also the non-cover one (on the silence latent, its
         # result thrown away by torch.where): only the first call's taps are the cover's
@@ -333,6 +347,7 @@ class AudioRecorder:
             if self.calls == 1:
                 self.first = snap
             self.last = snap
+            self.snaps.append(snap)
             return out
         h.model.prepare_condition = run
 
@@ -341,10 +356,15 @@ class AudioRecorder:
         self.t = self.rec.t
         self.calls = 0
         self.first = self.last = {}
+        self.snaps = []
 
     def finish(self):
         """After a generation: the first call's tensors are the cover's; with three calls the last are the non-cover's."""
         rt = self.rec.t
+        if self.morph:      # flow-edit: the overlay prepares the source's condition first, then the target's (the handler's own third call repeats the target's)
+            rt["fe.src.hidden"], rt["fe.src.mask"] = self.snaps[0]["encoder.hidden"], self.snaps[0]["encoder.mask"]
+            rt.update(self.snaps[1])
+            return
         if self.calls >= 3:
             rt["noncover.hidden"], rt["noncover.mask"], rt["noncover.context"] = self.last["encoder.hidden"], self.last["encoder.mask"], self.last["context"]
         rt.update(self.first)
@@ -383,6 +403,7 @@ def capture_tasks(a):
         d = os.path.join(a.outdir, name)
         os.makedirs(d, exist_ok=True)
         rec.reset()
+        rec.morph = bool(params.get("flow_edit_morph"))
         seeded_posterior(common["seed"] ^ VAE_SEED_XOR)
         seeded_renoise(h, common["seed"] ^ SDE_SEED_XOR)
         kw = {**common, **params}

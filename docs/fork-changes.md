@@ -758,6 +758,18 @@ Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`
 - The dashboard's Music composer has them (when `/v1/models` says `audio.sampler`, which the gateway takes from the engine's `READY`): a Sampler chip (Euler, Heun, SDE) and two fields, the velocity cap (0 to 100) and its smoothing (0 to 1), empty for off; the song's line says what ran.
 - Not done: flow-edit (a sampler overlay upstream has).
 
+### 2.38 ACE-Step's flow-edit: a clip edited toward a new caption and lyrics (2026-11-23; built, not pushed)
+
+Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents moved along the difference of the DiT's answers under the source and the target prompt over a window of the schedule (`docs/acestep.md`, "Flow-edit").
+
+- Engine: `acg_flow_edit` in `acestep_gen.h` (the paired trajectories, a guidance momentum each, the averaged draws, the switch to the target alone, the clamp and smoothing), the source prompt's condition in `ace_generate`, `AceRequest.morph`/`edit_*`, `GEN` fields
+  `morph`, `edit_caption`, `edit_lyrics`, `n_min`, `n_max`, `n_avg`, `READY` says `flow_edit`, the answer `flow_edit`; `acestep --edit CLIP --edit-caption ... --n-min --n-max --n-avg`. Around it: the gateway's `flow_edit_*` fields (refused when the engine does not announce
+  it, and with Heun, the SDE, ADG or the planner), `audio.flow_edit` in `/v1/models`, `coli music --edit CLIP --edit-caption ...`, the stub engine, `docs/api.md`.
+- Checked against upstream's handler: 9 cases (2 turbo, 7 base: the window, two draws, no guidance, an interval, the clamp and smoothing, lyrics), the final latents to 1.5e-5 to 1.6e-4 of their norm and the audio to 1e-5 to 2.7e-4, on the CPU, two of them on the card
+  too, with no tolerance widened. MUTANTS mutants caught (`tools/mutate_acestep_flowedit.py`); `tests/test_acestep_flowedit.py` (19) and `tests/test_acestep_flowedit_mutants.py` (4).
+- Cost: a guided DiT's step is four evaluations (two prompts, each with its null condition) times `n_avg`; the turbo's two.
+- Not done: the cover variant (upstream's overlay also runs on a cover's context) and a Music control for it in the dashboard (the API and the CLI have it).
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -818,6 +830,6 @@ Status as of today (the file itself has been brought into line with this):
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
   attachments, presets from the settings, the reasoning switch per model, the key in SecretStorage; the roadmap in its README has them.
-- **ACE-Step**: nothing is open but flow-edit and the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23, the sampler options are built, 2.37, with their dashboard controls, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
+- **ACE-Step**: nothing is open but flow-edit's cover variant and its dashboard control, and the other planner jobs (the 0.6B and 4B planners and the SFT DiT were held to upstream on real weights 2026-11-23 and are catalogue add-ons, the sampler options are built, 2.37, with their dashboard controls, flow-edit is built, 2.38, and the extension's add-on Remove button, 0.16.0). The upstream handler once rewrote files in `ace-step-1.5` (weights untouched).
 - **CI**: never run on GitHub. Turning it on is only worth it if you want Linux and sanitizer coverage.
 - `docs/repo-deep-dive` holds a repository deep-dive that is not in `main`.

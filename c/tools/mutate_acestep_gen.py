@@ -53,7 +53,7 @@ MUTANTS = {
     "mask-not-true": ("ctx[(size_t)f * 2 * A + A + c] = 1.0f;", "ctx[(size_t)f * 2 * A + A + c] = 0.0f;"),
     "source-not-silence": ("memcpy(ctx + (size_t)f * 2 * A, dit_src + (size_t)f * A, (size_t)A * sizeof(float));", "memcpy(ctx + (size_t)f * 2 * A, noise + (size_t)f * A, (size_t)A * sizeof(float));"),
     "lyrics-default": ("rq->lyrics ? rq->lyrics : \"[Instrumental]\"", "rq->lyrics ? rq->lyrics : \"\""),
-    "language-default": ("rq->language && *rq->language ? rq->language : \"unknown\"", "rq->language && *rq->language ? rq->language : \"en\""),
+    "language-default": ("rq->language && *rq->language ? rq->language : \"unknown\"", "rq->language && *rq->language ? rq->language : \"en\"", 2),     # the target's prompt and a flow-edit's source prompt
     "empty-lyrics-replaced": ("rq->lyrics ? rq->lyrics : \"[Instrumental]\"", "rq->lyrics && *rq->lyrics ? rq->lyrics : \"[Instrumental]\""),
     "duration-in-metas": ("cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration);", "cp = act_caption_prompt(instruction, rq->caption, bpm, rq->key, rq->timesig, meta_duration + 1.0);"),
     "bpm-dropped": ("if (rq->bpm > 0) snprintf(bpm, sizeof bpm, \"%d\", rq->bpm);", ""),

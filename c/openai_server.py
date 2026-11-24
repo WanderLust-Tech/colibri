@@ -6553,12 +6553,12 @@ def parse_multipart_edit(content_type, raw):
 
 # POST /v1/audio/music as multipart/form-data: the clips are files named `src_audio` and `reference_audio`, the
 # rest text fields (the JSON body's own names).
-_MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm", "lm_top_k")
+_MUSIC_INT_FIELDS = ("n", "steps", "seed", "bpm", "lm_top_k", "flow_edit_n_avg")
 _MUSIC_FLOAT_FIELDS = ("duration", "shift", "repainting_start", "repainting_end", "repaint_strength",
                        "audio_cover_strength", "cover_noise_strength", "guidance_scale", "cfg_interval_start",
                        "cfg_interval_end", "lm_temperature", "lm_cfg_scale", "lm_top_p", "velocity_norm_threshold",
-                       "velocity_ema_factor")
-_MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg", "thinking", "use_cot_caption", "use_cot_language")
+                       "velocity_ema_factor", "flow_edit_n_min", "flow_edit_n_max")
+_MUSIC_BOOL_FIELDS = ("stream", "dcw", "use_adg", "thinking", "use_cot_caption", "use_cot_language", "flow_edit_morph")
 # Body limits for audio in, from the clip caps: the pair may be 192 MiB, so a multipart body is that and a MiB of
 # fields; the same pair as base64 in a JSON body is 4/3 of it (the reason to send a file, not text, for a long clip).
 MUSIC_MAX_BODY_MULTIPART = music_engine.MAX_CLIPS_BYTES + (1 << 20)
@@ -6768,7 +6768,8 @@ class APIServer(ThreadingHTTPServer):
                                          "temperature": planner["temperature"], "cfg_scale": planner["cfg_scale"], "top_p": planner["top_p"]}
             entry["audio"]["guided"] = {"available": bool(guided["available"]), "default_steps": guided["default_steps"], "max_steps": guided["max_steps"],
                                         "default_guidance": guided["default_guidance"], "tracks": list(guided.get("tracks") or music_engine.TRACK_NAMES)}
-            entry["audio"]["sampler"] = bool(info.get("sampler"))         # Heun, the SDE step, the velocity clamp and smoothing: the engine takes them
+            entry["audio"]["sampler"] = bool(info.get("sampler"))
+            entry["audio"]["flow_edit"] = bool(info.get("flow_edit"))      # an edit of a clip toward a new caption and lyrics (upstream's flow-edit overlay)         # Heun, the SDE step, the velocity clamp and smoothing: the engine takes them
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}
             entry["embedding"] = {key: info.get(key) for key in EMBEDDING_OPTION_KEYS}
@@ -8837,7 +8838,7 @@ class APIHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _music_run(engine, request, **hooks):
         audio = {}
-        if request.get("task", "text2music") != "text2music" or request.get("reference_audio") is not None:
+        if request.get("task", "text2music") != "text2music" or request.get("reference_audio") is not None or request.get("src_audio") is not None:
             audio = {"task": request["task"], "src_audio": request["src_audio"],
                      "ref_audio": request["reference_audio"], "repaint_start": request["repainting_start"],
                      "repaint_end": request["repainting_end"], "repaint_mode": request["repaint_mode"],
@@ -8849,6 +8850,9 @@ class APIHandler(BaseHTTPRequestHandler):
                           "lm_cfg_scale": request.get("lm_cfg_scale"), "lm_top_p": request.get("lm_top_p"),
                           "lm_top_k": request.get("lm_top_k"), "lm_caption": request.get("use_cot_caption"),
                           "lm_language": request.get("use_cot_language")})
+        if request.get("morph"):                                 # flow-edit: the clip (src_audio, above) edited toward the caption and lyrics
+            audio.update({"morph": True, "edit_caption": request.get("edit_caption"), "edit_lyrics": request.get("edit_lyrics"),
+                          "n_min": request.get("n_min"), "n_max": request.get("n_max"), "n_avg": request.get("n_avg")})
         audio.update({"sampler": request.get("sampler_mode"), "infer": request.get("infer_method"),     # the sampler, any DiT
                       "vnorm": request.get("velocity_norm_threshold"), "vema": request.get("velocity_ema_factor")})
         if request.get("guided") or request.get("dit"):         # the base and SFT DiTs: which, and how hard they are guided
@@ -8868,7 +8872,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if wav is None:
             wav = music_engine.encode_wav(result["pcm"], result["sample_rate"], result["channels"])
         keys = ("sample_rate", "channels", "samples", "duration", "seed", "steps", "shift", "frames",
-                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance", "sampler", "lm", "plan_codes", "meta")
+                "truncated", "peak", "caption_tokens", "lyric_tokens", "timings", "task", "src_seconds", "dit", "guidance", "sampler", "flow_edit", "lm", "plan_codes", "meta")
         return {"created": created,
                 "data": [{"b64_json": base64.b64encode(wav).decode("ascii"), "format": "wav"}],
                 "colibri": {**{key: result.get(key) for key in keys},

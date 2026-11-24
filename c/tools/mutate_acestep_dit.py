@@ -88,7 +88,7 @@ MUTANTS = {
     "dcw-high-not-complementary": ("(float)((1.0 - (double)t) * o->dcw_high)", "(float)((double)t * o->dcw_high)"),
     "dcw-second-frame-sign": ("if (x1) x1[c] += low - high;", "if (x1) x1[c] += low + high;"),
     "dcw-odd-tail": ("e1 = x1 ? x1[c] - y1[c] : 0.f;", "e1 = x1 ? x1[c] - y1[c] : e0;"),     # shows only on an odd number of frames
-    "dcw-uses-new-latents": ("for (size_t k = 0; k < N; k++) den[k] = x[k] - v[k] * t;", "for (size_t k = 0; k < N; k++) den[k] = out[k] - v[k] * t;"),
+    "dcw-uses-new-latents": ("for (size_t k = 0; k < N; k++) den[k] = x[k] - vd[k] * t;", "for (size_t k = 0; k < N; k++) den[k] = out[k] - vd[k] * t;"),
 }
 
 

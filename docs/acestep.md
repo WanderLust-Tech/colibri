@@ -380,8 +380,8 @@ gateway or `coli music` refuses the tasks, by name and with the remedy, when the
 momentum of -0.75, cut to a norm of 2.5 along the frames, and only its part orthogonal to the conditional velocity is added, scaled by
 guidance - 1. `use_adg` selects ADG, the angle-based form. `cfg_interval_start` and `cfg_interval_end` limit it to a part of the schedule
 (t from 1 down to 0; outside it the velocity is the conditional one alone). A guidance of 1 or less is off, and then the null branch is not
-evaluated. The schedule is `linspace(1, 0, steps + 1)` bent by `shift`, so its last step goes from t to 0. Not built: flow-edit. Heun, the SDE
-step and the velocity clamp and smoothing (upstream's options, off by default) are built, after the next section.
+evaluated. The schedule is `linspace(1, 0, steps + 1)` bent by `shift`, so its last step goes from t to 0. Heun, the SDE
+step and the velocity clamp and smoothing (upstream's options, off by default) and flow-edit are built, after the next section.
 
 **What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks MODEL_DIR OUT WAVDIR --dit acestep-v15-base` captures 19
 cases from upstream's own handler (CPU, float32): guidance on and off, the interval, ADG, DCW, shift 3, 40 steps, a cover (with and without
@@ -448,6 +448,34 @@ is upstream's own doing**: run again with its input noise scaled by 1 + 1e-6, up
 3 times upstream's own response, and a wrong step is wrong by 1e-1 to 1. The same cases on the card (`COLI_VULKAN=1`) pass as well. `tools/mutate_acestep_sampler.py` breaks the options' lines one at a time (the noise's seed and
 weights, the level it noises to, Heun's predictor, corrector, average and guidance, the clamp's norm and threshold, the smoothing's weights and state): 30 of 30 caught between the turbo cases and the base ones (a mutant only a guided DiT can show needs the base ones; a 31st, Heun taking precedence over the SDE, is equivalent and is not in the list). `tests/test_acestep_sampler.py` (the request rules, the gateway and `coli music`
 against the stub engine) and `tests/test_acestep_sampler_mutants.py` (every mutant's text still occurs) run without a checkpoint.
+
+## Flow-edit: a clip edited toward a new description
+
+Upstream's flow-edit is not a task but an overlay on text to music (`GenerationParams.flow_edit_morph`): given a clip, a description of what the clip *is* and a description of what it should *become*, it moves the clip's
+latents along the difference between what the DiT says about the two, instead of making music from noise. The clip keeps its length, its tempo and a good deal of its character; the new caption and lyrics bend it. This engine has it
+(`acestep --edit CLIP --caption NEW --edit-caption OLD [--edit-lyrics TEXT] [--n-min X] [--n-max X] [--n-avg N]`; `coli music --edit CLIP --edit-caption OLD`; the gateway's `src_audio` with `flow_edit_morph`, `flow_edit_source_caption`,
+`flow_edit_source_lyrics`, `flow_edit_n_min`, `flow_edit_n_max`, `flow_edit_n_avg`; on the serve protocol `morph`, `edit_caption`, `edit_lyrics`, `n_min`, `n_max`, `n_avg`). `READY` says `"flow_edit": true` (`/v1/models` passes it on as
+`audio.flow_edit`, and a gateway whose engine does not say so refuses the request by name, since the engine would read the clip as something else), and the answer's `colibri.flow_edit` says whether the song was one.
+
+How it goes. The clip is encoded to latents `x` (the VAE encoder, as a cover's); the edit `zt` starts as `x`. The conditions are the text to music kind for both prompts: the silence latent as the context, the target's caption and lyrics
+(the request's own) on one side and `edit_caption` and `edit_lyrics` (empty if not given, upstream's default) on the other, the same instruction, tempo, key and language. Over the window of the schedule from `n_min` to `n_max` (0 to 1; the
+steps `int(steps * n_min)` to `int(steps * n_max)`), each step takes `n_avg` draws of: fresh noise `n`, the clip noised to the step's level `zs = (1 - t) x + t n`, the edit laid on it `zg = zt + zs - x`, the DiT asked about `zs` under
+the source prompt and about `zg` under the target prompt (each guided against its own null condition, with its own APG momentum), and the velocities averaged over the draws; then `zt += (t_next - t) (V_target - V_source)`. After the window the
+target alone is denoised from the edit (`zt` laid on the clip noised at that level) to the end. A narrow window edits the clip lightly and leaves the rest to ordinary denoising; `n_avg` above 1 averages the noise out at the price of
+`n_avg` times the evaluations (a guided DiT's step is then four evaluations, the turbo's two). The noise is torch's generator seeded with the request's seed, one draw per average and one for the switch, in order, so a seed repeats.
+
+What it does not take, and why. A flow-edit is Euler on the plain guidance: DCW is not part of it (upstream leaves it out, and so does this, silently, as upstream), and Heun, the SDE step, ADG and the planner are refused by name, where upstream
+ignores them with a log line, so a run never differs from its request unseen. The velocity clamp and smoothing are part of it (per trajectory). The turbo DiT takes it (guidance is baked in), and so do the base and SFT ones. Not built: the cover
+variant (upstream's overlay also runs on a cover's LM-codes context), and a control for it in the dashboard (the API and the CLI have it).
+
+**What is held to upstream's handler, and how.** `tools/acestep_ref_audio.py tasks` captures flow-edit cases from upstream's own handler (`flowedit_generate_audio` through `generate_music`; the recorder takes the overlay's inputs, the source and
+target conditions and its final latents): `s_fe` and `s_fe_window` for the turbo DiT and, with `--dit acestep-v15-base`, `b_fe` (the whole schedule), `b_fe_window` (0.2 to 0.7, so the switch to the target alone), `b_fe_avg` (two draws), `b_fe_nocfg`,
+`b_fe_interval` (a guidance interval at shift 3), `b_fe_vclamp` (the clamp and smoothing over a window) and `b_fe_lyrics` (lyrics on both sides). `acestep --gen-ref` holds each whole generation to it: the two conditions, the clip's latents, the context and the
+final latents agree to 1.5e-5 to 1.6e-4 of their norm (the clip's encoder 2e-5 to 4e-5) and the audio to 1e-5 to 2.7e-4, **inside the same limits as any other guided generation, with nothing widened for it**; the card (`COLI_VULKAN=1`) agrees as well
+(checked on `b_fe_vclamp` and `s_fe_window`). `tools/mutate_acestep_flowedit.py` breaks the loop's lines one at a time (the noise's seed and weights, which prompt goes with which branch, the delta's sign, each branch's momentum and when it moves, the averaging, the
+window's edges, the switch, the clamp, the smoothing, the source prompt): 31 of 31 mutants caught between the turbo cases and the base ones (the guidance, the clamp, the smoothing and the averaging only a guided DiT shows; a 32nd, swapping the two
+null conditions, is equivalent: a null condition is the null embedding repeated, so its length changes nothing, and it is not in the list). `tests/test_acestep_flowedit.py` (the request rules, the gateway, the model card and `coli music --edit` against the stub engine) and
+`tests/test_acestep_flowedit_mutants.py` (every mutant's text still occurs) run without a checkpoint.
 
 ## The DiT on the card
 

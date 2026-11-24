@@ -96,6 +96,9 @@ static void usage(void){
         "  the sampler, any DiT (upstream's options, off by default): [--sampler heun] [--sde] [--vnorm X] [--vema X]\n"
         "              Heun's second-order step (two DiT calls a step), the stochastic step (not with Heun), a cap on a step's velocity as X times the\n"
         "              latents' norm (above 0) and a smoothing of it with the last step's (0 to 1)\n"
+        "  flow-edit (upstream's overlay on text to music): [--edit CLIP --edit-caption TEXT [--edit-lyrics TEXT] [--n-min X] [--n-max X] [--n-avg N]]\n"
+        "              edits CLIP toward --caption and --lyrics, taking --edit-caption and --edit-lyrics as what the clip is; the edit runs over the window\n"
+        "              n-min to n-max (0 to 1, default 0 to 1) of the schedule, n-avg draws averaged a step. Euler only; the clip's length is the song's\n"
         "  DIR     the ACE-Step checkpoint (holds acestep-v15-turbo/ and vae/, and maybe acestep-v15-base/ and -sft/)\n"
         "  REFDIR  one case captured by tools/acestep_ref.py (REFDIR/ref.safetensors)\n");
 }
@@ -1099,6 +1102,8 @@ static void gen_tap(void *ud, const char *name, const float *x, size_t n){
         { "noise", "noise", 0 },
         { "timbre", "in.refer_audio_acoustic_hidden_states_packed", 1 },
         { "src_latents", "in.src_latents", 1 },
+        { "ctx_src_latents", "in.ctx_src_latents", 4 },
+        { "edit_src_hidden", "fe.src.hidden", 3 },
         { "clean_src_latents", "in.clean_src_latents", 1 },
         { "context", "context", 1 },
         { "encoder_hidden", "encoder.hidden", 3 },
@@ -1161,7 +1166,8 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     char src_path[4300], ref_path[4300], tracks_buf[512] = "";
     snprintf(src_path, sizeof src_path, "%s/src.wav", refdir); snprintf(ref_path, sizeof ref_path, "%s/ref.wav", refdir);
     { FILE *t = fopen(ref_path, "rb"); if (t) { fclose(t); rq.ref_path = ref_path; } }
-    if (rq.task != ACG_TASK_TEXT2MUSIC) { FILE *t = fopen(src_path, "rb"); if (t) { fclose(t); rq.src_path = src_path; } }      /* a complete may have none */
+    if (rq.task != ACG_TASK_TEXT2MUSIC || (json_get(p, "flow_edit_morph") && json_get(p, "flow_edit_morph")->t == J_BOOL && json_get(p, "flow_edit_morph")->boolean)) {
+        FILE *t = fopen(src_path, "rb"); if (t) { fclose(t); rq.src_path = src_path; } }      /* a complete may have none; a flow-edit is text to music on a clip */
     /* the base DiT: guidance and the tracks (the capture keeps the caller's `_track` and `_classes` in its parameters) */
     jval *gs = json_get(p, "guidance_scale"); rq.guidance = gs && gs->t == J_NUM ? gs->num : 0;
     { const char *cn = root ? json_str(root, "case") : NULL; size_t cl = cn ? strlen(cn) : 0;
@@ -1171,6 +1177,11 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     { jval *ad = json_get(p, "use_adg"); rq.adg = ad && ad->t == J_BOOL && ad->boolean; }
     { const char *sm = json_str(p, "sampler_mode"), *im = json_str(p, "infer_method"); rq.heun = sm && !strcmp(sm, "heun"); rq.sde = im && !strcmp(im, "sde"); }
     rq.vnorm = acd_json_num(p, "velocity_norm_threshold", 0); rq.vema = acd_json_num(p, "velocity_ema_factor", 0);
+    { jval *fm = json_get(p, "flow_edit_morph"); rq.morph = fm && fm->t == J_BOOL && fm->boolean; }
+    if (rq.morph) {
+        rq.edit_caption = json_str(p, "flow_edit_source_caption"); rq.edit_lyrics = json_str(p, "flow_edit_source_lyrics");
+        rq.edit_nmin = acd_json_num(p, "flow_edit_n_min", 0.0); rq.edit_nmax = acd_json_num(p, "flow_edit_n_max", 1.0); rq.edit_navg = acd_json_int(p, "flow_edit_n_avg", 1);
+    }
     rq.track = json_str(p, "_track");
     { jval *cl = json_get(p, "_classes");
       if (cl && cl->t == J_ARR) for (int k = 0; k < cl->len; k++) if (cl->kids[k]->t == J_STR) { size_t m = strlen(tracks_buf); snprintf(tracks_buf + m, sizeof tracks_buf - m, "%s%s", m ? "," : "", cl->kids[k]->str); }
@@ -1258,9 +1269,10 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
          * it must return is the shorter of the two, and that prefix of each channel is what is compared. For audio in, the
          * length asked is the source's (with a repaint's silence added). */
         const int64_t per = aud && ach > 0 && n % ach == 0 ? n / ach : -1;
-        const int ask = audio_in && (rq.task != ACG_TASK_TEXT2MUSIC || rq.ncodes > 0) ? (int)((int64_t)info.frames * ACG_HOP) : want_samples;
+        const int clip_len = rq.task != ACG_TASK_TEXT2MUSIC || rq.ncodes > 0 || rq.morph;         /* the song's length is the clip's or the codes' */
+        const int ask = audio_in && clip_len ? (int)((int64_t)info.frames * ACG_HOP) : want_samples;
         const int64_t expect = per < 0 ? -1 : per < ask ? per : ask;
-        if (aud && per > 0 && (info.samples == expect || ((rq.task != ACG_TASK_TEXT2MUSIC || rq.ncodes > 0) && info.samples <= per))) {
+        if (aud && per > 0 && (info.samples == expect || (clip_len && info.samples <= per))) {
             const int64_t cmpn = info.samples < per ? info.samples : per;
             float *pl = planar(pcm, (size_t)info.samples, ach), *want = (float *)malloc((size_t)cmpn * ach * sizeof(float)), *got = (float *)malloc((size_t)cmpn * ach * sizeof(float));
             if (!want || !got) { fprintf(stderr, "out of memory\n"); exit(1); }
@@ -1872,6 +1884,12 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--extract") && v) { rq.task = ACG_TASK_EXTRACT; rq.src_path = v; make = 1; i++; }
         else if (!strcmp(a, "--lego") && v) { rq.task = ACG_TASK_LEGO; rq.src_path = v; make = 1; i++; }
         else if (!strcmp(a, "--complete")) { rq.task = ACG_TASK_COMPLETE; make = 1; if (v && v[0] != '-') { rq.src_path = v; i++; } }
+        else if (!strcmp(a, "--edit") && v) { rq.morph = 1; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--edit-caption") && v) { rq.edit_caption = v; i++; }
+        else if (!strcmp(a, "--edit-lyrics") && v) { rq.edit_lyrics = v; i++; }
+        else if (!strcmp(a, "--n-min") && v) { rq.edit_nmin = atof(v); i++; }
+        else if (!strcmp(a, "--n-max") && v) { rq.edit_nmax = atof(v); i++; }
+        else if (!strcmp(a, "--n-avg") && v) { rq.edit_navg = atoi(v); i++; }
         else if (!strcmp(a, "--track") && v) { rq.track = v; i++; }
         else if (!strcmp(a, "--tracks") && v) { rq.tracks = v; i++; }
         else if (!strcmp(a, "--dit") && v) {

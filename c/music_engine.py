@@ -280,7 +280,8 @@ class MusicEngine:
                  repaint_strength=None, cover_strength=None, cover_noise=None, dit=None, guidance=None,
                  cfg_start=None, cfg_end=None, adg=None, track=None, tracks=None, plan=None, lm=None,
                  lm_temperature=None, lm_cfg_scale=None, lm_top_p=None, lm_top_k=None, lm_caption=None, lm_language=None,
-                 sampler=None, infer=None, vnorm=None, vema=None):
+                 sampler=None, infer=None, vnorm=None, vema=None,
+                 morph=None, edit_caption=None, edit_lyrics=None, n_min=None, n_max=None, n_avg=None):
         """Run one GEN to its final frame and return the audio.
 
         Fields left as None are left out of the request, so the engine's own defaults apply (no lyrics
@@ -309,6 +310,11 @@ class MusicEngine:
         latents) and `vema` (0 to 1: the share of the last step's velocity mixed into this one), upstream's `sampler_mode`, `infer_method`,
         `velocity_norm_threshold` and `velocity_ema_factor`.
 
+        Flow-edit (upstream's overlay on text to music; needs `src_audio`, the clip to edit, and an engine that announces `flow_edit`): `morph`
+        edits the clip toward `caption` and `lyrics`, taking `edit_caption` and `edit_lyrics` as what the clip is; `n_min` and `n_max` (0 to 1,
+        the default is 0 to 1) are the window of the schedule that is edited, and `n_avg` (1 to 16) the draws averaged a step. Euler only; the clip's
+        length is the song's.
+
         The planner: `plan` makes the 5 Hz language model write the song's structure (audio codes) first, and the DiT follow it. Of `bpm`,
         `key`, `time_signature` and `duration` the model writes what is not given (a first phase: the metadata and a rewritten caption, a
         `meta` stage, answered in `meta`), unless all four are given, which skips it; no `duration` lets the model pick 10 to 600 seconds
@@ -323,9 +329,12 @@ class MusicEngine:
                             ("tracks", tracks), ("plan", plan), ("lm", lm), ("lm_temperature", lm_temperature),
                             ("lm_cfg_scale", lm_cfg_scale), ("lm_top_p", lm_top_p), ("lm_top_k", lm_top_k),
                             ("lm_caption", lm_caption), ("lm_language", lm_language), ("sampler", sampler), ("infer", infer),
-                            ("vnorm", vnorm), ("vema", vema)):
+                            ("vnorm", vnorm), ("vema", vema), ("morph", morph), ("edit_caption", edit_caption),
+                            ("edit_lyrics", edit_lyrics), ("n_min", n_min), ("n_max", n_max), ("n_avg", n_avg)):
             if value is not None:
                 request[name] = value
+        if morph and not (self.info or {}).get("flow_edit"):
+            raise MusicEngineError("this music engine does not do flow-edit: update the engine")
         audio_in = (task not in (None, "text2music") or src_audio is not None or ref_audio is not None)
         if audio_in and "cover" not in self.tasks:
             raise MusicEngineError("this music engine does not take audio in (it announced no tasks): "
@@ -694,9 +703,20 @@ def _audio_request(body, info):
     if task in GUIDED_TASKS and task not in ((info or {}).get("tasks") or ()):
         raise MusicRequestError(f"This music engine does not do `{task}`: it needs a checkpoint with the base or SFT "
                                 "DiT (acestep-v15-base), and this one has only the turbo DiT.", "task")
+    morph = body.get("flow_edit_morph")
+    if morph is not None and not isinstance(morph, bool):
+        raise MusicRequestError("`flow_edit_morph` must be true or false.", "flow_edit_morph")
+    morph = bool(morph)
+    if morph:
+        if task != "text2music":
+            raise MusicRequestError("`flow_edit_morph` is an overlay on text to music: leave `task` out (or text2music).", "flow_edit_morph")
+        if not (info or {}).get("flow_edit"):
+            raise MusicRequestError("`flow_edit_morph`: this music engine does not do flow-edit; update the engine.", "flow_edit_morph")
+        if "src_audio" not in clips:
+            raise MusicRequestError("`flow_edit_morph` needs `src_audio`: the clip to edit.", "src_audio")
     if task == "text2music":
-        if "src_audio" in clips:
-            raise MusicRequestError("`src_audio` is for a cover, a repaint, an extract, a lego or a complete; for text to "
+        if "src_audio" in clips and not morph:
+            raise MusicRequestError("`src_audio` is for a cover, a repaint, an extract, a lego or a complete (or a flow-edit, `flow_edit_morph`); for text to "
                                     "music, give a reference clip (`reference_audio`) to take its style.", "src_audio")
         for name in given:
             raise MusicRequestError(f"`{name}` is for a {'cover' if 'cover' in name else 'repaint'}: set `task`.", name)
@@ -710,7 +730,7 @@ def _audio_request(body, info):
     for name in repaint_only:
         if task not in ("repaint", "lego") and body.get(name) is not None and task != "text2music":
             raise MusicRequestError(f"`{name}` is for a repaint or a lego; this is a {task}.", name)
-    out = {"task": task, "src_audio": None, "reference_audio": None, "repainting_start": None, "repainting_end": None,
+    out = {"morph": morph, "task": task, "src_audio": None, "reference_audio": None, "repainting_start": None, "repainting_end": None,
            "repaint_mode": None, "repaint_strength": None, "audio_cover_strength": None, "cover_noise_strength": None,
            "track_name": None, "complete_track_classes": None}
     total = 0
@@ -860,6 +880,43 @@ def music_request(body, info=None):
         sampler[name] = None if value is None else float(value)
     if sampler["sampler_mode"] == "heun" and sampler["infer_method"] == "sde":
         raise MusicRequestError("`sampler_mode` \"heun\" does not go with `infer_method` \"sde\" (upstream falls back to Euler): pick one.", "sampler_mode")
+    edit = {"edit_caption": None, "edit_lyrics": None, "n_min": None, "n_max": None, "n_avg": None}
+    for field, key in (("flow_edit_source_caption", "edit_caption"), ("flow_edit_source_lyrics", "edit_lyrics")):
+        value = body.get(field)
+        if value is not None:
+            if not isinstance(value, str):
+                raise MusicRequestError(f"`{field}` must be a string.", field)
+            if not audio["morph"]:
+                raise MusicRequestError(f"`{field}` is for a flow-edit (set `flow_edit_morph`).", field)
+            if len(value.encode("utf-8", "surrogatepass")) > int(info["max_lyric_bytes" if key == "edit_lyrics" else "max_caption_bytes"]):
+                raise MusicRequestError(f"`{field}` is too long.", field)
+        edit[key] = value
+    for field, key in (("flow_edit_n_min", "n_min"), ("flow_edit_n_max", "n_max")):
+        value = body.get(field)
+        if value is not None:
+            if not _number(value) or not 0 <= value <= 1:
+                raise MusicRequestError(f"`{field}` must be a number between 0 and 1.", field)
+            if not audio["morph"]:
+                raise MusicRequestError(f"`{field}` is for a flow-edit (set `flow_edit_morph`).", field)
+        edit[key] = None if value is None else float(value)
+    if edit["n_min"] is not None and edit["n_max"] is not None and edit["n_max"] < edit["n_min"]:
+        raise MusicRequestError("`flow_edit_n_max` must not be before `flow_edit_n_min`.", "flow_edit_n_max")
+    if edit["n_max"] == 0:
+        raise MusicRequestError("`flow_edit_n_max` must be above 0 (an edit window that ends where it starts edits nothing).", "flow_edit_n_max")
+    value = body.get("flow_edit_n_avg")
+    if value is not None:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 16:
+            raise MusicRequestError("`flow_edit_n_avg` must be a whole number from 1 to 16.", "flow_edit_n_avg")
+        if not audio["morph"]:
+            raise MusicRequestError("`flow_edit_n_avg` is for a flow-edit (set `flow_edit_morph`).", "flow_edit_n_avg")
+        edit["n_avg"] = value
+    if audio["morph"]:
+        if sampler["sampler_mode"] == "heun" or sampler["infer_method"] == "sde":
+            raise MusicRequestError("A flow-edit takes the plain Euler step: leave `sampler_mode` heun and `infer_method` sde out.", "sampler_mode")
+        if body.get("thinking"):
+            raise MusicRequestError("`thinking` (the planner) is not for a flow-edit: it edits a clip.", "thinking")
+        if body.get("use_adg"):
+            raise MusicRequestError("`use_adg` is not for a flow-edit: it takes the plain guidance.", "use_adg")
     thinking = body.get("thinking")
     planner = planner_info(info)
     lm_options = {"lm_model": None, "lm_temperature": None, "lm_cfg_scale": None, "lm_top_p": None, "lm_top_k": None,
@@ -913,7 +970,7 @@ def music_request(body, info=None):
     duration = body.get("duration")
     planner_picks = bool(thinking) and duration is None                 # no duration with the planner: the model chooses the length
     duration = info["default_duration"] if duration is None else duration
-    if audio["task"] not in ("text2music", "complete") or (audio["task"] == "complete" and audio["src_audio"] is not None):
+    if audio["task"] not in ("text2music", "complete") or (audio["task"] == "complete" and audio["src_audio"] is not None) or audio["morph"]:
         duration = None                       # the clip's own length is the song's
     elif planner_picks:
         duration = 0
@@ -957,7 +1014,7 @@ def music_request(body, info=None):
             "time_signature": signature or None, "dcw": (None if guided else True) if dcw is None else dcw,
             "response_format": response_format, "dit": dit, "guided": guided,
             "guidance_scale": None if guidance is None else float(guidance), **cfg, "use_adg": adg,
-            **sampler, "thinking": bool(thinking), **lm_options, **audio}
+            **sampler, **edit, "thinking": bool(thinking), **lm_options, **audio}
 
 
 # ---------------------------------------------------------------- WAV

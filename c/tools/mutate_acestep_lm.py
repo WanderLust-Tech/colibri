@@ -62,8 +62,8 @@ MUTANTS = {
     "fsq-level-scale": ("acestep_tok.h", "c[(size_t)w * n + i] = (2.f / (float)(L - 1)) * (float)(idx % L) - 1.f;", "c[(size_t)w * n + i] = (2.f / (float)L) * (float)(idx % L) - 1.f;"),
     "hints-padded-with-zeros": ("acestep_tok.h", "for (int f = keep; f < T; f++) memcpy(hints + (size_t)f * A, silence + (size_t)(f - keep) * A, (size_t)A * sizeof(float));", "for (int f = keep; f < T; f++) memset(hints + (size_t)f * A, 0, (size_t)A * sizeof(float));"),
     "codes-frames-per-code": ("acestep_gen.h", "#define ACG_CODE_FRAMES 5 ", "#define ACG_CODE_FRAMES 4 "),
-    "codes-song-keeps-the-text-to-music-instruction": ("acestep_gen.h", "const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;\n    const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;",
-                                                       "const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;\n    const int A = d->acdim, task = rq->task;"),
+    "codes-song-keeps-the-text-to-music-instruction": ("acestep_gen.h", "const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;",
+                                                       "const int A = d->acdim, task = rq->task;"),
     "codes-hints-not-the-cover-noise-start": ("acestep_gen.h", "memcpy(lat, hints, (size_t)T * A * sizeof(float));", ""),
 }
 

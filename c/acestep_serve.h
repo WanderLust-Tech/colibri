@@ -231,6 +231,15 @@ static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, s
     if (acs_number(j, "vnorm", &rq->vnorm, err, errn) < 0) return -1;
     if (acs_number(j, "vema", &rq->vema, err, errn) < 0) return -1;
     if (acs_string(j, "src_path", &rq->src_path, err, errn) < 0) return -1;
+    /* flow-edit: edit the clip src_path toward caption and lyrics, taking edit_caption and edit_lyrics as what it is */
+    { jval *m = json_get(j, "morph"); if (m && m->t != J_NULL) { if (m->t != J_BOOL) { snprintf(err, errn, "morph must be true or false"); return -1; } rq->morph = m->boolean; } }
+    if (acs_string(j, "edit_caption", &rq->edit_caption, err, errn) < 0) return -1;
+    if (acs_string(j, "edit_lyrics", &rq->edit_lyrics, err, errn) < 0) return -1;
+    if (acs_number(j, "n_min", &rq->edit_nmin, err, errn) < 0) return -1;
+    if (acs_number(j, "n_max", &rq->edit_nmax, err, errn) < 0) return -1;
+    { double nv = 0; const int got = acs_number(j, "n_avg", &nv, err, errn);
+      if (got < 0) return -1;
+      if (got) { if (nv != floor(nv) || nv < 1 || nv > 16) { snprintf(err, errn, "n_avg must be a whole number from 1 to 16"); return -1; } rq->edit_navg = (int)nv; } }
     if (acs_string(j, "ref_path", &rq->ref_path, err, errn) < 0) return -1;
     if (acs_number(j, "repaint_start", &rq->repaint_start, err, errn) < 0) return -1;
     if (acs_number(j, "repaint_end", &rq->repaint_end, err, errn) < 0) return -1;
@@ -284,7 +293,7 @@ static int acs_serve(AceEngine *e){
     printf("READY {\"model\":\"%s\",\"sample_rate\":%d,\"channels\":%d,\"format\":\"s16le\",\"default_duration\":%g,\"min_duration\":%g,"
            "\"max_duration\":%g,\"default_steps\":%d,\"max_steps\":%d,\"default_shift\":%g,\"max_caption_bytes\":%d,\"max_lyric_bytes\":%d,"
            "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"%s],"
-           "\"dits\":[%s%s%s%s%s],\"planner\":%s,\"sampler\":true,"
+           "\"dits\":[%s%s%s%s%s],\"planner\":%s,\"sampler\":true,\"flow_edit\":true,"
            "\"guided\":{\"available\":%s,\"default_steps\":32,\"max_steps\":%d,\"default_guidance\":7,\"tracks\":[\"woodwinds\",\"brass\",\"fx\",\"synth\",\"strings\","
            "\"percussion\",\"keyboard\",\"guitar\",\"bass\",\"drums\",\"backing_vocals\",\"vocals\"]},"
            "\"audio_in\":{\"formats\":[\"wav\",\"mp3\"],\"max_seconds\":%g,\"ref_seconds\":%d}}\n",
@@ -323,13 +332,13 @@ static int acs_serve(AceEngine *e){
                 printf("AUDIO {\"id\":\""); acs_escape(id);
                 printf("\",\"sample_rate\":%d,\"channels\":%d,\"samples\":%d,\"bytes\":%zu,\"seed\":%llu,\"steps\":%d,\"shift\":%g,\"duration\":%.3f,"
                        "\"frames\":%d,\"caption_tokens\":%d,\"lyric_tokens\":%d,\"truncated\":%s,\"peak\":%.4f,"
-                       "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,\"sampler\":\"%s\",\"lm\":\"%s\",\"plan_codes\":%d,"
+                       "\"task\":\"%s\",\"src_seconds\":%.3f,\"dit\":\"%s\",\"guidance\":%g,\"sampler\":\"%s\",\"flow_edit\":%s,\"lm\":\"%s\",\"plan_codes\":%d,"
                        "\"timings\":{\"plan\":%.2f,\"encode\":%.2f,\"text\":%.2f,\"condition\":%.2f,\"denoise\":%.2f,\"decode\":%.2f}",
                        e->vae->rate, e->vae->ach, info.samples, bytes, (unsigned long long)rq.seed, rq.steps, rq.shift,
                        (double)info.samples / e->vae->rate, info.frames, info.caption_tokens, info.lyric_tokens,
                        info.caption_cut || info.lyric_cut ? "true" : "false", info.peak,
                        (const char *const[]){ "text2music", "cover", "repaint", "extract", "lego", "complete" }[rq.task], info.src_seconds, info.dit, info.guidance,
-                       rq.sde ? "sde" : rq.heun ? "heun" : "euler", info.lm, info.plan_codes,
+                       rq.sde ? "sde" : rq.heun ? "heun" : "euler", info.morph ? "true" : "false", info.lm, info.plan_codes,
                        info.t_plan, info.t_encode, info.t_text, info.t_cond, info.t_denoise, info.t_decode);
                 if (info.meta_run) {                                  /* what the planner's first phase wrote */
                     printf(",\"meta\":{\"bpm\":%d,\"duration\":%g,\"keyscale\":\"", info.meta_bpm, info.meta_duration); acs_escape(info.meta_key);
