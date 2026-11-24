@@ -177,6 +177,60 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   the extension changing the start of the prompt, fixed in 0.4.1); a per-model reasoning switch is not needed (the gateway turns `reasoning_effort` into each
   model's own switch). What is left is the extension's own list: showing the reused tokens (H6), an editable diff, a preview for `run_command`.
 
+## I. Ideas of 2026-11-25 (listed, not started)
+
+Collected in one go; what each rests on is stated, so the next look does not start from nothing. Sizes as above.
+
+**Already known, now in one list**
+
+- [ ] **I1. The chain for prompt chunks and for several conversations (M-L).** Gemma 4's decode chain (2.19, [gemma4.md](gemma4.md)) is one
+  submission a token for one conversation. A prompt chunk (64 rows at a time) and a batch of conversations still go through the per-matrix
+  path, which is why a 26B prompt and a batch are slower than a single token's chain. Listed as "Not done" in fork-changes 2.19.
+- [ ] **I2. Gemma gives the card back instead of being stopped (M).** `Pool.demote` exists for the `qwen36` engines only; a Gemma holding the
+  card is stopped, and the 26B holds 15 GiB of it now. Needs a `DEMOTE` in the Gemma engine's own tier. Named in fork-changes 3.4 ("demoting
+  engines other than `qwen36`"). It touches the card code the Gemma 26B shares with other engines (`vk_tier.c`), which is the same care as I-set-aside
+  below: the user declined work there once, so settle that first.
+- [ ] **I3. Gemma's chain and tier on an integrated GPU (S, a measurement).** Both are off by default there because they were never measured on a card
+  that shares the CPU's RAM ([gemma4.md](gemma4.md), the chain and the tier). Needs a machine with one; the question is whether either wins.
+- [ ] **I4. Qwen-Image at 1024 x 1024 (S, a check).** Quality and time at that size, and a real edit at the 1024 reference (fork-changes 3.4; the
+  chain with an edit prefix was checked on the card 2026-11-21, 2.29).
+
+**New**
+
+- [ ] **I5. The VS Code extension works on what is open in the editor (M).** Today the model's file tools read and write files on disk and the
+  extension attaches the selection; it cannot see which files are open in tabs, what is unsaved, or the Problems list, and its edits go to disk
+  rather than through the editor (no undo step, an unsaved buffer is bypassed). A set of tools: list the open editors (with a dirty flag), read a
+  buffer (unsaved text, the selection, a range), edit a buffer with a `WorkspaceEdit` (one undo step, through the approval and editable diff that
+  `write_file` already has), read the diagnostics (errors and warnings of a file), open a file at a line. Open questions: what to do when a buffer
+  is dirty and the model edits the file on disk, and whether an edit to a file that is not open should open it.
+- [ ] **I6. Music: mixes (M, to be pinned down).** Two readings: a transition between two songs, or a remix. The first fits what the engine does
+  today: join the tail of clip A and the head of clip B with a gap and repaint the seam with a prompt (the repaint task, 2.33), a cheap thing to try
+  before building anything; the second is stems recombined (see I7). Ask which is meant before choosing.
+- [ ] **I7. Music: vocals out of a song (M-L).** Three routes. (a) The extract task pulls a named track (`vocals`, `drums` ...) out of a clip
+  ([acestep.md](acestep.md), tasks table), but it regenerates the stem with the DiT, so it is not the original sound and subtracting it from the mix
+  does not give a clean instrumental. (b) A cover at low strength with an instrumental caption keeps the tune and drops the voice (no new code; try
+  it). (c) A proper stem separator (an HT-Demucs or MDX-style model, tens of MB) as a new engine like the ASR and TTS ports: exact stems from the
+  original audio, which is what "strip the vocals" and any later remix need. (c) is the real answer and the larger job.
+- [ ] **I8. Video understanding (S to measure, L to extend).** Gemma 4 already takes video (frames and, on the E models, the soundtrack, through
+  `video_url`; fork-changes 2.14, G5), so a video question works today. The Kimi K3 engine in this fork (`c/kimi_k3.c`) is text-only and nothing in
+  the repository says the model takes pictures or video; check the model card before planning a vision tower port (L). If what is wanted is
+  "a better video model than Gemma 4", name it and see whether its weights and architecture are a port worth making.
+- [ ] **I9. The tray as a real program, not a Python script (M).** `coli tray` is `c/tray.py` (ctypes over the Win32 API, run with `pythonw`,
+  started at sign-in by a Run key; 2.13). A native `colibri-tray.exe` (a small C program over the same Win32 calls, or the script frozen) would
+  need no Python on the path to show the icon and start the router, give the process a proper name and icon in Task Manager, and could go in an
+  installer. The router and `coli` stay Python, so the tray would start them the way it does now.
+- [ ] **I10. Colibri as an MCP client: the models use MCP tools from the CLI, the dashboard and the extension (L).** `coli mcp` is the other
+  direction (Colibri as an MCP server for an assistant, [MCP_SERVER.md](MCP_SERVER.md)). The extension has its own MCP client and its own server
+  list. The idea: one list of MCP servers kept by the router (a file in the setup folder, `coli mcp add`), tools offered to a chat request and run
+  by the router in a loop (`coli chat --mcp`, a Tools switch and approval cards in the dashboard chat), with the extension able to use the same list.
+  The weight is in the agent loop in the gateway (one generation at a time per model, approvals from three clients, a tool result going back into
+  the next request), in where an MCP server's process runs and with what rights (they run local commands), and in what happens to the
+  extension's own servers. Settle who owns the loop and the approvals before building.
+- [ ] **I11. Choose where a model is installed (S-M).** `coli model install` (and the dashboard and the extension's installer) put the model in the
+  first models folder with enough free disk (`Installer.install_root`); there is no way to say which. A `--dest FOLDER` (a folder already scanned by
+  the catalog, or one to add), a list of the folders with their free space in the dashboard and the extension's menu, and `root` in the install
+  request; the model must end up in a folder the router scans, or be added to them.
+
 ## F. Considered and set aside
 
 - [-] **Streaming the denoising transformer from disk.** It runs every layer on every one of 8-35
@@ -185,6 +239,10 @@ Gemma 4 itself (26B-A4B, 31B, E4B, E2B, pictures, audio, batched decode) is buil
   a large separate project.
 - [-] **AirLLM's layer-by-layer loading for mixture-of-experts models.** Colibri's expert-level
   streaming reads far less per token.
+
+- [-] **Gemma 4's router on the card (declined 2026-11-23).** Moving the 26B's router onto the card would cut a share of the remaining
+  per-layer round trips (a part of the 25 ms, not all of it) but needs changes in `vk_tier.c`, which other models share; judged too risky for one
+  family. Do not start it again without a new reason.
 
 ## Suggested order
 
