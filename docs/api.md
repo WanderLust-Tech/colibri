@@ -613,6 +613,32 @@ behavior.
 > its system prompt and tool catalog are large, and on a disk-streaming CPU path
 > that is a long silent wait before the first token. Read it before you connect.
 
+## Responses API (`POST /v1/responses`, `coli router` only)
+
+Codex speaks only the OpenAI **Responses** API. `coli router` serves `POST /v1/responses` by translating the request into a chat request, sending
+it to its own `/v1/chat/completions` (so it is routed, loaded, queued and logged like any chat request, and the router's key and `X-Colibri-Tags` apply)
+and translating the chat stream back into Responses events. The translator is `c/responses_shim.py`, from upstream colibri (JustVugg/colibri,
+`ui/responses_shim.py`), with one change: an HTTP/1.1 handler gets the stream in chunks, the router (HTTP/1.0) gets it as the raw body of a response
+that ends when the connection closes.
+
+- **Supported**: text input and output (`input` as a string or as items, `instructions`), streaming (`stream: true`: `response.created`,
+  `response.output_text.delta`, ..., `response.completed`) and not, reasoning (the effort and the structured-output settings are forwarded; a
+  reasoning summary comes back as a reasoning item), function calls (`tools`, `tool_choice` including a named tool; `function_call` and
+  `function_call_output` items), Codex's freeform tools (`type: "custom"`, the `apply_patch` grammar), which go to the model as a function of one
+  string argument, `input`, and come back as `custom_tool_call` items, `usage`, `incomplete` when the generation was cut by the length limit.
+- **Left out**: hosted tools (web search, image generation); reasoning items Codex sends back are dropped (a chat history has no place for them).
+- **Errors**: a body that is not a Responses request is a 400; what the chat endpoint answers (an unknown model, a wrong key, a full queue) is passed
+  on with its status; an upstream stream that ends before it finishes ends the response with an error event.
+- **A client that goes away** cancels the chat request behind it, which stops the engine.
+- A single `coli serve` gateway does not serve it (`coli launch codex` says so).
+
+```sh
+curl http://127.0.0.1:8000/v1/responses -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+     -d '{"model": "qwen3-coder-30b-colibri", "input": "Say hello.", "stream": false}'
+```
+
+`coli launch codex` starts Codex pointed at it ([launch.md](launch.md)).
+
 ## Text to speech (`/v1/audio/speech`)
 
 When the served model is a **Qwen3-TTS** (`qwen3-tts-0.6b`), `POST /v1/audio/speech` speaks a text in a named speaker's voice, in OpenAI's shape:

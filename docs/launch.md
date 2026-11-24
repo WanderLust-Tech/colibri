@@ -26,6 +26,7 @@ works, and the router loads it when the first request arrives.
 |---|---|---|
 | `claude` (Claude Code) | `POST /v1/messages` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (the server's key; a placeholder when it has none), and the model for every tier (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_`, `_HAIKU_`, `CLAUDE_CODE_SUBAGENT_MODEL`) |
 | `opencode` | `POST /v1/chat/completions` | the whole configuration in `OPENCODE_CONFIG_CONTENT`: one provider, `colibri`, listing every chat model the server has |
+| `codex` (Codex) | `POST /v1/responses` | a provider on its command line: `-c model_provider=colibri -c model_providers.colibri={name="colibri",base_url="http://HOST:PORT/v1",env_key="COLIBRI_API_KEY",wire_api="responses"} -m MODEL`, and the server's key (a placeholder when it has none) in `COLIBRI_API_KEY`. Its own `~/.codex/config.toml` is not touched. Needs `coli router`: a single `coli serve` gateway has no Responses API (`coli launch codex` says so) |
 
 For Claude Code it also sets three things you would otherwise find out the hard way:
 
@@ -39,7 +40,6 @@ For Claude Code it also sets three things you would otherwise find out the hard 
 
 ## Not supported
 
-- **Codex** speaks the Responses API (`POST /v1/responses`), which colibri does not serve.
 - **Zed, Cline, VS Code** keep their server in a settings file you own. Launching them would mean editing that file, and
   `coli launch` edits nothing. Their settings take a base URL (`http://HOST:PORT/v1`), a key and a model name, all from
   `GET /v1/models`.
@@ -51,5 +51,7 @@ to read; later turns reuse the cache (`--kv-slots` above 1 keeps several convers
 [api.md](api.md#isolated-kv-contexts)). Claude Code assumes a 200,000-token window; give the server a context it can
 serve (`CTX`), and use a model that does tool calls (`qwen3-coder-30b` is the one built for it).
 
-The design follows Ollama's `ollama launch`. Both tools were checked against their documented settings and against this
-server's endpoints with a stand-in program; neither was run for real on the machine this was written on.
+The design follows Ollama's `ollama launch`. The tools were checked against their documented settings and against this
+server's endpoints with a stand-in program; none was run for real on the machine this was written on (Codex's Responses API route is also
+tested against the router with fake workers, `c/tests/test_router_responses.py`; the Codex command line is from upstream colibri's launcher and
+has not been run against a Codex install here).

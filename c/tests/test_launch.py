@@ -27,7 +27,7 @@ if base:
         status = urllib.request.urlopen(req, timeout=10).status
     except Exception as error:
         status = getattr(error, "code", str(error))
-seen = {k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "ENABLE_CLAUDEAI", "OPENCODE_"))}
+seen = {k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "ENABLE_CLAUDEAI", "OPENCODE_", "COLIBRI_"))}
 with open(os.environ["FAKE_TOOL_OUT"], "w") as handle:
     json.dump({"args": sys.argv[1:], "env": seen, "models_status": status}, handle)
 sys.exit(int(os.environ.get("FAKE_TOOL_EXIT", "0")))
@@ -44,7 +44,7 @@ class FakeTools:
         self.out = os.path.join(self.dir, "seen.json")
         script = os.path.join(self.dir, "fake_tool.py")
         Path(script).write_text(FAKE_TOOL, encoding="utf-8")
-        for name in ("claude", "opencode"):
+        for name in ("claude", "opencode", "codex"):
             if os.name == "nt":
                 Path(self.dir, name + ".bat").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
             else:
@@ -101,8 +101,14 @@ class EnvironmentTest(unittest.TestCase):
         self.assertEqual(list(env), ["OPENCODE_CONFIG_CONTENT"])
         env, args = launch.plan("opencode", "http://h:1", "m", ["m"], None, ["run", "fix it"])
         self.assertEqual(args, ["run", "fix it"])           # the config's own `model` applies; the user's words are not mixed with ours
+        env, args = launch.plan("codex", "http://h:1", "m", ["m"], None, ["exec", "fix it"])
+        self.assertEqual(env, {"COLIBRI_API_KEY": "colibri"}, "the placeholder key when the server has none")
+        self.assertEqual(args, ["-c", "model_provider=colibri", "-c",
+                                'model_providers.colibri={name="colibri",base_url="http://h:1/v1",env_key="COLIBRI_API_KEY",wire_api="responses"}',
+                                "-m", "m", "exec", "fix it"])
+        self.assertEqual(launch.plan("codex", "http://h:1", "m", ["m"], "secret")[0], {"COLIBRI_API_KEY": "secret"})
         with self.assertRaises(KeyError):
-            launch.plan("codex", "http://h:1", "m", ["m"], None)
+            launch.plan("nope", "http://h:1", "m", ["m"], None)
 
 
 class ModelChoiceTest(unittest.TestCase):
@@ -177,6 +183,56 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(config["provider"]["colibri"]["options"]["baseURL"], f"http://127.0.0.1:{rig.port}/v1")
         self.assertEqual(list(config["provider"]["colibri"]["models"]), ["text-a-colibri", "text-b-colibri"])
 
+    def test_codex_is_started_with_a_provider_for_the_routers_responses_api(self):
+        rig = Rig(self, [entry("text-a")])
+        tools = FakeTools(self)
+        code, out = coli("launch", "codex", "--port", str(rig.port), env_extra=tools.env())
+        self.assertEqual(code, 0, out)
+        seen = tools.seen()
+        provider = 'model_providers.colibri={name="colibri",base_url="http://127.0.0.1:%d/v1",env_key="COLIBRI_API_KEY",wire_api="responses"}' % rig.port
+        self.assertEqual(seen["args"], ["-c", "model_provider=colibri", "-c", provider, "-m", "text-a-colibri"])
+        self.assertEqual(seen["env"]["COLIBRI_API_KEY"], "colibri")
+
+    def test_codex_dry_run_hides_the_key_and_passes_the_users_arguments_on(self):
+        rig = Rig(self, [entry("text-a")], api_key="sekrit")
+        tools = FakeTools(self)
+        code, out = coli("launch", "codex", "--port", str(rig.port), "--api-key", "sekrit", "--dry-run", "--", "exec", "fix it",
+                         env_extra=tools.env())
+        self.assertEqual(code, 0, out)
+        self.assertIn("COLIBRI_API_KEY=***", out)
+        self.assertNotIn("sekrit", out)
+        self.assertIn("exec 'fix it'", out)
+        self.assertFalse(os.path.exists(tools.out))
+
+    def test_codex_is_refused_by_a_single_gateway_that_has_no_responses_api(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Gateway(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({"data": [{"id": "only-colibri", "capabilities": ["chat"]}]} if self.path == "/v1/models"
+                                  else {"error": {"message": "Not found."}}).encode()
+                self.send_response(200 if self.path == "/v1/models" else 404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        tools = FakeTools(self)
+        port = str(server.server_address[1])
+        code, out = coli("launch", "codex", "--port", port, env_extra=tools.env())
+        self.assertEqual(code, 1, out)
+        self.assertIn("Responses API", out)
+        self.assertFalse(os.path.exists(tools.out))
+        code, out = coli("launch", "claude", "--port", port, "--dry-run", env_extra=tools.env())
+        self.assertEqual(code, 0, "another tool is not held back by a single gateway: " + out)
+
     def test_the_tools_exit_code_is_the_commands(self):
         rig = Rig(self, [entry("text-a")])
         tools = FakeTools(self)
@@ -211,9 +267,9 @@ class CommandTest(unittest.TestCase):
         code, out = coli("launch", "claude", "--port", str(rig.port), env_extra=tools.env())
         self.assertEqual(code, 1)
         self.assertIn("no chat model", out)
-        code, out = coli("launch", "codex", "--port", str(rig.port), env_extra=tools.env())
+        code, out = coli("launch", "nope", "--port", str(rig.port), env_extra=tools.env())
         self.assertEqual(code, 1)
-        self.assertIn("no tool called codex", out)
+        self.assertIn("no tool called nope", out)
 
     def test_a_tool_that_is_not_installed_is_said_so_with_how_to_get_it(self):
         rig = Rig(self, [entry("text-a")])

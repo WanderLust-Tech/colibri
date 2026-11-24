@@ -87,6 +87,38 @@
         }
       }
     },
+    "/v1/responses": {
+      "post": {
+        "tags": ["Inference"],
+        "summary": "Create a response (OpenAI Responses API, router only)",
+        "description": "The Responses API that Codex speaks, over the router's own chat endpoint: text, reasoning, function calls and Codex's custom tools, streamed or not. A single `coli serve` gateway does not serve it.",
+        "operationId": "createResponse",
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "required": ["model", "input"], "additionalProperties": true,
+                          "properties": { "model": { "type": "string" }, "input": {}, "instructions": { "type": "string" },
+                                          "stream": { "type": "boolean" }, "tools": { "type": "array", "items": { "type": "object" } },
+                                          "tool_choice": {} } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A response object, or a server-sent stream of Responses events.",
+            "content": {
+              "application/json": { "schema": { "type": "object" } },
+              "text/event-stream": { "schema": { "type": "string" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/QueueFull" }
+        }
+      }
+    },
     "/v1/messages": {
       "post": {
         "tags": ["Inference"],

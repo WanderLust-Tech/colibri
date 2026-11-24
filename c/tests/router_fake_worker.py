@@ -147,6 +147,40 @@ class Handler(BaseHTTPRequestHandler):
         note("end " + args.id)
 
 
+    def chat_demo(self, body):
+        """FAKE_CHAT=1: /v1/chat/completions answers as a real chat model does (OpenAI chunks), for the Responses API test: text that
+        echoes the credentials and tags it was sent, or a get_weather call when the last user message says TOOL."""
+        last = next((m.get("content") for m in reversed(body.get("messages") or []) if m.get("role") == "user"), "")
+        asks_tool = "TOOL" in (last if isinstance(last, str) else json.dumps(last))
+        echo = f" [auth={self.headers.get('Authorization')} key={self.headers.get('x-api-key')} tags={self.headers.get('X-Colibri-Tags')}]"
+        deltas = [{"role": "assistant", "content": ""}]
+        if asks_tool:
+            deltas.append({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                           "function": {"name": "get_weather", "arguments": "{\"city\":\"Rome\"}"}}]})
+            finish = "tool_calls"
+        else:
+            deltas += [{"content": "Hello"}, {"content": " from " + args.id}, {"content": echo}]
+            finish = "stop"
+        chunks = [{"id": "c1", "object": "chat.completion.chunk", "model": args.id, "choices": [{"index": 0, "delta": d, "finish_reason": None}]} for d in deltas]
+        chunks.append({"id": "c1", "object": "chat.completion.chunk", "model": args.id, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                       "usage": {"prompt_tokens": 7, "completion_tokens": 3}})
+        if not body.get("stream"):
+            text = "".join(d.get("content") or "" for d in deltas)
+            return self.reply(200, {"id": "c1", "object": "chat.completion", "model": args.id, "choices": [{"index": 0, "finish_reason": finish,
+                              "message": {"role": "assistant", "content": text}}], "usage": chunks[-1]["usage"]})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for chunk in chunks:
+            payload = f"data: {json.dumps(chunk)}\n\n".encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(payload), payload))
+            self.wfile.flush()
+        tail = b"data: [DONE]\n\n"
+        self.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(tail), tail))
+        self.wfile.flush()
+        note(f"end {args.id}")
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
@@ -172,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   "type": "invalid_request_error", "param": "model",
                                                   "code": "model_not_found"}})
         note(f"start {args.id}")
+        if os.environ.get("FAKE_CHAT") and self.path == "/v1/chat/completions":
+            return self.chat_demo(body)
         if (body.get("job_demo") or os.environ.get("FAKE_ENGINE")) and self.path in ("/v1/images/generations", "/v1/audio/music"):
             return self.job_demo(body)
         origin = self.headers.get("Origin"), self.headers.get("Authorization"), self.headers.get("X-Test")

@@ -4,9 +4,12 @@ Nothing is written to the tool's own configuration. Each tool takes what it need
 
 - Claude Code reads ANTHROPIC_BASE_URL and friends, and talks to POST /v1/messages.
 - opencode reads its whole configuration from OPENCODE_CONFIG_CONTENT, and talks to POST /v1/chat/completions.
+- Codex takes a model provider on its command line (`-c model_providers.colibri={...}`) and its key from an environment variable, and
+  speaks only the Responses API, `POST /v1/responses`, which `coli router` serves (router.py, over its own chat endpoint; a single
+  `coli serve` gateway does not).
 
-Left out on purpose: Codex (it speaks the Responses API, which colibri does not serve) and tools that keep their server in a
-settings file the user owns (Zed, Cline, VS Code), which would mean editing that file.
+Left out on purpose: tools that keep their server in a settings file the user owns (Zed, Cline, VS Code), which would mean
+editing that file.
 """
 import json
 import os
@@ -16,7 +19,11 @@ TOOLS = {
     "claude": {"name": "Claude Code", "binary": "claude",
                "install": "https://docs.claude.com/en/docs/claude-code/setup"},
     "opencode": {"name": "opencode", "binary": "opencode", "install": "npm install -g opencode-ai"},
+    "codex": {"name": "Codex", "binary": "codex", "install": "npm install -g @openai/codex"},
 }
+
+# Codex reads the key of a provider from the environment variable the provider names.
+CODEX_KEY_VARIABLE = "COLIBRI_API_KEY"
 
 # What a client may send as a key when the server has none: the tools insist on a non-empty one.
 PLACEHOLDER_KEY = "colibri"
@@ -80,6 +87,11 @@ def opencode_config(base, model, models, api_key):
     }, separators=(",", ":"))
 
 
+def codex_provider(base):
+    """The TOML inline table for `-c model_providers.colibri=...`: the Responses API of this server, the key from CODEX_KEY_VARIABLE."""
+    return '{name="colibri",base_url="%s/v1",env_key="%s",wire_api="responses"}' % (base, CODEX_KEY_VARIABLE)
+
+
 def find_tool(tool, which=shutil.which, home=None):
     """The path of the tool's program, or None."""
     spec = TOOLS[tool]
@@ -102,4 +114,8 @@ def plan(tool, base, model, models, api_key, extra=(), environ=None):
         # an explicit --model wins over a model the user's own opencode configuration names for an agent
         return {"OPENCODE_CONFIG_CONTENT": opencode_config(base, model, models, api_key)}, \
             (list(extra) if extra else ["--model", "colibri/" + model])
+    if tool == "codex":
+        # a provider of its own on the command line, so the user's ~/.codex/config.toml is left as it is
+        return {CODEX_KEY_VARIABLE: api_key or PLACEHOLDER_KEY}, \
+            ["-c", "model_provider=colibri", "-c", "model_providers.colibri=" + codex_provider(base), "-m", model, *extra]
     raise KeyError(tool)

@@ -62,6 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
+| Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes | no | no, 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
@@ -816,6 +817,29 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
 - **Not done**: streaming the call's arguments as OpenAI-style `tool_calls` deltas (the arguments would have to extend what was sent and the final
   parse is the authority); the dashboard does not show it. Deploying it is a restart of the router (a change to `openai_server.py` only).
 
+### 2.41 Upstream batch 1: the Responses API, for Codex (branch `upstream-picks`, 2026-11-25; built, not pushed or deployed)
+
+First batch of [upstream-triage.md](upstream-triage.md). Upstream colibri (JustVugg/colibri, tip `e479104a`) has a translator from the OpenAI
+Responses API to chat completions, which is all Codex speaks; the fork's `coli launch` had left Codex out for want of it (C1).
+
+- **Taken**: `ui/responses_shim.py` as `c/responses_shim.py` (447 lines of standard library; one change: the stream is chunked only for an HTTP/1.1
+  handler, since the router is HTTP/1.0 and a strict client such as Codex's would read chunk sizes as event text) and upstream's five tests
+  (`test_responses_disconnect`, `_incomplete`, `_reasoning`, `_tool_choice`, `_upstream_failure`; 39 tests, the disconnect ones against a real gateway),
+  with their paths and import paths adapted. They all pass on Windows.
+- **Wired in**: `RouterHandler.responses_api` (`c/router.py`): `POST /v1/responses` after the host, cross-site and key checks, then the shim against
+  the router's own port, so the chat request it makes is routed, loaded, queued and logged like any other; the shim passes on `Authorization`,
+  `x-api-key` and `X-Colibri-Tags`. (A first version named the method `responses`, which shadows the HTTP server's table of status phrases and broke every
+  reply: the tests found it at once.) A single `coli serve` gateway does not serve it.
+- **`coli launch codex`**: a provider on Codex's command line (`-c model_providers.colibri={...wire_api="responses"}`), the key in `COLIBRI_API_KEY`, no
+  file of Codex's touched; refused with the reason against a gateway that is not a router. The command line is from upstream's launcher.
+- **Tests added**: `test_router_responses.py` (8: a streamed response as the raw body of an HTTP/1.0 answer, the JSON form, a function call, the key
+  and `x-api-key`, tags forwarded, the host check, a bad body and an unknown model, the chat endpoint unchanged; the router test's fake worker has a
+  `FAKE_CHAT` mode for it), `test_responses_framing.py` (2: chunks for HTTP/1.1, the raw stream for HTTP/1.0), and 3 for `coli launch codex`.
+  18 deliberate breakages of the new code were each caught, bar one that cannot behave differently. The full router suite (208) and the docs and
+  launch tests (34) pass.
+- **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
+  wanted).
+
 ## 3. Planned and open
 
 ### 3.1 Waiting for your decision
@@ -845,7 +869,7 @@ Status as of today (the file itself has been brought into line with this):
 | A1-A5 router, load on demand, memory fit, one render at a time, limits | **done**, live |
 | A0 one server per model on separate ports | set aside, the router replaced it |
 | B1-B3 `keep_alive`, `coli ps` / `coli stop`, Unload button | **done**, live |
-| C1 `coli launch` | **done**, merged and live: Claude Code and opencode via the environment; Codex needs a Responses API colibri lacks; settings-file tools left out; not run against the real tools |
+| C1 `coli launch` | **done**, merged and live: Claude Code and opencode via the environment; Codex too once the router serves the Responses API (2.41, built, not deployed); settings-file tools left out; not run against the real tools |
 | C2 Named presets (saved sizes, steps, durations that show up as model names) | **done**, live (2.12); dashboard live (`feat/web-presets`) |
 | C3 Windows tray or autostart (would replace the restart script) | **done**, live (2.13), and it starts at sign-in |
 | C4 One place for settings, request logging | **done**, live (2.12); the log is in the dashboard on `feat/web-presets` |

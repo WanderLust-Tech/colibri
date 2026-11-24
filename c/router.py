@@ -1970,6 +1970,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.voice_delete()
             if path == "/v1/jobs/cancel":
                 return self.job_cancel()
+            if path == "/v1/responses":
+                return self.responses_api()
             if path not in COMPUTE_PATHS:
                 raise ApiError(404, "Not found.", "not_found")
             raw = self.read_body(path)
@@ -2011,6 +2013,15 @@ class RouterHandler(BaseHTTPRequestHandler):
                     record["error"] = self._error
                 log.write({k: v for k, v in record.items() if v is not None})
             self._status = self._error = None
+
+    def responses_api(self):
+        """POST /v1/responses: the Responses API, which is all Codex speaks, over this router's own chat endpoint.
+
+        responses_shim.py (from upstream colibri) translates the request into a chat request, sends it to /v1/chat/completions here
+        (so it is routed, loaded, queued and logged like any chat request, with the caller's key and tags) and translates the
+        chat stream back into Responses events."""
+        import responses_shim
+        responses_shim.serve(self, urlsplit(f"http://127.0.0.1:{self.server.server_address[1]}"))
 
     def tags_header(self):
         """The tags the request carries (client_tags.py), None for none. A header that does not fit is a 400 that says what to change."""

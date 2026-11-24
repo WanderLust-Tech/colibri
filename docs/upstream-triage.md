@@ -35,6 +35,10 @@ and a `desktop/` shell.
 | 6 | **CUDA** (328 commits) | Possibly faster than Vulkan on the RTX 5090. | Large, and blocked: this machine has no CUDA toolkit (no `nvcc`) and the Windows build needs `nvcc` and MSVC (`CUDA_DLL=1`). Install them and measure one model before deciding. |
 | - | **Skip**: README and translations, CHANGELOG, `docs/*` that describe upstream's own setup, `ci.yml`, the upstream `web/` page (the fork's dashboard is its own; 14 files conflict), the `desktop/` shell and `ui/` page unless wanted for themselves | They conflict and carry nothing the fork needs. | None. |
 
+## Progress
+
+- **Batch 1, the Responses API: built 2026-11-25** on branch `upstream-picks` (fork-changes 2.41). Not pushed or deployed.
+
 ## How to take things
 
 1. A branch `upstream-picks` off `main`, one batch at a time, each ending in the test suite and a merge to `main` only when it is green.
