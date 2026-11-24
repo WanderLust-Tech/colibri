@@ -3129,7 +3129,7 @@
         "task": { "type": "string", "enum": ["text2music", "cover", "repaint", "extract", "lego", "complete"], "default": "text2music", "description": "`cover` makes the whole clip again in the new style; `repaint` makes only a span of it again and keeps the rest." },
         "src_audio": { "type": "string", "description": "The clip to cover or repaint (required for those tasks): base64 or a `data:` URL of a WAV or MP3, or a file in multipart/form-data." },
         "reference_audio": { "type": "string", "description": "A clip to take the voice and style from, with any task: base64 or a `data:` URL, or a file in multipart/form-data. Clips shorter than 30 s are repeated, longer ones sampled." },
-        "audio_cover_strength": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1, "description": "Cover only: the share of the steps that follow the clip's structure." },
+        "audio_cover_strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 1, "description": "Cover only: the share of the steps that follow the clip's structure." },
         "cover_noise_strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 0, "description": "Cover only: how near the clip the first step starts; 0 starts from noise." },
         "repainting_start": { "type": "number", "default": 0, "description": "Repaint only: where the span starts, in seconds; below 0 adds silence before the clip." },
         "repainting_end": { "type": "number", "description": "Repaint only: where the span ends, in seconds; 0 or less (the default) is the end of the clip, past it adds silence after." },

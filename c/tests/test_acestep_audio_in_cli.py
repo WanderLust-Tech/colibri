@@ -164,8 +164,7 @@ class AudioInCommands(unittest.TestCase):
         self.assertIn("at most", str(caught.exception))
 
     def test_the_settings_have_the_ranges_the_request_says(self):
-        for flags, word in ((["--cover", "SONG", "--cover-strength", "0"], "--cover-strength"),
-                            (["--cover", "SONG", "--cover-strength", "1.5"], "--cover-strength"),
+        for flags, word in ((["--cover", "SONG", "--cover-strength", "1.5"], "--cover-strength"),
                             (["--cover", "SONG", "--cover-noise", "2"], "--cover-noise"),
                             (["--repaint", "SONG", "--repaint-strength", "0"], "--repaint-strength"),
                             (["--repaint", "SONG", "--repaint-strength", "3"], "--repaint-strength"),
@@ -174,6 +173,11 @@ class AudioInCommands(unittest.TestCase):
             with self.subTest(flags=flags):
                 flags = [str(self.song) if f == "SONG" else f for f in flags]
                 self.refused("calm piano", *flags, word=word)
+
+    def test_a_cover_strength_of_zero_is_taken(self):
+        # 0 lets the prompt lead from the first step: it is a setting, not "not given"
+        result = self.music("calm piano", "--cover", str(self.song), "--cover-strength", "0", "--out", str(self.out))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_a_mode_that_does_not_exist_is_refused_by_the_parser(self):
         result = self.music("calm piano", "--repaint", str(self.song), "--repaint-mode", "wild")

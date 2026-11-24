@@ -678,8 +678,8 @@ JSON body, or a file part in a `multipart/form-data` body whose other fields hav
 at most 128 MiB each and 192 MiB together. A cover or a repaint takes its length from the clip (`duration` is ignored) and its caption
 may be empty. The task's own fields, with upstream's names: `repainting_start`, `repainting_end` (seconds; no end is the clip's end; a
 start below 0 or an end past the clip adds silence there), `repaint_mode` (`balanced`, `conservative`, `aggressive`), `repaint_strength`
-(above 0 and at most 1: the default is 0.5, and `conservative` is the mode for the small end), `audio_cover_strength` (the same range,
-default 1) and `cover_noise_strength` (0 to 1, default 0). Each is refused with a 400 naming it when it does not apply to the task. The
+(above 0 and at most 1: the default is 0.5, and `conservative` is the mode for the small end), `audio_cover_strength` (0 to 1, default 1; 0 is a cover whose steps never follow the clip's context, so the prompt
+leads from the first step and the clip only matters through `cover_noise_strength`) and `cover_noise_strength` (0 to 1, default 0). Each is refused with a 400 naming it when it does not apply to the task. The
 answer is the same, with `task` and `src_seconds` added to its `colibri` block; `/v1/models` lists `audio.tasks` and `audio.audio_in`
 (`formats`, `max_seconds`, `ref_seconds`, `max_clip_bytes`, `max_total_bytes`) and the capability `audio_input`, so a client can offer the
 clips only where they work. The clips are written to a private temporary directory for the engine, which reads them from there, and the

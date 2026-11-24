@@ -154,7 +154,6 @@ class Requests(unittest.TestCase):
         cover = dict(task="cover", src_audio=wav)
         repaint = dict(task="repaint", src_audio=wav)
         cases = [
-            ("audio_cover_strength", {**cover, "audio_cover_strength": 0}),       # 0 would be read as "not given" by the engine
             ("audio_cover_strength", {**cover, "audio_cover_strength": 1.01}),
             ("audio_cover_strength", {**cover, "audio_cover_strength": -0.5}),
             ("audio_cover_strength", {**cover, "audio_cover_strength": "0.5"}),
@@ -179,6 +178,8 @@ class Requests(unittest.TestCase):
                 self.refused(param, **body)
         # and what is on the edge is taken
         make_request(**cover, audio_cover_strength=1, cover_noise_strength=1)
+        # a cover strength of 0 is the prompt leading from the first step (upstream's int(steps * 0) = 0 steps on the clip's context)
+        self.assertEqual(make_request(**cover, audio_cover_strength=0)["audio_cover_strength"], 0.0)
         make_request(**repaint, repaint_strength=1, repainting_start=-3600, repainting_end=3600)
 
     def test_a_clip_that_is_not_a_clip_is_refused_by_name(self):
@@ -568,8 +569,10 @@ class Gateway(unittest.TestCase):
         self.assertEqual((status, answer["error"]["param"]), (400, "audio_cover_strength"))
         status, answer = send({"task": "cover", "dcw": "maybe"})
         self.assertEqual((status, answer["error"]["param"]), (400, "dcw"))
-        status, answer = send({"task": "cover", "audio_cover_strength": 0})
+        status, answer = send({"task": "cover", "audio_cover_strength": 2})
         self.assertEqual((status, answer["error"]["param"]), (400, "audio_cover_strength"))
+        status, answer = send({"task": "cover", "audio_cover_strength": 0})        # 0 is allowed: the prompt leads
+        self.assertEqual(status, 200, answer)
         status, answer = send({"task": "cover"}, files=[("src_audio", "a.wav", wav), ("src_audio", "b.wav", wav)])
         self.assertEqual((status, answer["error"]["param"]), (400, "src_audio"))
         self.assertIn("2 times", answer["error"]["message"])

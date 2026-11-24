@@ -407,6 +407,7 @@ typedef struct {
     int repaint_mode;                              /* ACG_REPAINT_*: how much of the source the span's edges keep */
     double repaint_strength;                       /* balanced mode, 0 to 1, higher = freer: 0 is the default, 0.5 */
     double cover_strength;                         /* a cover: 0 to 1, the share of the steps that follow the source's structure; 0 is the default, 1 */
+    int cover_zero;                                /* a cover: 1 asks for a cover_strength of exactly 0 (cover_strength 0 alone is "not given", 1): no step follows the source's context */
     double cover_noise;                            /* a cover: 0 to 1, how near the source the first step starts; 0 starts from noise */
     /* the base and SFT DiTs (0, NULL and 0 are the defaults; the turbo DiT has guidance baked in and ignores the first three): */
     double guidance;                               /* classifier-free guidance scale; 0 is the default, 7; 1 or less turns it off */
@@ -544,7 +545,7 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     } else if (r->lm && *r->lm) { snprintf(err, errn, "lm is for the planner (plan)"); return 1; }
     if (r->ncodes < 0 || r->ncodes > ACG_MAX_CODES || (r->ncodes > 0 && !r->codes)) { snprintf(err, errn, "codes must be 1 to %d audio codes", ACG_MAX_CODES); return 1; }
     if (r->ncodes > 0 && r->task != ACG_TASK_TEXT2MUSIC) { snprintf(err, errn, "audio codes are for text to music (a cover has its clip's own)"); return 1; }
-    if (r->task != ACG_TASK_COVER && !(r->ncodes > 0) && (r->cover_strength != 0 || r->cover_noise != 0)) { snprintf(err, errn, "cover_strength and cover_noise are for a cover"); return 1; }
+    if (r->task != ACG_TASK_COVER && !(r->ncodes > 0) && (r->cover_strength != 0 || r->cover_zero || r->cover_noise != 0)) { snprintf(err, errn, "cover_strength and cover_noise are for a cover"); return 1; }
     if (!(r->cover_strength >= 0 && r->cover_strength <= 1) || !(r->cover_noise >= 0 && r->cover_noise <= 1)) { snprintf(err, errn, "cover_strength and cover_noise must be 0 to 1"); return 1; }
     if (r->task != ACG_TASK_REPAINT && r->task != ACG_TASK_LEGO && (r->repaint_start != 0 || r->repaint_end != 0 || r->repaint_mode != 0 || r->repaint_strength != 0)) { snprintf(err, errn, "the repaint settings are for a repaint or a lego"); return 1; }
     if (!(r->guidance >= 0 && r->guidance <= 100)) { snprintf(err, errn, "guidance must be 0 (the default) to 100"); return 1; }
@@ -1074,7 +1075,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     text = act_encode(e->text, cids, cn);
     lyric = act_embed(e->text, lids, ln);
     if (!text || !lyric) { snprintf(err, errn, "the text encoder failed"); goto out; }
-    const double cover_strength = rq->cover_strength > 0 ? rq->cover_strength : 1.0;
+    const double cover_strength = rq->cover_zero ? 0.0 : rq->cover_strength > 0 ? rq->cover_strength : 1.0;
     int cn2 = 0;
     if (task == ACG_TASK_COVER && cover_strength < 1.0) {
         /* the steps after the switch run on the text-to-music prompt (the default instruction) and the silence as the source */

@@ -244,7 +244,9 @@ static int acs_request(jval *j, const AceEngine *e, AceRequest *rq, char *err, s
     if (acs_number(j, "repaint_start", &rq->repaint_start, err, errn) < 0) return -1;
     if (acs_number(j, "repaint_end", &rq->repaint_end, err, errn) < 0) return -1;
     if (acs_number(j, "repaint_strength", &rq->repaint_strength, err, errn) < 0) return -1;
-    if (acs_number(j, "cover_strength", &rq->cover_strength, err, errn) < 0) return -1;
+    { const int got = acs_number(j, "cover_strength", &rq->cover_strength, err, errn);      /* a given 0 is a cover that never follows the source's context, not "not given" */
+      if (got < 0) return -1;
+      if (got && rq->cover_strength == 0) rq->cover_zero = 1; }
     if (acs_number(j, "cover_noise", &rq->cover_noise, err, errn) < 0) return -1;
     if (acs_string(j, "repaint_mode", &mode, err, errn) < 0) return -1;
     if (mode) {

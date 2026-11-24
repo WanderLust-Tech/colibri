@@ -4736,7 +4736,7 @@ def main():
                  ("--to",dict(dest="repaint_to",type=float,default=None,metavar="S",help="with --repaint: where the span ends, in seconds (default: the end of the clip; past it adds silence after)")),
                  ("--repaint-mode",dict(choices=["balanced","conservative","aggressive"],default=None,help="with --repaint: how much of the source the span's edges keep (default balanced)")),
                  ("--repaint-strength",dict(type=float,default=None,metavar="X",help="with --repaint, balanced mode: above 0 and at most 1, higher is freer (default 0.5)")),
-                 ("--cover-strength",dict(type=float,default=None,metavar="X",help="with --cover: above 0 and at most 1, the share of the steps that follow the clip's structure (default 1)")),
+                 ("--cover-strength",dict(type=float,default=None,metavar="X",help="with --cover: 0 to 1, the share of the steps that follow the clip's structure (default 1; 0 lets the prompt lead from the first step)")),
                  ("--cover-noise",dict(type=float,default=None,metavar="X",help="with --cover: 0 to 1, how near the clip the start is; 0 starts from noise (default 0)")),
                  ("--extract",dict(default=None,metavar="FILE",help="pull one track out of this clip (a WAV or MP3); --track says which (music models with the base DiT: --dit base)")),
                  ("--lego",dict(default=None,metavar="FILE",help="add one track to this clip inside a span, keeping the rest; --track says which, --from and --to the span (music models with the base DiT)")),

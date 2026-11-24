@@ -214,6 +214,7 @@ TASKS = {
     "codes_short": ({**INSTR, "audio_duration": 4.0, "audio_code_string": code_string(20, 12)}, {}),               # 100 frames: the floor of 128 pads the hints with silence
     "codes_odd": ({**INSTR, "audio_duration": 9.07, "audio_code_string": code_string(45, 13)}, {}),                  # 225 frames; the prompt says 9 seconds
     "codes_vocal": ({**VOCAL, "audio_duration": 12.0, "audio_code_string": code_string(60, 14)}, {}),
+    "cover_zero": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.0}, {"src": ("inst10", None)}),          # no step on the cover context: the text-to-music prompt and the silence from the first step
     "codes_half": ({**INSTR, "audio_duration": 10.0, "audio_code_string": code_string(50, 15), "audio_cover_strength": 0.5}, {}),
     "codes_noise": ({**INSTR, "audio_duration": 10.0, "audio_code_string": code_string(50, 16), "cover_noise_strength": 0.3}, {}),
     "cover_ref": ({**VOCAL, "task_type": "cover"}, {"src": ("inst10", None), "ref": ("long30", None)}),   # both clips: the source is encoded first, then the reference
@@ -286,6 +287,7 @@ TASKS_BASE = {
     "b_fe_vclamp": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "velocity_norm_threshold": 1.1, "velocity_ema_factor": 0.4, "flow_edit_n_min": 0.1, "flow_edit_n_max": 0.8, "inference_steps": 10}, {"src": ("inst10", 6.0)}),
     "b_fe_lyrics": ({**VOCAL, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_source_lyrics": "[Verse 1]\nevening light on the kitchen floor", "flow_edit_n_max": 0.75, "inference_steps": 8}, {"src": ("long30", 8.0)}),
     "b_cover": ({**INSTR, "task_type": "cover"}, {"src": ("inst10", None)}),
+    "b_cover_zero": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.0}, {"src": ("inst10", None)}),
     "b_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5}, {"src": ("inst10", None)}),      # the second half of the steps on the null condition of the text-to-music prompt
     "b_repaint": ({**INSTR, "task_type": "repaint", "repainting_start": 3.0, "repainting_end": 6.0}, {"src": ("inst10", None)}),
     "b_extract": ({**INSTR, "task_type": "extract", "_track": "drums"}, {"src": ("inst10", None)}),

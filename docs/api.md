@@ -703,7 +703,7 @@ The request's fields, with upstream's own names for the audio ones:
 | `track_name` | extract and lego: `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals` or `vocals` (without one, "the track") |
 | `complete_track_classes` | complete: the tracks to complete the input with, a list or a comma-separated string |
 | `reference_audio` | a clip to take the voice and style from, with any task. A clip under 30 s is repeated to 30 s; a longer one is sampled in three places |
-| `audio_cover_strength` | cover: above 0, at most 1 (default 1): the share of the steps that follow the clip's structure; less lets the text lead the last steps |
+| `audio_cover_strength` | cover: 0 to 1 (default 1): the share of the steps that follow the clip's structure; less lets the text lead the last steps, and 0 lets it lead from the first (the clip then only matters through `cover_noise_strength`) |
 | `cover_noise_strength` | cover: 0 to 1 (default 0): how near the clip the first step starts; 0 starts from noise |
 | `repainting_start`, `repainting_end` | repaint and lego: the span in seconds of the clip (default 0 and the end). A start below 0 adds silence before the clip, an end past it silence after; the whole may not pass 600 s |
 | `repaint_mode` | repaint: `balanced` (default), `conservative` (keeps the most of the source around the span) or `aggressive` (the span is freest, no splice back of the source's own samples) |

@@ -742,8 +742,8 @@ def _audio_request(body, info):
                 raise MusicRequestError(f"`src_audio` and `reference_audio` together are longer than "
                                         f"{MAX_CLIPS_BYTES >> 20} MiB.", name)
     if task == "cover":
-        # 0 would be read by the engine as "not given" (the default, 1), so it is refused rather than misread
-        out["audio_cover_strength"] = _unit_number(body, "audio_cover_strength", low_open=True)
+        # 0 is allowed: no step follows the clip's structure, the prompt alone leads (the engine reads a given 0 as that)
+        out["audio_cover_strength"] = _unit_number(body, "audio_cover_strength")
         out["cover_noise_strength"] = _unit_number(body, "cover_noise_strength")
     if task in ("repaint", "lego"):
         for name in ("repainting_start", "repainting_end"):

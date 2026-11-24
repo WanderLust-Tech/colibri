@@ -57,6 +57,7 @@ MUTANTS = {
     "cover-noise-level": ("const double level = 1.0 - rq->cover_noise;", "const double level = rq->cover_noise;"),
     "cover-noise-roles-swapped": ("x[k] = a * noise[k] + b * lat[k];", "x[k] = b * noise[k] + a * lat[k];"),
     "cover-noise-schedule-not-cut": ("sched = sched_all + best; n = n_all - best;", "sched = sched_all; n = n_all - best;"),
+    "cover-strength-zero-read-as-one": ("const double cover_strength = rq->cover_zero ? 0.0 : rq->cover_strength > 0 ?", "const double cover_strength = rq->cover_strength > 0 ?"),
     "cover-strength-switch-late": ("const int cover_steps = cond2 ? (int)(n * cover_strength) : n;", "const int cover_steps = cond2 ? (int)(n * cover_strength) + 1 : n;"),
     "cover-strength-keeps-the-source-context": ("if (cond2 && i >= cover_steps) { cur = cond2; ncur = ncond2; cur_ctx = ctx2; }", "if (cond2 && i >= cover_steps) { cur = cond2; ncur = ncond2; }"),
     "noncover-source-is-the-clip": ("memcpy(ctx2 + (size_t)f * 2 * A, sil + (size_t)f * A, (size_t)A * sizeof(float));", "memcpy(ctx2 + (size_t)f * 2 * A, src + (size_t)f * A, (size_t)A * sizeof(float));"),

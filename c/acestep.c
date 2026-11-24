@@ -1198,6 +1198,7 @@ static int run_gen_oracle(const char *model, const char *refdir, const char *wav
     if (rq.task == ACG_TASK_COVER || (json_str(p, "audio_code_string") && *json_str(p, "audio_code_string"))) {        /* a cover, or text to music from codes: the same */
         const double cs = acd_json_num(p, "audio_cover_strength", 1.0);
         rq.cover_strength = cs == 1.0 ? 0 : cs;
+        rq.cover_zero = cs == 0.0;
         rq.cover_noise = acd_json_num(p, "cover_noise_strength", 0.0);
     }
     /* the planner's codes, as the handler was given them (audio_code_string): text to music from them */
@@ -1915,7 +1916,7 @@ int main(int argc, char **argv){
             i++;
         }
         else if (!strcmp(a, "--repaint-strength") && v) { rq.repaint_strength = atof(v); i++; }
-        else if (!strcmp(a, "--cover-strength") && v) { rq.cover_strength = atof(v); i++; }
+        else if (!strcmp(a, "--cover-strength") && v) { rq.cover_strength = atof(v); rq.cover_zero = rq.cover_strength == 0.0; i++; }
         else if (!strcmp(a, "--cover-noise") && v) { rq.cover_noise = atof(v); i++; }
         else if (!strcmp(a, "--vae-ref") && v) { vae_ref = v; i++; }
         else if (!strcmp(a, "--vae-enc-ref") && v) { venc_ref = v; i++; }
