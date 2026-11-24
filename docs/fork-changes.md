@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `5b14720c` (pushed 2026-11-24) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `5b14720c` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
+| Fork's `main` | `1f2f7108` (pushed 2026-11-25) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `1f2f7108` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -62,7 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
-| Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes | no | no, 2.40 |
+| Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
@@ -797,7 +797,7 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
 - Not built: putting the card back to a model without a stop (the engine would build the card tier again while running, which means the shared
   `vk_tier.c`; not worth the risk), and demoting engines other than `qwen36`.
 
-### 2.40 Progress of a tool call being written (2026-11-24; built, merged into local main, not pushed or deployed)
+### 2.40 Progress of a tool call being written (2026-11-24; pushed (`1f2f7108`) and live)
 
 - **The gap**: `openai_server.py` holds a tool call back and parses it from the whole reply after generation, so a long call (a big
   `write_file`) showed an editor nothing for minutes (only the empty keepalive every 10 s). The roadmap of the VS Code extension listed it as
@@ -812,6 +812,7 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
   shim on Windows, so it runs here): comments with growing `chars` and the name, the stream otherwise as ever, no comment without the header or
   with a value other than `1`, none when no call is written or no tools are sent. 9 mutations of the change each broke a test. The 492 other
   gateway unit tests (`test_openai_server`, `test_anthropic_messages`) pass.
+- **Live check** (2026-11-25, through the router with Gemma 4 E2B asked to write a file with a 25-line list): 5 comments, `chars` 12 to 1488, the stream still ended with `tool_calls`. `name` stayed `null` for the whole call: Gemma's `call:name{...}` form does not parse until it is closed.
 - **Not done**: streaming the call's arguments as OpenAI-style `tool_calls` deltas (the arguments would have to extend what was sent and the final
   parse is the authority); the dashboard does not show it. Deploying it is a restart of the router (a change to `openai_server.py` only).
 
