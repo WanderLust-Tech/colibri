@@ -251,6 +251,16 @@ Known limitations, current build:
 The columns above and below are held to the code: `c/tests/test_family_registry.py` asks each family's renderer whether it
 accepts tools, and `c/tests/test_api_matrix_docs.py` fails when a table here disagrees with the registry.
 
+### Progress of a tool call being written
+
+The gateway holds a tool call back while the model writes it and parses it from the whole reply when generation ends (so the `tool_calls` a stream ends with are always whole and correct). A long call, a big file in `write_file`, therefore showed a streaming client nothing but empty keepalives for minutes. A client that sends `X-Colibri-Progress: 1` with a streamed chat request that has `tools` now also gets an SSE *comment* about once a second while a call is written:
+
+```
+: colibri-tool {"chars":3412,"name":"write_file"}
+```
+
+`chars` is how much of the call's text has been written; `name` is the tool it names, read from what is written so far, and `null` until that can be read. A comment line is ignored by every SSE parser that does not look for it, adds no JSON event and changes nothing in the stream, and a client that does not send the header (or sends anything but `1`) gets the same stream as before, byte for byte. Not for engines that send tool calls on a side channel (Kimi K3). `COLI_TOOL_PROGRESS_GAP` (seconds, default 1) sets the time between two comments. The VS Code extension (0.22.0) uses it for its status line.
+
 ### What else each engine takes
 
 | Engine | `response_format` accepted | Pictures in | Audio in |

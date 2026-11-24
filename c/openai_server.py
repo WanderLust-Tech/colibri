@@ -4358,6 +4358,44 @@ class StopFilter:
         return self.matched is not None
 
 
+TOOL_PROGRESS_HEADER = "X-Colibri-Progress"
+TOOL_PROGRESS_GAP = float(os.environ.get("COLI_TOOL_PROGRESS_GAP", "1.0"))   # seconds between two comments (a test makes it short)
+
+
+class ToolProgress:
+    """What a client that asks for it hears while a tool call is being written.
+
+    The gateway holds a tool call back and parses it from the whole reply when generation ends (the authoritative parse), so a
+    long call (a big file in write_file) used to show the client nothing but empty keepalives for minutes. A client that sends
+    `X-Colibri-Progress: 1` now also gets an SSE *comment* about once a second while the call is written:
+    `: colibri-tool {"chars": 3412, "name": "write_file"}`. A comment is ignored by every SSE parser that does not look for it, it
+    adds no JSON event and changes nothing in the tool_calls the stream ends with. `name` is read from what has been written so far
+    (the reply is parsed the way the final parse does, and may name nothing yet); `chars` counts the call's text so far.
+
+    `write(text)` puts one comment on the wire; `names(reply)` returns the tool names found in the reply so far (it may raise)."""
+
+    def __init__(self, write, names, clock=time.monotonic, gap=None):
+        self.write, self.names, self.clock = write, names, clock
+        self.gap = TOOL_PROGRESS_GAP if gap is None else gap
+        self.chars = 0
+        self.sent = None                       # when the last comment went out (None: none yet)
+
+    def feed(self, n, reply):
+        """`n` more characters of the call were written; `reply` is a function giving the whole reply so far."""
+        self.chars += n
+        now = self.clock()
+        if self.sent is not None and now - self.sent < self.gap:
+            return
+        self.sent = now
+        name = None
+        try:
+            found = self.names(reply())
+            name = found[-1] if found else None
+        except Exception:                      # a half-written call may not parse: say how much, not what
+            name = None
+        self.write("colibri-tool " + json.dumps({"chars": self.chars, "name": name}, separators=(",", ":")))
+
+
 class ToolSideband:
     """Request-scoped K3 TOOL frames with the same stop policy as DATA."""
     def __init__(self, enabled, sequences, ignore_leading=False):
@@ -9207,6 +9245,19 @@ class APIHandler(BaseHTTPRequestHandler):
                     except OSError:
                         connected = False
 
+            def comment(text):
+                """An SSE comment line (ignored by clients that do not look for it); counts as traffic for the keepalive."""
+                nonlocal connected
+                if not connected:
+                    return
+                with ka_lock:
+                    try:
+                        self.wfile.write(f": {text}\n\n".encode())
+                        self.wfile.flush()
+                        last_write[0] = time.time()
+                    except OSError:
+                        connected = False
+
             def _keepalive():
                 # #597: an empty delta already resets the client's idle timer without
                 # painting hundreds of dots in the reasoning panel during a minutes-long
@@ -9278,6 +9329,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 raw = []
                 sideband = ToolSideband(ARCH == "kimi", stop_sequences,
                                         ignore_leading_stop)
+                progress = None
+                if self.headers.get(TOOL_PROGRESS_HEADER, "").strip() == "1" and not sideband.enabled:
+                    progress = ToolProgress(
+                        comment, lambda text: [c["function"]["name"] for c in parse_arch_tool_calls(text, tools, None)[1]])
 
                 def feed_content(chunk):               # answer text only (post-</think>)
                     raw.append(chunk)
@@ -9285,14 +9340,19 @@ class APIHandler(BaseHTTPRequestHandler):
                         emit(chunk)
                         return
                     if sp["tool"]:
+                        if progress:
+                            progress.feed(len(chunk), lambda: "".join(raw))
                         return
                     sp["buf"] += chunk
                     cut = _tool_cut(sp["buf"])
                     if cut >= 0:
                         if cut:
                             emit(sp["buf"][:cut])
+                        written = len(sp["buf"]) - cut
                         sp["buf"] = ""
                         sp["tool"] = True
+                        if progress:
+                            progress.feed(written, lambda: "".join(raw))
                         return
                     flush = max(0, len(sp["buf"]) - hold)
                     if flush:
