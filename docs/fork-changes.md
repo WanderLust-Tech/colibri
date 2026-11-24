@@ -758,7 +758,7 @@ Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`
 - The dashboard's Music composer has them (when `/v1/models` says `audio.sampler`, which the gateway takes from the engine's `READY`): a Sampler chip (Euler, Heun, SDE) and two fields, the velocity cap (0 to 100) and its smoothing (0 to 1), empty for off; the song's line says what ran.
 - Not done: flow-edit (a sampler overlay upstream has).
 
-### 2.38 ACE-Step's flow-edit: a clip edited toward a new caption and lyrics (2026-11-23; built, not pushed)
+### 2.38 ACE-Step's flow-edit: a clip edited toward a new caption and lyrics (2026-11-23; pushed and live)
 
 Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents moved along the difference of the DiT's answers under the source and the target prompt over a window of the schedule (`docs/acestep.md`, "Flow-edit").
 
@@ -769,6 +769,7 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
   too, with no tolerance widened. MUTANTS mutants caught (`tools/mutate_acestep_flowedit.py`); `tests/test_acestep_flowedit.py` (19) and `tests/test_acestep_flowedit_mutants.py` (4).
 - Cost: a guided DiT's step is four evaluations (two prompts, each with its null condition) times `n_avg`; the turbo's two.
 - Not done: the cover variant (upstream's overlay also runs on a cover's context) and a Music control for it in the dashboard (the API and the CLI have it).
+- Also 2026-11-23, with it: a cover's `audio_cover_strength` of 0 is allowed (the prompt leads from the first step, as upstream's `int(steps * 0)`); the engine read a given 0 as "not given" before (`cover_zero` in `AceRequest`), held to upstream on `cover_zero` (turbo) and `b_cover_zero` (base).
 
 ## 3. Planned and open
 
