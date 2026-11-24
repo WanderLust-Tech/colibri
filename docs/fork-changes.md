@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `1f2f7108` (pushed 2026-11-25) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `1f2f7108` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
+| Fork's `main` | `82991b8a`, and the docs commit after it (pushed 2026-11-25) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `82991b8a` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds (`qwen36.exe` rebuilt 2026-11-25 for the performance-core team, 2.43; the other engines still carry the old thread rule until they are rebuilt) |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -62,8 +62,8 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
-| Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes | no | no, 2.43 |
-| Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes | no | no, 2.42 |
+| Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
+| Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
@@ -843,7 +843,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
-### 2.43 Upstream batch 3: the Windows fixes that fit (branch `upstream-win`, 2026-11-25; built, merged into local main, not pushed or deployed)
+### 2.43 Upstream batch 3: the Windows fixes that fit (branch `upstream-win`, 2026-11-25; merged, pushed (`82991b8a`) and live: router restarted, `qwen36.exe` rebuilt)
 
 How the 142 upstream commits that mention Windows were sorted: each one's files were compared with what the fork has and has changed (27 touch only files the fork never
 changed, 37 touch files it did change, 78 touch files the fork does not have, mostly the CUDA, GGUF and engine-test files). Twenty-two went in (21 at first, `cf14203f` after it was measured), each cherry-picked with
@@ -875,7 +875,7 @@ changed, 37 touch files it did change, 78 touch files the fork does not have, mo
   clash; `c5beedfa` and `5f977ab6`: test files that conflict and test what the fork does not run).
 - **Checks**: the touched Python tests pass, except two that fail on `main` too (`test_setup_hw.test_user_driver_manifests`, a path-separator assertion;). The full suite: 4,469 tests (`main`: 4,452, the difference is the tests the picks added), the same failures as `main` except that two int4-converter errors are gone and one router test, `test_a_model_that_is_answering_goes_when_it_has_finished`, failed in that run and passes alone in this tree but fails alone on `main`'s tree too: a timing test that flickers. (Run the suite with the PATH the baseline used: with MSYS2 first on it, speech tests error.)
 
-### 2.42 Upstream batch 2: 26 validation and robustness fixes (branch `upstream-picks`, 2026-11-25; built, merged into local main, not pushed or deployed)
+### 2.42 Upstream batch 2: 26 validation and robustness fixes (branch `upstream-picks`, 2026-11-25; merged, pushed (`c402657f`) and live with batch 3's restart)
 
 The review list and how it was found are in [upstream-triage.md](upstream-triage.md) (batch 2). Twenty-six upstream commits, each cherry-picked as its own commit with
 `-x` (the upstream hash is in the message): gateway request validation (10: NaN and Infinity in bodies, non-integer `n`, out-of-range integers, a NUL in a
