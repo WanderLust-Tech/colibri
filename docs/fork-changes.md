@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `084aa287` (pushed 2026-11-24, with the cover variant of flow-edit and the dashboard's Edit mode, `a031254a`) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `084aa287` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
+| Fork's `main` | `5b14720c` (pushed 2026-11-24) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `5b14720c` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -61,7 +61,7 @@ the clone that serves port 8000):
 | ACE-Step's planner, DiT and VAE on the Vulkan card | `feat/qwen3-speech` | yes (`929ea3c1`, `e903d6a0`, `47d8dd3a`) | yes | yes (2026-11-22): `acestep.exe` is the `VK=1` build; a 10 s song 2.8 s warm, 2.36 |
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
-| A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes | no | no, 2.39 |
+| A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
@@ -776,7 +776,7 @@ Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents move
   with nothing widened, 3 more mutants caught; and the dashboard's Edit mode (clip, what it is now, its lyrics, the window, the averages, "Keep the structure"). Not built: `cover-nofsq` (no such task here). Live since 2026-11-24 (VK `acestep.exe` rebuilt, `web/dist` rebuilt, router restarted): a cover flow-edit of a 10 s clip through the gateway took 8.1 s warm and `/v1/models` says `flow_edit_cover`. The Edit mode's layout has not been looked at in a browser.
 - Also 2026-11-23, with it: a cover's `audio_cover_strength` of 0 is allowed (the prompt leads from the first step, as upstream's `int(steps * 0)`); the engine read a given 0 as "not given" before (`cover_zero` in `AceRequest`), held to upstream on `cover_zero` (turbo) and `b_cover_zero` (base).
 
-### 2.39 A chat model gets the card back (2026-11-24; built, merged into local main, not pushed or deployed)
+### 2.39 A chat model gets the card back (2026-11-24; pushed (`5b14720c`) and live)
 
 - **The gap** (named in 3.4): a chat model that started on the CPU because the card was full, or that gave the card back to another model
   (Qwen3-Coder: about 3 tokens a second there, 18 on the card), stayed on the CPU until the idle timer unloaded it, half an hour by default,
@@ -850,8 +850,7 @@ Status as of today (the file itself has been brought into line with this):
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.
   Checked live 2026-11-20: with the 4B and 8B rerankers idle, the embedding model loaded on the card and the 4B was stopped. A small
-  model that started on the CPU gets the card when it frees up (2.28). A chat model, or a demoted one, gets it after 5 idle minutes (2.39, built,
-  not deployed). What is not built: putting the card back without a stop, and demoting engines other than `qwen36`.
+  model that started on the CPU gets the card when it frees up (2.28). A chat model, or a demoted one, gets it after 5 idle minutes (2.39, live). What is not built: putting the card back without a stop, and demoting engines other than `qwen36`.
 - **Context**: E4B and the 26B show no `context_length` until they have run once; a per-model window would need a per-model setting
   in the router (today `CTX` and `Q36_MAXT` are per family, in the router's environment).
 - **VS Code extension**: not done yet: the server's KV slot (`cache_slot`) so a long chat is not read again, picture, audio and video
