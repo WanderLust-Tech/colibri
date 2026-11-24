@@ -62,6 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
+| Upstream batch 3: 21 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes | no | no, 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes | no | no, 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
 | Progress of a tool call being written, for streaming clients (`X-Colibri-Progress`, `ToolProgress`) | `feat/qwen3-speech` | yes (`1f2f7108`) | yes | yes (2026-11-25, router restarted), 2.40 |
@@ -841,6 +842,30 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Live check** (2026-11-25, Gemma 4 E2B through the router): no key is a 401; non-streaming gives `response`/`completed` with the text and usage; streaming arrives as the raw HTTP/1.0 body (`Connection: close`, no `Transfer-Encoding`) with the whole event sequence from `response.created` to `response.completed`.
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
+
+### 2.43 Upstream batch 3: the Windows fixes that fit (branch `upstream-win`, 2026-11-25; built, merged into local main, not pushed or deployed)
+
+How the 142 upstream commits that mention Windows were sorted: each one's files were compared with what the fork has and has changed (27 touch only files the fork never
+changed, 37 touch files it did change, 78 touch files the fork does not have, mostly the CUDA, GGUF and engine-test files). Twenty-one went in, each cherry-picked with
+`-x`, in date order, with its own tests run; the full Python suite was then compared with `main`.
+
+- **Taken (21)**: the converter tools on Windows (`convert_qwen38_experts_int4` without `os.pread`, `convert_qwen36`'s vision tower and memmap shard reader, and the int4
+  converter test that could not delete its temp directory on Windows); `coli stop` (a stop that needs no rights on the process, an ended process is stopped and not "Access
+  is denied", and no "stopped" when it failed); `coli setup` (a stalled `curl.exe` download times out, an empty file completes without Windows curl, HTTP errors in the
+  throughput probe are rejected, two test fixes); `fix(memory)` keeps a measured zero Windows commit headroom; a clear stop on an MSYS or Cygwin `gcc`; `qpack` refuses a
+  FIFO at `manifest.json` instead of hanging; `COLI_MMAP` and `TRUNK_RESIDENT_LAYERS` map shards on Windows too (the `colibri` engine); the OpenMP team binds one place
+  per core and not per SMT thread; and three test-hygiene fixes (`test_cli_output`, C test binaries by absolute path, `test_ablate_mode`'s stderr capture).
+- **Taken, but an I/O path change that has not been measured on the fork's models**: `bf70afcc` (a shard's readers overlap through a second descriptor, `st.h`) and
+  `81eaf807` (direct-read descriptors opened for overlapped I/O, `compat.h`). Their own C tests pass (`test_compat_direct`, `test_compat_overlapped`,
+  `test_st_shared_read`), and `compat_pread` on Windows now creates one event per read. They take effect only when an engine is rebuilt; the Python changes take effect on
+  the next router restart. Measure a model that reads from disk (Qwen3-Coder cold) before rebuilding the live engines.
+- **Held back, with reasons**: `cf14203f` (a hybrid CPU's OpenMP team is its performance cores: this machine reports 24 physical and 8 performance cores, so every engine that
+  calls `omp_tune.h` would drop from 24 threads to 8; upstream measured it on a 6 P + 8 E laptop CPU only, so measure here first); the Vulkan commits (`backend_vulkan.c`,
+  `vk_chain.c`, the host pool on Windows: files the fork changed, and they touch what the Gemma and Qwen cards run on); the engines the fork carries but does not run
+  (DeepSeek V4 and V4.1, Kimi K3, MiMo, GLM: the aligned-free, RAM-budget and engram-staging fixes cannot be run without their models); CUDA, GGUF (`gguf.h` is not in the
+  fork), xdna, LoRA, FreeBSD, CI, release packaging and README commits; and three that do not apply (`5653e038`: the fork has no `i8r16_group2`, so there is no `grp2`
+  clash; `c5beedfa` and `5f977ab6`: test files that conflict and test what the fork does not run).
+- **Checks**: the touched Python tests pass, except two that fail on `main` too (`test_setup_hw.test_user_driver_manifests`, a path-separator assertion;). The full suite: 4,469 tests (`main`: 4,452, the difference is the tests the picks added), the same failures as `main` except that two int4-converter errors are gone and one router test, `test_a_model_that_is_answering_goes_when_it_has_finished`, failed in that run and passes alone in this tree but fails alone on `main`'s tree too: a timing test that flickers. (Run the suite with the PATH the baseline used: with MSYS2 first on it, speech tests error.)
 
 ### 2.42 Upstream batch 2: 26 validation and robustness fixes (branch `upstream-picks`, 2026-11-25; built, merged into local main, not pushed or deployed)
 
