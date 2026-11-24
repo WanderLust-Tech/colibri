@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `90ca977b` (pushed 2026-11-24) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `90ca977b` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
+| Fork's `main` | `b36fec34` (pushed 2026-11-24); the cover variant of flow-edit and the dashboard's Edit mode (`a031254a`) are local only |
+| Live server | clone `C:\Users\kp-mi\colibri` at `b36fec34` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -60,7 +60,7 @@ the clone that serves port 8000):
 | ACE-Step add-ons in `coli model install`; the Music controls in the dashboard | `feat/qwen3-speech` | yes (`99ea6c0c`, `8873f60d`) | yes (`929ea3c1`) | yes (2026-11-22), 2.35 |
 | ACE-Step's planner, DiT and VAE on the Vulkan card | `feat/qwen3-speech` | yes (`929ea3c1`, `e903d6a0`, `47d8dd3a`) | yes | yes (2026-11-22): `acestep.exe` is the `VK=1` build; a 10 s song 2.8 s warm, 2.36 |
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
-| ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes | yes (2026-11-24), 2.38 |
+| ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | `0c9a7381` and `8e0c0996` yes, `a031254a` no | `0c9a7381` and `8e0c0996` yes (2026-11-23/24); `a031254a` not deployed, 2.38 |
 | ACE-Step planner 0.6B/4B and SFT DiT as `coli model install` add-ons | `feat/qwen3-speech` | yes (`7438e992`) | yes | yes (2026-11-23), 2.35 |
 | VS Code extension 0.14.0 (outside this repository, 2.17) | none: its own folder, no commits | n/a | n/a | the package is built and installed on this machine (0.14.0 installed 2026-11-20) |
 
@@ -761,7 +761,7 @@ Upstream's four off-by-default sampler options, for every DiT: `sampler_mode` (`
 - The dashboard's Music composer has them (when `/v1/models` says `audio.sampler`, which the gateway takes from the engine's `READY`): a Sampler chip (Euler, Heun, SDE) and two fields, the velocity cap (0 to 100) and its smoothing (0 to 1), empty for off; the song's line says what ran.
 - Not done: flow-edit (a sampler overlay upstream has).
 
-### 2.38 ACE-Step's flow-edit: a clip edited toward a new caption and lyrics (2026-11-23, cover variant and dashboard 2026-11-24; pushed and live)
+### 2.38 ACE-Step's flow-edit: a clip edited toward a new caption and lyrics (2026-11-23; the engine and the API pushed and live, the cover variant and the dashboard's Edit mode of 2026-11-24 built, not pushed)
 
 Upstream's overlay on text to music (`flow_edit_morph`): the clip's latents moved along the difference of the DiT's answers under the source and the target prompt over a window of the schedule (`docs/acestep.md`, "Flow-edit").
 
