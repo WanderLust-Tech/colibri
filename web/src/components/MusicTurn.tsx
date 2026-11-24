@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Activity, AudioLines, Blocks, Clock, Copy, Cpu, Dices, Download, Footprints, Gauge, Languages, Layers, Mic, Music2, Paintbrush, Repeat2, RefreshCw, RotateCcw, Scissors, SlidersHorizontal, Sparkles, Upload, Waves, X, Zap } from "lucide-react"
+import { Activity, AudioLines, Blocks, Clock, Copy, Cpu, Dices, Download, Footprints, Gauge, Languages, Layers, Mic, Music2, Paintbrush, Pencil, Repeat2, RefreshCw, RotateCcw, Scissors, SlidersHorizontal, Sparkles, Upload, Waves, X, Zap } from "lucide-react"
 
 import type { GeneratedMusic, MusicDit, MusicLimits, MusicSampler, MusicTask, RepaintMode } from "@/lib/api"
 import { duration as formatSeconds, elapsedClock } from "@/lib/images"
@@ -86,6 +86,7 @@ export function MusicResultCard({ song, copied, busy, onDownload, onCopySeed, on
   const fmt = (seconds: number) => String(Math.round(seconds * 10) / 10)
   const trackName = (name: string | undefined) => (name ? t(`music.track.${name}`) : t("music.track.any"))
   const origin = song.task === "cover" && song.source ? t("music.result.cover", { name: song.source.name })
+    : song.task === "edit" && song.source ? t(song.edit?.cover ? "music.result.editCover" : "music.result.edit", { name: song.source.name })
     : song.task === "repaint" && song.source && song.repaint
       ? t("music.result.repaint", { name: song.source.name, from: fmt(song.repaint.from), to: song.repaint.to !== undefined ? fmt(song.repaint.to) : songClock(song.duration) })
       : song.task === "extract" && song.source ? t("music.result.extract", { name: song.source.name, track: trackName(song.track) })
@@ -144,7 +145,7 @@ export function MusicStoppedCard({ request, finish, busy, onRetry }: { request: 
    controls and the chat's reasoning chip sit. A typed value counts as soon as it is valid, so
    sending straight from a field uses what is on screen; leaving the field puts an invalid one
    inside the range. */
-export function MusicControls({ limits, task, onTask, planner, guided, sampler, cover, repaint, hasReference, onReferenceFile, duration, steps, seed, seedValid, language, lyricsOpen, lyricsFilled, onDuration, onSteps, onSeed, onLanguage, onLyrics }: {
+export function MusicControls({ limits, task, onTask, planner, guided, sampler, cover, edit, repaint, hasReference, onReferenceFile, duration, steps, seed, seedValid, language, lyricsOpen, lyricsFilled, onDuration, onSteps, onSeed, onLanguage, onLyrics }: {
   limits: MusicLimits
   task: MusicTask
   onTask: (task: MusicTask) => void
@@ -162,6 +163,11 @@ export function MusicControls({ limits, task, onTask, planner, guided, sampler, 
     vnorm: string; vnormOk: boolean; onVnorm: (text: string) => void; vema: string; vemaOk: boolean; onVema: (text: string) => void
   }
   cover: { strength: string; noise: string; onStrength: (text: string) => void; onNoise: (text: string) => void }
+  /* A flow-edit: the window of the schedule it edits, the draws averaged a step, and (when the engine has it) the cover's context. */
+  edit: {
+    from: string; to: string; avg: string; ok: boolean; hasCover: boolean; cover: boolean
+    onFrom: (text: string) => void; onTo: (text: string) => void; onAvg: (text: string) => void; onCover: () => void
+  }
   repaint: {
     from: string; to: string; mode: RepaintMode; strength: string; spanOk: boolean
     onFrom: (text: string) => void; onTo: (text: string) => void; onMode: (mode: RepaintMode) => void; onStrength: (text: string) => void
@@ -200,7 +206,7 @@ export function MusicControls({ limits, task, onTask, planner, guided, sampler, 
   const needsClock = task === "text2music" ? !(planner.available && planner.on && planner.auto) : task === "complete"
   const referenceInput = useRef<HTMLInputElement>(null)
   const unit =(text: string) => text.trim() !== "" && Number.isFinite(Number(text)) && Number(text) >= 0 && Number(text) <= 1
-  const TaskIcon = { text2music: Music2, cover: Repeat2, repaint: Paintbrush, extract: Scissors, lego: Blocks, complete: Layers } as const
+  const TaskIcon = { text2music: Music2, cover: Repeat2, edit: Pencil, repaint: Paintbrush, extract: Scissors, lego: Blocks, complete: Layers } as const
   return <div className="image-controls">
     {limits.tasks.length > 1 && <div className="music-tasks" role="group" aria-label={t("music.mode.label")}>
       {limits.tasks.map((item) => {
@@ -236,14 +242,14 @@ export function MusicControls({ limits, task, onTask, planner, guided, sampler, 
         onChange={(event) => guided.onGuidance(event.target.value)} />
     </label>}
     {sampler.available && <>
-      <label className="image-chip" title={t("music.sampler.help")}>
+      {task !== "edit" && <label className="image-chip" title={t("music.sampler.help")}>
         <Waves aria-hidden="true" />
         <select aria-label={t("music.sampler")} value={sampler.step} onChange={(event) => sampler.onStep(event.target.value as MusicSampler | "")}>
           <option value="">{t("music.sampler.euler")}</option>
           <option value="heun">{t("music.sampler.heun")}</option>
           <option value="sde">{t("music.sampler.sde")}</option>
         </select>
-      </label>
+      </label>}
       <label className={cn("image-chip", !sampler.vnormOk && "invalid")} title={t("music.sampler.vnormHelp")}>
         <Zap aria-hidden="true" />
         <input aria-label={t("music.sampler.vnorm")} aria-invalid={!sampler.vnormOk} inputMode="decimal" className="music-unit" value={sampler.vnorm}
@@ -290,6 +296,25 @@ export function MusicControls({ limits, task, onTask, planner, guided, sampler, 
         <input aria-label={t("music.cover.noise")} aria-invalid={!unit(cover.noise)} inputMode="decimal" className="music-unit" value={cover.noise}
           onChange={(event) => cover.onNoise(event.target.value)} />
       </label>
+    </>}
+    {task === "edit" && <>
+      <label className={cn("image-chip", !edit.ok && "invalid")} title={t("music.edit.windowHelp")}>
+        <SlidersHorizontal aria-hidden="true" />
+        <input aria-label={t("music.edit.from")} aria-invalid={!edit.ok} inputMode="decimal" className="music-unit" value={edit.from}
+          onChange={(event) => edit.onFrom(event.target.value)} />
+        <span className="image-unit">–</span>
+        <input aria-label={t("music.edit.to")} aria-invalid={!edit.ok} inputMode="decimal" className="music-unit" value={edit.to}
+          onChange={(event) => edit.onTo(event.target.value)} />
+      </label>
+      <label className={cn("image-chip", !edit.ok && "invalid")} title={t("music.edit.avgHelp")}>
+        <Layers aria-hidden="true" />
+        <input aria-label={t("music.edit.avg")} aria-invalid={!edit.ok} inputMode="numeric" className="music-unit" value={edit.avg}
+          onChange={(event) => edit.onAvg(event.target.value)} />
+      </label>
+      {edit.hasCover && <button type="button" className={cn("image-chip", edit.cover && "on")} aria-pressed={edit.cover}
+        title={t("music.edit.coverHelp")} onClick={edit.onCover}>
+        <Repeat2 aria-hidden="true" /><span>{t("music.edit.cover")}</span>
+      </button>}
     </>}
     {(task === "repaint" || task === "lego") && <>
       <label className={cn("image-chip", !repaint.spanOk && "invalid")} title={t(task === "lego" ? "music.lego.help" : "music.repaint.help")}>
@@ -351,6 +376,19 @@ export function MusicControls({ limits, task, onTask, planner, guided, sampler, 
         placeholder={t("image.seedRandom")} onChange={(event) => onSeed(event.target.value)} />
       {seed && <button type="button" className="image-clear" aria-label={t("image.seedClear")} title={t("image.seedClear")} onClick={() => onSeed("")}><X /></button>}
     </label>
+  </div>
+}
+
+/* A flow-edit's description of the clip as it is, above the prompt (which says what it should become): a line for its caption, a box for its lyrics. */
+export function MusicEditBox({ caption, lyrics, max, onCaption, onLyrics }: { caption: string; lyrics: string; max: number; onCaption: (text: string) => void; onLyrics: (text: string) => void }) {
+  const { t } = useLocale()
+  const bytes = lyricBytes(lyrics)
+  return <div className="music-lyrics">
+    <input aria-label={t("music.edit.caption")} value={caption} placeholder={t("music.edit.captionPlaceholder")} className="music-edit-caption"
+      onChange={(event) => onCaption(event.target.value)} />
+    <textarea aria-label={t("music.edit.lyrics")} value={lyrics} placeholder={t("music.edit.lyricsPlaceholder")} rows={3}
+      className={cn(bytes > max && "invalid")} onChange={(event) => onLyrics(event.target.value)} />
+    <small className={cn(bytes > max && "invalid")}>{t("music.lyricsBytes", { bytes, max })}</small>
   </div>
 }
 

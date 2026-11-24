@@ -24,9 +24,10 @@ import music_engine  # noqa: E402
 
 B64 = lambda data: base64.b64encode(data).decode()  # noqa: E731
 CLIP = B64(make_wav(2.5))
-WITH = {"tasks": ["text2music", "cover", "repaint"], "flow_edit": True, "sampler": True,
+WITH = {"tasks": ["text2music", "cover", "repaint"], "flow_edit": True, "flow_edit_cover": True, "sampler": True,
         "audio_in": {"formats": ["wav", "mp3"], "max_seconds": 600, "ref_seconds": 30}}
-WITHOUT = {k: v for k, v in WITH.items() if k != "flow_edit"}
+WITHOUT = {k: v for k, v in WITH.items() if k not in ("flow_edit", "flow_edit_cover")}
+BEFORE_COVER = {k: v for k, v in WITH.items() if k != "flow_edit_cover"}          # an engine from before the cover variant
 
 
 def request(info=WITH, **body):
@@ -74,7 +75,6 @@ class Rules(unittest.TestCase):
         refused("src_audio", flow_edit_morph=False)
 
     def test_what_a_flow_edit_does_not_go_with(self):
-        refused("flow_edit_morph", task="cover")
         refused("flow_edit_morph", task="repaint")
         refused("src_audio", src_audio=None)
         refused("flow_edit_morph", flow_edit_morph="yes")
@@ -83,6 +83,15 @@ class Rules(unittest.TestCase):
         refused("thinking", thinking=True)
         refused("use_adg", use_adg=True)
         request(sampler_mode="euler", infer_method="ode")                                     # naming the plain step is fine
+
+    def test_a_flow_edit_on_a_covers_context(self):
+        r = request(task="cover", flow_edit_source_caption="slow piano", flow_edit_n_max=0.7)
+        self.assertEqual((r["morph"], r["task"], r["duration"], r["n_max"]), (True, "cover", None, 0.7))
+        self.assertEqual((r["audio_cover_strength"], r["cover_noise_strength"]), (None, None))
+        self.assertIn("update the engine", refused("task", BEFORE_COVER, task="cover"))      # the older engine would run it on silence: refused in front of it
+        request(BEFORE_COVER)                                                                  # and text to music is still fine there
+        for name in ("audio_cover_strength", "cover_noise_strength"):
+            self.assertIn("not for a flow-edit", refused(name, task="cover", **{name: 0.5}))
 
     def test_bad_values_are_refused_by_name(self):
         for value in (-0.1, 1.1, "0.5", True):
@@ -131,6 +140,19 @@ class Gateway(unittest.TestCase):
         self.assertIs(out["colibri"]["flow_edit"], True)
         self.assertAlmostEqual(out["colibri"]["src_seconds"], 2.5, places=3)
 
+    def test_a_flow_edit_on_a_covers_context_is_the_clips_length_too(self):
+        status, out = self.song(prompt="bright ukulele", task="cover", flow_edit_morph=True, src_audio=CLIP, flow_edit_source_caption="slow piano", steps=2, seed=3)
+        self.assertEqual(status, 200, out)
+        self.assertIs(out["colibri"]["flow_edit"], True)
+        self.assertEqual(out["colibri"]["task"], "cover")
+        self.assertAlmostEqual(out["colibri"]["src_seconds"], 2.5, places=3)
+        status, out = self.song(prompt="bright ukulele", task="cover", flow_edit_morph=True, src_audio=CLIP, audio_cover_strength=0.5)
+        self.assertEqual((status, out["error"]["param"]), (400, "audio_cover_strength"))
+
+    def test_the_model_card_says_the_cover_variant_too(self):
+        status, _, raw = self.rig.request("/v1/models", method="GET")
+        self.assertIs(json.loads(raw)["data"][0]["audio"]["flow_edit_cover"], True)
+
     def test_a_plain_song_says_it_was_not_one(self):
         status, out = self.song(prompt="calm piano", duration=2, steps=2, seed=1)
         self.assertEqual(status, 200, out)
@@ -174,7 +196,9 @@ class Plain(unittest.TestCase):
 
     def test_the_model_card_says_it_does_not(self):
         status, _, raw = self.rig.request("/v1/models", method="GET")
-        self.assertIs(json.loads(raw)["data"][0]["audio"]["flow_edit"], False)
+        card = json.loads(raw)["data"][0]["audio"]
+        self.assertIs(card["flow_edit"], False)
+        self.assertIs(card["flow_edit_cover"], False)
 
 
 class Cli(unittest.TestCase):
@@ -189,7 +213,7 @@ class Cli(unittest.TestCase):
         base = dict(cover=None, repaint=None, extract=None, lego=None, complete=None, ref=None, track=None, tracks=None, dit=None, guidance=None,
                     cfg_start=None, cfg_end=None, adg=False, duration=None, repaint_from=None, repaint_to=None, repaint_mode=None,
                     repaint_strength=None, cover_strength=None, cover_noise=None, sampler=None, sde=False, velocity_norm=None, velocity_ema=None,
-                    edit=None, edit_caption=None, edit_lyrics=None, n_min=None, n_max=None, n_avg=None, plan=False)
+                    edit=None, edit_cover=False, edit_caption=None, edit_lyrics=None, n_min=None, n_max=None, n_avg=None, plan=False)
         base.update(kw)
         return type("Args", (), base)()
 
@@ -211,6 +235,13 @@ class Cli(unittest.TestCase):
         none = self.coli.music_audio_flags(self.args())
         for field in ("flow_edit_morph", "flow_edit_source_caption", "flow_edit_n_min", "src_audio"):
             self.assertNotIn(field, none)
+
+    def test_edit_cover_asks_for_the_cover_context(self):
+        body = self.with_clip(edit_cover=True, edit_caption="slow piano")
+        self.assertEqual((body["task"], body["flow_edit_morph"]), ("cover", True))
+        with self.assertRaises(SystemExit) as caught:
+            self.coli.music_audio_flags(self.args(edit_cover=True))
+        self.assertIn("--edit FILE", str(caught.exception))
 
     def exits(self, flag, **kw):
         with self.assertRaises(SystemExit) as caught:

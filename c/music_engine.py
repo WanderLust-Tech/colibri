@@ -335,6 +335,8 @@ class MusicEngine:
                 request[name] = value
         if morph and not (self.info or {}).get("flow_edit"):
             raise MusicEngineError("this music engine does not do flow-edit: update the engine")
+        if morph and task == "cover" and not (self.info or {}).get("flow_edit_cover"):
+            raise MusicEngineError("this music engine does not do flow-edit on a cover's context: update the engine")
         audio_in = (task not in (None, "text2music") or src_audio is not None or ref_audio is not None)
         if audio_in and "cover" not in self.tasks:
             raise MusicEngineError("this music engine does not take audio in (it announced no tasks): "
@@ -708,10 +710,15 @@ def _audio_request(body, info):
         raise MusicRequestError("`flow_edit_morph` must be true or false.", "flow_edit_morph")
     morph = bool(morph)
     if morph:
-        if task != "text2music":
-            raise MusicRequestError("`flow_edit_morph` is an overlay on text to music: leave `task` out (or text2music).", "flow_edit_morph")
+        if task not in ("text2music", "cover"):
+            raise MusicRequestError("`flow_edit_morph` is an overlay on text to music or on a cover: leave `task` out (or text2music), or set it to cover.", "flow_edit_morph")
         if not (info or {}).get("flow_edit"):
             raise MusicRequestError("`flow_edit_morph`: this music engine does not do flow-edit; update the engine.", "flow_edit_morph")
+        if task == "cover" and not (info or {}).get("flow_edit_cover"):
+            raise MusicRequestError("`flow_edit_morph` with task cover: this music engine does not do flow-edit on a cover's context; update the engine.", "task")
+        for name in ("audio_cover_strength", "cover_noise_strength"):
+            if body.get(name) is not None:
+                raise MusicRequestError(f"`{name}` is not for a flow-edit (upstream's overlay leaves it out).", name)
         if "src_audio" not in clips:
             raise MusicRequestError("`flow_edit_morph` needs `src_audio`: the clip to edit.", "src_audio")
     if task == "text2music":

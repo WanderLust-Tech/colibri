@@ -6769,6 +6769,7 @@ class APIServer(ThreadingHTTPServer):
             entry["audio"]["guided"] = {"available": bool(guided["available"]), "default_steps": guided["default_steps"], "max_steps": guided["max_steps"],
                                         "default_guidance": guided["default_guidance"], "tracks": list(guided.get("tracks") or music_engine.TRACK_NAMES)}
             entry["audio"]["sampler"] = bool(info.get("sampler"))
+            entry["audio"]["flow_edit_cover"] = bool(info.get("flow_edit_cover"))     # the same on a cover's context (task cover with flow_edit_morph)
             entry["audio"]["flow_edit"] = bool(info.get("flow_edit"))      # an edit of a clip toward a new caption and lyrics (upstream's flow-edit overlay)         # Heun, the SDE step, the velocity clamp and smoothing: the engine takes them
         if is_embedding_engine(self.engine):
             info = getattr(self.engine, "info", None) or {}

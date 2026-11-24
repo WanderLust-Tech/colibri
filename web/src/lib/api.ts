@@ -206,9 +206,10 @@ function editLimits(image: unknown): ModelInfo["edit"] {
 
 /* The tasks a /v1/models `audio` block lists: the ones this page knows, in its order, and composing
    always (an engine that says nothing only composes). */
-function musicTasks(value: unknown): MusicTask[] {
+function musicTasks(value: unknown, flowEdit = false): MusicTask[] {
   const listed = Array.isArray(value) ? value : []
-  const known = MUSIC_TASKS.filter((task) => task === "text2music" || listed.includes(task))
+  /* "edit" is not a task of the engine: it is its flow-edit overlay, announced on its own (audio.flow_edit) and needing the clip tasks' audio in */
+  const known = MUSIC_TASKS.filter((task) => task === "text2music" || (task === "edit" ? flowEdit && listed.includes("cover") : listed.includes(task)))
   return known.length ? known : ["text2music"]
 }
 
@@ -228,7 +229,7 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
     maxSteps: number(info.max_steps, 20),
     defaultShift: number(info.default_shift, 1),
     maxLyricBytes: number(info.max_lyric_bytes, 32768),
-    tasks: musicTasks(info.tasks),
+    tasks: musicTasks(info.tasks, info.flow_edit === true),
   }
   const audioIn = info.audio_in as { max_seconds?: unknown; ref_seconds?: unknown } | undefined
   if (audioIn && positive(audioIn.max_seconds) && positive(audioIn.ref_seconds) && limits.tasks.length > 1) {
@@ -248,6 +249,7 @@ export function musicLimits(audio: unknown): MusicLimits | undefined {
     }
   }
   if (info.sampler === true) limits.sampler = true
+  if (info.flow_edit === true && info.flow_edit_cover === true) limits.flowEditCover = true
   return limits.minDuration <= limits.maxDuration ? limits : undefined
 }
 
@@ -1175,9 +1177,9 @@ export type MusicStage = "meta" | "plan" | "encode" | "text" | "condition" | "de
    clip, or a clip with a span of it repainted. A reference clip, for the style, goes with any. The guided
    DiT (the base one, when installed) adds three: one track taken out of a clip, one track made to go with a
    clip inside a span, and a partial track completed with others. */
-export type MusicTask = "text2music" | "cover" | "repaint" | "extract" | "lego" | "complete"
+export type MusicTask = "text2music" | "cover" | "edit" | "repaint" | "extract" | "lego" | "complete"
 export type RepaintMode = "balanced" | "conservative" | "aggressive"
-export const MUSIC_TASKS: readonly MusicTask[] = ["text2music", "cover", "repaint", "extract", "lego", "complete"]
+export const MUSIC_TASKS: readonly MusicTask[] = ["text2music", "cover", "edit", "repaint", "extract", "lego", "complete"]
 export const GUIDED_TASKS: readonly MusicTask[] = ["extract", "lego", "complete"]
 export type MusicDit = "turbo" | "base" | "sft"
 export const MUSIC_DITS: readonly MusicDit[] = ["turbo", "base", "sft"]
@@ -1215,7 +1217,14 @@ export interface MusicLimits {
   guided?: { dits: MusicDit[]; defaultSteps: number; maxSteps: number; defaultGuidance: number; tracks: string[] }
   /* The engine takes upstream's sampler options (Heun, the SDE step, the velocity clamp and smoothing), for any DiT. */
   sampler?: boolean
+  /* The flow-edit also runs on a cover's context (the clip's own structure kept), not only on silence. */
+  flowEditCover?: boolean
 }
+
+/* A flow-edit of a clip (the "edit" task of this page: upstream's overlay on text to music, or on a cover): what the clip is now (`caption`, `lyrics`),
+   the part of the schedule the edit runs over (`nMin` to `nMax`, 0 to 1), the noise draws averaged a step (`nAvg`, 1 to 16), and whether it runs on a cover's context.
+   The prompt and the lyrics of the request are what the clip should become. Each is left out at its default. */
+export interface MusicEdit { caption: string; lyrics?: string; nMin?: number; nMax?: number; nAvg?: number; cover?: boolean }
 
 /* The sampler: the plain Euler step (not sent), Heun's second-order one, or the stochastic one. `vnorm` caps a step's velocity as a multiple of the
    latents' norm (above 0), `vema` smooths it with the last step's (above 0, up to 1); each is left out when off. */
@@ -1261,6 +1270,7 @@ export interface GeneratedMusic {
   reference?: { name: string }
   repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
   cover?: { strength: number; noise: number }
+  edit?: MusicEdit
   /* The planner and the guided DiT, as asked: `auto` is a length left to the planner (`duration` is then the one it chose). */
   plan?: boolean
   auto?: boolean
@@ -1298,6 +1308,7 @@ export interface GenerateMusicOptions {
   reference?: File
   repaint?: { from: number; to?: number; mode: RepaintMode; strength?: number }
   cover?: { strength: number; noise: number }
+  edit?: MusicEdit
   plan?: boolean
   /* With `plan`: no length is sent and the planner picks it. */
   auto?: boolean
@@ -1335,6 +1346,11 @@ export function musicFields(options: GenerateMusicOptions, stream: boolean) {
     stream,
   }
   if (task === "text2music") { if (!(options.plan && options.auto)) fields.duration = options.duration }
+  else if (task === "edit") {
+    /* a flow-edit is the overlay on text to music (no task sent) or on a cover; the clip's length is the song's */
+    fields.flow_edit_morph = true
+    if (options.edit?.cover) fields.task = "cover"
+  }
   else fields.task = task
   if (task === "complete" && !options.source) fields.duration = options.duration      // no clip: made from the description, so it needs a length
   if (options.plan) fields.thinking = true
@@ -1357,6 +1373,14 @@ export function musicFields(options: GenerateMusicOptions, stream: boolean) {
     if (options.repaint.to !== undefined) fields.repainting_end = options.repaint.to
     if (options.repaint.mode !== "balanced") fields.repaint_mode = options.repaint.mode
     if (options.repaint.mode === "balanced" && options.repaint.strength !== undefined) fields.repaint_strength = options.repaint.strength
+  }
+  if (task === "edit" && options.edit) {
+    const edit = options.edit
+    if (edit.caption.trim()) fields.flow_edit_source_caption = edit.caption
+    if (edit.lyrics?.trim()) fields.flow_edit_source_lyrics = edit.lyrics
+    if (edit.nMin) fields.flow_edit_n_min = edit.nMin
+    if (edit.nMax !== undefined && edit.nMax !== 1) fields.flow_edit_n_max = edit.nMax
+    if (edit.nAvg && edit.nAvg !== 1) fields.flow_edit_n_avg = edit.nAvg
   }
   if (task === "cover" && options.cover) {
     if (options.cover.strength !== 1) fields.audio_cover_strength = options.cover.strength
@@ -1491,6 +1515,7 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
     ...(options.reference ? { reference: { name: options.reference.name } } : {}),
     ...((options.task === "repaint" || options.task === "lego") && options.repaint ? { repaint: options.repaint } : {}),
     ...(options.task === "cover" && options.cover ? { cover: options.cover } : {}),
+    ...(options.task === "edit" && options.edit ? { edit: options.edit } : {}),
     ...(options.plan ? { plan: true, ...(options.auto ? { auto: true } : {}) } : {}),
     ...(options.dit ? { dit: options.dit } : {}),
     ...(options.guidance !== undefined ? { guidance: options.guidance } : {}),

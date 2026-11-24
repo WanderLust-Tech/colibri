@@ -295,7 +295,7 @@ static int acs_serve(AceEngine *e){
     printf("READY {\"model\":\"%s\",\"sample_rate\":%d,\"channels\":%d,\"format\":\"s16le\",\"default_duration\":%g,\"min_duration\":%g,"
            "\"max_duration\":%g,\"default_steps\":%d,\"max_steps\":%d,\"default_shift\":%g,\"max_caption_bytes\":%d,\"max_lyric_bytes\":%d,"
            "\"max_seed\":4294967295,\"protocol\":1,\"tasks\":[\"text2music\",\"cover\",\"repaint\"%s],"
-           "\"dits\":[%s%s%s%s%s],\"planner\":%s,\"sampler\":true,\"flow_edit\":true,"
+           "\"dits\":[%s%s%s%s%s],\"planner\":%s,\"sampler\":true,\"flow_edit\":true,\"flow_edit_cover\":true,"
            "\"guided\":{\"available\":%s,\"default_steps\":32,\"max_steps\":%d,\"default_guidance\":7,\"tracks\":[\"woodwinds\",\"brass\",\"fx\",\"synth\",\"strings\","
            "\"percussion\",\"keyboard\",\"guitar\",\"bass\",\"drums\",\"backing_vocals\",\"vocals\"]},"
            "\"audio_in\":{\"formats\":[\"wav\",\"mp3\"],\"max_seconds\":%g,\"ref_seconds\":%d}}\n",

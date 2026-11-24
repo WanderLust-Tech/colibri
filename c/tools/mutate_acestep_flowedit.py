@@ -63,6 +63,10 @@ MUTANTS = {
     # --- the source's prompt -------------------------------------------------------------------------------------------------------
     "source-lyrics-default-is-instrumental": ("acestep_gen.h", 'rq->edit_lyrics ? rq->edit_lyrics : ""', 'rq->edit_lyrics ? rq->edit_lyrics : "[Instrumental]"'),
     "source-caption-is-the-targets": ("acestep_gen.h", 'rq->edit_caption ? rq->edit_caption : ""', "rq->caption"),
+    # --- on a cover's context (task cover with the overlay) ----------------------------------------------------------------------
+    "cover-context-is-the-raw-clip": ("acestep_gen.h", "dit_src = hints;", "dit_src = morph ? src : hints;"),
+    "cover-context-is-silence": ("acestep_gen.h", "dit_src = hints;", "if (morph) { acg_silence_slice(e, T, src); dit_src = src; } else dit_src = hints;"),
+    "cover-source-prompt-has-the-text-instruction": ("acestep_gen.h", "act_caption_prompt(instruction, rq->edit_caption ? rq->edit_caption", "act_caption_prompt(instructions[0], rq->edit_caption ? rq->edit_caption"),
     "context-is-the-clip": ("acestep_gen.h", "if (text_like) acg_silence_slice(e, T, src);", "if (text_like && !morph) acg_silence_slice(e, T, src);"),
 }
 

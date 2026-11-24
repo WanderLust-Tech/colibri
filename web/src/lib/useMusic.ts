@@ -83,6 +83,13 @@ export function useMusic(env: MusicEnvironment) {
   const [repaintStrength, setRepaintStrength] = useState("0.5")
   const [coverStrength, setCoverStrength] = useState("1")
   const [coverNoise, setCoverNoise] = useState("0")
+  /* a flow-edit: what the clip is now, the window of the schedule it edits, the draws averaged a step, and the cover's context */
+  const [editCaption, setEditCaption] = useState("")
+  const [editLyrics, setEditLyrics] = useState("")
+  const [editFrom, setEditFrom] = useState("0")
+  const [editTo, setEditTo] = useState("1")
+  const [editAvg, setEditAvg] = useState("1")
+  const [editCover, setEditCover] = useState(false)
   /* the planner and the guided DiT */
   const [plan, setPlan] = useState(() => read("colibri.musicPlan", "") === "1")
   const [lengthAuto, setLengthAuto] = useState(() => read("colibri.musicLengthAuto", "1") === "1")
@@ -157,7 +164,12 @@ export function useMusic(env: MusicEnvironment) {
   const coverStrengthValue = number(coverStrength)
   const coverNoiseValue = number(coverNoise)
   const unitOk = (value: number) => Number.isFinite(value) && value >= 0 && value <= 1
+  const editFromValue = number(editFrom), editToValue = number(editTo), editAvgValue = number(editAvg)
+  const editOk = unitOk(editFromValue) && unitOk(editToValue) && editToValue > 0 && editToValue >= editFromValue &&
+    Number.isInteger(editAvgValue) && editAvgValue >= 1 && editAvgValue <= 16
+  const hasEditCover = mode && limits.flowEditCover === true
   const settingsOk = task === "cover" ? unitOk(coverStrengthValue) && unitOk(coverNoiseValue)
+    : task === "edit" ? editOk
     : task === "repaint" ? repaintMode !== "balanced" || unitOk(strengthValue) : true
   /* A completion may start from the description alone; the other clip tasks need the clip. */
   const clipsOk = (task === "text2music" || task === "complete" ? !source || !sourceProblem : source !== null && !sourceProblem) && !referenceProblem
@@ -198,7 +210,7 @@ export function useMusic(env: MusicEnvironment) {
         ...(request.sampler ? { sampler: request.sampler } : {}), ...(request.vnorm ? { vnorm: request.vnorm } : {}), ...(request.vema ? { vema: request.vema } : {}),
         ...(request.track ? { track: request.track } : {}), ...(request.tracks?.length ? { tracks: request.tracks } : {}),
         ...(files?.source ? { source: files.source } : {}), ...(files?.reference ? { reference: files.reference } : {}),
-        ...(request.repaint ? { repaint: request.repaint } : {}), ...(request.cover ? { cover: request.cover } : {}),
+        ...(request.repaint ? { repaint: request.repaint } : {}), ...(request.cover ? { cover: request.cover } : {}), ...(request.edit ? { edit: request.edit } : {}),
         signal: controller.signal,
         onProgress: (progress) => update({ progress }),
         onPlainRequest: () => update({ plain: true }),
@@ -228,7 +240,7 @@ export function useMusic(env: MusicEnvironment) {
     ...(planning ? { plan: true, ...(auto ? { auto: true } : {}) } : {}),
     ...(dit ? { dit } : {}),
     ...(guided ? { guidance: guidanceValue } : {}),
-    ...(hasSampler && sampler ? { sampler } : {}),
+    ...(hasSampler && sampler && task !== "edit" ? { sampler } : {}),            // a flow-edit takes the plain Euler step
     ...(hasSampler && optionalValue(vnorm) > 0 ? { vnorm: optionalValue(vnorm) } : {}),
     ...(hasSampler && optionalValue(vema) > 0 ? { vema: optionalValue(vema) } : {}),
     ...((task === "extract" || task === "lego") && track ? { track } : {}),
@@ -239,6 +251,11 @@ export function useMusic(env: MusicEnvironment) {
     ...(task === "repaint" ? { repaint: { from, ...(to !== undefined ? { to } : {}), mode: repaintMode, ...(repaintMode === "balanced" ? { strength: clampUnit(strengthValue) } : {}) } } : {}),
     ...(task === "lego" ? { repaint: { from, ...(to !== undefined ? { to } : {}), mode: "balanced" as RepaintMode } } : {}),
     ...(task === "cover" ? { cover: { strength: clampUnit(coverStrengthValue), noise: clampUnit(coverNoiseValue) } } : {}),
+    ...(task === "edit" ? { edit: {
+      caption: editCaption.trim(), ...(editLyrics.trim() ? { lyrics: editLyrics } : {}),
+      ...(editFromValue > 0 ? { nMin: editFromValue } : {}), ...(editToValue !== 1 ? { nMax: editToValue } : {}), ...(editAvgValue !== 1 ? { nAvg: editAvgValue } : {}),
+      ...(hasEditCover && editCover ? { cover: true } : {}),
+    } } : {}),
     ...(reference ? { reference: { name: reference.name } } : {}),
   })
 
@@ -302,6 +319,8 @@ export function useMusic(env: MusicEnvironment) {
     mode, limits, duration, steps: activeSteps, stepLimits: activeLimits, language, seedText, lyrics, lyricsOpen, run, copied, seed, canSend,
     task, audioIn, source, reference, sourceProblem, referenceProblem, spanOk,
     repaintFrom, repaintTo, repaintMode, repaintStrength, coverStrength, coverNoise,
+    editCaption, editLyrics, editFrom, editTo, editAvg, editCover, editOk, hasEditCover,
+    setEditCaption, setEditLyrics, setEditFrom, setEditTo, setEditAvg, setEditCover,
     hasPlanner, plan, planning, lengthAuto, auto, dits, dit, guided, guidance, guidanceOk: guidanceValid(guidanceValue), track, completeTracks, needsLength,
     hasSampler, sampler, vnorm, vema, vnormOk, vemaOk, setSampler, setVnorm, setVema,
     setPlan, setLengthAuto, setDit, setGuidance, setTrack, setCompleteTracks,

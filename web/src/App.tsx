@@ -49,7 +49,7 @@ import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
 import { Brand } from "./components/Brand"
 import { ImageControls, ImageProgressCard, ImageResultCard, ImageStoppedCard, type ImageRun } from "./components/ImageTurn"
-import { MusicClips, MusicControls, MusicLyrics, MusicProgressCard, MusicResultCard, MusicStoppedCard } from "./components/MusicTurn"
+import { MusicClips, MusicControls, MusicEditBox, MusicLyrics, MusicProgressCard, MusicResultCard, MusicStoppedCard } from "./components/MusicTurn"
 import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
@@ -861,6 +861,8 @@ export default function App() {
             {music.mode && music.audioIn && <MusicClips task={music.task} source={music.source} reference={music.reference}
               sourceProblem={music.sourceProblem} referenceProblem={music.referenceProblem} onChoose={(role, file) => void music.chooseClip(role, file)}
               onClear={music.clearClip} />}
+            {music.mode && music.task === "edit" && <MusicEditBox caption={music.editCaption} lyrics={music.editLyrics} max={music.limits.maxLyricBytes}
+              onCaption={music.setEditCaption} onLyrics={music.setEditLyrics} />}
             {music.mode && music.lyricsOpen && <MusicLyrics value={music.lyrics} max={music.limits.maxLyricBytes} onChange={music.setLyrics} />}
             <Textarea ref={draftRef} id="draft" aria-label={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} value={draft} onChange={e => setDraft(e.target.value)} placeholder={music.mode ? t("music.placeholder") : imageMode ? t(attached.length ? "image.placeholderEdit" : "image.placeholder") : t("chat.placeholder")} onPaste={event => { if (music.mode || (imageMode && !canEdit)) return; const files = Array.from(event.clipboardData.files || []); if (files.length) { event.preventDefault(); void (imageMode ? attachPictures : attach)(files) } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
             <div className="composer-foot">
@@ -871,6 +873,8 @@ export default function App() {
                 sampler={{ available: music.hasSampler, step: music.sampler, onStep: music.setSampler, vnorm: music.vnorm, vnormOk: music.vnormOk, onVnorm: music.setVnorm,
                   vema: music.vema, vemaOk: music.vemaOk, onVema: music.setVema }}
                 cover={{ strength: music.coverStrength, noise: music.coverNoise, onStrength: music.setCoverStrength, onNoise: music.setCoverNoise }}
+                edit={{ from: music.editFrom, to: music.editTo, avg: music.editAvg, ok: music.editOk, hasCover: music.hasEditCover, cover: music.editCover,
+                  onFrom: music.setEditFrom, onTo: music.setEditTo, onAvg: music.setEditAvg, onCover: () => music.setEditCover(!music.editCover) }}
                 repaint={{ from: music.repaintFrom, to: music.repaintTo, mode: music.repaintMode, strength: music.repaintStrength, spanOk: music.spanOk,
                   onFrom: music.setRepaintFrom, onTo: music.setRepaintTo, onMode: music.setRepaintMode, onStrength: music.setRepaintStrength }}
                 hasReference={music.reference !== null} onReferenceFile={(file) => void music.chooseClip("reference", file)}

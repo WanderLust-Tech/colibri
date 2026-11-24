@@ -246,6 +246,7 @@ TASKS = {
     "s_vnorm_mid": ({**INSTR, "audio_duration": 10.0, "velocity_norm_threshold": 1.3}, {}),
     # flow-edit: the clip (inst10, or less of it) edited toward the caption, over a window of the schedule (the turbo has no guidance; DCW is on and upstream leaves it out of the overlay)
     "s_fe": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_source_lyrics": ""}, {"src": ("inst10", None)}),
+    "s_fe_cover": ({**INSTR, "task_type": "cover", "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_min": 0.0, "flow_edit_n_max": 0.75}, {"src": ("inst10", None)}),      # flow-edit on a cover's context: the clip's own hints for both branches
     "s_fe_window": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_min": 0.25, "flow_edit_n_max": 0.75}, {"src": ("inst10", None)}),
     "s_heun_mid": ({**INSTR, "audio_duration": 10.0, "sampler_mode": "heun", "velocity_norm_threshold": 1.3, "velocity_ema_factor": 0.5}, {}),
 }
@@ -280,6 +281,8 @@ TASKS_BASE = {
     "b_heun_cover_half": ({**INSTR, "task_type": "cover", "audio_cover_strength": 0.5, "sampler_mode": "heun", "inference_steps": 8}, {"src": ("inst10", None)}),
     # flow-edit on a guided DiT: the source and target prompts each guided with a momentum of their own, the window, the averaged draws, the interval, the clamp and smoothing
     "b_fe": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "inference_steps": 8}, {"src": ("inst10", None)}),
+    "b_fe_cover": ({**INSTR, "task_type": "cover", "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_max": 0.7, "inference_steps": 8}, {"src": ("inst10", None)}),
+    "b_fe_cover_lyrics": ({**VOCAL, "task_type": "cover", "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_source_lyrics": "[Verse 1]\nevening light on the kitchen floor", "flow_edit_n_min": 0.1, "flow_edit_n_max": 0.8, "inference_steps": 8}, {"src": ("inst10", None)}),
     "b_fe_window": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_min": 0.2, "flow_edit_n_max": 0.7, "inference_steps": 10}, {"src": ("inst10", None)}),
     "b_fe_avg": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "flow_edit_n_max": 0.6, "flow_edit_n_avg": 2, "inference_steps": 8}, {"src": ("inst10", 6.0)}),
     "b_fe_nocfg": ({**INSTR, "flow_edit_morph": True, "flow_edit_source_caption": "slow solo piano, calm and sparse", "guidance_scale": 1.0, "flow_edit_n_max": 0.75, "inference_steps": 8}, {"src": ("inst10", 6.0)}),
@@ -364,8 +367,9 @@ class AudioRecorder:
         """After a generation: the first call's tensors are the cover's; with three calls the last are the non-cover's."""
         rt = self.rec.t
         if self.morph:      # flow-edit: the overlay prepares the source's condition first, then the target's (the handler's own third call repeats the target's)
-            rt["fe.src.hidden"], rt["fe.src.mask"] = self.snaps[0]["encoder.hidden"], self.snaps[0]["encoder.mask"]
-            rt.update(self.snaps[1])
+            # (a cover has the handler's own call of the cover context before these three: count from the end)
+            rt["fe.src.hidden"], rt["fe.src.mask"] = self.snaps[-3]["encoder.hidden"], self.snaps[-3]["encoder.mask"]
+            rt.update(self.snaps[-2])
             return
         if self.calls >= 3:
             rt["noncover.hidden"], rt["noncover.mask"], rt["noncover.context"] = self.last["encoder.hidden"], self.last["encoder.mask"], self.last["context"]

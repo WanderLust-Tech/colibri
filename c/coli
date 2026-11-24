@@ -3149,6 +3149,8 @@ def music_audio_flags(a):
     for flag, dest in (("--edit-caption", "edit_caption"), ("--edit-lyrics", "edit_lyrics"), ("--n-min", "n_min"), ("--n-max", "n_max"), ("--n-avg", "n_avg")):
         if getattr(a, dest, None) is not None and not edit:
             sys.exit(f"{C.yel}{flag} is for --edit FILE{C.r} (a flow-edit of a clip)")
+    if getattr(a, "edit_cover", False) and not edit:
+        sys.exit(f"{C.yel}--edit-cover is for --edit FILE{C.r} (a flow-edit of a clip)")
     if edit and (getattr(a, "sampler", None) == "heun" or getattr(a, "sde", False) or getattr(a, "adg", False) or getattr(a, "plan", False)):
         sys.exit(f"{C.yel}--edit takes the plain Euler step:{C.r} no --sampler heun, --sde, --adg or --plan")
     if (cover or repaint or extract or lego or edit) and getattr(a, "duration", None) is not None:
@@ -3170,6 +3172,8 @@ def music_audio_flags(a):
                     repainting_start=getattr(a, "repaint_from", None), repainting_end=getattr(a, "repaint_to", None),
                     repaint_mode=getattr(a, "repaint_mode", None), repaint_strength=getattr(a, "repaint_strength", None))
     if edit:
+        if getattr(a, "edit_cover", False):
+            body["task"] = "cover"                                  # on a cover's context: the clip's own tokenised structure for both prompts
         body.update(flow_edit_morph=True, src_audio=music_clip(a, "--edit", edit), flow_edit_source_caption=getattr(a, "edit_caption", None),
                     flow_edit_source_lyrics=getattr(a, "edit_lyrics", None), flow_edit_n_min=getattr(a, "n_min", None),
                     flow_edit_n_max=getattr(a, "n_max", None), flow_edit_n_avg=getattr(a, "n_avg", None))
@@ -4749,6 +4753,7 @@ def main():
                  ("--cfg-end",dict(type=float,default=None,metavar="T",help="with the base or sft DiT: where in the schedule guidance stops applying (default 1)")),
                  ("--adg",dict(action="store_true",help="with the base or sft DiT: angle-based guidance instead of APG")),
                  ("--edit",dict(default=None,metavar="FILE",help="flow-edit this clip toward the prompt and lyrics (music models with flow-edit): --edit-caption says what the clip is, --n-min and --n-max the part of the schedule that is edited, --n-avg the draws averaged a step; the clip's length is the song's")),
+                 ("--edit-cover",dict(action="store_true",default=False,help="with --edit: run on a cover's context (the clip's own structure, as a cover keeps it) instead of silence: a closer edit, the tune stays")),
                  ("--edit-caption",dict(default=None,metavar="TEXT",help="with --edit: what the clip is (its caption); the edit moves from this description to the prompt")),
                  ("--edit-lyrics",dict(default=None,metavar="TEXT",help="with --edit: the clip's lyrics (default none)")),
                  ("--n-min",dict(type=float,default=None,metavar="X",help="with --edit: where in the schedule the edit begins, 0 (the default) to 1")),

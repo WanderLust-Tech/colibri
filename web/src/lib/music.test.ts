@@ -261,9 +261,9 @@ describe("generateMusic", () => {
 /* The keys the page builds with a template, and what each ranges over. */
 const TEMPLATES: Record<string, string[]> = {
   "music.stage": ["encode", "text", "condition", "decode"],
-  "music.mode": ["text2music", "cover", "repaint", "extract", "lego", "complete"],
-  "music.mode.help": ["text2music", "cover", "repaint", "extract", "lego", "complete"],
-  "music.source.add": ["cover", "repaint", "extract", "lego", "complete"],
+  "music.mode": ["text2music", "cover", "edit", "repaint", "extract", "lego", "complete"],
+  "music.mode.help": ["text2music", "cover", "edit", "repaint", "extract", "lego", "complete"],
+  "music.source.add": ["cover", "edit", "repaint", "extract", "lego", "complete"],
   "music.track": ["any", "woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"],
   "music.dit": ["base", "sft"],
   "music.sampler": ["heun", "sde"],
@@ -354,6 +354,28 @@ describe("audio in: clips, a repaint's span, and the request", () => {
     expect(tail).not.toHaveProperty("repainting_end")
     expect(tail).not.toHaveProperty("repaint_strength")                               // only balanced mode has one
     expect(tail).not.toHaveProperty("duration")
+  })
+
+  it("sends a flow-edit as the overlay on text to music, or on a cover, and only what differs from the default", () => {
+    const plain = musicFields({ ...base, task: "edit", edit: { caption: "slow piano" } }, false)
+    expect(plain).toEqual({ model: "m", prompt: "p", steps: 8, seed: 1, stream: false, flow_edit_morph: true, flow_edit_source_caption: "slow piano" })
+    expect(plain).not.toHaveProperty("task")                                      // text to music is the default task, and a flow-edit has no length
+    expect(plain).not.toHaveProperty("duration")
+    const full = musicFields({ ...base, task: "edit", lyrics: "[Verse]\nla", edit: { caption: "slow piano", lyrics: "[Verse]\noh", nMin: 0.2, nMax: 0.7, nAvg: 2, cover: true } }, true)
+    expect(full).toMatchObject({ task: "cover", flow_edit_morph: true, flow_edit_source_caption: "slow piano", flow_edit_source_lyrics: "[Verse]\noh",
+      flow_edit_n_min: 0.2, flow_edit_n_max: 0.7, flow_edit_n_avg: 2, lyrics: "[Verse]\nla" })
+    const edges = musicFields({ ...base, task: "edit", edit: { caption: "", nMin: 0, nMax: 1, nAvg: 1 } }, false)
+    for (const field of ["flow_edit_source_caption", "flow_edit_n_min", "flow_edit_n_max", "flow_edit_n_avg"]) expect(edges).not.toHaveProperty(field)
+  })
+
+  it("offers the edit task only where the engine does flow-edit and takes clips, and the cover context only where it says so", () => {
+    const audioIn = { max_seconds: 600, ref_seconds: 30 }
+    expect(musicLimits({ tasks: ["cover", "repaint"], audio_in: audioIn, flow_edit: true })!.tasks).toEqual(["text2music", "cover", "edit", "repaint"])
+    expect(musicLimits({ tasks: ["cover", "repaint"], audio_in: audioIn })!.tasks).toEqual(["text2music", "cover", "repaint"])
+    expect(musicLimits({ tasks: ["text2music"], flow_edit: true })!.tasks).toEqual(["text2music"])            // no audio in: no clip to edit
+    expect(musicLimits({ tasks: ["cover"], audio_in: audioIn, flow_edit: true })!.flowEditCover).toBeUndefined()
+    expect(musicLimits({ tasks: ["cover"], audio_in: audioIn, flow_edit: true, flow_edit_cover: true })!.flowEditCover).toBe(true)
+    expect(musicLimits({ tasks: ["cover"], audio_in: audioIn, flow_edit_cover: true })!.flowEditCover).toBeUndefined()
   })
 
   const wavLike = () => new File([new Uint8Array([82, 73, 70, 70])], "clip.wav", { type: "audio/wav" })

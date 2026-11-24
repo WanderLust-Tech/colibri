@@ -47,6 +47,7 @@ Knobs (environment), all optional:
                              complete are accepted, steps go to 200 on a guided DiT, and AUDIO says which DiT ran
     ACESTEP_STUB_SAMPLER     set to make READY say "sampler": the options sampler (euler or heun), infer (ode or sde), vnorm and vema are accepted, and
                              AUDIO says which sampler ran
+    ACESTEP_STUB_NO_FLOWEDIT_COVER  with ACESTEP_STUB_FLOWEDIT: READY does not say "flow_edit_cover" (an engine from before the cover variant)
     ACESTEP_STUB_FLOWEDIT    set to make READY say "flow_edit": a text-to-music request with morph and a source clip (src_path) is a flow-edit; the clip's length is the
                              song's, edit_caption, edit_lyrics, n_min, n_max and n_avg are accepted, and AUDIO says "flow_edit": true
 Captions containing __stub_error__ get an ERROR, __stub_crash__ kills the process in the middle of
@@ -175,8 +176,10 @@ def check(request, audio_in=True, guided=False):
     if task not in ("text2music", "complete") and not (isinstance(src, str) and src):
         return "%s needs a source clip (src)" % {"cover": "a cover", "repaint": "a repaint", "extract": "an extract", "lego": "a lego"}[task]
     if request.get("morph"):
-        if task != "text2music" or request.get("plan") or not (isinstance(src, str) and src):
-            return "a flow-edit is a text-to-music overlay on a clip (src): no other task and no planner" if isinstance(src, str) and src else "a flow-edit needs the clip it edits (src)"
+        if task not in ("text2music", "cover") or request.get("plan") or not (isinstance(src, str) and src):
+            return "a flow-edit is an overlay on text to music or a cover, on a clip (src): no other task and no planner" if isinstance(src, str) and src else "a flow-edit needs the clip it edits (src)"
+        if request.get("cover_strength", 0) != 0 or request.get("cover_noise", 0) != 0:
+            return "a flow-edit takes no cover_strength or cover_noise (upstream's overlay leaves them out)"
         if request.get("sampler") == "heun" or request.get("infer") == "sde" or request.get("adg"):
             return "a flow-edit takes the plain Euler step: no Heun, SDE or ADG"
         nmin, nmax, navg = request.get("n_min", 0), request.get("n_max", 0), request.get("n_avg", 1)
@@ -401,7 +404,7 @@ def serve():
     planner = bool(os.environ.get("ACESTEP_STUB_PLANNER"))
     out.line("READY", {**READY, "sample_rate": rate, **(GUIDED if guided else AUDIO_IN if audio_in else {}), **(PLANNER if planner else {}),
                        **({"sampler": True} if os.environ.get("ACESTEP_STUB_SAMPLER") else {}),
-                       **({"flow_edit": True} if os.environ.get("ACESTEP_STUB_FLOWEDIT") else {})})
+                       **({"flow_edit": True, "flow_edit_cover": not os.environ.get("ACESTEP_STUB_NO_FLOWEDIT_COVER")} if os.environ.get("ACESTEP_STUB_FLOWEDIT") else {})})
     lines = queue.Queue()
 
     def reader():

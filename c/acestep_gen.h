@@ -527,7 +527,8 @@ static int ace_check(const AceRequest *r, char *err, size_t errn){
     if (needs_src && !(r->src_path && *r->src_path)) { snprintf(err, errn, "%s needs a source clip (src)", task_names[r->task]); return 1; }
     if (r->task == ACG_TASK_TEXT2MUSIC && r->src_path && *r->src_path && !r->morph) { snprintf(err, errn, "a source clip is for a cover, a repaint, an extract, a lego or a complete (or a flow-edit); for text to music, give a reference clip (ref) to take its style"); return 1; }
     if (r->morph) {
-        if (r->task != ACG_TASK_TEXT2MUSIC || r->plan || r->ncodes > 0) { snprintf(err, errn, "a flow-edit is a text-to-music overlay: no other task, no planner and no codes of your own"); return 1; }
+        if ((r->task != ACG_TASK_TEXT2MUSIC && r->task != ACG_TASK_COVER) || r->plan || r->ncodes > 0) { snprintf(err, errn, "a flow-edit is an overlay on text to music or on a cover: no other task, no planner and no codes of your own"); return 1; }
+        if (r->cover_strength != 0 || r->cover_zero || r->cover_noise != 0) { snprintf(err, errn, "a flow-edit takes no cover_strength or cover_noise (upstream's overlay leaves them out)"); return 1; }
         if (!(r->src_path && *r->src_path)) { snprintf(err, errn, "a flow-edit needs the clip it edits (src)"); return 1; }
         if (r->heun || r->sde || r->adg) { snprintf(err, errn, "a flow-edit takes the plain Euler step: no Heun, SDE or ADG"); return 1; }
         if (!(r->edit_nmin >= 0 && r->edit_nmin <= 1) || !(r->edit_nmax >= 0 && r->edit_nmax <= 1) || (r->edit_nmax > 0 && r->edit_nmax < r->edit_nmin)) { snprintf(err, errn, "the flow-edit window must be 0 to 1, from before to after (n_min, n_max)"); return 1; }
@@ -947,7 +948,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
     /* text to music with the planner's codes is what the handler turns into a cover (_resolve_generate_music_task): the cover instruction, and the
      * codes' own hints as the context where a cover's source would be heard */
     const int from_codes = rq->ncodes > 0 && rq->task == ACG_TASK_TEXT2MUSIC;
-    const int morph = rq->morph;                                                       /* flow-edit: text to music on a clip's latents, a silence context */
+    const int morph = rq->morph;                                                       /* flow-edit: text to music on a clip's latents, a silence context (or, as a cover, the clip's own hints) */
     info->morph = morph;
     const int A = d->acdim, task = from_codes ? ACG_TASK_COVER : rq->task;
     const int repaint_like = task == ACG_TASK_REPAINT || task == ACG_TASK_LEGO;       /* a span is generated, the rest is the source put back */
@@ -1162,7 +1163,7 @@ static int ace_generate(AceEngine *e, const AceRequest *rq, const AceHooks *h, f
             rmask[f] = 1;
         }
     } else memset(rmask, 1, (size_t)T);
-    if (morph) { ACG_TAP("src_latents", lat, (size_t)T * A); ACG_TAP("ctx_src_latents", src, (size_t)T * A); }
+    if (morph) { ACG_TAP("src_latents", lat, (size_t)T * A); if (task == ACG_TASK_TEXT2MUSIC) ACG_TAP("ctx_src_latents", src, (size_t)T * A); }      /* a cover's context input is the clip's latents themselves: the tap above */
     else ACG_TAP("src_latents", src, (size_t)T * A);
     if (repaint_like) ACG_TAP("clean_src_latents", lat, (size_t)T * A);
     for (int f = 0; f < T; f++) {

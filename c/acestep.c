@@ -1886,6 +1886,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--lego") && v) { rq.task = ACG_TASK_LEGO; rq.src_path = v; make = 1; i++; }
         else if (!strcmp(a, "--complete")) { rq.task = ACG_TASK_COMPLETE; make = 1; if (v && v[0] != '-') { rq.src_path = v; i++; } }
         else if (!strcmp(a, "--edit") && v) { rq.morph = 1; rq.src_path = v; make = 1; i++; }
+        else if (!strcmp(a, "--edit-cover")) { rq.task = ACG_TASK_COVER; }
         else if (!strcmp(a, "--edit-caption") && v) { rq.edit_caption = v; i++; }
         else if (!strcmp(a, "--edit-lyrics") && v) { rq.edit_lyrics = v; i++; }
         else if (!strcmp(a, "--n-min") && v) { rq.edit_nmin = atof(v); i++; }
