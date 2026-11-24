@@ -37,7 +37,7 @@ and a `desktop/` shell.
 
 ## Progress
 
-- **Batch 1, the Responses API: built 2026-11-25** on branch `upstream-picks` (fork-changes 2.41). Not pushed or deployed.
+- **Batch 1, the Responses API: done and live 2026-11-25** (branch `upstream-picks`, merged into `main` as `37dfdb44`; fork-changes 2.41). Not yet run with a real Codex.
 
 ## How to take things
 
