@@ -1360,35 +1360,70 @@ def decode_wav_mono16k(data, param):
     down), sample rate must already be 16 kHz — resampling belongs at the
     capture edge, not in the gateway."""
     import struct as _struct
-    np = _np()
     if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise APIError(400, "Audio must be a RIFF/WAVE file.", param, "invalid_value")
+    end = 8 + _struct.unpack_from("<I", data, 4)[0]
+    if end < 12 or end > len(data):
+        raise APIError(400, "WAV file has an invalid RIFF boundary.", param, "invalid_value")
     pos, fmt, raw = 12, None, None
-    while pos + 8 <= len(data):
+    while pos + 8 <= end:
         cid, size = data[pos:pos + 4], _struct.unpack_from("<I", data, pos + 4)[0]
+        if pos + 8 + size > end:
+            raise APIError(400, "WAV file has a truncated chunk.", param, "invalid_value")
+        # An odd chunk is word-padded, but the pad is optional when the RIFF
+        # size ends on that chunk's body. Python's wave module reads the PCM
+        # in that file. A missing pad earlier still swallows the next header,
+        # so only a chunk that ends on the boundary may omit it.
+        pad = (size & 1) and (pos + 8 + size < end)
         body = data[pos + 8:pos + 8 + size]
         if cid == b"fmt ":
+            if len(body) < 16:
+                raise APIError(400, "WAV fmt chunk is too short.", param, "invalid_value")
             fmt = _struct.unpack_from("<HHIIHH", body, 0)
+            if fmt[0] == 0xFFFE:      # WAVE_FORMAT_EXTENSIBLE identifies encoding by GUID.
+                if len(body) < 40:
+                    raise APIError(400, "WAV extensible fmt chunk is too short.", param, "invalid_value")
+                extension_size = _struct.unpack_from("<H", body, 16)[0]
+                if extension_size < 22 or 18 + extension_size > len(body):
+                    raise APIError(400, "WAV extensible fmt has an invalid extension size.",
+                                   param, "invalid_value")
+                guid = body[24:40]
+                guid_tail = bytes.fromhex("00001000800000aa00389b71")
+                if guid == b"\x01\0\0\0" + guid_tail:
+                    fmt = (1,) + fmt[1:]
+                elif guid == b"\x03\0\0\0" + guid_tail:
+                    fmt = (3,) + fmt[1:]
+                else:
+                    raise APIError(400, "Unsupported WAV extensible subformat; use PCM16 or float32.",
+                                   param, "invalid_value")
         elif cid == b"data":
             raw = body
-        pos += 8 + size + (size & 1)
+        pos += 8 + size + pad
+    if pos != end:
+        raise APIError(400, "WAV file has a truncated chunk header.", param, "invalid_value")
     if fmt is None or raw is None:
         raise APIError(400, "WAV file is missing fmt/data chunks.", param, "invalid_value")
+    np = _np()
     audio_format, channels, rate, _, _, bits = fmt
-    if audio_format == 0xFFFE:      # WAVE_FORMAT_EXTENSIBLE: trust the bit width
-        audio_format = 3 if bits == 32 else 1
+    if channels == 0:
+        raise APIError(400, "WAV channel count must be positive.", param, "invalid_value")
     if rate != AUDIO_SAMPLE_RATE:
         raise APIError(400, f"Audio must be {AUDIO_SAMPLE_RATE} Hz (got {rate}). "
                             "Resample at the capture edge.", param, "invalid_value")
     if audio_format == 1 and bits == 16:
+        if len(raw) % (channels * 2):
+            raise APIError(400, "WAV data must contain complete PCM16 frames.", param, "invalid_value")
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     elif audio_format == 3 and bits == 32:
+        if len(raw) % (channels * 4):
+            raise APIError(400, "WAV data must contain complete float32 frames.", param, "invalid_value")
         samples = np.frombuffer(raw, dtype="<f4").astype(np.float32)
     else:
         raise APIError(400, f"Unsupported WAV encoding (format {audio_format}, {bits}-bit); "
                             "use PCM16 or float32.", param, "invalid_value")
+    if not np.isfinite(samples).all():
+        raise APIError(400, "WAV samples must be finite numbers.", param, "invalid_value")
     if channels > 1:
-        samples = samples[:len(samples) - len(samples) % channels]
         samples = samples.reshape(-1, channels).mean(axis=1)
     return samples
 
