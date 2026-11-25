@@ -17,8 +17,8 @@ again on 2026-11-20 (Z-Image, the model installer, embeddings, reranking and the
 | Size of the difference | 178 commits, 401 files, +100,564 / -2,329 lines (2026-11-23) |
 | Remotes | `origin` = the fork (WanderLust-Tech), `upstream` = JustVugg. Nothing here is meant for upstream; no PR has been opened there |
 | Upstream since then | `upstream/main` was 1,412 commits ahead of our baseline at the last fetch (2026-10-31). We have not merged any of it |
-| Fork's `main` | `9d5b43e3`, and the docs commit after it (pushed 2026-11-25) |
-| Live server | clone `C:\Users\kp-mi\colibri` at `9d5b43e3` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds (`qwen36.exe` rebuilt 2026-11-25 for the performance-core team, 2.43; the other engines still carry the old thread rule until they are rebuilt) |
+| Fork's `main` | `aac8e192`, and the docs commit after it (pushed 2026-11-25) |
+| Live server | clone `C:\Users\kp-mi\colibri` at `aac8e192` (brought there by `git pull` from the fork), running `coli router` on port 8000 through `C:\Users\kp-mi\restart-colibri.ps1 -Router` (2.9 lists what that script sets); `gemma4.exe`, `qwen36.exe`, `qwen3embed.exe` and `acestep.exe` are the `VK=1` builds (`qwen36.exe` rebuilt 2026-11-25 for the performance-core team, 2.43; the other engines still carry the old thread rule until they are rebuilt) |
 
 Where each piece stands (**local** = in local `main` only; **fork** = pushed to the fork's `main`; **live** = the code is in
 the clone that serves port 8000):
@@ -62,7 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
-| Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes | no | no, 2.45 |
+| Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes (`aac8e192`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router a 160-token answer takes 1.3 s on the 26B-A4B and 1.0 s on Qwen3-Coder), 2.45 |
 | The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes (`9d5b43e3`) | yes | yes (2026-11-25: live clone fast-forwarded, the nine engines rebuilt with `VK=1`, no rollback copies, router restarted; Qwen3-Coder through the router 167 tok/s), 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
@@ -845,7 +845,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
-### 2.45 Gemma 4's decode: the routed experts in the chain's frame (branch `main`, 2026-11-25; built, tested, committed, not pushed or deployed)
+### 2.45 Gemma 4's decode: the routed experts in the chain's frame (branch `main`, 2026-11-25; pushed (`aac8e192`) and live)
 
 Started from a profile of the 26B-A4B on the RTX 5090 (`COLI_VK_CHAIN_PROF=1`, which Gemma now prints at every turn): a decode token took 37 ms, of which the dense
 chain's device time was 6 ms and the routed experts, run as a separate step after each of the 30 layers (a submission, a wait, the host's router), the rest; prompt
