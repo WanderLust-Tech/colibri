@@ -63,7 +63,7 @@ the clone that serves port 8000):
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
 | Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes (`aac8e192`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router a 160-token answer takes 1.3 s on the 26B-A4B and 1.0 s on Qwen3-Coder), 2.45 |
-| Gemma 4's attention in registers (`chain_attnf`: 26B-A4B 7.8k tokens 9.6 s to 5.1 s, 2.2k 1.8 s to 1.25 s) | `main` | no (local commit) | no | no, 2.47 |
+| Gemma 4's attention in registers (`chain_attnf`: 26B-A4B 7.8k tokens 9.6 s to 5.1 s, 2.2k 1.8 s to 1.25 s) | `main` | yes (`a532f360`) | yes | yes (2026-11-25: `gemma4.exe` rebuilt with `VK=1`, no rollback copy, router restarted; through the router the 26B-A4B reads 7.8k tokens in 5.5 s cold and 0.6 s on a repeat, E4B a repeat in 0.6 s, Qwen3-Coder 160 tokens in 0.7 s once on the card), 2.47 |
 | Gemma 4's prompt chunks in the chain (26B-A4B 2k tokens 31 s to 1.7 s, 7k 7.9 s; E4B 7k 5.6 s), grouped GeGLU expert GEMMs | `main` | yes (`d051369d`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router the 26B-A4B reads 8.7k tokens in 10 s cold and answers a repeat in 1.8 s, Qwen3-Coder 160 tokens in 0.8 s), 2.46 |
 | The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes (`9d5b43e3`) | yes | yes (2026-11-25: live clone fast-forwarded, the nine engines rebuilt with `VK=1`, no rollback copies, router restarted; Qwen3-Coder through the router 167 tok/s), 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
@@ -847,7 +847,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
-### 2.47 Gemma 4's attention in registers (branch `main`, 2026-11-25; local commit, not pushed, not deployed)
+### 2.47 Gemma 4's attention in registers (branch `main`, 2026-11-25; pushed (`a532f360`) and live)
 
 2.46's last open item: attention was 4.5 s of the 7.4 s of device time of a 7,023-token prompt on the 26B-A4B (2.5 s in the 5 full layers' 512-wide heads, 2.1 s in the 25
 sliding layers), both at about 1.5 TFLOPS on a card that does ten times that in floats. The matrix-unit form was ruled out there (f16 operands move the answer); the float
@@ -868,6 +868,8 @@ forms were written for a small shared memory and for GPUs that wait on memory, a
   path: 676 and 0.018); E4B 679 of 679 (0.001); E2B 679 of 679 (0.000). The unit test (`test_vk_chain.c`: 10 shapes, both head dims, windows, a ring, a partial last block of rows,
   a chunk after earlier rows, a group of 6 that falls back) holds it to 2e-5 of a double-precision reference, and checks that the kernel ran (107 calls). The Gemma chain and tier
   Python suites (11) pass. The one failure of the chain test, `kvs ds ... hd 1024`, is the same with `COLI_VK_ATTN_F=0`.
+- **Live check** (2026-11-25, through the router after the restart): 26B-A4B 7,844 tokens 5.5 s cold, 0.6 s repeat; E4B 7,841 tokens 9.7 s with its load, 0.6 s repeat; Qwen3-Coder 0.7 s for 160 tokens after
+  an unload and reload (loaded beside a full card it first ran on the CPU: the caveat of 2.46).
 - **Not done**: the head dim 128 and the other models' shapes (the shader takes `HDV=128` too; no model needed it); the Q chunk is re-read for every tile (at 256 wide it could stay in shared
   memory); a causal block's last tiles are mostly masked. Attention is now about an eighth of a 7k prompt, so these are small.
 
