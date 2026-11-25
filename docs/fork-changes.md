@@ -63,7 +63,7 @@ the clone that serves port 8000):
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
 | Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes (`aac8e192`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router a 160-token answer takes 1.3 s on the 26B-A4B and 1.0 s on Qwen3-Coder), 2.45 |
-| Gemma 4's prompt chunks in the chain (26B-A4B 2k tokens 31 s to 1.7 s, 7k 7.9 s; E4B 7k 5.6 s), grouped GeGLU expert GEMMs | `main` | yes | no | no, 2.46 |
+| Gemma 4's prompt chunks in the chain (26B-A4B 2k tokens 31 s to 1.7 s, 7k 7.9 s; E4B 7k 5.6 s), grouped GeGLU expert GEMMs | `main` | yes (`d051369d`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router the 26B-A4B reads 8.7k tokens in 10 s cold and answers a repeat in 1.8 s, Qwen3-Coder 160 tokens in 0.8 s), 2.46 |
 | The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes (`9d5b43e3`) | yes | yes (2026-11-25: live clone fast-forwarded, the nine engines rebuilt with `VK=1`, no rollback copies, router restarted; Qwen3-Coder through the router 167 tok/s), 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
@@ -846,7 +846,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
-### 2.46 Gemma 4's prompt chunks in the chain (branch `main`, 2026-11-25; built, tested, committed, not pushed or deployed)
+### 2.46 Gemma 4's prompt chunks in the chain (branch `main`, 2026-11-25; pushed (`d051369d`) and live)
 
 2.45 left prompt reading as the slow part: a 26B-A4B prompt of 2k tokens took 31 s (the CPU's attention, a synchronous call for each dense matrix, the experts a
 batch at a time through the tier). The chain took one row, so every chunk of 256 went the per-matrix way. Now it takes up to a chunk's rows.
@@ -872,6 +872,9 @@ batch at a time through the tier). The chain took one row, so every chunk of 256
 - **Measured** (the same prompt, temperature 0, through `coli serve`): 26B-A4B 2,023 tokens 31.2 s to 1.7 s; 7,023 tokens 7.9 s (6.2k took 109 s); E4B 7,019 tokens 5.6 s (6.2k
   took 58 s); Qwen3-Coder (shares the grouped-GEMM code) 4.5k tokens 1.1 s as before. Decode is the step 2.45 measured. At 7k the full layers' wide attention is the largest
   share of a chunk's time.
+- **Full suite** (4,482 tests): the failures are the Windows environment's (symlink privilege, no WSL `bash`, charmap, path separators), `responses_shim.py` missing from
+  `make install`, and the Mimo engine's tests, whose engine dies at start the same way built from the commit before this one; none is in the Gemma, Vulkan-chain or Makefile tests.
+  A model loaded while the card is full runs on the CPU until it is reloaded (the Coder did, in the check after the deploy: 8 s for 160 tokens, 0.8 s once reloaded with the card free).
 - **Not done**: the same chain for several conversations (a batch of decode rows is still the CPU's path); the full layers' 512-wide heads have no flash form (`chain_attn512`
   walks the positions a row at a time); the chunk's matrix-unit forms stay off for Gemma until a form that survives its activations exists (the cause is f16 operands, not
   a bug in the shaders: they agree with `chain_moe` on random data).
