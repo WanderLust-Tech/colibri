@@ -1,0 +1,188 @@
+#version 450
+// A prompt chunk's attention in floats, register-tiled (vk_chain.c, chain_attnf): the same results as
+// chain_attnb.comp (to rounding: f32 throughout, the order of the sums differs) for a position-major
+// cache (K[(row*KVH + kvh)*HD + d], row = position or position % ring), head dims 128, 256 and 512
+// (HDV at compile time: chain_attnf256.spv, chain_attnf512.spv), V as wide as K, no gate, no sink,
+// no selection list, no part mode. Gemma 4's layers: 256-wide sliding heads over a ring and 512-wide
+// full ones.
+// chain_attnb walks a tile of positions with 8 lanes a (head, row) pair and the arithmetic at one
+// multiply-add a shared-memory read (about 1.4 TFLOPS on an RTX 5090 over Gemma 4's 7k-token prompt, the
+// five 512-wide layers 2.5 s of it: chain_attn512 the same with a workgroup a pair). Here:
+//  * a workgroup is M = 32 (head, row) pairs of one KV head (G = H / KVH heads for 32 / G rows),
+//    BC = 32 positions a tile, 256 invocations;
+//  * Q.K^T: the tile's scores as a 32 x 32 block, a thread 2 pairs x 2 positions (pairs ty and ty + 16,
+//    positions tx and tx + 16), the head dim in chunks of DK = 64 through shared memory (Q and K chunks
+//    vec4 a load): four multiply-adds a shared vec4 read; the scores scaled and masked (causal, window,
+//    positions past the block's last row) into shared memory;
+//  * the online softmax: 8 invocations a pair, 4 positions each, the tile's max and sum through shared
+//    memory, P = exp(s - m) written transposed (P[position][pair], a vec4 a thread's 4 pairs), the
+//    pair's m and l kept in shared memory;
+//  * P.V: a thread 4 pairs x 4 dims of each 128-wide chunk of the head dim (the output accumulators in
+//    registers all along: 4 * HD / 128 vec4), V chunks of 128 dims through shared memory, the
+//    accumulators scaled by the max's correction as the tile starts.
+// Grid: x = KV heads, y = ceil(S / br), br = 32 / G rows a workgroup; the push constants are
+// chain_attnb's (br after sink_off).
+// Position t of a block is bfirst + tile start + j, bfirst the first position the block's first row sees
+// (a window): a block's sums depend on its rows only, so a slice of rows at a multiple of br gives the
+// same bytes.
+#extension GL_EXT_control_flow_attributes : enable
+layout(local_size_x = 256) in;
+#ifndef HDV
+#define HDV 256
+#endif
+#define HD HDV
+#define NCH (HD / 128)
+#define M 32
+#define BC 32
+#define DK 64
+#define SQ 17    // a Q or K chunk row in vec4s: DK / 4 + 1 (the pad keeps the key reads off one bank)
+#define SV 33    // a V chunk row: 128 / 4 + 1
+
+layout(std430, binding = 0) readonly buffer QB { float q[]; };
+layout(std430, binding = 1) readonly buffer KB { vec4 kc4[]; };
+layout(std430, binding = 2) readonly buffer VB { vec4 vc4[]; };
+layout(std430, binding = 3) buffer OB { float o[]; };
+
+layout(push_constant) uniform P {
+    int S, H, KVH, hd, pos_base, cap;
+    int q_off, q_row, q_seg;
+    int g_off, g_row, g_seg, has_gate;
+    int o_off, o_row;
+    int sel_off, sel_row;
+    float scale;
+    int k_off, v_off;
+    int win, ring, vd, kv_pm, sink, sink_off;
+    int br;
+    int B, anchor, part, st_off;
+} p;
+
+shared vec4 buf[(M + BC) * SQ];   // Q chunk rows 0..31, K chunk rows 32..63; then the V chunk (BC * SV vec4s)
+shared float ssh[M * 33];         // the scores [pair][position]
+shared vec4 psh[BC * 8];          // P [position][pair / 4][pair % 4]
+shared float redm[256], reds[256];
+shared float msh[M], lsh[M];
+shared vec4 csh[8];               // the max's correction [pair / 4][pair % 4]
+
+void main() {
+    int tid = int(gl_LocalInvocationID.x);
+    int kvh = int(gl_WorkGroupID.x);
+    int G = p.H / p.KVH;
+    int s0 = int(gl_WorkGroupID.y) * p.br;
+    int slast = min(s0 + p.br, p.S) - 1;
+    int bfirst = p.win > 0 ? max(0, p.pos_base + s0 - p.win + 1) : 0;
+    int n = p.pos_base + slast + 1 - bfirst;
+    int tx = tid & 15, ty = tid >> 4;      // the scores' thread: pairs ty, ty + 16; positions tx, tx + 16
+    int pg = tid >> 5, td = tid & 31;      // the output's thread: pairs 4 pg ..; dims 4 td of each chunk
+    int sp = tid >> 3, k8 = tid & 7;       // the softmax's thread: pair sp, positions k8 + 8 i
+
+    // this thread's two Q-staging pairs and two scored pairs
+    int qa[2], qr[2];
+    for (int i = 0; i < 2; i++) {
+        int r = (tid + 256 * i) >> 4, rr = r / G, g = r - rr * G, s = s0 + rr;
+        qr[i] = r;
+        qa[i] = rr < p.br && s < p.S ? p.q_off + s * p.q_row + (kvh * G + g) * p.q_seg + 4 * ((tid + 256 * i) & 15) : -1;
+    }
+    int spos[2], sfirst[2]; bool slive[2];
+    for (int a = 0; a < 2; a++) {
+        int pr = ty + 16 * a, rr = pr / G, s = s0 + rr;
+        slive[a] = rr < p.br && s < p.S;
+        spos[a] = p.pos_base + s;
+        sfirst[a] = p.win > 0 ? max(0, spos[a] - p.win + 1) : 0;
+    }
+    if (tid < M) { msh[tid] = -3.0e38; lsh[tid] = 0.0; }
+    vec4 acc[NCH][4];
+    [[unroll]] for (int c = 0; c < NCH; c++) [[unroll]] for (int a = 0; a < 4; a++) acc[c][a] = vec4(0.0);
+    barrier();
+
+    for (int t0 = 0; t0 < n; t0 += BC) {
+        // ---- the scores: Q.K over the head dim in chunks of DK
+        float s00 = 0.0, s01 = 0.0, s10 = 0.0, s11 = 0.0;
+        for (int dc = 0; dc < HD; dc += DK) {
+            [[unroll]] for (int i = 0; i < 2; i++) {
+                vec4 v = vec4(0.0);
+                if (qa[i] >= 0) { int a = qa[i] + dc; v = vec4(q[a], q[a + 1], q[a + 2], q[a + 3]); }
+                buf[qr[i] * SQ + ((tid + 256 * i) & 15)] = v;
+            }
+            [[unroll]] for (int i = 0; i < 2; i++) {
+                int idx = tid + 256 * i, j = idx >> 4, c4 = idx & 15;
+                vec4 v = vec4(0.0);
+                if (t0 + j < n) {
+                    int t = bfirst + t0 + j, rw = p.ring > 0 ? t % p.ring : t;
+                    v = kc4[((rw * p.KVH + kvh) * HD + p.k_off + dc) / 4 + c4];
+                }
+                buf[(M + j) * SQ + c4] = v;
+            }
+            barrier();
+            [[unroll]] for (int d4 = 0; d4 < DK / 4; d4++) {
+                vec4 q0 = buf[ty * SQ + d4], q1 = buf[(ty + 16) * SQ + d4];
+                vec4 k0 = buf[(M + tx) * SQ + d4], k1 = buf[(M + tx + 16) * SQ + d4];
+                s00 += dot(q0, k0); s01 += dot(q0, k1); s10 += dot(q1, k0); s11 += dot(q1, k1);
+            }
+            barrier();
+        }
+        {
+            float sc[4] = float[4](s00, s01, s10, s11);
+            [[unroll]] for (int a = 0; a < 2; a++) [[unroll]] for (int b = 0; b < 2; b++) {
+                int key = tx + 16 * b, t = bfirst + t0 + key;
+                bool ok = slive[a] && t0 + key < n && t >= sfirst[a] && t <= spos[a];
+                ssh[(ty + 16 * a) * 33 + key] = ok ? sc[2 * a + b] * p.scale : -3.0e38;
+            }
+        }
+        barrier();
+        // ---- the online softmax: pair sp, positions k8 + 8 i
+        float mold = msh[sp];
+        float sv[4], pm = -3.0e38;
+        [[unroll]] for (int i = 0; i < 4; i++) { sv[i] = ssh[sp * 33 + k8 + 8 * i]; pm = max(pm, sv[i]); }
+        redm[tid] = pm;
+        barrier();
+        float mn = mold;
+        [[unroll]] for (int k = 0; k < 8; k++) mn = max(mn, redm[(tid & ~7) + k]);
+        float ps = 0.0;
+        [[unroll]] for (int i = 0; i < 4; i++) {
+            float e = sv[i] > -1.0e38 ? exp(sv[i] - mn) : 0.0;
+            ps += e;
+            psh[(k8 + 8 * i) * 8 + (sp >> 2)][sp & 3] = e;
+        }
+        reds[tid] = ps;
+        float corr = exp(mold - mn);
+        if (k8 == 0) { msh[sp] = mn; csh[sp >> 2][sp & 3] = corr; }
+        barrier();
+        if (k8 == 0) {
+            float sum = 0.0;
+            [[unroll]] for (int k = 0; k < 8; k++) sum += reds[tid + k];
+            lsh[sp] = lsh[sp] * corr + sum;
+        }
+        // ---- P.V: the accumulators scaled by the correction, then each 128-wide chunk of V
+        vec4 cr = csh[pg];
+        [[unroll]] for (int c = 0; c < NCH; c++) [[unroll]] for (int a = 0; a < 4; a++) acc[c][a] *= cr[a];
+        [[unroll]] for (int c = 0; c < NCH; c++) {
+            [[unroll]] for (int i = 0; i < 4; i++) {
+                int idx = tid + 256 * i, j = idx >> 5, c4 = idx & 31;
+                vec4 v = vec4(0.0);
+                if (t0 + j < n) {
+                    int t = bfirst + t0 + j, rw = p.ring > 0 ? t % p.ring : t;
+                    v = vc4[((rw * p.KVH + kvh) * HD + p.v_off + c * 128) / 4 + c4];
+                }
+                buf[j * SV + c4] = v;
+            }
+            barrier();
+            for (int j = 0; j < BC; j++) {
+                vec4 pj = psh[j * 8 + pg], v = buf[j * SV + td];
+                [[unroll]] for (int a = 0; a < 4; a++) acc[c][a] = fma(vec4(pj[a]), v, acc[c][a]);
+            }
+            barrier();
+        }
+    }
+    // ---- the output: each pair's accumulators over its sum
+    [[unroll]] for (int a = 0; a < 4; a++) {
+        int pr = 4 * pg + a, rr = pr / G, g = pr - rr * G, s = s0 + rr;
+        if (rr < p.br && s < p.S) {
+            float l = lsh[pr], inv = l > 0.0 ? 1.0 / l : 0.0;
+            int ob = p.o_off + s * p.o_row + (kvh * G + g) * HD + 4 * td;
+            [[unroll]] for (int c = 0; c < NCH; c++) {
+                vec4 v = acc[c][a] * inv;
+                o[ob + c * 128] = v.x; o[ob + c * 128 + 1] = v.y; o[ob + c * 128 + 2] = v.z; o[ob + c * 128 + 3] = v.w;
+            }
+        }
+    }
+}

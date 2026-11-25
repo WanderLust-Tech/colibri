@@ -928,6 +928,7 @@ typedef struct {
     size_t dev_bytes;             /* live chain buffers */
     unsigned long long attn_blocked;   /* attention calls through chain_attnb (blocks of rows) */
     unsigned long long attn_flash;     /* attention calls through chain_attn_flash (matrix units) */
+    unsigned long long attn_f;         /* attention calls through chain_attnf (register-tiled floats, head dims 256/512) */
     unsigned long long attn_slices;    /* extra submissions that cut a long attention (COLI_VK_ATTN_SLICE) */
     unsigned long long tile_gemms;     /* prompt matmuls on the matrix units (chain_gemm.comp, qmatmul_gemm_bdc.comp) */
     unsigned long long moe_i8;         /* routed-expert layer steps in the CPU's integer form (chain_moe_i8) */

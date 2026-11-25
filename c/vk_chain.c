@@ -1737,6 +1737,36 @@ static VkPipeline kab_pipe(int hd, int vd, int kv16, int vec) {
                 kv16 ? "float16" : "float32");
     return p || !fixed ? p : kab_pipe(0, 0, kv16, 0);
 }
+/* ---- chain_attnf: a prompt chunk's attention in floats, register-tiled (chain_attnf.comp) ----
+ * For a position-major float32 cache of head dim 256 or 512 with no gate, sink or list (Gemma 4's
+ * sliding and full layers); a pipeline each head dim, made on first use. COLI_VK_ATTN_F: the rows from
+ * which it runs (16; 0 = never). Else chain_attnb (256) or chain_attn512 (512) as before. */
+static struct { VkShaderModule mod[2]; VkPipeline p[2]; int tried[2]; } g_kaf[2];
+#define KAF (g_kaf[g_kd])
+static VkPipeline kaf_pipe(int hd) {
+    int i = hd == 256 ? 0 : hd == 512 ? 1 : -1;
+    if (i < 0) return VK_NULL_HANDLE;
+    if (!KAF.p[i] && !KAF.tried[i]) {
+        KAF.tried[i] = 1;
+        if (!vkc_ready()) return VK_NULL_HANDLE;
+        KAF.mod[i] = load_module(KC.core.spv_path, i ? "chain_attnf512.spv" : "chain_attnf256.spv");
+        if (KAF.mod[i]) KAF.p[i] = make_pipe(KAF.mod[i], NULL);
+        if (!KAF.p[i]) fprintf(stderr, "[VK] %schain: chain_attnf's pipeline for head dim %d failed: chain_attnb / chain_attn512\n", g_kd ? "dev2 " : "", hd);
+    }
+    return KAF.p[i];
+}
+static int attnf_rows(void) {
+    const char *e = getenv("COLI_VK_ATTN_F");
+    int v = e && *e ? atoi(e) : 16;
+    return v < 0 ? 0 : v;
+}
+static void kaf_shutdown(void) {
+    for (int i = 0; i < 2; i++) {
+        if (KAF.p[i]) vkDestroyPipeline(KC.dev, KAF.p[i], NULL);
+        if (KAF.mod[i]) vkDestroyShaderModule(KC.dev, KAF.mod[i], NULL);
+    }
+    memset(&KAF, 0, sizeof KAF);
+}
 static void kab_shutdown(void) {
     for (int i = 0; i < KAB.n; i++) if (KAB.p[i]) vkDestroyPipeline(KC.dev, KAB.p[i], NULL);
     if (KAB.mod) vkDestroyShaderModule(KC.dev, KAB.mod, NULL);
@@ -1996,6 +2026,26 @@ int vkc_attn_w(VkcBuf *q, VkcBuf *kc, VkcBuf *vc, VkcBuf *o, VkcBuf *gate, VkcBu
     int wide = w.a.hd > 256 || w.vd > 256;   /* head dim 257..512: chain_attn512 (Gemma 4's full-attention layers), plain causal rows only */
     if (w.a.hd > 512 || w.vd > 512 || (wide && !KC.mpipe[PM_A512]) || w.a.H % w.a.KVH || w.win < 0 || w.ring < 0 || (w.sink && !snk)) return 0;
     VkcBind bd[7] = {B(q, 0), B(kc, 0), B(vc, 0), B(o, 1), B(gate, 0), B(sel, 0), B(snk, 0)};
+    int G0 = w.a.KVH > 0 ? w.a.H / w.a.KVH : 0, fr = attnf_rows();
+    if (fr > 0 && w.a.S >= fr && w.kv_pm && !g_kvh && w.vd == w.a.hd && (w.a.hd == 256 || w.a.hd == 512) && G0 >= 1 && G0 <= 32 &&
+        32 % G0 == 0 && !w.a.has_gate && !w.sink && !(sel && w.a.sel_row > 0) && w.a.k_off % 4 == 0 && w.a.v_off % 4 == 0) {
+        VkPipeline fp = kaf_pipe(w.a.hd);
+        if (fp) {   /* a workgroup a KV head and 32 / G rows; slices of rows at multiples of that, as chain_attnb's */
+            int br = 32 / G0, S = w.a.S, ok = 1;
+            int rr = attn_slice_rows(S, w.a.pos_base, (double)w.a.H * w.a.hd, br, w.a.KVH);
+            for (int r0 = 0; ok && r0 < S; r0 += rr) {
+                VkcAttnW x = w;
+                int n = S - r0 < rr ? S - r0 : rr;
+                x.a.S = n; x.a.pos_base = w.a.pos_base + r0;
+                x.a.q_off += r0 * w.a.q_row; x.a.o_off += r0 * w.a.o_row;
+                if (r0 && !attn_slice_next()) return 0;
+                struct { VkcAttnW w; int br, B, anchor, part, st_off; } pc = {x, br, 0, 0, 0, 0};
+                ok = record(fp, bd, 7, &pc, sizeof pc, (uint32_t)x.a.KVH, (uint32_t)((x.a.S + br - 1) / br), 1);
+                KC.st.attn_f += ok;
+            }
+            return ok;
+        }
+    }
     if (wide) {   /* one workgroup per (head, row), the cache read as chain_attn reads it; no blocked or flash form */
         int S = w.a.S, rr = attn_slice_rows(S, w.a.pos_base, (double)w.a.H * (w.a.hd > w.vd ? w.a.hd : w.vd), 1, w.a.H), ok = 1;
         for (int r0 = 0; ok && r0 < S; r0 += rr) {
@@ -3895,6 +3945,7 @@ void vkc_shutdown(void) {
     if (KC.cpool) vkDestroyCommandPool(KC.dev, KC.cpool, NULL);
     kx_shutdown();
     kab_shutdown();
+    kaf_shutdown();
     cp2_shutdown();
     ke_shutdown();
     kf_shutdown();

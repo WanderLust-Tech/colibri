@@ -820,6 +820,8 @@ VK_SPV   += shaders/qmatmul_grp_gate_up_q_ge.spv shaders/qmatmul_grp_gate_up_qc_
 VK_SPV   += shaders/chain_sconv.spv shaders/chain_relattn.spv
 # blocked attention for prompt chunks (made on first use; vk_chain.c, chain_attnb.comp)
 VK_SPV   += shaders/chain_attnb.spv
+# and its register-tiled float form for position-major caches of head dim 256 and 512 (Gemma 4; made on first use; chain_attnf.comp)
+VK_SPV   += shaders/chain_attnf256.spv shaders/chain_attnf512.spv
 # a grid of copy regions in one dispatch (made on first use; vk_chain.c, chain_copy2d.comp)
 VK_SPV   += shaders/chain_copy2d.spv
 # the int8/int4 prompt GEMM on the matrix units (optional at run time)
@@ -1062,6 +1064,12 @@ shaders/qmatmul_grp_gate_up_qc.spv: shaders/qmatmul_grp_qc.comp
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
 	$(GLSLC) --target-env=vulkan1.2 -DGATE_UP $< -o $@
 # the same two with GeGLU (act 2) in place of SwiGLU: Gemma 4's routed experts on a prompt chunk
+shaders/chain_attnf256.spv: shaders/chain_attnf.comp
+	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
+	$(GLSLC) --target-env=vulkan1.2 -DHDV=256 $< -o $@
+shaders/chain_attnf512.spv: shaders/chain_attnf.comp
+	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
+	$(GLSLC) --target-env=vulkan1.2 -DHDV=512 $< -o $@
 shaders/qmatmul_grp_gate_up_q_ge.spv: shaders/qmatmul_grp_q.comp
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
 	$(GLSLC) --target-env=vulkan1.2 -DGATE_UP -DGEGLU $< -o $@

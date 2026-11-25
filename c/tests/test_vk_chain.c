@@ -4602,6 +4602,17 @@ int main(int argc, char **argv) {
     test_attn_win(1, 300, 16, 2, 512, 512, 0, 0, 0, 1); test_attn_win(1, 5, 16, 2, 512, 512, 0, 0, 0, 1);
     test_attn_win(3, 40, 8, 1, 512, 512, 0, 0, 0, 0);   test_attn_win(1, 130, 8, 2, 320, 384, 64, 64, 1, 1);
     test_attn_win(1, 700, 16, 8, 512, 512, 0, 0, 0, 1);
+    /* prompt chunks on chain_attnf (register-tiled floats, position-major, head dim 256 or 512, from 16 rows): Gemma 4's
+     * full layers (16 heads over 2, 512 wide), sliding ones (over a ring, 256 wide, a pair of heads a KV head), a head a KV head,
+     * a partial last block of rows, a chunk after earlier rows, and a group of 6 (no whole 32 of pairs: the other shaders) */
+    test_attn_win(16, 0, 16, 2, 512, 512, 0, 0, 0, 1); test_attn_win(70, 300, 16, 2, 512, 512, 0, 0, 0, 1);
+    test_attn_win(130, 41, 16, 2, 512, 512, 0, 0, 0, 1); test_attn_win(37, 500, 8, 2, 512, 512, 0, 0, 0, 1);
+    test_attn_win(50, 200, 16, 8, 256, 256, 120, 0, 0, 1); test_attn_win(70, 300, 16, 8, 256, 256, 100, 180, 0, 1);
+    test_attn_win(40, 100, 8, 8, 256, 256, 0, 0, 0, 1); test_attn_win(33, 7, 16, 2, 256, 256, 0, 0, 0, 1);
+    test_attn_win(40, 100, 12, 2, 256, 256, 0, 0, 0, 1); test_attn_win(130, 3000, 16, 8, 256, 256, 1024, 1300, 0, 1);
+    { VkcStats st; vkc_stats(&st); if (vkc_attn_block_rows() > 0 && !getenv("COLI_VK_ATTN_F"))
+          CHECK(st.attn_f >= 8, "attn: %llu calls took chain_attnf (8 expected)", st.attn_f);
+      printf("  register-tiled attention: %llu calls\n", st.attn_f); }
     /* prompt chunks through the blocked attention (chain_attnb.comp, from 16 rows): Qwen3.6's
      * and Qwen3.8's head groups (8 and 12 a KV head), one head a KV head, lists, the window,
      * the ring, position-major rows and the sink; then the same cases on chain_attn */
