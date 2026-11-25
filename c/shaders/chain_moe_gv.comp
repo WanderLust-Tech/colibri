@@ -71,6 +71,7 @@ float nb(uint w, int off) { return float(bitfieldExtract(w, off, 4)) - 8.0; }  /
 uvec2 addr(uint at) { return uvec2(tab[at], tab[at + 1u]); }
 float situ_tanh(float v) { return abs(v) < 0.000244140625 ? v : tanh(v); }
 float act(float g, float u) {
+    if (p.act == 2) return 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))) * u;   // GeGLU (Gemma 4): gelu_tanh(gate) * up
     if (p.act == 1) return p.a * situ_tanh(g / p.a) * (1.0 / (1.0 + exp(-g))) * (p.b * situ_tanh(u / p.b));
     if (p.limit > 0.0) { g = min(g, p.limit); u = clamp(u, -p.limit, p.limit); }
     return (g / (1.0 + exp(-g))) * u;

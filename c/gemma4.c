@@ -1305,6 +1305,12 @@ static void g4_vk_turn(Model *m, const char *scope) {
     if (!m->vk_hist) return;
     vkt_report(scope, m->hits, m->miss);
     if (!strcmp(scope, "turn")) vkc_prof_print();   /* COLI_VK_CHAIN_PROF=1: the chain's device time by kind of op, cumulative */
+    if (!strcmp(scope, "turn") && getenv("COLI_VK_CHAIN_PROF")) {
+        G4Chain *gc = g4c_of(m);
+        fprintf(stderr, "[gemma4] timers (cumulative): %lld forwards, attention+dense %.0f ms, experts %.0f ms, head %.0f ms%s\n", m->forwards,
+                m->t_attn * 1e3, m->t_moe * 1e3, m->t_head * 1e3, gc ? "" : "");
+        if (gc) fprintf(stderr, "[gemma4] chain (cumulative): %llu steps, %llu waits %.0f ms in all, %.0f ms host experts, sync %.0f ms, record %.0f ms, after %.0f ms\n", gc->forwards, gc->frames, gc->wait_ms, gc->host_ms, gc->t_sync * 1e3, gc->t_rec * 1e3, gc->t_post * 1e3);
+    }
     rt_save(g_g4_usage, 1);
 }
 static Model *g_g4_model_for_exit = NULL;           /* the model whose history and report the exit hook writes */

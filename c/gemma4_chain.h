@@ -37,6 +37,7 @@
  * whole picture), the trace on, a matrix that did not reach the device, no room for the caches. COLI_VK_CHAIN=0
  * turns it off. Not the bits of the CPU's (sums in another order), the same as the per-matrix path. */
 #include "vk_chain.h"
+#include "vk_dmoe.h"   /* the routed experts in the frame: route, experts and sum on the device */
 
 typedef struct {
     int ok, failed;
@@ -55,8 +56,16 @@ typedef struct {
     float *stage;                              /* a sliding layer's rows packed in position order for one upload */
     size_t stage_floats;
     float *host_h;                             /* the experts' output as normalized on the host */
+    /* a mixture layer whose experts the tier holds all of runs its router and experts in the frame (g4c_moe_dev): */
+    VkcDmoe dm;                                /* vk_dmoe.h: the tier's table, the ids and weights, the hidden rows, the sum */
+    ColiVkTensor **t_rt;                       /* the routers' projections (f32 [E][H]) */
+    size_t *o_rs, *o_pf2, *o_pof2;             /* in prm: router.scale / sqrt(H), pre_feedforward_layernorm_2, post_feedforward_layernorm_2 */
+    VkcBuf *pes, *rn, *rlg, *xe, *rt2;         /* router.per_expert_scale [L][E], the router's input row, its logits, the experts' input row, their normalized sum */
+    uint8_t *devl;                             /* the layers that ran their experts in this step's frame */
+    int dmoe_ok;                               /* the buffers above exist */
+    unsigned long long dev_layers;             /* layer steps whose experts ran in the frame */
     unsigned long long forwards, frames, declined;
-    double wait_ms, host_ms;
+    double wait_ms, host_ms, t_sync, t_rec, t_post;   /* t_*: the step's host time before the frame, recording it, after it */
 } G4Chain;
 
 static int g_vk_chain = 0;     /* COLI_VK_CHAIN decided on, and the chain's pipelines are up */
@@ -113,7 +122,9 @@ static G4Chain *g4c_setup(Model *m) {
         !ALLOC(ch->t_o, L, sizeof(void *)) || !ALLOC(ch->t_g, L, sizeof(void *)) || !ALLOC(ch->t_u, L, sizeof(void *)) ||
         !ALLOC(ch->t_d, L, sizeof(void *)) || !ALLOC(ch->t_pg, L, sizeof(void *)) || !ALLOC(ch->t_pp, L, sizeof(void *)) ||
         !ALLOC(ch->kc, L, sizeof(void *)) || !ALLOC(ch->vc, L, sizeof(void *)) || !ALLOC(ch->rows_d, L, sizeof(int)) ||
-        !ALLOC(ch->v_lo, L, sizeof(int)) || !ALLOC(ch->v_hi, L, sizeof(int)))
+        !ALLOC(ch->v_lo, L, sizeof(int)) || !ALLOC(ch->v_hi, L, sizeof(int)) || !ALLOC(ch->t_rt, L, sizeof(void *)) ||
+        !ALLOC(ch->o_rs, L, sizeof(size_t)) || !ALLOC(ch->o_pf2, L, sizeof(size_t)) || !ALLOC(ch->o_pof2, L, sizeof(size_t)) ||
+        !ALLOC(ch->devl, L, 1))
         return NULL;
 #undef ALLOC
     /* the matrices: the device copies the per-matrix path uploads */
@@ -134,12 +145,18 @@ static G4Chain *g4c_setup(Model *m) {
         }
         if (!ok) { fprintf(stderr, "[VK] gemma4 chain: a dense matrix of layer %d did not reach the device; per-matrix path\n", l); return NULL; }
     }
+    /* the routers' projections as f32 rows (a layer whose does not reach the device keeps the host's router: dmoe_ok 0) */
+    int rt_ok = c->moe && c->n_experts > 0;
+    if (rt_ok) for (int l = 0; l < L; l++) {
+        Layer *y = &m->L[l];
+        if (!y->router_proj || !coli_vk_tensor_ensure_f32(&ch->t_rt[l], y->router_proj, H, c->n_experts, 0)) { rt_ok = 0; break; }
+    }
     /* the norm weights, one arena */
     size_t n = 0;
     for (int l = 0; l < L; l++) {
         Layer *y = &m->L[l];
         ch->o_in[l] = n; n += H; ch->o_pa[l] = n; n += H; ch->o_pf[l] = n; n += H; ch->o_pof[l] = n; n += H;
-        if (c->moe) { ch->o_p1[l] = n; n += H; }
+        if (c->moe) { ch->o_p1[l] = n; n += H; ch->o_rs[l] = n; n += H; ch->o_pf2[l] = n; n += H; ch->o_pof2[l] = n; n += H; }
         ch->o_qn[l] = n; n += y->hd;
         if (y->kv_src < 0) { ch->o_kn[l] = n; n += y->hd; }
         if (P) { ch->o_ple[l] = n; n += H; }
@@ -154,7 +171,13 @@ static G4Chain *g4c_setup(Model *m) {
         memcpy(arena + ch->o_pa[l], y->post_attn_ln, H * sizeof(float));
         memcpy(arena + ch->o_pf[l], y->pre_ff_ln, H * sizeof(float));
         memcpy(arena + ch->o_pof[l], y->post_ff_ln, H * sizeof(float));
-        if (c->moe) memcpy(arena + ch->o_p1[l], y->post_ff_ln1, H * sizeof(float));
+        if (c->moe) {
+            memcpy(arena + ch->o_p1[l], y->post_ff_ln1, H * sizeof(float));
+            const float rscale = 1.f / sqrtf((float)H);      /* moe_routed: rms_nw(x) * router_scale * rscale, one weighted norm here */
+            for (int i = 0; i < H; i++) arena[ch->o_rs[l] + i] = y->router_scale[i] * rscale;
+            memcpy(arena + ch->o_pf2[l], y->pre_ff_ln2, H * sizeof(float));
+            memcpy(arena + ch->o_pof2[l], y->post_ff_ln2, H * sizeof(float));
+        }
         memcpy(arena + ch->o_qn[l], y->q_norm, y->hd * sizeof(float));
         if (y->kv_src < 0) memcpy(arena + ch->o_kn[l], y->k_norm, y->hd * sizeof(float));
         if (P) memcpy(arena + ch->o_ple[l], y->ple_norm, H * sizeof(float));
@@ -205,12 +228,24 @@ static G4Chain *g4c_setup(Model *m) {
         if (!ok) { ch->t_head = NULL; ok = 1; }          /* no room for the logits: the head stays with the caller */
     }
     if (!ok) { fprintf(stderr, "[VK] gemma4 chain: device memory for the step's buffers refused; per-matrix path\n"); return NULL; }
+    if (rt_ok) {   /* the experts in the frame: the per-expert scales and the router's and the experts' rows */
+        int E = c->n_experts;
+        float *pes = malloc((size_t)L * E * sizeof(float));
+        ok = pes && (ch->pes = vkc_buf((size_t)L * E * 4, VKC_DEV)) && (ch->rn = vkc_buf((size_t)H * 4, VKC_DEV)) &&
+             (ch->rlg = vkc_buf((size_t)E * 4, VKC_DEV)) && (ch->xe = vkc_buf((size_t)H * 4, VKC_DEV)) && (ch->rt2 = vkc_buf((size_t)H * 4, VKC_DEV));
+        if (ok) {
+            for (int l = 0; l < L; l++) memcpy(pes + (size_t)l * E, m->L[l].router_pes, (size_t)E * sizeof(float));
+            ok = vkc_begin() && vkc_write(ch->pes, 0, pes, (size_t)L * E * 4) && vkc_submit(1);
+        }
+        free(pes);
+        ch->dmoe_ok = ok;
+    }
     ch->stage = malloc((stage ? stage : 1) * sizeof(float)); ch->stage_floats = stage;
     ch->host_h = malloc((size_t)H * sizeof(float));
     if (!ch->stage || !ch->host_h) return NULL;
     ch->ok = 1;
     fprintf(stderr, "[VK] gemma4 chain: %d layers on the device (%d keep keys and values of their own), %.1f MiB of KV mirrors%s\n",
-            L, (int)(L - (c->kv_shared > 0 ? c->kv_shared : 0)), need / 1048576.0, c->moe ? ", the routed experts on the host" : "");
+            L, (int)(L - (c->kv_shared > 0 ? c->kv_shared : 0)), need / 1048576.0, c->moe ? (ch->dmoe_ok ? ", the routed experts in the frame when the tier holds them" : ", the routed experts on the host") : "");
     return ch;
 }
 
@@ -341,6 +376,22 @@ static int g4c_mlp(G4Chain *ch, Model *m, int l) {
     return ok;
 }
 
+/* the routed experts of a mixture layer in the frame (vk_dmoe.h): the router on the residual after attention (the same
+ * weighted norm and projection as moe_routed, then softmax, the top-K renormalized and times the expert's own scale), the
+ * experts on pre_feedforward_layernorm_2 of it as GeGLU, their rank-order sum normalized by post_feedforward_layernorm_2
+ * and added to tmp (the dense MLP's, already normalized by post_feedforward_layernorm_1). */
+static int g4c_moe_dev(G4Chain *ch, Model *m, int l) {
+    Cfg *c = &m->c;
+    int H = c->hidden, E = c->n_experts;
+    VkcRoute rp = {.kind = 0, .has_bias = 3, .b_off = l * E, .n_group = 1, .topk_group = 1, .norm = 1, .temp = 1.f, .scale = 1.f};
+    VkcMoe mp = {.D = H, .I = c->moe_inter, .act = 2};
+    return g4c_rows_norm(ch->x, 0, ch->prm, ch->o_rs[l], ch->rn, 0, H, c->eps) &&
+           vkc_matmul(ch->t_rt[l], ch->rn, 0, ch->rlg, 0, 1) &&
+           g4c_rows_norm(ch->x, 0, ch->prm, ch->o_pf2[l], ch->xe, 0, H, c->eps) &&
+           vkc_dmoe_layer(&ch->dm, l, 1, ch->rlg, ch->pes, ch->xe, &rp, &mp) &&
+           g4c_rows_norm(ch->dm.y, 0, ch->prm, ch->o_pof2[l], ch->rt2, 0, H, c->eps) && g4c_add(ch->tmp, ch->rt2, H);
+}
+
 /* from tmp (the feed-forward's output, the experts' normalized sum already added on a mixture layer) to the end of
  * the layer: post_feedforward_layernorm, the residual add, the per-layer-embedding block, the layer scalar */
 static int g4c_tail(G4Chain *ch, Model *m, int l) {
@@ -370,7 +421,10 @@ static int g4c_forward(Model *m, Seq *cq, int p, const float *cs_s, const float 
     if (!ch || ch->failed) return 0;
     Cfg *c = &m->c; int H = c->hidden, L = c->n_layers, P = c->ple_dim, hs2 = c->hd_s / 2, hg2 = c->hd_g / 2;
     double t0 = now_s();
+    double ts0 = now_s();
     if (!g4c_sync(ch, m, cq, p)) goto lost;
+    ch->t_sync += now_s() - ts0;
+    double tr0 = now_s();
     memcpy(vkc_ptr(ch->xu), m->x, (size_t)H * sizeof(float));
     if (P) memcpy(vkc_ptr(ch->plev), m->ple, (size_t)L * P * sizeof(float));
     {
@@ -378,12 +432,20 @@ static int g4c_forward(Model *m, Seq *cq, int p, const float *cs_s, const float 
         for (int j = 0; j < hs2; j++) { cs[2 * j] = cs_s[j]; cs[2 * j + 1] = sn_s[j]; }
         for (int j = 0; j < hg2; j++) { cs[c->hd_s + 2 * j] = cs_g[j]; cs[c->hd_s + 2 * j + 1] = sn_g[j]; }
     }
+    int dmoe = c->moe && ch->dmoe_ok && vkc_dmoe_prepare(&ch->dm, 0, L, c->n_experts, c->topk, H, c->moe_inter, 1);
+    memset(ch->devl, 0, (size_t)L);
     int ok = vkc_begin() && vkc_copy(ch->x, 0, ch->xu, 0, H);
+    if (ok && dmoe) ok = vkc_dmoe_upload(&ch->dm);        /* the tier's residents changed: the table again */
     for (int l = 0; l < L && ok; l++) {
         ok = g4c_attn(ch, m, l, p);
         if (!ok) break;
         if (!c->moe) {
             ok = g4c_mlp(ch, m, l) && g4c_tail(ch, m, l);
+            continue;
+        }
+        if (dmoe && vkc_dmoe_on(&ch->dm, l)) {              /* the tier holds this layer's experts: everything stays in the frame */
+            ok = g4c_mlp(ch, m, l) && g4c_moe_dev(ch, m, l) && g4c_tail(ch, m, l);
+            ch->devl[l] = ok;
             continue;
         }
         /* the residual after attention comes down; the dense MLP runs while the host does the experts */
@@ -410,10 +472,23 @@ static int g4c_forward(Model *m, Seq *cq, int p, const float *cs_s, const float 
              vkc_copy(ch->lgd, 0, ch->lg, 0, (size_t)c->vocab);
     }
     double w0 = now_s();
+    ch->t_rec += w0 - tr0;
     ok = ok && vkc_submit(1);
     ch->frames++; ch->wait_ms += (now_s() - w0) * 1e3;
     if (!ok) goto lost;
+    double tp0 = now_s();
     m->g4_lg = head ? (const float *)vkc_ptr(ch->lgd) : NULL;      /* head_row and head_rows take it for this row */
+    if (dmoe) {                                                      /* the layers whose experts ran here: moe_routed's books */
+        const int K = c->topk, E = c->n_experts;
+        for (int l = 0; l < L; l++) {
+            if (!ch->devl[l]) continue;
+            const int *ids = vkc_dmoe_ids(&ch->dm, l);
+            for (int k = 0; k < K; k++) if (ids[k] >= 0) m->ehit[(size_t)l * E + ids[k]] = 1;
+            if (m->vk_hist) rt_count(l, ids, K);
+            vkt_dev_count(l, 1, K, ids);
+            ch->dev_layers++;
+        }
+    }
     /* the step completed: the new rows into the host's caches (the CPU's own placement), the residual back */
     memcpy(m->x, vkc_ptr(ch->xd), (size_t)H * sizeof(float));
     {
@@ -428,6 +503,7 @@ static int g4c_forward(Model *m, Seq *cq, int p, const float *cs_s, const float 
         }
     }
     ch->forwards++;
+    ch->t_post += now_s() - tp0;
     m->t_attn += now_s() - t0;
     return 1;
 lost:   /* a frame failed: the device is gone (or would not take a command); the CPU runs the step, and every later one */
@@ -456,7 +532,7 @@ static void g4c_report(void) {
     G4Chain *ch = g_g4c_model ? g4c_of(g_g4c_model) : NULL;
     if (!ch || !ch->ok || !ch->forwards) return;
     VkcStats st; vkc_stats(&st);
-    fprintf(stderr, "[VK] gemma4 chain: %llu decode steps, %llu waits for the device (%.1f ms in all, %.1f ms of routed experts on the host), %.1f MiB on the device\n",
-            ch->forwards, ch->frames, ch->wait_ms, ch->host_ms, st.dev_bytes / 1048576.0);
+    fprintf(stderr, "[VK] gemma4 chain: %llu decode steps, %llu waits for the device (%.1f ms in all, %.1f ms of routed experts on the host), %llu layer steps with their experts in the frame, %.1f MiB on the device\n",
+            ch->forwards, ch->frames, ch->wait_ms, ch->host_ms, ch->dev_layers, st.dev_bytes / 1048576.0);
     vkc_prof_print();   /* COLI_VK_CHAIN_PROF=1: the device time by kind of op */
 }

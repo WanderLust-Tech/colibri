@@ -13,7 +13,7 @@
 // is skipped everywhere (the host's sum adds those itself). hid holds S*K rows of I floats
 // and then yk, S*K rows of D. act 0: SwiGLU silu(g) * u, with limit > 0 the gate clamped
 // from above and up to [-limit, limit] first; act 1: SiTU-GLU a*tanh(g/a)*sigmoid(g) *
-// b*tanh(u/b) (expert_act.comp's formulas).
+// b*tanh(u/b) (expert_act.comp's formulas); act 2: GeGLU gelu_tanh(g) * u (Gemma 4).
 // Weight formats as qmatmul.comp lays them out: 1 int8 and 2 int4 with a scale per row,
 // 4 int4 and 7 MXFP4 per gs inputs, 5 int3-g64, 10 f32, 11 bf16, 12 FP8 E4M3 and 13 int8
 // per gs inputs; and the block formats (100 + a ggml type, a GGUF's experts as the file has
@@ -356,6 +356,7 @@ float g_s13 = 1.0;   // the pair's gate and up scale (entry word 19), mode 0
 float esc(uint eb, uint w) { uint v = tab[eb + w]; return v == 0u ? 1.0 : uintBitsToFloat(v); }
 float act(float g, float u) {
     g *= g_s13; u *= g_s13;
+    if (p.act == 2) return 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))) * u;   // GeGLU (Gemma 4): gelu_tanh(gate) * up
     if (p.act == 1) return p.a * situ_tanh(g / p.a) * (1.0 / (1.0 + exp(-g))) * (p.b * situ_tanh(u / p.b));
     if (p.limit > 0.0) { g = min(g, p.limit); u = clamp(u, -p.limit, p.limit); }
     return (g / (1.0 + exp(-g))) * u;

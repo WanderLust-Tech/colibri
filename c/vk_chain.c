@@ -2603,7 +2603,7 @@ int vkc_route_ready(void) { return vkc_ready() && KC.mpipe[PM_ROUTE]; }
 int vkc_route(VkcBuf *logits, VkcBuf *bias, VkcBuf *ids, VkcBuf *w, const VkcRoute *p) {
     KC.kind = PK_ROUTE;
     if (!KC.mpipe[PM_ROUTE] || p->S < 1 || p->E < 1 || p->E > VKC_ROUTE_EMAX || p->K < 1 || p->K > VKC_ROUTE_KMAX ||
-        p->K > p->E || p->kind < 0 || p->kind > 2 || p->has_bias < 0 || p->has_bias > 2 || (p->has_bias && !bias) || !(p->temp > 0.0f) ||
+        p->K > p->E || p->kind < 0 || p->kind > 2 || p->has_bias < 0 || p->has_bias > 3 || (p->has_bias && !bias) || !(p->temp > 0.0f) ||
         (p->n_group > 1 && (p->n_group > 64 || p->E % p->n_group || p->topk_group < 1 || p->topk_group > p->n_group)))
         return 0;
     /* without a bias the logits stand in for it, at their own offset: a device that reads
@@ -2928,7 +2928,7 @@ int vkc_moe(VkcBuf *x, VkcBuf *ids, VkcBuf *w, VkcBuf *table, VkcBuf *hid, VkcBu
         if (!mg) mg = mp;
         if (!md) md = mp;
     }
-    if (!mg || !md || p->S < 1 || p->K < 1 || p->K > VKC_ROUTE_KMAX || p->D < 1 || p->I < 1 || p->act < 0 || p->act > 1 ||
+    if (!mg || !md || p->S < 1 || p->K < 1 || p->K > VKC_ROUTE_KMAX || p->D < 1 || p->I < 1 || p->act < 0 || p->act > 2 ||
         (p->act == 1 && !(p->a > 0.0f && p->b > 0.0f)) || p->t_off < 0 || !x || !ids || !w || !table || !hid || !y ||
         hid == x || hid == y || y == x) return 0;
     if ((size_t)p->S * p->K * ((size_t)p->I + p->D) * sizeof(float) > hid->bytes) return 0;

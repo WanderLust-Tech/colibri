@@ -451,7 +451,7 @@ int  vkc_ink2_dconv(VkcBuf *x, VkcBuf *dyn, VkcBuf *prm, VkcBuf *ring, const Vkc
  * Every MoE engine's routing on the device, for S rows of E logits (l_off + s*l_row):
  * kind 0 softmax, 1 sigmoid, 2 sqrt(softplus), of logit / temp; the bias (b_off) added
  * for the pick only with has_bias 1 (noaux_tc), to the logit with 2 (qwen36's gate bias,
- * before the softmax); with n_group > 1 the topk_group best
+ * before the softmax, 3 to the picked weights as a scale each expert has: bias[b_off + e], after the norm); with n_group > 1 the topk_group best
  * groups (a group's value: its two best picks) and their experts only; the K best picks,
  * the lower expert on a tie, in rank order into ids (i_off + s*i_row, -1 for a slot no
  * finite pick fills); their scores into w (w_off + s*w_row), divided by their sum plus
@@ -476,7 +476,7 @@ int vkc_route(VkcBuf *logits, VkcBuf *bias, VkcBuf *ids, VkcBuf *w, const VkcRou
  * to ids/w as vkc_route writes them (i_off + s*i_row, w_off + s*w_row, K each); expert e's
  * weights by address from table (backend_vulkan.h: coli_vk_xb_expert_entry), entry
  * t_off + e, a zero entry (not resident) skipped. hid holds S*K rows of I floats
- * (gate and up's output, act 0 SwiGLU clamped by limit > 0, 1 SiTU-GLU with a and b),
+ * (gate and up's output, act 0 SwiGLU clamped by limit > 0, 1 SiTU-GLU with a and b, 2 GeGLU),
  * then S*K rows of D (down's output per slot): S*K*(I + D) floats at least; y (y_off +
  * s*y_row) gets each row's sum over its slots in rank order of w * down's output, from 0.
  * Needs bufferDeviceAddress and clustered subgroup adds (vkc_moe_ready); 0 when a

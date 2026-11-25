@@ -5,6 +5,7 @@
 //   score:    kind 0 softmax over the row (max, exp(l - max), sum, divide: the CPU's
 //             softmax_row), 1 sigmoid, 2 sqrt(softplus) (softplus = l above 20, else
 //             log(1 + exp(l)): deepseek_v41.c moe_gate)
+//   scale:    has_bias 3: each picked expert's weight times bias[b_off + e] (after the norm, before scale)
 //   pick:     the score, plus bias[b_off + e] with has_bias 1 (the bias picks; the weight
 //             stays the score: noaux_tc)
 //   groups:   n_group > 1: E / n_group experts a group, a group's value the sum of its two
@@ -135,6 +136,7 @@ void route_sg(int s, int lb) {
         float x = myw;
         if (norm) x = x / div;
         ids[p.i_off + s * p.i_row + int(ln)] = myc;
+        if (p.has_bias == 3 && myc >= 0) x *= bias[p.b_off + myc];   // a weight scale each expert has (Gemma 4's per_expert_scale)
         w[p.w_off + s * p.w_row + int(ln)] = x * p.scale;
     }
 }
@@ -251,6 +253,7 @@ void main() {
         float x = wv[tid];
         if (norm) x = x / div;
         ids[p.i_off + s * p.i_row + tid] = b;
+        if (p.has_bias == 3 && b >= 0) x *= bias[p.b_off + b];   // a weight scale each expert has (Gemma 4's per_expert_scale)
         w[p.w_off + s * p.w_row + tid] = x * p.scale;
     }
 }
