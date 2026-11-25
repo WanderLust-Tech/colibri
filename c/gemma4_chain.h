@@ -436,7 +436,9 @@ static int g4c_forward(Model *m, Seq *cq, int p, const float *cs_s, const float 
     memset(ch->devl, 0, (size_t)L);
     int ok = vkc_begin() && vkc_copy(ch->x, 0, ch->xu, 0, H);
     if (ok && dmoe) ok = vkc_dmoe_upload(&ch->dm);        /* the tier's residents changed: the table again */
+    int sent = 0;                                           /* layers recorded since the frame last went to the device */
     for (int l = 0; l < L && ok; l++) {
+        if (l > 0) { ok = vkc_layer_recorded(&sent); if (!ok) break; }   /* every few layers the frame goes off: the device starts while the host records */
         ok = g4c_attn(ch, m, l, p);
         if (!ok) break;
         if (!c->moe) {

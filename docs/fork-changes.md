@@ -62,6 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
+| Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes | no | no, 2.45 |
 | The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes (`9d5b43e3`) | yes | yes (2026-11-25: live clone fast-forwarded, the nine engines rebuilt with `VK=1`, no rollback copies, router restarted; Qwen3-Coder through the router 167 tok/s), 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
@@ -843,6 +844,29 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Live check** (2026-11-25, Gemma 4 E2B through the router): no key is a 401; non-streaming gives `response`/`completed` with the text and usage; streaming arrives as the raw HTTP/1.0 body (`Connection: close`, no `Transfer-Encoding`) with the whole event sequence from `response.created` to `response.completed`.
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
+
+### 2.45 Gemma 4's decode: the routed experts in the chain's frame (branch `main`, 2026-11-25; built, tested, committed, not pushed or deployed)
+
+Started from a profile of the 26B-A4B on the RTX 5090 (`COLI_VK_CHAIN_PROF=1`, which Gemma now prints at every turn): a decode token took 37 ms, of which the dense
+chain's device time was 6 ms and the routed experts, run as a separate step after each of the 30 layers (a submission, a wait, the host's router), the rest; prompt
+reading ran at 87 tok/s. The Qwen engine had put its experts into the same frame as the layer since the upstream merge (2.44), at 5 ms a token.
+
+- **The experts in the frame** (`gemma4_chain.h`, `g4c_moe_dev`; `vk_dmoe.h`, the helper the Qwen chain uses): a mixture layer whose experts the tier holds all of runs the
+  router (the same weighted norm and f32 projection as `moe_routed`, softmax, the top 8 renormalised, times the expert's own scale), the experts (GeGLU) and their
+  rank-order sum on the device, the sum normalised by `post_feedforward_layernorm_2` and joined to the dense branch; a layer whose experts the tier does not hold keeps
+  the host's step. Shader side: `chain_route.comp` takes a per-expert weight scale (`has_bias` 3: `per_expert_scale`), `chain_moe.comp` and `chain_moe_gv.comp` GeGLU
+  (act 2). The tier's books (`vkt_dev_count`, the history, the hit marks) follow at the step's end.
+- **A decode's attention in blocks** (`chain_attn_dec.comp`, which already strides a position-major cache): the rule that keeps it to caches the flash shader takes now
+  lets Gemma's through under `COLI_VK_ATTN_DEC=2`, which the engine sets itself when it is unset. At a 1.2k prompt the attention was 6.2 ms of a token, now 2.5.
+- **The frame goes to the device every four layers** (`vkc_layer_recorded`, as the Qwen chain does): the device starts while the host records, which was 4.8 ms of
+  recording after the device had finished with the attention above.
+- **Measured** (the live build against this one, the 26B-A4B and the E4B, a Python source file as the prompt, temperature 0, the same first words of the answer, two
+  runs): 26B-A4B decode after a 1.6k-token prompt 19.8 against 68.6 tok/s, after a 6.2k-token one 15.1 against 34.8; E4B 41.8 against 59.1 and 22.3 against 26.7. Per
+  token on the 26B at 1.2k: 21.6 ms of waiting for the device became 13.1 plus 1.8 of recording. `COLI_VK_CHAIN_CHECK=1` (each chained step again on the CPU, the
+  residuals compared) found no step off by more than 1e-3 over about 90 steps with the split attention; the Gemma tests (chain, tier, the rest) pass.
+- **Not done**: prompt reading (a 1.6k-token prompt still takes 14-20 s, a 6.2k-token one 109 s, against 1.3 s for the same size on Qwen3-Coder): the chain takes one row,
+  so a prompt chunk goes through the per-matrix path (idea I1); and the remaining gap between the device's own time and the step's wall time is the dispatches' gaps
+  (about 670 small ones a token).
 
 ### 2.44 The engine side of upstream, merged (branch `merge-upstream`, 2026-11-25; merged, pushed (`9d5b43e3`) and live)
 

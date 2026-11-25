@@ -2270,6 +2270,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[gemma4] dense matrices on %s\n", g_gvk ? coli_vk_device_name() : "the CPU (G4_VK_DENSE=0)");
         /* the decode chain (gemma4_chain.h): COLI_VK_CHAIN=0 off; on a discrete card it is on */
         if (g_gvk) {
+            /* a decode's attention over a long context in blocks (chain_attn_dec; it strides this engine's position-major caches):
+             * the 26B-A4B after a 1.2k prompt, 6.2 ms of a token's attention to 2.5 */
+            if (!getenv("COLI_VK_ATTN_DEC")) setenv("COLI_VK_ATTN_DEC", "2", 0);
             g_vk_chain = coli_vk_chain_decide("gemma4", 0, COLI_VK_CHAIN_UNMEASURED);
             if (g_vk_chain && !vkc_init()) g_vk_chain = 0;
             { const char *e = getenv("COLI_VK_CHAIN_CHECK"); g_g4c_check = g_vk_chain && e && *e == '1'; }

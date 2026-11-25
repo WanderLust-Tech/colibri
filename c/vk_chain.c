@@ -1950,7 +1950,7 @@ static int attn_dec(VkcBuf *q, VkcBuf *kc, VkcBuf *vc, VkcBuf *o, VkcBuf *gate, 
      * tok/s, chain_attn's 16 workgroups walking every position, and at 35.52 with =2 (32K: 2.71
      * -> 33.88; after a short prompt 37.21 -> 38.00), its prompts as fast, the same answers */
     int G = w->a.H / w->a.KVH, fsub = 1, fgq = fa_group(G, &fsub);
-    if (!((KC.mod_fa || adec_knob() == 2) && vkc_attn_flash_rows() > 0 && !w->kv_pm && w->vd == w->a.hd &&
+    if (!((KC.mod_fa || adec_knob() == 2) && vkc_attn_flash_rows() > 0 && (!w->kv_pm || adec_knob() == 2) && w->vd == w->a.hd &&   /* =2: a position-major cache too (Gemma 4's: the shader strides it) */
           w->a.hd % 64 == 0 && (!g_kvh || (w->a.k_off % 8 == 0 && w->a.v_off % 8 == 0)) &&
           (!KC.mod_fa || fa_pipe(w->a.hd, fgq, fsub)))) return 0;
     if (S < 1 || S > VKC_ATTN_DEC_ROWS || n < VKC_ATTN_DEC_MIN || w->a.pos_base + 1 < VKC_ATTN_DEC_MIN || !adec_pipe()) return 0;
