@@ -871,7 +871,7 @@ the routed experts inside the device frame), which the fork had changed by only 
   (Qwen-Image's pixels within 3 of the fork's; Z-Image's differ in the fine detail, mean 2.6 of 255, the same picture, and its steps take 0.42 s against 0.56 s) and a 10-second
   song. The C tests `test_vk_chain`, `test_vk_tier`, `test_vk_alloc` and `test_vk_memtype` pass. The full Python suite: 4,473 tests, the same failures as before the merge, none new.
 - **What it costs**: an engine starts about 5 to 7 s later (Qwen3-Coder 21-24 s against 13-17 s to a ready server, though its first request is then 0.2 s against 1.8 s, and
-  the first Z-Image run asks the driver for its mapped memory, 5.6 s). `COLI_VK_WINDOW_PROBE_MB=27648` answers the probe without asking on this machine.
+  the first Z-Image run asks the driver for its mapped memory, 5.6 s). `COLI_VK_WINDOW_PROBE_MB=27648` answers the probe without asking on this machine. `restart-colibri.ps1` now sets it (2026-11-25): the probe line says 0.0 s, Qwen3-Coder's first request through the router 25.7 s against 32.9 s, 185 tok/s afterwards.
 - **Not done**: the new `colibri-tui` target and upstream's UI are not installed; CUDA, GGUF
   and the other engines' work is in the tree but only the engines the fork runs were exercised.
 
