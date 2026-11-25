@@ -3445,8 +3445,8 @@ done:
 }
 /* The same for our own formats (qmatmul_grp_q.comp): int8 rows (fmt 1), int4 rows (2), int4
  * with a scale per gs inputs (4), against chain_moe's float form of the same experts */
-static void test_moe_rows_q(int fmt, int gs, int S, int K, int E, int D, int I) {
-    if (!vkc_moe_rows_ready(fmt, fmt)) { printf("moe rows fmt %d: not on this device\n", fmt); return; }
+static void test_moe_rows_q(int fmt, int gs, int S, int K, int E, int D, int I, int act) {
+    if (!vkc_moe_rows_ready_act(fmt, fmt, act)) { printf("moe rows fmt %d: not on this device\n", fmt); return; }
     if (!coli_vk_xb_init(D, I, COLI_VK_ACT_SWIGLU, 0, 0, 0)) { CHECK(0, "moe rows fmt %d: the expert batch did not start", fmt); return; }
     size_t rg = fmt == 1 ? (size_t)D : (size_t)D / 2, rd = fmt == 1 ? (size_t)I : (size_t)I / 2;
     size_t ng = fmt == 4 ? (size_t)D / gs : 1, nd = fmt == 4 ? (size_t)I / gs : 1;
@@ -3473,7 +3473,7 @@ static void test_moe_rows_q(int fmt, int gs, int S, int K, int E, int D, int I) 
         VkcBuf *ib = vkc_buf((size_t)S * K * 4, VKC_DOWN), *wb = vkc_buf((size_t)S * K * 4, VKC_DEV);
         VkcBuf *hb = vkc_buf((size_t)S * K * (I + D) * 4, VKC_DEV), *y0 = vkc_buf((size_t)S * D * 4, VKC_DOWN), *y1 = vkc_buf((size_t)S * D * 4, VKC_DOWN);
         VkcRoute rp = {S, E, K, 0, 0, E, 0, 0, 0, K, 0, K, 1, 1, 1, 1.f, 1.f, 0.f, 0};
-        VkcMoe mp = {S, K, D, I, 0, 0.f, 0.f, 0.f, 0, 0, D, 0, K, 0, K, 0, D, 0, 0, fmt, fmt, E, 0, 0};
+        VkcMoe mp = {S, K, D, I, act, 0.f, 0.f, 0.f, 0, 0, D, 0, K, 0, K, 0, D, 0, 0, fmt, fmt, E, 0, 0};
         VkcMoeRows rr = {0};
         VkcStats s0, s1; vkc_stats(&s0);
         ok = vkc_begin() && vkc_write(tb, 0, tab, (size_t)E * COLI_VK_XB_ENTRY * 4) && vkc_route(lb, NULL, ib, wb, &rp) &&
@@ -3489,7 +3489,7 @@ static void test_moe_rows_q(int fmt, int gs, int S, int K, int E, int D, int I) 
             for (size_t i = 0; i < (size_t)S * D; i++) { double d = fabs((double)a[i] - b[i]); if (d > mx) mx = d; if (fabs(a[i]) > ref) ref = fabs(a[i]); }
             double tol = coop ? 2e-3 * ref : 1e-4 * (ref > 1 ? ref : 1);
             CHECK(mx <= tol, "moe rows fmt %d S %d%s: max |diff| %.3g of %.3g against chain_moe", fmt, S, coop ? " (matrix units)" : "", mx, ref);
-            printf("moe rows fmt %d gs %d S %d K %d E %d%s: max |diff| %.3g of %.3g against chain_moe\n", fmt, gs, S, K, E,
+            printf("moe rows fmt %d gs %d S %d K %d E %d act %d%s: max |diff| %.3g of %.3g against chain_moe\n", fmt, gs, S, K, E, act,
                    coop ? " on the matrix units" : "", mx, ref);
         }
         vkc_moe_rows_free(&rr);
@@ -4905,10 +4905,17 @@ int main(int argc, char **argv) {
         test_moe_rows(GQ_Q8_0, GQ_Q8_0, 300, 8, 16, 576, 320);
         test_moe_rows(GQ_IQ4_XS, GQ_IQ2_S, 144, 4, 12, 512, 256);
         /* and our own formats: int8 rows, int4 rows, int4 per 64 and per 32 (qmatmul_grp_q.comp) */
-        test_moe_rows_q(1, 0, 40, 4, 12, 512, 256);
-        test_moe_rows_q(2, 0, 40, 4, 12, 512, 256);
-        test_moe_rows_q(4, 64, 40, 4, 12, 512, 256);
-        test_moe_rows_q(4, 32, 7, 2, 6, 256, 256);
+        test_moe_rows_q(1, 0, 40, 4, 12, 512, 256, 0);
+        test_moe_rows_q(2, 0, 40, 4, 12, 512, 256, 0);
+        test_moe_rows_q(4, 64, 40, 4, 12, 512, 256, 0);
+        test_moe_rows_q(4, 32, 7, 2, 6, 256, 256, 0);
+        /* GeGLU (Gemma 4's experts): the same experts through chain_moe's act 2 and the grouped GEMMs' */
+        test_moe_rows_q(4, 64, 40, 4, 12, 512, 256, 2);
+        test_moe_rows_q(4, 32, 7, 2, 6, 256, 256, 2);
+        test_moe_rows_q(2, 0, 64, 8, 16, 512, 256, 2);
+        /* a tiny model's shape (D and I of one tile, few rows an expert): where the matrix units' f16 matters most */
+        test_moe_rows_q(4, 64, 14, 3, 8, 64, 64, 0);
+        test_moe_rows_q(4, 64, 14, 3, 8, 64, 64, 2);
         /* the integer form, every type it decodes, against the CPU's */
         test_moe_i8(GQ_IQ2_S, GQ_Q2_0, 3, 4, 12, 512, 256);
         test_moe_i8(GQ_Q4_K, GQ_Q6_K, 2, 4, 12, 512, 256);

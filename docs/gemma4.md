@@ -337,6 +337,11 @@ device lost in the middle of a step leaves the answer unchanged (the CPU carries
 two conversations on two slots, one of 2,400 tokens (past the 512-row window and several prompt chunks), interleaved turn by
 turn, answered word for word as each does alone on the CPU; so did a three-turn conversation on the 26B-A4B (that one alone).
 
+A prompt chunk (up to 256 rows of one conversation, none inside a picture) takes the same chain over S rows: the attention over the ring and the window, the dense MLP and
+the routed experts (the grouped GEMMs, in floats) in one frame, the new keys and values coming down together. The 26B-A4B reads 2,023 tokens in 1.7 s (31 s before) and 7,023
+in 7.9 s. The engine keeps `COLI_VK_CHAIN_GEMM=0` for itself (the chain's int8 prompt GEMM rounds the activations to f16, which Gemma's do not survive: the next-token choice
+moved at one prompt position in eight) and the chunk's experts in floats (`G4_VK_CHUNK_COOP=1` for the matrix units); `G4_VK_CHUNK=0` keeps the chain to decode rows.
+
 `COLI_VK_CHAIN=0` keeps the per-matrix path; `COLI_VK_CHAIN_CHECK=1` runs every chained step on the CPU path as well and
 reports the worst residual difference at exit (for a new model, or after a change: about 1e-5 to 7e-5 relative on the models
 above). The chain is on by default for a discrete card; it was not measured on an integrated one, so it is off there unless

@@ -135,7 +135,11 @@ void main() {
         if (s >= S) continue;
         float g = (ag[j].x + ag[j].y) + (ag[j].z + ag[j].w), u = (au[j].x + au[j].y) + (au[j].z + au[j].w);
         if (p.limit > 0.0) { if (g > p.limit) g = p.limit; if (u > p.limit) u = p.limit; if (u < -p.limit) u = -p.limit; }
+#ifdef GEGLU
+        y[(xoff + s) * O + o] = 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))) * u;   /* -DGEGLU: Gemma 4's gelu_tanh(gate) * up */
+#else
         y[(xoff + s) * O + o] = (g / (1.0 + exp(-g))) * u;
+#endif
     }
 #else
     [[unroll]] for (int j = 0; j < 8; j++) {

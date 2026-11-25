@@ -45,6 +45,7 @@ def run(snap, mode, extra=None, greedy=GREEDY, usage=None):
         env["COLI_VULKAN"] = "1"
     if usage:
         env["COLI_USAGE"] = usage
+    env["COLI_VK_GRP_COOP"] = "0"      # a prompt chunk's grouped expert GEMMs in floats: these runs are compared with the CPU's to 2e-3 (test_gemma4_chain has the matrix units' form)
     env.update(extra or {})
     done = subprocess.run([t4.EXE, "128"], env=env, capture_output=True, text=True, timeout=300, cwd=os.path.join(HERE, ".."))
     if done.returncode:
@@ -124,7 +125,8 @@ class TierTest(unittest.TestCase):
     def test_a_batch_that_fails_is_recomputed_on_the_cpu(self):
         failed = 0
         for n in ("1", "7", "40", "150"):
-            out, err = self.card({"COLI_VK_TIER_FAULT": n})
+            # G4_VK_CHUNK=0: the prompt's rows take the tier's batches (a chunk in the chain runs its experts in the frame, none of these)
+            out, err = self.card({"COLI_VK_TIER_FAULT": n, "G4_VK_CHUNK": "0"})
             self.same_as_cpu(out, f"batch {n} failed")
             failed += "a batch failed, its experts are recomputed on the CPU and the tier stops" in err
         self.assertGreater(failed, 0, "no fault landed: the fallback was not exercised")

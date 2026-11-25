@@ -1445,15 +1445,19 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
     m->g4_lg = NULL;                         /* a new step: no row's logits are waiting */
 #ifdef COLI_VULKAN
     /* one decode row: its layers on the device in one go (gemma4_chain.h); anything else, or a chain that declines, runs below */
-    float chk[8192]; int checking = 0;       /* COLI_VK_CHAIN_CHECK: the chain's residual, to compare with the CPU's run of the same step */
-    if (S == 1 && g_vk_chain && reach[0] == (ps ? ps[0] : pos0)) {
-        float xin[8192];
-        if (g_g4c_check && H <= 8192) memcpy(xin, m->x, (size_t)H * sizeof(float));
-        chained = g4c_forward(m, qs ? qs[0] : q, ps ? ps[0] : pos0, cs_s, sn_s, cs_g, sn_g);
-        if (chained && g_g4c_check && H <= 8192) {
-            memcpy(chk, m->x, (size_t)H * sizeof(float)); memcpy(m->x, xin, (size_t)H * sizeof(float));
+    float *chk = NULL, *xin = NULL; int checking = 0;   /* COLI_VK_CHAIN_CHECK: the chain's residual, to compare with the CPU's run of the same step */
+    int plain = 1;                           /* no row reads past its own position (not inside a picture) */
+    for (int s = 0; s < S; s++) if (reach[s] != (ps ? ps[s] : pos0 + s)) plain = 0;
+    /* one decode row, or a prompt chunk of one conversation (its rows at consecutive positions) */
+    if (g_vk_chain && plain && (S == 1 || (!qs && !ps))) {
+        if (g_g4c_check) { xin = xmalloc((size_t)S * H * sizeof(float)); memcpy(xin, m->x, (size_t)S * H * sizeof(float)); }
+        chained = g4c_forward(m, qs ? qs[0] : q, ps ? ps[0] : pos0, S, cs_s, sn_s, cs_g, sn_g);
+        if (chained && g_g4c_check) {
+            chk = xmalloc((size_t)S * H * sizeof(float));
+            memcpy(chk, m->x, (size_t)S * H * sizeof(float)); memcpy(m->x, xin, (size_t)S * H * sizeof(float));
             chained = 0; checking = 1;
         }
+        if (!checking) { free(xin); xin = NULL; }
     }
     if (!chained && !checking) g4c_cpu_step(m, q, qs, ps, S, pos0);
 #endif
@@ -1570,7 +1574,10 @@ static void forward_chunk(Model *m, Seq *q, const int *ids, int S, int pos0, con
         trace(m, "layer", l, m->x + (size_t)(S - 1) * H, H);
     }
 #ifdef COLI_VULKAN
-    if (checking) g4c_compare(chk, m->x, H, ps ? ps[0] : pos0);
+    if (checking) {
+        for (int s = 0; s < S; s++) g4c_compare(chk + (size_t)s * H, m->x + (size_t)s * H, H, pos0 + s);
+        free(chk); free(xin);
+    }
 #endif
     free(cs_s); free(sn_s); free(cs_g); free(sn_g); free(reach);
 }
@@ -2273,6 +2280,10 @@ int main(int argc, char **argv) {
             /* a decode's attention over a long context in blocks (chain_attn_dec; it strides this engine's position-major caches):
              * the 26B-A4B after a 1.2k prompt, 6.2 ms of a token's attention to 2.5 */
             if (!getenv("COLI_VK_ATTN_DEC")) setenv("COLI_VK_ATTN_DEC", "2", 0);
+            /* the chain's int8 prompt GEMM rounds the activations to f16 once; Gemma 4's do not survive that (the 26B-A4B's prompt: 90 of 679
+             * positions' next-token choices moved, the last row's logits by 1.2), so a chunk takes the backend's GEMM below it, as the
+             * per-matrix path always did */
+            if (!getenv("COLI_VK_CHAIN_GEMM")) setenv("COLI_VK_CHAIN_GEMM", "0", 0);
             g_vk_chain = coli_vk_chain_decide("gemma4", 0, COLI_VK_CHAIN_UNMEASURED);
             if (g_vk_chain && !vkc_init()) g_vk_chain = 0;
             { const char *e = getenv("COLI_VK_CHAIN_CHECK"); g_g4c_check = g_vk_chain && e && *e == '1'; }

@@ -34,8 +34,9 @@ def run(snap, mode, extra=None, greedy=GREEDY):
     """The engine's test mode on a prompt of token ids; mode: cpu, permatrix (the card without the chain), chain.
     Returns (the JSON it prints, its stderr)."""
     env = dict(os.environ, SNAP=snap, G4_TEST="1", G4_IDS=",".join(map(str, IDS)), G4_GREEDY=str(greedy),
-               OMP_NUM_THREADS="2", G4_SLACK="0", G4_IMG_TOKENS="1")
-    for name in ("COLI_VULKAN", "COLI_VK_CHAIN", "COLI_VK_CHAIN_CHECK", "COLI_VK_CHAIN_FAULT", "G4_VK_DENSE"):
+               OMP_NUM_THREADS="2", G4_SLACK="0", G4_IMG_TOKENS="1",
+               COLI_VK_GRP_COOP="0")   # a prompt chunk's grouped expert GEMMs in floats: the parity checks below are tight; the matrix units' f16 form has its own test
+    for name in ("COLI_VULKAN", "COLI_VK_CHAIN", "COLI_VK_CHAIN_CHECK", "COLI_VK_CHAIN_FAULT", "G4_VK_DENSE", "G4_VK_CHUNK"):
         env.pop(name, None)
     if mode == "permatrix":
         env.update(COLI_VULKAN="1", COLI_VK_CHAIN="0")
@@ -103,6 +104,31 @@ class ChainTest(unittest.TestCase):
                 out, err = run(snap, "permatrix")
                 self.assertNotIn("gemma4 chain:", err)
                 self.assertEqual(out["greedy"], self.reference(variant)["greedy"])
+
+    def test_the_prompt_is_read_in_chunks_on_the_device(self):
+        """The 14 prompt rows go through the chain as one chunk (the CPU's chunk before): the same tokens and logits as the CPU's, and
+        with G4_VK_CHUNK=0 (decode rows only) no chunk is stepped there."""
+        for variant, snap in SNAPS.items():
+            with self.subTest(variant):
+                cpu = self.reference(variant)
+                out, err = run(snap, "chain")
+                found = re.search(r"(\d+) prompt chunks \((\d+) rows", err)
+                self.assertTrue(found, err[-600:])
+                self.assertEqual((int(found.group(1)), int(found.group(2))), (1, len(IDS)))
+                self.assertEqual(out["greedy"], cpu["greedy"])
+                self.assertLess(rel_diff(cpu["last"], out["last"]), 2e-3)
+                out, err = run(snap, "chain", {"G4_VK_CHUNK": "0"})
+                self.assertRegex(err, r"0 prompt chunks \(0 rows")
+                self.assertEqual(out["greedy"], cpu["greedy"])
+
+    def test_a_chunk_on_the_matrix_units_is_the_cpus_to_f16(self):
+        """The chunk's grouped expert GEMMs on the cooperative matrices (f16 operands, the form a real prompt takes): the same tokens, the
+        last logits within what f16 operands reach (a tiny model's random weights amplify it, a real one's do not)."""
+        cpu = self.reference("moe")
+        out, err = run(SNAPS["moe"], "chain", {"COLI_VK_GRP_COOP": "1"})
+        self.assertIn("1 prompt chunks", err)
+        self.assertEqual(out["greedy"], cpu["greedy"])
+        self.assertLess(rel_diff(cpu["last"], out["last"]), 5e-2)
 
     def test_a_device_lost_in_the_middle_of_a_step_does_not_change_the_answer(self):
         for variant, snap in SNAPS.items():

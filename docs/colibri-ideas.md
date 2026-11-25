@@ -183,7 +183,8 @@ Collected in one go; what each rests on is stated, so the next look does not sta
 
 **Already known, now in one list**
 
-- [ ] **I1. The chain for prompt chunks and for several conversations (M-L).** Gemma 4's decode chain (2.19, [gemma4.md](gemma4.md)) is one
+- [~] **I1. The chain for prompt chunks and for several conversations (M-L).** Prompt chunks are done (fork-changes 2.46: a chunk of up to 256 rows is one frame, 26B-A4B 2k tokens
+  31 s to 1.7 s); what is left is a batch of conversations' decode rows. Original text: Gemma 4's decode chain (2.19, [gemma4.md](gemma4.md)) is one
   submission a token for one conversation. A prompt chunk (64 rows at a time) and a batch of conversations still go through the per-matrix
   path, which is why a 26B prompt and a batch are slower than a single token's chain. Listed as "Not done" in fork-changes 2.19.
 - [ ] **I2. Gemma gives the card back instead of being stopped (M).** `Pool.demote` exists for the `qwen36` engines only; a Gemma holding the

@@ -190,7 +190,11 @@ void main() {
         uint t = r >> 4u, at = (r & 15u) * 16u + (n & 15u);
         float g = sacc[(((n >> 4u)) * 2u + t) * 256u + at], u = sacc[((2u + (n >> 4u)) * 2u + t) * 256u + at];
         if (p.limit > 0.0) { if (g > p.limit) g = p.limit; if (u > p.limit) u = p.limit; if (u < -p.limit) u = -p.limit; }
+#ifdef GEGLU
+        y[(xoff + s) * O + o] = 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g))) * u;   /* -DGEGLU: Gemma 4's gelu_tanh(gate) * up */
+#else
         y[(xoff + s) * O + o] = (g / (1.0 + exp(-g))) * u;
+#endif
     }
 #else
     for (uint e = tid; e < TM * BO; e += 256u) {

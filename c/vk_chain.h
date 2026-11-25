@@ -503,6 +503,8 @@ int vkc_moe_ready(void);
  * device lacks the pipelines (vkc_moe_rows_ready) or a parameter is out of range. */
 typedef struct { VkcBuf *cnt, *amap, *items, *etab, *aux, *hid, *yk; } VkcMoeRows;
 int vkc_moe_rows_ready(int gfmt, int dfmt);
+/* with the gate+up activation: 0 SwiGLU, 2 GeGLU (our formats' grouped GEMMs only) */
+int vkc_moe_rows_ready_act(int gfmt, int dfmt, int act);
 int vkc_moe_rows(VkcBuf *x, VkcBuf *ids, VkcBuf *w, VkcBuf *table, VkcMoeRows *r, VkcBuf *y, const VkcMoe *p);
 void vkc_moe_rows_free(VkcMoeRows *r);
 /* The pipelines vk_chain.c otherwise makes at first use, made now, while the device still

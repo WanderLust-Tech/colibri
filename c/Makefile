@@ -814,6 +814,7 @@ VK_SPV   += shaders/qmatmul_grp_bdcw.spv shaders/qmatmul_grp_gate_up_bdcw.spv
 VK_SPV   += shaders/qmatmul_grp_q.spv shaders/qmatmul_grp_gate_up_q.spv
 # and on the matrix units (cooperative matrices at subgroups of 64 or 32)
 VK_SPV   += shaders/qmatmul_grp_qc.spv shaders/qmatmul_grp_gate_up_qc.spv
+VK_SPV   += shaders/qmatmul_grp_gate_up_q_ge.spv shaders/qmatmul_grp_gate_up_qc_ge.spv
 # inkling's chain ops (made on first use): the short convolution and the attention
 # with its relative-position bias
 VK_SPV   += shaders/chain_sconv.spv shaders/chain_relattn.spv
@@ -1060,6 +1061,13 @@ shaders/chain_kda_rows.spv: shaders/chain_kda.comp
 shaders/qmatmul_grp_gate_up_qc.spv: shaders/qmatmul_grp_qc.comp
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
 	$(GLSLC) --target-env=vulkan1.2 -DGATE_UP $< -o $@
+# the same two with GeGLU (act 2) in place of SwiGLU: Gemma 4's routed experts on a prompt chunk
+shaders/qmatmul_grp_gate_up_q_ge.spv: shaders/qmatmul_grp_q.comp
+	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
+	$(GLSLC) --target-env=vulkan1.2 -DGATE_UP -DGEGLU $< -o $@
+shaders/qmatmul_grp_gate_up_qc_ge.spv: shaders/qmatmul_grp_qc.comp
+	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
+	$(GLSLC) --target-env=vulkan1.2 -DGATE_UP -DGEGLU $< -o $@
 shaders/%.spv: shaders/%.comp
 	@command -v $(GLSLC) >/dev/null 2>&1 || { echo "glslc not found: install shaderc (for VK=1)" >&2; exit 1; }
 	$(GLSLC) --target-env=vulkan1.2 $< -o $@

@@ -104,6 +104,8 @@ typedef struct VkcDmoe_ {
      * its layers through vkc_moe_rows when their experts are block formats; cap the rows
      * the buffers hold a layer (VKC_DMOE_ROWS, or the step's) */
     int big, cap;
+    int floats;                    /* the engine's choice: a prompt chunk's grouped GEMMs stay in floats (1), not on the matrix units' f16 operands (Gemma 4's activations do not survive them) */
+    int act;                       /* the activation of the engine's experts, for a big step's choice of grouped GEMMs (0 SwiGLU, 2 GeGLU) */
     int big_step;                  /* this step's rows are more than VKC_DMOE_ROWS */
     uint8_t *rows_off;             /* per layer, in a big step: its formats have no grouped GEMM (the host's step) */
     VkcMoeRows rows;
@@ -638,7 +640,7 @@ static int vkc_dmoe_prepare(VkcDmoe *d, int lo, int L, int E, int K, int D, int 
         if (!d->rows_off && !(d->rows_off = calloc((size_t)L, 1))) return 0;
         int some = 0;
         for (int i = 0; i < L; i++) {
-            d->rows_off[i] = d->on[i] && !vkc_moe_rows_ready(vkc_dmoe_fmt(d, i, 12), vkc_dmoe_fmt(d, i, 15));
+            d->rows_off[i] = d->on[i] && !vkc_moe_rows_ready_act(vkc_dmoe_fmt(d, i, 12), vkc_dmoe_fmt(d, i, 15), d->act);
             some |= d->on[i] && !d->rows_off[i];
         }
         if (!some) return 0;
@@ -815,7 +817,7 @@ static int vkc_dmoe_layer(VkcDmoe *d, int layer, int n, VkcBuf *lg, VkcBuf *bias
          * 507-token prompt, 115-116 tok/s against 93-94 on the matrix units; without the pool the
          * two were even (104-114 against 109-120). */
         int stg = d->stg_on && d->frn[i] > 0, have = stg && d->stg_layer == layer;
-        m.floats = vkt_host_pool_on() && !(d->stg_on && d->full[i]);   /* staged: VRAM, the matrix units' GEMMs */
+        m.floats = d->floats || (vkt_host_pool_on() && !(d->stg_on && d->full[i]));   /* staged: VRAM, the matrix units' GEMMs */
         if (!vkc_route(lg, bias, d->rid, d->rwt, &r)) return 0;
         /* the layer's host pool experts into stg: after the layer before is done reading it,
          * before this one's GEMMs read it (both by address, so the barriers are ours) */

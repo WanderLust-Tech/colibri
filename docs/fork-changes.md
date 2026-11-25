@@ -63,6 +63,7 @@ the clone that serves port 8000):
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
 | Gemma 4's decode: the routed experts in the chain's frame, the split decode attention, the frame sent every four layers (26B-A4B 19.8 to 68.6 tok/s) | `main` | yes (`aac8e192`) | yes | yes (2026-11-25: engines rebuilt with `VK=1`, no rollback copies, router restarted; through the router a 160-token answer takes 1.3 s on the 26B-A4B and 1.0 s on Qwen3-Coder), 2.45 |
+| Gemma 4's prompt chunks in the chain (26B-A4B 2k tokens 31 s to 1.7 s, 7k 7.9 s; E4B 7k 5.6 s), grouped GeGLU expert GEMMs | `main` | yes | no | no, 2.46 |
 | The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes (`9d5b43e3`) | yes | yes (2026-11-25: live clone fast-forwarded, the nine engines rebuilt with `VK=1`, no rollback copies, router restarted; Qwen3-Coder through the router 167 tok/s), 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
@@ -845,6 +846,36 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
+### 2.46 Gemma 4's prompt chunks in the chain (branch `main`, 2026-11-25; built, tested, committed, not pushed or deployed)
+
+2.45 left prompt reading as the slow part: a 26B-A4B prompt of 2k tokens took 31 s (the CPU's attention, a synchronous call for each dense matrix, the experts a
+batch at a time through the tier). The chain took one row, so every chunk of 256 went the per-matrix way. Now it takes up to a chunk's rows.
+
+- **The step takes S rows** (`gemma4_chain.h`; `forward_chunk` in `gemma4.c`): the norms, projections, RoPE (a table a row), the keys and values into the device's caches,
+  attention (`vkc_attn_w` with S rows over the position-major, windowed, ringed cache: the blocked shader, or `chain_attn512` for the full layers' 512-wide heads), the
+  dense MLP, the per-layer-embedding block and the layer scalar all run over S rows in the frame. A chunk is the rows of one conversation at consecutive positions, none
+  inside a picture (a sliding layer reads the whole picture there, so those still go the old way), and no more than `m->chunk`; the new rows come down together and go
+  into the host's caches as before, so a rewind, a prefix reuse and the CPU path see what they always saw. A sliding layer's device ring is now the window plus a chunk
+  (a chunk's rows are all written before any is read). The head is the caller's for a chunk (it needs the last row only). `G4_VK_CHUNK=0` keeps decode rows only.
+- **The routed experts of a chunk** (`vk_dmoe.h`, `vkc_moe_rows`): the grouped GEMMs the Qwen chain already used for its prompt chunks, now with GeGLU: two new
+  shaders (`qmatmul_grp_gate_up_q_ge.spv`, `qmatmul_grp_gate_up_qc_ge.spv`, `-DGATE_UP -DGEGLU` of the same sources), `vkc_moe_rows_ready_act`, and a `floats` and an `act`
+  field in `VkcDmoe` (defaults unchanged for the other engines). `test_vk_chain` checks them against `chain_moe`'s act 2 (the floats' form to 4e-9, the matrix units' to 5e-6 of
+  the output), including a tiny model's shape.
+- **Two numeric settings the real model needed** (the tiny test models did not show either): with the chain's int8 prompt GEMM (`chain_gemm`, activations rounded to f16
+  once) or the experts' grouped GEMMs on the matrix units, the 26B-A4B's next-token choice moved at 80-90 of 679 prompt positions and the last row's logits by 1.2-1.5 (top
+  five changed) against the CPU's; with either in floats (the backend's GEMM below `chain_gemm`, the grouped GEMMs' floats) it was 3 of 679 and 0.02, the per-matrix path's
+  own 1 of 679 and 0.015. So the Gemma engine sets `COLI_VK_CHAIN_GEMM=0` when it is unset, and its chunks' experts stay in floats (`G4_VK_CHUNK_COOP=1` takes the matrix
+  units). The test files keep `COLI_VK_GRP_COOP=0` for their tight parity checks and `test_a_chunk_on_the_matrix_units_is_the_cpus_to_f16` has the matrix units' form.
+- **Checked against the CPU** (`COLI_VULKAN` unset), argmax at every position of a source file as the prompt, then the last row's logits: 26B-A4B 679 tokens 676 of 679
+  (0.018 of 26.4), E4B 679 tokens 679 of 679 (0.001), E4B 3,196 tokens (the 768-row ring wrapped several times) 3,196 of 3,196 (0.000); the 26B-A4B at 3,631 tokens (past its
+  1,024 window) against the per-matrix path 3,629 of 3,631 (0.086 of 21.8). `COLI_VK_CHAIN_CHECK=1` compares every row of a chunk.
+- **Measured** (the same prompt, temperature 0, through `coli serve`): 26B-A4B 2,023 tokens 31.2 s to 1.7 s; 7,023 tokens 7.9 s (6.2k took 109 s); E4B 7,019 tokens 5.6 s (6.2k
+  took 58 s); Qwen3-Coder (shares the grouped-GEMM code) 4.5k tokens 1.1 s as before. Decode is the step 2.45 measured. At 7k the full layers' wide attention is the largest
+  share of a chunk's time.
+- **Not done**: the same chain for several conversations (a batch of decode rows is still the CPU's path); the full layers' 512-wide heads have no flash form (`chain_attn512`
+  walks the positions a row at a time); the chunk's matrix-unit forms stay off for Gemma until a form that survives its activations exists (the cause is f16 operands, not
+  a bug in the shaders: they agree with `chain_moe` on random data).
+
 ### 2.45 Gemma 4's decode: the routed experts in the chain's frame (branch `main`, 2026-11-25; pushed (`aac8e192`) and live)
 
 Started from a profile of the 26B-A4B on the RTX 5090 (`COLI_VK_CHAIN_PROF=1`, which Gemma now prints at every turn): a decode token took 37 ms, of which the dense
@@ -865,7 +896,7 @@ reading ran at 87 tok/s. The Qwen engine had put its experts into the same frame
   token on the 26B at 1.2k: 21.6 ms of waiting for the device became 13.1 plus 1.8 of recording. `COLI_VK_CHAIN_CHECK=1` (each chained step again on the CPU, the
   residuals compared) found no step off by more than 1e-3 over about 90 steps with the split attention; the Gemma tests (chain, tier, the rest) pass.
 - **Not done**: prompt reading (a 1.6k-token prompt still takes 14-20 s, a 6.2k-token one 109 s, against 1.3 s for the same size on Qwen3-Coder): the chain takes one row,
-  so a prompt chunk goes through the per-matrix path (idea I1); and the remaining gap between the device's own time and the step's wall time is the dispatches' gaps
+  so a prompt chunk goes through the per-matrix path (idea I1; done in 2.46); and the remaining gap between the device's own time and the step's wall time is the dispatches' gaps
   (about 670 small ones a token).
 
 ### 2.44 The engine side of upstream, merged (branch `merge-upstream`, 2026-11-25; merged, pushed (`9d5b43e3`) and live)
