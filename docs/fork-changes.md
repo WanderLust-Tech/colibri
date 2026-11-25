@@ -875,9 +875,21 @@ batch at a time through the tier). The chain took one row, so every chunk of 256
 - **Full suite** (4,482 tests): the failures are the Windows environment's (symlink privilege, no WSL `bash`, charmap, path separators), `responses_shim.py` missing from
   `make install`, and the Mimo engine's tests, whose engine dies at start the same way built from the commit before this one; none is in the Gemma, Vulkan-chain or Makefile tests.
   A model loaded while the card is full runs on the CPU until it is reloaded (the Coder did, in the check after the deploy: 8 s for 160 tokens, 0.8 s once reloaded with the card free).
-- **Not done**: the same chain for several conversations (a batch of decode rows is still the CPU's path); the full layers' 512-wide heads have no flash form (`chain_attn512`
-  walks the positions a row at a time); the chunk's matrix-unit forms stay off for Gemma until a form that survives its activations exists (the cause is f16 operands, not
-  a bug in the shaders: they agree with `chain_moe` on random data).
+- **Attention at 7k tokens, tried and not kept** (2026-11-25, after the deploy). Attention is 4.5 s of the 7.4 s of device time of a 7,023-token prompt on the 26B-A4B: 2.5 s in the
+  5 full layers (512-wide heads, `chain_attn512`: a workgroup per (head, row), each reading the whole cache) and 2.1 s in the 25 sliding ones (`chain_attnb`, floats, about 1.4
+  TFLOPS). Two ways were built and measured, then reverted:
+  - *`chain_attn_flash` (the matrix units) on a position-major cache*: the addressing is a few lines and the unit test (against a double-precision reference, window and ring
+    included) passed, but on the real model the next-token choice moved at 72 of 679 prompt positions and the last row's logits by 0.95, worse than the CPU-vs-floats gap by
+    far. Cause, found by rounding each operand to float16 in the CPU attention alone: Q moves 56 of 679 positions, K 52, V 22, the softmax weights P 18 (all four together 79,
+    last row 1.4). Every operand matters, so an exact form needs a hi/lo split of all four (about three times the matrix work, and the 512-wide heads' tiles do not fit
+    in registers that way); not built.
+  - *`chain_attnb` for 512-wide heads* (`-DWIDE`: 64 dims a lane, 8-position tiles, K and V read once for the 8 query heads and 4 rows): right (677 of 679 positions, last row within
+    0.003) but no faster: the five layers still took 2.5 s, so the cache traffic was not what limited either kernel.
+  What remains is a float attention that keeps the arithmetic's units busy (a fused flash in floats), or the hi/lo matrix form. Both are a shader project of their own; a 2k-token
+  prompt spends 0.4 s of 1.7 in attention, so it matters from about 4k tokens up.
+- **Not done**: the same chain for several conversations (a batch of decode rows is still the CPU's path). It needs a device mirror of the keys and values for each conversation in
+  the batch (the chain keeps one, for the conversation it last served), and the router starts every worker with one slot, so only `--kv-slots` above 1 with two conversations
+  decoding at once reaches it.
 
 ### 2.45 Gemma 4's decode: the routed experts in the chain's frame (branch `main`, 2026-11-25; pushed (`aac8e192`) and live)
 
