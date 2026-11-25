@@ -458,4 +458,5 @@ static void g4c_report(void) {
     VkcStats st; vkc_stats(&st);
     fprintf(stderr, "[VK] gemma4 chain: %llu decode steps, %llu waits for the device (%.1f ms in all, %.1f ms of routed experts on the host), %.1f MiB on the device\n",
             ch->forwards, ch->frames, ch->wait_ms, ch->host_ms, st.dev_bytes / 1048576.0);
+    vkc_prof_print();   /* COLI_VK_CHAIN_PROF=1: the device time by kind of op */
 }

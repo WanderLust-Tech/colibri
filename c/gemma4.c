@@ -1304,6 +1304,7 @@ static size_t g4_qm_dev(const QMat *W) { return W->q ? (size_t)W->O * W->I + (si
 static void g4_vk_turn(Model *m, const char *scope) {
     if (!m->vk_hist) return;
     vkt_report(scope, m->hits, m->miss);
+    if (!strcmp(scope, "turn")) vkc_prof_print();   /* COLI_VK_CHAIN_PROF=1: the chain's device time by kind of op, cumulative */
     rt_save(g_g4_usage, 1);
 }
 static Model *g_g4_model_for_exit = NULL;           /* the model whose history and report the exit hook writes */
