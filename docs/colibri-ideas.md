@@ -199,7 +199,7 @@ Collected in one go; what each rests on is stated, so the next look does not sta
 
 **New**
 
-- [ ] **I5. The VS Code extension works on what is open in the editor (M).** Today the model's file tools read and write files on disk and the
+- [x] **I5. The VS Code extension works on what is open in the editor (M).** Built as extension 0.25.0 (2026-11-25; the vsix is built, not yet installed): an open file is read from its buffer and edited through it (one undo step, the diff on the card against the buffer; saved after the edit when it had no unsaved changes, left unsaved when it had; a file that is not open stays on disk and is not opened), plus `list_editors`, `diagnostics` and `open_file`; `colibri.editorTools` switches it off. The open questions below were decided that way. Original text: Today the model's file tools read and write files on disk and the
   extension attaches the selection; it cannot see which files are open in tabs, what is unsaved, or the Problems list, and its edits go to disk
   rather than through the editor (no undo step, an unsaved buffer is bypassed). A set of tools: list the open editors (with a dirty flag), read a
   buffer (unsaved text, the selection, a range), edit a buffer with a `WorkspaceEdit` (one undo step, through the approval and editable diff that
