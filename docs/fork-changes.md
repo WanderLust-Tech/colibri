@@ -62,6 +62,7 @@ the clone that serves port 8000):
 | ACE-Step's sampler options (Heun, SDE, velocity clamp and smoothing) and their dashboard controls | `feat/qwen3-speech` | yes (`b33b4953`, `cdafc2a0`) | yes | yes (2026-11-23), 2.37 |
 | ACE-Step flow-edit (a clip edited toward a new description), also on a cover's context, with its Edit mode in the dashboard; the cover strength of 0 | `feat/qwen3-speech` | yes (`0c9a7381`, `8e0c0996`, `a031254a`) | yes (2026-11-24) | yes (2026-11-23/24; `a031254a` too, with the VK `acestep.exe` rebuilt and `web/dist` rebuilt), 2.38 |
 | A chat model gets the card back after a long idle (`Pool.promote`, `COLI_CARD_PROMOTE_CHAT`) | `feat/qwen3-speech` | yes (`5b14720c`) | yes | yes (2026-11-24, router restarted; `router.card_promote.chat_stops` is in `/health`; not yet seen to move a real chat model), 2.39 |
+| The engine side of upstream merged (Vulkan chain with flash attention and the experts in the device frame, the Qwen engine's serve loop; the fork's JSON mode, `DEMOTE` and cached tokens ported): Qwen3-Coder 20 to 195 tok/s | `merge-upstream` | yes | no | no, 2.44 |
 | Upstream batch 3: 22 of the 142 Windows-related commits (converters, `coli stop`, `coli setup`, memory, qpack, `COLI_MMAP`, test hygiene) | `upstream-win` | yes (`82991b8a`) | yes | yes (2026-11-25, router restarted, `qwen36.exe` rebuilt; Qwen3-Coder answered after the restart), 2.43 |
 | Upstream batch 2: 26 validation fixes (gateway, JSON and grammar, images, MCP, `coli`), and the WAV and image hand ports | `upstream-picks` | yes (`c402657f`) | yes | yes (2026-11-25, with batch 3's restart), 2.42 |
 | Upstream batch 1: the Responses API (`responses_shim.py`, `POST /v1/responses` on the router, `coli launch codex`) | `upstream-picks` | yes (`37dfdb44`) | yes | yes (2026-11-25, router restarted; checked with Gemma 4 E2B through the router), 2.41 |
@@ -842,6 +843,37 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Live check** (2026-11-25, Gemma 4 E2B through the router): no key is a 401; non-streaming gives `response`/`completed` with the text and usage; streaming arrives as the raw HTTP/1.0 body (`Connection: close`, no `Transfer-Encoding`) with the whole event sequence from `response.created` to `response.completed`.
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
+
+### 2.44 The engine side of upstream, merged (branch `merge-upstream`, 2026-11-25; built, tested, in local main, not pushed or deployed)
+
+The measurements that led here are in [upstream-triage.md](upstream-triage.md) (the Vulkan note): upstream's own `qwen36` runs Qwen3-Coder on the RTX 5090 at 182-196 tok/s
+against the fork's 20, and reads a 5k-token prompt in 1.2 s against 18 s. The cause is in the Vulkan chain (flash attention on the matrix units at subgroups of 32,
+the routed experts inside the device frame), which the fork had changed by only a few dozen lines.
+
+- **What is merged**: a real merge commit (parent `main` and `upstream/main` at `e479104a`, so a later `git merge upstream/main` starts from here) whose content is
+  upstream's for the engine side only: `c/*.c`, `c/*.h`, the CUDA and Metal sources, `c/shaders/`, the build files and the C tests (472 files). **Everything else stays the
+  fork's**: the Python gateway and router (`openai_server.py`, `coli`, `router.py`...), the dashboard (`web/`; upstream replaced it with a chat UI in `ui/`, not taken), the
+  docs, the Qwen-Image engine (`qwenimage*`, `qi_gemm.h`: upstream's GGUF reading of Qwen-Image collides with the fork's edit pipeline, and the fork does not use it) and the
+  install list of the Makefile. Upstream's new Python (its UI, `power.py`, the GGUF tools) is not in the tree.
+- **The fork's features ported into upstream's rewritten `qwen36` serve loop** (it moved its frames into `serve_codec.h` and added held frames, STOP and mux changes):
+  JSON mode (the grammar rides as the SUBMIT's extension bytes; `q36_pick` in the single and the multiplexed loops; the walker freed on every way out), `DEMOTE` (a new
+  `serve_codec.h` frame, answer code 7 because 6 is the held IMAGE; handled between requests in both loops), the reused-prompt-tokens field of `DONE` (kept as the 8th field
+  after upstream's cache hit rate), and the `CAPS` line (`grammar=1 ctx=N demote=1`). Gemma 4's two element-wise ops are renumbered 15 and 16 after upstream's 9-14
+  (`vk_chain.h`, `chain_ew.comp`, the rebuilt `.spv`); its 512-wide attention keeps its own pipeline beside upstream's route pipeline.
+- **Python data aligned with the merged Makefile**: `family_registry.py` says `supports_accelerator=True` for olmoe, laya and gliner_decide (upstream's CUDA chain for them);
+  glm53, deepseek_v41 and mimo are kept off the CUDA object in the Makefile (the fork's `coli setup` sends those to Vulkan, and its tests say so).
+  `test_backend_loader.py` and `test_glm53_metal_routed_source.py` are upstream's versions (they count the loader's functions and read `glm53.c`); the Gemma tier test sets
+  `COLI_VK_TIER_HOST=0` (with the host pool the experts a small budget cannot hold are read from system RAM by the device, so all of them run on it).
+- **Measured** (fork build against the merged one, the same models, 2 runs each, the fork's gateway on both): Qwen3-Coder on the card, 367-token prompt: decode 195 against
+  20 tok/s, first token 0.05 s against 1.1 s; 5,382-token prompt: first token 1.3 s against 18 s, decode 181 against 10.5 tok/s; the same JSON mode, JSON schema and tool call
+  answers; `cached_tokens` now reports the shared prefix (485 of 493) where the fork's engine said 0. Gemma 26B-A4B the same (26-28 tok/s), Gemma E4B 54-59 against 44-47 tok/s.
+  Through a scratch router on another port: chat on Coder and E4B, embeddings, rerank, speech then transcription (the words came back), Qwen-Image and Z-Image renders
+  (Qwen-Image's pixels within 3 of the fork's; Z-Image's differ in the fine detail, mean 2.6 of 255, the same picture, and its steps take 0.42 s against 0.56 s) and a 10-second
+  song. The C tests `test_vk_chain`, `test_vk_tier`, `test_vk_alloc` and `test_vk_memtype` pass. The full Python suite: 4,473 tests, the same failures as before the merge, none new.
+- **What it costs**: an engine starts about 5 to 7 s later (Qwen3-Coder 21-24 s against 13-17 s to a ready server, though its first request is then 0.2 s against 1.8 s, and
+  the first Z-Image run asks the driver for its mapped memory, 5.6 s). `COLI_VK_WINDOW_PROBE_MB=27648` answers the probe without asking on this machine.
+- **Not done**: the engines are not rebuilt in the live clone and the router is not restarted; the new `colibri-tui` target and upstream's UI are not installed; CUDA, GGUF
+  and the other engines' work is in the tree but only the engines the fork runs were exercised.
 
 ### 2.43 Upstream batch 3: the Windows fixes that fit (branch `upstream-win`, 2026-11-25; merged, pushed (`82991b8a`) and live: router restarted, `qwen36.exe` rebuilt)
 
