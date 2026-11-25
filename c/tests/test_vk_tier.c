@@ -74,6 +74,11 @@
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
+#ifdef _WIN32
+/* MinGW has no setenv: an empty value removes the variable, which is what unsetenv does */
+#define setenv(k, v, o) _putenv_s((k), (v))
+#define unsetenv(k) _putenv_s((k), "")
+#endif
 #include "../backend_vulkan.h"
 #include "../vk_tier.h"
 #include "../ggml_quants.h"   /* the block formats' CPU decoders, the reference of section blocks */
