@@ -18,6 +18,12 @@ static int64_t expert_bytes_layer(Model *m, int layer){
     if(st_nbytes(&m->S,nm)<=0) return 0;
     for(int k=0;k<3;k++){
         snprintf(nm,sizeof(nm),"model.layers.%d.mlp.experts.0.%s.weight",layer,suf[k]);
+        const st_tensor *t=st_find(&m->S,nm);
+        if(t && st_is_ggml(t->dtype) && t->rank==2){   /* a GGUF's: as qt_from_disk holds it */
+            const int held=coli_ggml_held_type(st_ggml_type(t->dtype),t->shape[0],t->shape[1],"GLM_ILV16");
+            eb+=gq_row_bytes(held,t->shape[1])*t->shape[0];
+            continue;
+        }
         eb+=st_nbytes(&m->S,nm);
         snprintf(nm,sizeof(nm),"model.layers.%d.mlp.experts.0.%s.weight.qs",layer,suf[k]);
         int64_t q=st_nbytes(&m->S,nm); if(q>0) eb+=q;
@@ -132,14 +138,9 @@ static void hw_probe(char *cpu, size_t cn, int *cores, double *ram_total, double
 #ifdef _WIN32
     compat_meminfo(ram_total,ram_avail);
 #elif defined(__APPLE__)
-    { uint64_t ms=0; size_t sl=sizeof(ms);
-      if(!sysctlbyname("hw.memsize",&ms,&sl,NULL,0)) *ram_total=(double)ms/1e9;
-      int64_t pgsz=0; sl=sizeof(pgsz);
-      if(sysctlbyname("hw.pagesize",&pgsz,&sl,NULL,0)||pgsz<=0) pgsz=16384;
-      vm_statistics64_data_t vs; mach_msg_type_number_t nc=HOST_VM_INFO64_COUNT;
-      if(host_statistics64(mach_host_self(),HOST_VM_INFO64,(host_info64_t)&vs,&nc)==KERN_SUCCESS)
-          /* macOS analogue of Linux MemAvailable: free + inactive + purgeable */
-          *ram_avail=(double)(vs.free_count+vs.inactive_count+vs.purgeable_count)*(double)pgsz/1e9; }
+    compat_meminfo_gb(ram_total,ram_avail);   /* free + file-backed + purgeable, as the budgets */
+#elif defined(__FreeBSD__)
+    compat_meminfo_gb(ram_total,ram_avail);   /* no /proc/meminfo on FreeBSD: the sysctl branch there */
 #else
     FILE *mi=fopen("/proc/meminfo","r");
     if(mi){ char ln[256]; double mt=0,ma=0;

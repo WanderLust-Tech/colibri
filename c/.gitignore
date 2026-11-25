@@ -1,5 +1,15 @@
 *.exe
 glm_tiny/
+# QLoRA training (experimental): trainer and test binaries, adapters, generated data
+coli_train
+tests/test_lora
+tests/test_train_linear
+tests/test_train_tiny
+tests/test_train_resume
+adapters/
+train_state.bin
+data/m8_tokenized/
+data/tiny_sft/
 olmoe_hf/
 olmoe_i4/
 .build-config
@@ -8,6 +18,7 @@ build/
 COLI_V4_UNIT_*.o
 expert_store_registry.o
 deepseek_v4
+tools/bench_dsv4_head_batch
 test_expert_store_registry
 tests/test_st_mirror
 tests/test_st_pread
@@ -18,12 +29,17 @@ tools/librans_c.so
 tools/librans_c.dylib
 tools/rans_c.dll
 tests/fuzz_rans
+tests/fuzz_glm53_worker
 tests/bench_omp_grain
 tests/mxfp4_ref.o
 mxfp4_cuda_test
 mxfp4_expert_cuda_test
 absorb_determinism_test
 cuda_fmt_trap_test
+cuda_dsv4c_test
+cuda_dsv4c_test.exe
+cuda_glm53c_test
+cuda_glm53c_test.exe
 tests/*.dSYM/
 tests/test_dsa_select
 tests/test_i4_grouped
@@ -51,6 +67,8 @@ cublasLt64*.dll
 cudart64*.dll
 glm53
 qwen36
+qwen36-canonical
+qwen36_dense_file_test*.qc
 qwenimage
 qwenimage.exe
 zimage
@@ -73,3 +91,8 @@ gemma4_tiny_*/gemma4_meta.json
 gemma4_tiny_*/model.safetensors.index.json
 gemma4_tiny_*/tokenizer.json
 gemma4_tiny_*/.coli_*
+tests/xdna_fake_helper*.so
+libcoli_xdna.so
+shaders/chain_dnconv_rows.spv
+shaders/qmatmul_bd.spv
+shaders/qmatmul_gate_up_bd.spv

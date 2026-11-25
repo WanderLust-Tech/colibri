@@ -107,7 +107,9 @@ class TierTest(unittest.TestCase):
 
     def test_a_budget_that_holds_a_part_of_the_experts_shares_them_with_the_cpu(self):
         # the tiny experts are about 7 KiB each: 0.00004 GiB is a few
-        out, err = self.card({"COLI_VK_TIER_GB": "0.00004", "COLI_VK_TIER_RATE": "0"})
+        # (COLI_VK_TIER_HOST=0: with the host pool, the experts the card cannot hold are read from system RAM by the device, so all
+        # of them would run on it; this test is of the other split, the CPU taking the rest)
+        out, err = self.card({"COLI_VK_TIER_GB": "0.00004", "COLI_VK_TIER_RATE": "0", "COLI_VK_TIER_HOST": "0"})
         found = re.search(r"tier gemma4 run: device (\d+) of (\d+) routed experts", err)
         self.assertTrue(found, err[-1200:])
         self.assertGreater(int(found.group(1)), 0)

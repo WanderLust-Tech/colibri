@@ -17,14 +17,15 @@
 #define COLI_VK_FUNCS(X) \
     X(vkAllocateCommandBuffers) X(vkAllocateDescriptorSets) X(vkAllocateMemory) \
     X(vkBeginCommandBuffer) X(vkBindBufferMemory) X(vkCmdBindDescriptorSets) \
-    X(vkCmdBindPipeline) X(vkCmdCopyBuffer) X(vkCmdDispatch) X(vkCmdFillBuffer) \
+    X(vkCmdBindPipeline) X(vkCmdCopyBuffer) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdFillBuffer) \
+    X(vkCmdSetEvent) X(vkCmdWaitEvents) X(vkCreateEvent) X(vkDestroyEvent) X(vkResetEvent) X(vkSetEvent) X(vkGetEventStatus) \
     X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdResetQueryPool) \
     X(vkCmdWriteTimestamp) X(vkCreateBuffer) X(vkCreateCommandPool) \
     X(vkCreateComputePipelines) X(vkCreateDescriptorPool) X(vkCreateDescriptorSetLayout) \
-    X(vkCreateDevice) X(vkCreateFence) X(vkCreateInstance) X(vkCreatePipelineLayout) \
+    X(vkCreateDevice) X(vkCreateFence) X(vkCreateInstance) X(vkCreatePipelineCache) X(vkCreatePipelineLayout) \
     X(vkCreateQueryPool) X(vkCreateShaderModule) X(vkDestroyBuffer) X(vkDestroyCommandPool) \
     X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkDestroyDevice) \
-    X(vkDestroyFence) X(vkDestroyInstance) X(vkDestroyPipeline) X(vkDestroyPipelineLayout) \
+    X(vkDestroyFence) X(vkDestroyInstance) X(vkDestroyPipeline) X(vkDestroyPipelineCache) X(vkDestroyPipelineLayout) \
     X(vkDestroyQueryPool) X(vkDestroyShaderModule) X(vkDeviceWaitIdle) X(vkEndCommandBuffer) \
     X(vkEnumerateDeviceExtensionProperties) X(vkEnumeratePhysicalDevices) \
     X(vkFreeCommandBuffers) X(vkFreeDescriptorSets) X(vkFreeMemory) \
@@ -32,7 +33,7 @@
     X(vkGetDeviceQueue) X(vkGetFenceStatus) X(vkGetInstanceProcAddr) \
     X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkGetPhysicalDeviceMemoryProperties2) X(vkGetPhysicalDeviceProperties) \
-    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceQueueFamilyProperties) \
+    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPipelineCacheData) \
     X(vkGetQueryPoolResults) X(vkMapMemory) X(vkQueueSubmit) X(vkResetCommandBuffer) \
     X(vkResetDescriptorPool) X(vkResetFences) X(vkUnmapMemory) X(vkUpdateDescriptorSets) \
     X(vkWaitForFences)
@@ -54,6 +55,7 @@ int coli_vk_load(void);
 #define vkCmdBindPipeline coli_vkCmdBindPipeline
 #define vkCmdCopyBuffer coli_vkCmdCopyBuffer
 #define vkCmdDispatch coli_vkCmdDispatch
+#define vkCmdDispatchIndirect coli_vkCmdDispatchIndirect
 #define vkCmdFillBuffer coli_vkCmdFillBuffer
 #define vkCmdPipelineBarrier coli_vkCmdPipelineBarrier
 #define vkCmdPushConstants coli_vkCmdPushConstants
@@ -66,7 +68,15 @@ int coli_vk_load(void);
 #define vkCreateDescriptorSetLayout coli_vkCreateDescriptorSetLayout
 #define vkCreateDevice coli_vkCreateDevice
 #define vkCreateFence coli_vkCreateFence
+#define vkCmdSetEvent coli_vkCmdSetEvent
+#define vkCmdWaitEvents coli_vkCmdWaitEvents
+#define vkCreateEvent coli_vkCreateEvent
+#define vkDestroyEvent coli_vkDestroyEvent
+#define vkResetEvent coli_vkResetEvent
+#define vkSetEvent coli_vkSetEvent
+#define vkGetEventStatus coli_vkGetEventStatus
 #define vkCreateInstance coli_vkCreateInstance
+#define vkCreatePipelineCache coli_vkCreatePipelineCache
 #define vkCreatePipelineLayout coli_vkCreatePipelineLayout
 #define vkCreateQueryPool coli_vkCreateQueryPool
 #define vkCreateShaderModule coli_vkCreateShaderModule
@@ -78,6 +88,7 @@ int coli_vk_load(void);
 #define vkDestroyFence coli_vkDestroyFence
 #define vkDestroyInstance coli_vkDestroyInstance
 #define vkDestroyPipeline coli_vkDestroyPipeline
+#define vkDestroyPipelineCache coli_vkDestroyPipelineCache
 #define vkDestroyPipelineLayout coli_vkDestroyPipelineLayout
 #define vkDestroyQueryPool coli_vkDestroyQueryPool
 #define vkDestroyShaderModule coli_vkDestroyShaderModule
@@ -100,6 +111,7 @@ int coli_vk_load(void);
 #define vkGetPhysicalDeviceProperties coli_vkGetPhysicalDeviceProperties
 #define vkGetPhysicalDeviceProperties2 coli_vkGetPhysicalDeviceProperties2
 #define vkGetPhysicalDeviceQueueFamilyProperties coli_vkGetPhysicalDeviceQueueFamilyProperties
+#define vkGetPipelineCacheData coli_vkGetPipelineCacheData
 #define vkGetQueryPoolResults coli_vkGetQueryPoolResults
 #define vkMapMemory coli_vkMapMemory
 #define vkQueueSubmit coli_vkQueueSubmit

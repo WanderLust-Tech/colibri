@@ -223,6 +223,30 @@ int coli_metal_gemm(float *y, const float *x, const void *weights, const float *
 int coli_metal_rtop8(int par, const float *sig, const float *bias, int S, int E, int K,
                      int Ksel, float topp, int normk, float rscale,
                      int *idx, float *w, int *keff);
+
+/*
+ * Training kernels (QLoRA, M6). Synchronous, correctness-first; each has a CPU
+ * reference in train/qlora_ops.h and a parity test in metal-test. Returns 1 on
+ * success, 0 -> caller must run the CPU path.
+ *
+ *   train_tmul:      dx[S,I] += dequant(W[O,I])^T dy[S,O]  (fmt 0=f32 no-scale,
+ *                    1=int8, 2=int4 per-row scale, 4=int4 grouped — gs columns
+ *                    per scale, scale[o*ng+i/gs]; the dequantized matrix is
+ *                    never materialized. gs ignored unless fmt=4)
+ *   train_lora_fwd:  z = x A^T ; y += scale * z B^T        (f32, z cached for bwd)
+ *   train_lora_bwd:  dz = scale * dy B ; dB += scale * dy^T z ; dA += dz^T x ;
+ *                    dx += dz A  (dx may be NULL to skip)
+ */
+int coli_metal_train_tmul(float *dx, const float *dy, const void *weights, const float *scales,
+                          int fmt, int gs, int S, int I, int O);
+int coli_metal_train_lora_fwd(float *y, float *z, const float *x,
+                              const float *A, const float *B, float scale,
+                              int S, int I, int O, int rank);
+int coli_metal_train_lora_bwd(float *dA, float *dB, float *dx,
+                              const float *x, const float *z, const float *dy,
+                              const float *A, const float *B, float scale,
+                              int S, int I, int O, int rank);
+
 void coli_metal_attn_counts(uint64_t *ok, double *wall, double *kernel);
 void coli_metal_attn_lat(double *ksched, double *gsched);
 int coli_metal_attn_decode(const float *x,
@@ -302,6 +326,25 @@ ColiMetalMoeHandle* coli_metal_moe_block_begin(int nb, int D, int Iinter, int fm
                          const float *xg, const int *xoff, const int *nr,
                          const int *rows, const float *rw);
 int coli_metal_moe_block_end(ColiMetalMoeHandle *h, float *out);
+
+/* The same blocks with the activation and the formats named: act 0 SwiGLU, 1 GLM-5.3's
+ * clamped one (a0 the limit), 2 Inkling-2's softcap(g, a0) * sigmoid(g) * softcap(u, a1);
+ * fmt as above, or 9 = int4 g64 planar (expert_ffn.h: per 64-block, byte k holds element k
+ * low and k+32 high as v+8; scales [O][I/64]; D and Iinter multiples of 64, qgs ignored).
+ * Inkling-2's path (INK2_METAL=1) is the only caller of act 2 and fmt 9, and it has not been
+ * measured on a Mac yet. */
+int coli_metal_moe_block_act(int nb, int D, int Iinter, int fmt, int qgs,
+                         int act, float a0, float a1,
+                         const void *const *g, const void *const *u, const void *const *d,
+                         const float *const *gs, const float *const *us, const float *const *ds,
+                         const float *xg, const int *xoff, const int *nr,
+                         const int *rows, const float *rw, float *out);
+ColiMetalMoeHandle* coli_metal_moe_block_begin_act(int nb, int D, int Iinter, int fmt, int qgs,
+                         int act, float a0, float a1,
+                         const void *const *g, const void *const *u, const void *const *d,
+                         const float *const *gs, const float *const *us, const float *const *ds,
+                         const float *xg, const int *xoff, const int *nr,
+                         const int *rows, const float *rw);
 
 /*
  * KDA state recurrence for one token (decode: C=1). Replaces the serial per-head

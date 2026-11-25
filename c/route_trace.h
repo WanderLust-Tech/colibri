@@ -305,8 +305,24 @@ static int rt_acc_cb(int l, int e, uint32_t c, void *ud){
     row[e] += c;
     return 1;
 }
+/* A history file that does not exist yet starts from the model's start profile, where it ships
+ * one: COLI_USAGE_START, else <path>.start (tools/usage_start_profile.py writes
+ * <model>/.coli_usage.start from ordinary prompts). Its counts seed the counters; the history
+ * the run writes still goes to path. A history that exists but cannot be read is left alone. */
 static int64_t rt_load(const char *path){
     int64_t t = rt_read(path, rt_acc_cb, NULL);
+    FILE *f = NULL;
+    if(t < 0 && path && !(f = fopen(path, "rb"))){
+        const char *s = getenv("COLI_USAGE_START");
+        char buf[4200];
+        if(!s || !*s){ snprintf(buf, sizeof buf, "%s.start", path); s = buf; }
+        int64_t u = rt_read(s, rt_acc_cb, NULL);
+        if(u > 0){
+            fprintf(stderr, "[USAGE] no expert history yet: the start profile's %lld selections (%s); the history "
+                            "goes to %s\n", (long long)u, s, path);
+            t = u;
+        }
+    } else if(t < 0 && path) fclose(f);
     return t < 0 ? 0 : t;                       /* callers already treat 0 as "no history" */
 }
 
@@ -332,14 +348,16 @@ static void rt_decay(void){
     }
 }
 
+/* USAGE_SAVE=0 is a read-only run: the history is loaded but never written back (#1039).
+ * Answered here so every engine reads the switch the same way. */
+static int rt_save_enabled(void){
+    const char *sv = getenv("USAGE_SAVE");
+    return !(sv && atoi(sv)==0);
+}
+
 static int rt_save(const char *path, int quiet){
     if(!rt_c || !path || !*path) return 0;
-    /* USAGE_SAVE=0: read-only run — the history is loaded but never written back
-     * (#1039: benchmark loops must not skew the very profile they are measuring).
-     * Checked HERE so every engine honours the same switch with the same
-     * truthiness; a requested skip is a success, not a save failure. */
-    { const char *sv = getenv("USAGE_SAVE");
-      if(sv && atoi(sv)==0) return 1; }
+    if(!rt_save_enabled()) return 1;   /* a requested skip is a success, not a save failure */
     rt_decay();
     int64_t tot = 0, nz = 0;
     for(int i = 0; i <= rt_nl; i++){
@@ -379,7 +397,11 @@ static int rt_save(const char *path, int quiet){
                 if(rt_c[i][e]) fprintf(f, "%d %d %u\n", i, e, rt_c[i][e]);
         }
     }
-    fclose(f);
+    /* Buffered writes may fail only during close (for example a full disk).
+     * Publish only a complete history, keeping the previous one on failure. */
+    int write_failed = ferror(f);
+    if(fclose(f) != 0) write_failed = 1;
+    if(write_failed){ remove(tmp); return 0; }
     if(rename(tmp, path) != 0) return 0;
     if(!quiet) fprintf(stderr, "[STATS] %lld selections across %lld distinct experts -> %s\n",
                        (long long)tot, (long long)nz, path);

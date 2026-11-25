@@ -25,6 +25,12 @@
 #include "tok_unicode.h"
 #include "tok_unicode_o200k.h"
 #include "tok_unicode_deepseek.h"
+/* A tokenizer.json normalizer of type NFC is applied only in an engine that
+ * defines TOK_NFC before including this file (olmoe.c, mimo.c): the tables are
+ * ~330 KB, and the other tok.h engines' tokenizers declare no NFC. */
+#ifdef TOK_NFC
+#include "qwen38_nfc.h"     /* q38_nfc_normalize */
+#endif
 
 /* ---------- hash map (chiavi binarie con lunghezza) ---------- */
 typedef struct { const char *k; int klen; int v; int used; } ment;
@@ -58,6 +64,8 @@ typedef struct {
     uint32_t byte2cp[256]; int byte2cp_len[256]; char byte2str[256][3];
     int16_t cp2byte[1024];
     int o200k;           /* pre_tokenizer regex family: 0 = cl100k (GLM), 1 = o200k (Inkling) */
+    int tekken;          /* 1 = Mistral's Tekken (tekken-num3, with o200k): no contractions on the
+                          * letter runs, numbers in groups of three counted from their end */
     int kimi;            /* 1 = Kimi (K3) family: o200k rules + a leading \p{Han}-run rule,
                           * Han excluded from the letter classes, no '/' tail in the punct rule */
     int gpt2;            /* 1 = GPT-2 family (OLMoE / GPT-NeoX): a bare ByteLevel pre_tokenizer
@@ -70,6 +78,9 @@ typedef struct {
     int rankbpe;         /* 1 = no merges list (tiktoken-derived vocab): merge the adjacent
                           * pair whose CONCATENATION has the lowest vocab id — exactly
                           * tiktoken's byte_pair_encode, no recovered merges to diverge */
+    int nfc;             /* 1 = tokenizer.json's normalizer is {"type":"NFC"} (OLMoE, MiMo):
+                          * with TOK_NFC, the text between added tokens is composed before
+                          * pre-tokenizing */
 } Tok;
 
 /* ---------- UTF-8 ---------- */
@@ -249,6 +260,7 @@ static void tok_load(Tok *T, const char *path){
             jval *pat=json_get(ps->kids[i],"pattern");
             jval *rx=pat?json_get(pat,"Regex"):NULL;
             if(rx&&rx->t==J_STR&&strstr(rx->str,"\\p{Lu}")) T->o200k=1;
+            if(rx&&rx->t==J_STR&&strstr(rx->str,"\\p{N}{1,3}(?=(?:\\p{N}{3})*(?!\\p{N}))")) T->tekken=1;
             if(rx&&rx->t==J_STR&&strstr(rx->str,"\\p{Han}")) T->kimi=1;
             if(rx&&rx->t==J_STR&&strstr(rx->str,"|\\p{N}|")) T->ndig1=1;
             /* DeepSeek's third Split: ASCII punctuation takes the ASCII letters after
@@ -256,6 +268,14 @@ static void tok_load(Tok *T, const char *path){
             if(rx&&rx->t==J_STR&&strstr(rx->str,"][A-Za-z]+|")&&strstr(rx->str,"[\\p{L}\\p{M}]+"))
                 T->deepseek=1;
         }
+    }
+    /* normalizer: HF applies it to the text between added tokens before the
+     * pre_tokenizer sees it. NFC alone is what OLMoE and MiMo declare (as laya.c
+     * reads it); any other normalizer is left as before. Applied under TOK_NFC. */
+    jval *nz=json_get(root,"normalizer");
+    if(nz && nz->t==J_OBJ){
+        jval *nty=json_get(nz,"type");
+        if(nty && nty->t==J_STR && nty->str && !strcmp(nty->str,"NFC")) T->nfc=1;
     }
     T->json_root=root;
 }
@@ -378,8 +398,10 @@ static int o2_contraction(const uint32_t *cp, int n, int k){
     }
     return k;
 }
-/* end (cp index) of branch A|B match at i, or -1 */
-static int o2_letters(const uint32_t *cp, int n, int i){
+/* end (cp index) of branch A|B match at i, or -1; contr 0: Tekken's, no contraction suffix */
+static int o2_letters_c(const uint32_t *cp, int n, int i, int contr);
+static int o2_letters(const uint32_t *cp, int n, int i){ return o2_letters_c(cp,n,i,1); }
+static int o2_letters_c(const uint32_t *cp, int n, int i, int contr){
     /* branch A, prefix greedy (taken first), then without prefix */
     for(int pfx=1; pfx>=0; pfx--){
         int j0=i;
@@ -392,7 +414,7 @@ static int o2_letters(const uint32_t *cp, int n, int i){
         for(int s=m1; s>=j0; s--){
             if(s<n && O2_S2(cp[s])){
                 int k=s+1; while(k<n && O2_S2(cp[k])) k++;
-                return o2_contraction(cp,n,k);
+                return contr ? o2_contraction(cp,n,k) : k;
             }
         }
     }
@@ -407,7 +429,7 @@ static int o2_letters(const uint32_t *cp, int n, int i){
         int m1=j0; while(m1<n && O2_S1(cp[m1])) m1++;
         if(m1>j0){
             int k=m1; while(k<n && O2_S2(cp[k])) k++;
-            return o2_contraction(cp,n,k);
+            return contr ? o2_contraction(cp,n,k) : k;
         }
     }
     return -1;
@@ -424,10 +446,13 @@ static void pretok_chunk_o200k(Tok *T, const unsigned char *p, int a, int b, int
         int start=i; uint32_t c=cp[i];
         /* A|B: letter runs with case-aware split + optional contraction */
         {
-            int e=o2_letters(cp,n,i);
+            int e=o2_letters_c(cp,n,i,!T->tekken);
             if(e>i){ i=e; bpe_piece(T,p,off[start],off[i],out,no,max); continue; }
         }
-        /* C: \p{N}{1,3} */
+        /* C: \p{N}{1,3}; Tekken's \p{N}{1,3}(?=(?:\p{N}{3})*(?!\p{N})): the run's first group takes
+         * what a multiple of three leaves, the rest go by three */
+        if(is_N(c) && T->tekken){ int r=0; while(i+r<n && is_N(cp[i+r])) r++;
+            int k=r%3 ? r%3 : 3; i+=k; bpe_piece(T,p,off[start],off[i],out,no,max); continue; }
         if(is_N(c)){ int j=i,k=0; while(j<n && is_N(cp[j]) && k<3){ j++; k++; } i=j; bpe_piece(T,p,off[start],off[i],out,no,max); continue; }
         /* D: ' ?[^\s\p{L}\p{N}]+[\r\n/]*' */
         {
@@ -732,11 +757,24 @@ static int tok_encode(Tok *T, const char *text, int len, int *out, int max){
         }
         int chunk_end = (hitpos<0) ? len : hitpos;
         if(chunk_end>i){
-            if(T->gpt2)       pretok_chunk_gpt2(T,p,i,chunk_end,out,&no,max);
-            else if(T->deepseek) pretok_chunk_deepseek(T,p,i,chunk_end,out,&no,max);
-            else if(T->kimi)  pretok_chunk_kimi(T,p,i,chunk_end,out,&no,max);
-            else if(T->o200k) pretok_chunk_o200k(T,p,i,chunk_end,out,&no,max);
-            else              pretok_chunk(T,p,i,chunk_end,out,&no,max);
+            /* added tokens are matched on the raw bytes above (normalized:false);
+             * only the ordinary span between them is normalized, as HF does */
+            const unsigned char *s=p; int a=i, b=chunk_end; char *norm=NULL;
+#ifdef TOK_NFC
+            if(T->nfc){
+                size_t nl=0;
+                if(q38_nfc_normalize(text+i,(size_t)(chunk_end-i),&norm,&nl) || nl>(size_t)INT_MAX){
+                    free(norm); fprintf(stderr,"tok_encode: NFC normalization failed\n"); exit(1);
+                }
+                s=(const unsigned char*)norm; a=0; b=(int)nl;
+            }
+#endif
+            if(T->gpt2)       pretok_chunk_gpt2(T,s,a,b,out,&no,max);
+            else if(T->deepseek) pretok_chunk_deepseek(T,s,a,b,out,&no,max);
+            else if(T->kimi)  pretok_chunk_kimi(T,s,a,b,out,&no,max);
+            else if(T->o200k) pretok_chunk_o200k(T,s,a,b,out,&no,max);
+            else              pretok_chunk(T,s,a,b,out,&no,max);
+            free(norm);
         }
         if(hitpos<0) break;
         if(no<max) out[no++]=hitid;

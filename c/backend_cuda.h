@@ -172,6 +172,29 @@ COLI_CUDA_DLLEXPORT int  coli_cuda_dn_step(ColiCudaDn *d, ColiCudaTensor *proj, 
  * async expert groups. Optional in the DLL loader: 0 from a backend that
  * predates it (or on any failure), and the caller frees and uploads as before. */
 COLI_CUDA_DLLEXPORT int coli_cuda_tensor_overwrite(ColiCudaTensor *tensor, const void *weights, const float *scales);
+/* Host memory the device copies from at the bus's full rate (the qwen36 tier's RAM cache,
+ * staged for a prompt chunk's experts): coli_cuda_host_register page-locks bytes at p
+ * (portable to every context), 0 on failure (the memory stays as it was);
+ * coli_cuda_host_unregister undoes it. coli_cuda_planar_rows: whether a prompt chunk's
+ * expert GEMMs on this device read int4 per 64 in expert_ffn.h's planar blocks
+ * (CcExpert.planar; the f16 GEMMs at D and I). Optional in the DLL loader: 0 from a backend
+ * that predates them, and the tier keeps the host's step. */
+COLI_CUDA_DLLEXPORT int coli_cuda_host_register(void *p, size_t bytes);
+COLI_CUDA_DLLEXPORT void coli_cuda_host_unregister(void *p);
+COLI_CUDA_DLLEXPORT int coli_cuda_planar_rows(int device, int D, int I);
+/* A GGUF's block formats (cuda_bd.cuh): fmt 100 + ggml type t, each row as the file stores
+ * it (no scale array: the scales are in the blocks), uploaded with coli_cuda_tensor_upload
+ * and computed by coli_cuda_matmul, coli_cuda_pipe_gemm and the dense chain's matmul (a
+ * speculative verify's rows sharing every weight load). The elements of a block of fmt, 0
+ * when the backend does not take it (a row's width must be a multiple of it and of 32).
+ * Optional in the DLL loader: 0 from a backend that predates it. */
+COLI_CUDA_DLLEXPORT int coli_cuda_block_elems(int fmt);
+/* A block-format tensor (fmt >= 100) in device memory the caller owns (dev, cap bytes: an
+ * arena's slot, at least O rows of the file's row padded to words), its rows uploaded from
+ * weights; coli_cuda_tensor_free leaves the memory. No cudaMalloc, so none of its rounding
+ * (a 576 KiB matrix took 1 MiB) and none of its synchronisation. Optional in the DLL loader. */
+COLI_CUDA_DLLEXPORT int coli_cuda_tensor_upload_at(ColiCudaTensor **tensor, void *dev, size_t cap, const void *weights,
+                                                   int fmt, int I, int O, int device);
 #ifdef COLI_ANS
 /* Experimental Linux-only GPU-resident entropy tier. The archive remains in
  * VRAM and is decoded into per-device scratch immediately before a grouped
@@ -212,6 +235,13 @@ COLI_CUDA_DLLEXPORT int coli_cuda_matmul(ColiCudaTensor **tensor,
                      const void *weights, const float *scales,
                      int fmt, int S, int I, int O, int device, int gs);
 
+/* A vision tower's attention (the Qwen family's, qwen38_vision.h): every row of qkv [n][3][heads][D]
+ * (q, k and v side by side, rotated already) attends to all n, softmax(q.k * scale) over v, into
+ * out [n][heads][D], float32. D 64, 72, 80, 96 or 128. 1 on success; 0 (out untouched) leaves it
+ * to the CPU. Optional in the DLL loader. */
+COLI_CUDA_DLLEXPORT int coli_cuda_vision_attention(int device, float *out, const float *qkv,
+                                                   int n, int heads, int D, float scale);
+
 /* Fused expert pipeline: y = down(silu(gate(x)) * up(x)).  All three tensors
  * must already be resident on one device.  Activations cross PCIe once in
  * each direction instead of once per matrix. */
@@ -230,8 +260,9 @@ COLI_CUDA_DLLEXPORT int coli_cuda_shared_mlp_w4a16(ColiCudaTensor *gate, ColiCud
  * consecutive [D] rows in call order. */
 /* Async issue/take split of the group call below (Inc.4): issue launches on the
  * device stream and returns; take syncs and returns the pinned result rows (valid
- * until the next issue on that device). Small totals only (<=8 rows); one
- * outstanding issue per device. */
+ * until the next issue on that device). Decode-scale totals only (<=32 rows, the
+ * same numeric family as coli_cuda_expert_group_pinned); one outstanding issue
+ * per device. */
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
                                ColiCudaTensor *const *ups,
                                ColiCudaTensor *const *downs,

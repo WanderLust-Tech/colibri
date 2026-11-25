@@ -1481,7 +1481,7 @@ FAMILIES = (
         # rule links NOCUDA_LDFLAGS. Since #1830 a VK=1 build can put its resident
         # matrices on a Vulkan device (COLI_VULKAN=1), opt-in and outside the
         # planner. Left at the default this advertised a VRAM tier.
-        supports_accelerator=False,
+        supports_accelerator=True,
         expert_inventory=_individual_expert_inventory(_GLM_EXPERT),
         # coli convert routes to convert_olmoe_merged.py (d4d11ef dispatch);
         # the converter takes no precision flags (--ebits / --group-size etc.).
@@ -2066,7 +2066,7 @@ FAMILIES = (
         # one-shot `coli run` has nothing to run: a decision needs questions,
         # which come over POST /v1/systemone from `coli serve` / `coli web`
         has_cli_adapter=False,
-        supports_accelerator=False,
+        supports_accelerator=True,
         modality="decision",
         tokenizer_file="tokenizer/tokenizer.json",
         checkpoint_files=("tokenizer/tokenizer_config.json", "encoder/config.json"),
@@ -2111,7 +2111,7 @@ FAMILIES = (
         capabilities=FamilyCapabilities(False, False, False, False, decision=True),
         has_gateway_adapter=True,
         has_cli_adapter=False,
-        supports_accelerator=False,
+        supports_accelerator=True,
         modality="decision",
         tokenizer_file="tokenizer.json",
         checkpoint_files=("config.json", "encoder_config/config.json"),

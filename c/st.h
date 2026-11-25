@@ -358,6 +358,23 @@ static int st_direct_fd_rep(shards *S, int fd, int rep) {
     int i = st_fidx(S, fd); return i < 0 ? -1 : S->mdfds[rep-1][i];
 }
 
+/* A file read without the kernel's readahead, on every drive that holds it (the primary and its
+ * mirrors registered so far). A GGUF keeps a layer's experts in three tensors, so an expert is
+ * three slices read apart through the page cache, and the readahead read past each one: on a
+ * two-NVMe md array with its 2 MiB readahead, Kimi K3 UD-IQ1_S read 17.3 GB a decoded token for
+ * 6.7 GB of experts (0.27 tok/s; 0.34 without it), GLM-5.2 UD-IQ1_S 6.2-6.6 GB for 3.6. A whole
+ * tensor's pread still reads its whole range, so loading the dense matrices does not change. */
+static void st_no_readahead(shards *S, int fd) {
+#if defined(POSIX_FADV_RANDOM) && !defined(_WIN32)
+    for (int r = 0; r <= S->nrep; r++) {
+        int f = st_fd_rep(S, fd, r);
+        if (f >= 0) posix_fadvise(f, 0, 0, POSIX_FADV_RANDOM);
+    }
+#else
+    (void)S; (void)fd;
+#endif
+}
+
 /* Registers <dir>/<basename> as read replica S->nrep+1 of every already-indexed
  * shard. A file is accepted ONLY if its size and safetensors header are
  * byte-identical to the primary: the data_offsets then match by construction,
@@ -373,6 +390,37 @@ static void st_mirror_reset(shards *S) {           /* re-init: drop every replic
     }
     memset(S->nmirror, 0, sizeof(S->nmirror));
     S->nrep = 0;
+}
+/* A GGUF part has no length-prefixed header to compare: its first eight bytes are the magic and the
+ * version. Its copy is the same file when it has the primary's size, the same bytes up to where the
+ * first tensor starts (the key/value table and the tensor table, which fix every offset), and the
+ * same 64 KiB at the tensor data's start, its end and 14 places between: a truncated or different
+ * copy fails at one of them. The data is not read through: `coli mirror verify` is the full check. */
+static int st_pread_exact(int fd, void *buf, int64_t n, int64_t off) {
+    while (n > 0) { ssize_t r = pread(fd, buf, (size_t)n, (off_t)off); if (r <= 0) return -1; buf = (char *)buf + r; n -= r; off += r; }
+    return 0;
+}
+static int st_mirror_gguf_same(const shards *S, int i, int mfd, int64_t size) {
+    const int pfd = S->fds[i];
+    char m[4];
+    if (pread(mfd, m, 4, 0) != 4 || memcmp(m, "GGUF", 4)) return 0;
+    int64_t head = size;
+    for (int j = 0; j < S->n; j++) if (S->t[j].fd == pfd && S->t[j].off < head) head = S->t[j].off;
+    if (head > ((int64_t)256 << 20)) return 0;        /* the tables of any real part are a few MiB */
+    const int64_t chunk = (int64_t)1 << 20, probe = 64 << 10;
+    char *a = malloc((size_t)chunk), *b = malloc((size_t)chunk);
+    int ok = a && b;
+    for (int64_t at = 0; ok && at < head; at += chunk) {
+        int64_t n = head - at < chunk ? head - at : chunk;
+        ok = !st_pread_exact(pfd, a, n, at) && !st_pread_exact(mfd, b, n, at) && !memcmp(a, b, (size_t)n);
+    }
+    const int64_t data = size - head, n = data < probe ? data : probe;
+    for (int k = 0; ok && k < 16 && n > 0; k++) {
+        int64_t at = head + (data - n) * k / 15;
+        ok = !st_pread_exact(pfd, a, n, at) && !st_pread_exact(mfd, b, n, at) && !memcmp(a, b, (size_t)n);
+    }
+    free(a); free(b);
+    return ok;
 }
 static int st_mirror_add(shards *S, const char *dir) {
     if (S->nrep >= ST_MAX_MIR) return 0;
@@ -395,6 +443,10 @@ static int st_mirror_add(shards *S, const char *dir) {
             close(mfd); continue;
         }
         uint64_t ha = 0, hb = 0; int ok = 1;   /* identical header => identical data_offsets */
+        char magic[4];
+        if (pread(S->fds[i], magic, 4, 0) == 4 && !memcmp(magic, "GGUF", 4)) {
+            ok = st_mirror_gguf_same(S, i, mfd, sza);
+        } else {
         if (pread(S->fds[i], &ha, 8, 0) != 8 || pread(mfd, &hb, 8, 0) != 8 ||
             ha != hb || ha == 0 || ha > (uint64_t)256 << 20 || (int64_t)(8 + ha) > sza) ok = 0;
         if (ok) {
@@ -403,8 +455,10 @@ static int st_mirror_add(shards *S, const char *dir) {
                 pread(mfd, bb, ha, 8) != (ssize_t)ha || memcmp(ba, bb, ha)) ok = 0;
             free(ba); free(bb);
         }
+        }
         if (!ok) {
-            fprintf(stderr, "[MIRROR] %s: header differs from the primary copy — file skipped\n", mp);
+            fprintf(stderr, "[MIRROR] %s: %s differs from the primary copy — file skipped\n", mp,
+                    pread(S->fds[i], magic, 4, 0) == 4 && !memcmp(magic, "GGUF", 4) ? "head or sampled contents" : "header");
             close(mfd); continue;
         }
         S->mfds[r][i] = mfd;
@@ -706,8 +760,14 @@ static void st_scan_dir(const char *dir, char files[][1024], int *nf, int *added
  * drive holds that shard, so concurrent expert loads parallelise across drives
  * and combined capacity is used. Scales to N drives. Metadata (config /
  * tokenizer / .coli_usage / .coli_kv) is read from snap_dir only. */
+#ifdef ST_GGUF
+static int st_init_gguf(shards *S, const char *snap_dir);   /* st_gguf.h: a gguf_import folder */
+#endif
 static void st_init_multi(shards *S, const char *snap_dir, const char *extra_dirs) {
     memset(S, 0, sizeof(*S));
+#ifdef ST_GGUF
+    if (st_init_gguf(S, snap_dir)) return;
+#endif
     S->cap = 4096; S->t = calloc(S->cap, sizeof(st_tensor));
     /* Duplicate-tensor-name detector, indexed-shard scope.
      * st_find()/S->hidx (below) aren't built until every shard has been read, so a
@@ -1531,5 +1591,9 @@ static void st_read_slice_f32(shards *S, const char *name, int64_t elem_off, int
     free(raw);
     if (drop && nb) posix_fadvise(t->fd, boff, nb, POSIX_FADV_DONTNEED);
 }
+
+#ifdef ST_GGUF
+#include "st_gguf.h"
+#endif
 
 #endif

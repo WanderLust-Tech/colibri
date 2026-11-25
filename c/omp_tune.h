@@ -45,12 +45,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compat.h"
+
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/types.h>
 #include <sys/sysctl.h>
 #else
 #include <dirent.h>
+#endif
+#if defined(__linux__) || defined(__FreeBSD__)
+#include <sched.h>
+#include <unistd.h>
+#endif
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #endif
 
 /* Numero di core FISICI, o 0 se non determinabile. Mai un valore inventato. */
@@ -110,15 +121,36 @@ static int coli_physical_cores(void)
     return cores;
 
 #elif defined(__APPLE__)
-    /* hw.perflevel0.logicalcpu = i core PERFORMANCE. Su Apple Silicon
-     * hw.physicalcpu li conta tutti, E-core compresi (10 su un M1 Max), e con
-     * una barriera per matmul e' il thread piu' lento a dettare il passo: gli
-     * E-core rallentano la squadra invece di aiutarla (#707, -4.2% decode).
-     * Su Intel Mac perflevel* non esiste: li' hw.physicalcpu e' corretto. */
-    int v = 0; size_t sz = sizeof(v);
+    /* Apple Silicon: every core but the efficiency tier's. hw.physicalcpu counts
+     * the E-cores too (10 on an M1 Max), and with a barrier per matmul the slowest
+     * thread sets the pace: the E-cores slowed the team (#707, -4.2% decode). The
+     * tiers are hw.perflevel0 .. hw.perflevel(N-1), fastest first, the last the
+     * efficiency cores: an M1-M4 has two (perflevel0, its P-cores), an M6 three
+     * (2 Super, 4 Performance, 6 Efficiency: 6, not perflevel0's 2, #2194); one
+     * tier is every core. An Intel Mac has no perflevel*: hw.physicalcpu. */
+    int n = 0; size_t sz = sizeof(n);
+    if (sysctlbyname("hw.nperflevels", &n, &sz, NULL, 0) == 0 && n >= 1) {
+        int tot = 0, last = n > 1 ? n - 1 : 1;
+        for (int i = 0; i < last && i < 16; i++) {
+            char nm[48]; snprintf(nm, sizeof nm, "hw.perflevel%d.logicalcpu", i);
+            int c = 0; sz = sizeof(c);
+            if (sysctlbyname(nm, &c, &sz, NULL, 0) == 0 && c > 0) tot += c;
+        }
+        if (tot > 0) return tot;
+    }
+    int v = 0; sz = sizeof(v);
     if (sysctlbyname("hw.perflevel0.logicalcpu", &v, &sz, NULL, 0) == 0 && v > 0) return v;
     v = 0; sz = sizeof(v);
     if (sysctlbyname("hw.physicalcpu", &v, &sz, NULL, 0) == 0 && v > 0) return v;
+    return 0;
+
+#elif defined(__FreeBSD__)
+    /* kern.smp.cores counts a core once, whatever kern.smp.threads_per_core is.
+     * There is no /sys to read here, and without this the team stayed at the
+     * logical count: both SMT siblings of every core (#718). */
+    int v = 0;
+    size_t sz = sizeof(v);
+    if (sysctlbyname("kern.smp.cores", &v, &sz, NULL, 0) == 0 && v > 0) return v;
     return 0;
 
 #else
@@ -210,7 +242,7 @@ static int coli_performance_cores(void)
 /* Dimensiona la squadra OpenMP sui core fisici. Rispetta OMP_NUM_THREADS se
  * l'utente l'ha impostata, e non fa nulla se il conteggio non e' affidabile.
  * `engine` finisce solo nella riga di log. */
-static void coli_omp_tune_threads(const char *engine)
+static inline void coli_omp_tune_threads(const char *engine)
 {
 #ifdef _OPENMP
     const char *off = getenv("COLI_NO_OMP_TUNE");
@@ -222,10 +254,26 @@ static void coli_omp_tune_threads(const char *engine)
     int perf = coli_performance_cores();   /* a hybrid CPU: its P-cores pace the team */
     int team = perf > 0 && perf < phys ? perf : phys;
     int logical = omp_get_max_threads();
-    if (team >= logical) return;           /* niente SMT da evitare: silenzio */
+
+    double cg_quota = 0.0;
+    int cg_threads = compat_cgroup_cpu_limit(&cg_quota);
+    int bounded_by_cgroup = 0;
+    if (cg_threads > 0 && cg_threads < team) {
+        team = cg_threads;
+        bounded_by_cgroup = 1;
+    }
+
+    /* never above OpenMP's own default: that is the affinity mask, a container's cpuset
+     * (a quota of 7 CPUs on a cpuset of 4 stays at the 4) */
+    if (team >= logical) return;           /* niente da evitare: silenzio */
 
     omp_set_num_threads(team);
-    if (team < phys)
+    if (bounded_by_cgroup)
+        fprintf(stderr, "[OMP] %s: %d threads bounded by container CPU quota "
+                        "(cgroup: %.2f cores, %d physical cores on host); "
+                        "set OMP_NUM_THREADS=<n> to override\n",
+                engine, team, cg_quota, phys);
+    else if (team < phys)
         fprintf(stderr, "[OMP] %s: %d performance-core threads instead of %d logical CPUs "
                         "(%d physical cores, the efficiency cores left out: the slowest thread "
                         "sets the pace of every matmul); set OMP_NUM_THREADS=<n> to override\n",
@@ -237,6 +285,99 @@ static void coli_omp_tune_threads(const char *engine)
                 engine, phys, logical);
 #else
     (void)engine;
+#endif
+}
+
+/* The CPUs a team sized from the machine may keep busy: OpenMP's processor count (the
+ * affinity mask), no more than a container's CPU quota lets run at once
+ * (compat_cgroup_cpu_limit, #2914). For the teams a probe or a serving thread pool
+ * sizes from the CPU count instead of taking coli_omp_tune_threads's team: under a
+ * quota of 7.65 CPUs on a 96-CPU host, omp_get_num_procs() says 96. */
+static inline int coli_cpu_budget(void)
+{
+#ifdef _OPENMP
+    const int n = omp_get_num_procs();
+    const int q = compat_cgroup_cpu_limit(NULL);
+    return q > 0 && q < n ? q : n;
+#else
+    return 1;
+#endif
+}
+
+/* 1 when an engine switch such as COLI_CUDA is on (set, and not 0/false/off/no) */
+static inline int coli_omp_env_on(const char *name)
+{
+    const char *v = getenv(name);
+    if (!v || !*v) return 0;
+    return !(strcmp(v, "0") == 0 || strcmp(v, "false") == 0 || strcmp(v, "off") == 0 || strcmp(v, "no") == 0);
+}
+
+/* The hot team colibri.c gives itself, for the engines that only had the sizing above:
+ * OMP_WAIT_POLICY=active with GOMP_SPINCOUNT=200000 (spin a moment between the many small
+ * matmul regions of a token, then sleep, so a wait on the disk does not burn a core),
+ * KMP_BLOCKTIME=200 for LLVM's libomp (#341: an idle team spinning forever), the team on
+ * whole cores (OMP_PROC_BIND=close, OMP_PLACES=cores) and of fixed size. libgomp reads them
+ * in its constructor, before main(): they are set, then the engine runs itself again, once
+ * (Linux, FreeBSD). Not on macOS (#707: slower with Apple's libomp), not with CUDA or Metal
+ * on (gpu_on; colibri.c leaves those out too), not under COLI_NO_OMP_TUNE; a variable the
+ * user set wins. On Linux the engine keeps its own name (the path /proc/self/exe points to,
+ * not "exe": a `pgrep -x olmoe` still finds it). Measured on an i5-13500 (6 P + 8 E cores),
+ * served, Q4_K_M on the CPU: OLMoE decode 43.3 and 42.7 -> 47.9 and 47.6 tok/s, LFM3 33.7
+ * and 33.8 -> 34.5 and 34.5, Qwen3.6 13.5 -> 13.9, Qwen3.8 IQ2_XS from the disk 7.9-8.1 -> 9.0-9.1
+ * (its prompt 4% slower) (docs/tuning.md). */
+#if defined(__FreeBSD__)
+/* The running executable's path on FreeBSD, for the hot-team re-exec (here and in
+ * colibri.c). The re-exec used /proc/curproc/file, which exists only when procfs is
+ * mounted, and a default FreeBSD install does not mount it: execv failed, the engine
+ * printed "re-exec failed, running untuned" and ran without the hot team. The kernel
+ * gives the same path through the kern.proc.pathname sysctl (what `procstat -b`
+ * reads), procfs or not. 1 with a NUL-terminated path in buf, else 0. */
+static inline int coli_self_exe_path(char *buf, size_t n)
+{
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t len = n;
+    if (n < 2 || sysctl(mib, 4, buf, &len, NULL, 0) != 0 || len < 2) return 0;
+    buf[n - 1] = 0;
+    return 1;
+}
+#endif
+
+static inline void coli_omp_hot_team(char **argv, const char *engine, int gpu_on)
+{
+#if defined(_OPENMP) && !defined(__APPLE__) && (defined(__linux__) || defined(__FreeBSD__))
+    if (getenv("COLI_OMP_TUNED") || getenv("COLI_NO_OMP_TUNE") || gpu_on || !argv || !argv[0]) return;
+    setenv("OMP_WAIT_POLICY", "active", 0);
+    setenv("GOMP_SPINCOUNT", "200000", 0);
+    setenv("KMP_BLOCKTIME", "200", 0);
+    setenv("OMP_PROC_BIND", "close", 0);
+    setenv("OMP_PLACES", "cores", 0);
+    setenv("OMP_DYNAMIC", "FALSE", 0);
+    setenv("COLI_OMP_TUNED", "1", 1);
+    fprintf(stderr, "[OMP] %s: hot-thread tuning, re-exec once (COLI_NO_OMP_TUNE=1 to skip)\n", engine);
+#ifdef __linux__
+#ifdef CPU_SETSIZE
+    {   /* #471: a user's OMP_PROC_BIND already bound this thread to one place; the new image
+         * would inherit that mask and put its whole team there */
+        cpu_set_t all; CPU_ZERO(&all);
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n > CPU_SETSIZE) n = CPU_SETSIZE;
+        for (long i = 0; i < n; i++) CPU_SET((int)i, &all);
+        if (sched_setaffinity(0, sizeof all, &all) != 0) perror("[OMP] sched_setaffinity before the re-exec (continuing)");
+    }
+#endif
+    char self[4096];
+    ssize_t k = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (k > 0) { self[k] = 0; execv(self, argv); }
+    execv("/proc/self/exe", argv);
+#else
+    {   char self[4096];   /* FreeBSD: the path from the kernel, no procfs needed */
+        if (coli_self_exe_path(self, sizeof self)) execv(self, argv);
+    }
+    execv("/proc/curproc/file", argv);   /* the old path, for a system that mounts procfs */
+#endif
+    perror("[OMP] re-exec failed, running untuned");
+#else
+    (void)argv; (void)engine; (void)gpu_on;
 #endif
 }
 

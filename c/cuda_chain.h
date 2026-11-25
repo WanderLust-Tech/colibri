@@ -1,0 +1,826 @@
+/* cuda_chain.h -- a layer's dense chain on a CUDA device, issued on one stream.
+ *
+ * The CUDA twin of vk_chain.h. With the dense trunk in VRAM one coli_cuda_matmul at a
+ * time, every matrix is a host round trip (the input up, the kernel, the output down,
+ * a synchronization): on Qwen3.6-35B about seventy per decode token, the attention
+ * core, the norms, the router and the shared expert still on the CPU between them.
+ * Here an engine issues a whole layer -- norms, projections, RoPE, attention over a
+ * KV cache that lives on the device, the Gated DeltaNet recurrence with its state on
+ * the device, gates, the router logits, the shared expert, the residual add -- on one
+ * stream, and the residual stream stays on the device from one layer to the next.
+ * Only what the CPU needs crosses: the rows the CPU's routed experts read and the
+ * router logits, then the routed sum coming back.
+ *
+ * The pieces, shaped as vk_chain.h's so an engine wires both chains the same way:
+ *   - buffers (CcBuf): CC_DEV the device's own (state, scratch); CC_UP written by the
+ *     host and read by the device; CC_DOWN written by the device and read by the host.
+ *     UP and DOWN are page-locked host memory mapped into the device's address space:
+ *     the host writes or reads them in place (cc_ptr), the device reads or writes them
+ *     over the bus, as the Vulkan chain's host-visible buffers.
+ *   - recording: cc_begin opens a frame; every op goes to the device's stream in order
+ *     (a stream is the barrier Vulkan records by hand); cc_submit(wait) ends it with an
+ *     event, waited for or not. Frames run in order on the one stream.
+ *   - ops: cc_matmul over the resident tensors the engines already upload
+ *     (coli_cuda_tensor_upload: the backend's GEMV / GEMM kernel on the chain's
+ *     stream), and the chain's kernels, each the arithmetic of the shader of the same
+ *     name in shaders/chain_*.comp: cc_norm, cc_rope, cc_attn, cc_dnconv, cc_dnrec,
+ *     cc_ew. Offsets and strides are in floats; the parameter structs are field for
+ *     field the Vkc ones.
+ *
+ * The backend exports the ops as one table (coli_cuda_chain_ops): one symbol for the
+ * Windows loader, versioned by its size, so a DLL that predates the chain simply has
+ * none and the engine stays on the per-matrix path. The cc_* calls below go through
+ * the table.
+ *
+ * Threading: the engine thread only. The expert tier's groups run on the backend's own
+ * stream of the device and overlap the chain's frames. A CUDA error inside a frame
+ * marks the device lost (cc_lost() says so, every later call returns 0): the engine
+ * then rebuilds its state on the CPU, as with the Vulkan chain.
+ *
+ * tests/test_cuda_chain.cu checks every op against a CPU reference on a real device;
+ * tests/qwen36_fake_cuda.h carries a host-side table of the same ops for the engine
+ * tests. */
+#ifndef COLI_CUDA_CHAIN_H
+#define COLI_CUDA_CHAIN_H
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "backend_cuda.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct CcBuf CcBuf;
+#define CC_DEV  0
+#define CC_UP   1
+#define CC_DOWN 2
+
+/* chain_norm.comp */
+typedef struct { int nseg, D, per_row, x_off, x_row, x_seg, y_off, y_row, y_seg, w_off, w_mod, flags; float eps, post; } CcNorm;
+/* addnorm: per row of D, x += (flags & 1 ? norm(t) with the weights at wp_off : t), then y = norm(x) with
+ * the weights at w_off; RMSNorms with (1 + w) weights (CC_NORM_ADD1), cc_norm's arithmetic, so the same
+ * bits as the norm, the add and the norm apart (cc_addnorm_ready) */
+typedef struct { int rows, D, x_off, t_off, y_off, wp_off, w_off, flags; float eps; } CcAddNorm;
+#define CC_NORM_ADD1 1
+#define CC_NORM_NOW  2
+#define CC_NORM_L2   4
+#define CC_NORM_PRESCALE 8   /* scale by w, then normalise (Muse Spark; cc_muse_ready) */
+/* chain_rope.comp */
+typedef struct { int nseg, per_row, x_off, x_row, x_seg, half_, cs_off, cs_row; } CcRope;
+/* chain_attn.comp (k_off/v_off: where the layer's cache starts in kc/vc; the cache
+ * head-major, K[(kvh*cap + t)*hd + d]; sel_row > 0: a selection list per row) */
+typedef struct { int S, H, KVH, hd, pos_base, cap, q_off, q_row, q_seg, g_off, g_row, g_seg, has_gate,
+                 o_off, o_row, sel_off, sel_row; float scale; int k_off, v_off; } CcAttn;
+/* The same with Flint's two (vk_chain.h VkcAttnW's win and sink): a sliding window of win
+ * positions (row s sees max(0, pos - win + 1)..pos; 0 = all), and with sink a logit per head
+ * at snk[sink_off + h] that joins the softmax's denominator only. No selection list. */
+typedef struct { CcAttn a; int win, sink, sink_off; } CcAttnW;
+/* chain_dnconv.comp */
+/* order 0, 1: Gated DeltaNet's (the sum's two orders); 2: LFM3's gated convolution, input rows B | C | x
+ * of CD channels, out = C * conv(B * x), no activation (cc_lfm3_ready) */
+/* snap_n > 0 (a verify's rows in one dispatch): the ring after each row s < snap_n into the buffer at the device
+ * address snap holds at float snap_off + 2 s (a table of snap_n addresses, cc_dev_addr's; snap_row -1) */
+typedef struct { int S, CD, CK, in_off, in_row, out_off, out_row, snap_row, order, w_off, ring_off, snap_off; int snap_n; } CcDnConv;
+/* chain_dnrec.comp (KD a template parameter: 4, 8, 16, 32, 64, 128 or 256; VD <= 128). flags: 1 the gated
+ * norm's gate a sigmoid (Qwen3.8), 2 the parameter A itself (a GGUF's, -exp(A_log)), 4 the value
+ * heads tiled (a GGUF's: value head h reads key head h % KH) */
+/* snap_n > 0: the state after each row s < snap_n into the buffer at the device address snap holds at float
+ * snap_off + 2 s (CcDnConv's table; snap_row -1): a verify's copies in one dispatch, the state read and written
+ * once instead of once a row */
+typedef struct { int S, VH, KH, VD, Ktot, cv_off, cv_row, b_off, b_row, a_off, a_row, z_off, z_row,
+                 y_off, y_row, snap_row, flags; float eps, qscale; int st_off, snap_off, prm_off; int snap_n; } CcDnRec;
+/* chain_ew.comp */
+#define CC_EW_ADD      0
+#define CC_EW_COMBINE  1
+#define CC_EW_SWIGLU   2
+#define CC_EW_HC_LOW   3
+#define CC_EW_HC_MIX   4
+#define CC_EW_HC_INJ   5
+#define CC_EW_HC_APPLY 6
+#define CC_EW_SCALE    7
+#define CC_EW_GATE_ADD 8
+#define CC_EW_SIGMUL   9    /* y = a * sigmoid(b) (cc_muse_ready) */
+#define CC_EW_RESGATE  10   /* y = e[col] * a + c[col] * b (cc_muse_ready) */
+#define CC_EW_F16      11   /* y = a clamped to +-65504, rounded to the nearest float16, as kv16.h (cc_kv16_ready) */
+#define CC_EW_HEADGATE 12   /* y = a * sigmoid(b[b_off + i / D]): a gate per head of D values, LFM3's (cc_lfm3_ready) */
+#define CC_EW_LOOPGATE 13   /* y = (1 - tanh(a)) * c + tanh(b) * e: Inkling-2-Mini's loop gate (cc_ink2_caps' CC_INK2_LOOPGATE) */
+typedef struct { int op, n, D, C, flags, e_row, y_off, a_off, b_off, c_off, e_off; float fc; } CcEw;
+/* chain_qsa.comp (mode 0: nb block keys from b0; mode 1: S rows' selections) */
+typedef struct { int mode, ID, R, b0, half_, S, pos_base, budget, IQ, q_off, q_row, nbmax, sel_row; float eps;
+                 int src_off, w_off, pk_off, nb; } CcQsa;
+/* chain_ple.comp (mode 0: the gate over S*C (row, stream) pairs; mode 1: the convolution) */
+typedef struct { int mode, S, C, H, CK, NG, keys_off, hyp_off, val_off, snap_row, snap_off; float eps;
+                 int prm_off, conv_off, ring_off; } CcPle;
+/* chain_route.comp (vk_chain.h's VkcRoute, field for field): every MoE engine's routing
+ * for S rows of E logits (l_off + s*l_row): kind 0 softmax, 1 sigmoid, 2 sqrt(softplus)
+ * of logit / temp; the bias (b_off) added for the pick only with has_bias 1, to the
+ * logit with 2; with n_group > 1 the topk_group best groups' experts only; the K best
+ * picks, the lower expert on a tie, in rank order into ids (i_off + s*i_row, -1 for a
+ * slot no finite pick fills), their scores into w (w_off + s*w_row), divided by their
+ * sum plus norm_eps with norm 1 (when that is above 0) or norm 2 (from K > 1 only),
+ * times scale. ids holds ints. */
+#define CC_ROUTE_EMAX 1024
+#define CC_ROUTE_KMAX 32
+typedef struct {
+    int S, E, K, kind;
+    int l_off, l_row, b_off, has_bias;
+    int i_off, i_row, w_off, w_row;
+    int n_group, topk_group, norm;
+    float temp, scale, norm_eps;
+} CcRoute;
+/* A routed expert as a device holds it (the CUDA tier's resident tensors: their weights
+ * and scales, coli_cuda_tensor_dev); g NULL: not on the device (the host computes it).
+ * planar 1: int4 per 64 as the engine keeps it in RAM (expert_ffn.h's planar blocks: in each
+ * 64 weights' 32 bytes, byte k holds weight k in its low nibble and k + 32 in its high one,
+ * both v + 8), as a prompt chunk stages it from the tier's RAM cache (cc_fetch; its GEMMs
+ * only); 0: the backend's own layout (signed nibbles, weight 2j low and 2j + 1 high).
+ * host 1: the matrices are in page-locked host memory the device reads over the bus (an
+ * engine's host pool, a GGUF's experts: g, u and d in one span from g); a decode step
+ * copies its such experts into the staging cc_moe_stage gave first, where there is one. */
+typedef struct { const void *g, *u, *d; const float *gs, *us, *ds; int planar, host; } CcExpert;
+#define CC_MOE_STAGE_MAP 256   /* the staging's map of a step's slots to its places, bytes before them */
+/* A layer's routed experts on the device for S rows (cc_moe): x (x_off + s*x_row, D
+ * floats) routed to ids and w as cc_route writes them (i_off + s*i_row, w_off + s*w_row,
+ * K each); expert e is entry t_off + e of the table (E of them), its matrices of format fmt (1 int8
+ * rows, 2 int4 rows, 4 int4 with a scale per gs inputs, 8 fp8-e4m3 with a scale per
+ * 128 x 128 block: the tier's formats; 100 + t a GGUF's ggml type t, fmt_d down's, the types
+ * with cuda_bd.cuh's integer step), D and I multiples of 32 up to CC_MOE_DIM_MAX. hid holds S*K rows of
+ * I floats (act 0 silu(gate) * up; act 1 SiTU-GLU, act_a * tanh(g / act_a) * sigmoid(g) *
+ * act_b * tanh(u / act_b), Inkling-2's, a decode step's rows only) and then S*K rows of D (down's
+ * output). parts 1: the experts the table holds; parts 2: y (y_off + s*y_row) = the
+ * host's row (hy at h_off + s*D, h_off >= 0; else 0) plus each slot the table holds,
+ * w * down's output, in rank order (the CPU tier's order: its misses, then the device's
+ * results); 3 both. A slot whose id is -1 or whose entry is not on the device adds
+ * nothing. */
+#define CC_MOE_DIM_MAX 12032   /* D and I: an input row and the fp8 table in 48 KiB of shared memory */
+typedef struct {
+    int S, K, D, I, fmt, gs, act, parts;
+    int t_off, x_off, x_row, i_off, i_row, w_off, w_row, y_off, y_row, h_off;
+    int E;   /* the layer's experts: a step of more than CC_MOE_FRAME_ROWS rows sorts its slots by expert */
+    int planar;   /* the table may hold CcExpert.planar entries: refused where the GEMMs cannot read them */
+    int fmt_d;    /* fmt >= 100 (a GGUF's blocks, ggml type fmt - 100 for gate and up): down's,
+                     0 = fmt's; a matrix's rows as the file has them, padded to words */
+    int lay_S, lay_s0;   /* parts 2 only: hid as a parts 1 of lay_S rows left it (0: S), this call's
+                            S rows its rows lay_s0.. (a prompt chunk's lanes sum their own rows) */
+    /* cc_ink2_caps' CC_INK2_MOE, a decode step's rows (S up to CC_MOE_FRAME_ROWS) only:
+     * esc_off > 0, each expert's scales outside its matrices, float pairs (gate's and up's one
+     * number, then down's) at byte esc_off of the table's buffer, entry t_off + e's pair at
+     * t_off + e (Inkling-2's NVFP4 layers from a GGUF: the gate's and up's outputs times the
+     * first before the activation, down's times the second in the sum); act_a, act_b act 1's
+     * caps. The table's entries may then be the CUDA tier's (cu_xb.cu): CcExpert.planar 2, int4
+     * rows as the tier keeps them (each nibble v + 8, weight 2j the low one). */
+    int esc_off;
+    float act_a, act_b;
+} CcMoe;
+/* the ggml types cc_moe takes for a GGUF's experts (CcMoe.fmt >= 100: cuda_bd.cuh's integer step) */
+static inline int cc_moe_block_type(int t) {
+    return t == 6 || t == 7 || t == 8 || t == 10 || t == 11 || t == 12 || t == 13 || t == 14 || t == 16 || t == 17 || t == 18 || t == 19 || t == 20 ||
+           t == 21 || t == 22 || t == 23 || t == 29 || t == 42;
+}
+/* More rows than this (a prompt chunk): the slots sorted by expert and each expert's rows
+ * through the tensor cores' GEMM where the device has it (gate and up, then down); hid
+ * then also holds the sort's integers, cc_moe_hid_floats in all. */
+#define CC_MOE_FRAME_ROWS 8
+static inline size_t cc_moe_hid_floats(int S, int K, int D, int I, int E) {
+    size_t A = (size_t)S * K, n = A * (size_t)(I + D);
+    if (S > CC_MOE_FRAME_ROWS) n += 3 * (size_t)E + 2 + 2 * ((A + 63) / 64 + (size_t)(E < (int)A ? E : (int)A)) + 2 * A;
+    return n;
+}
+/* one copy over n regions (a KV row per head, say); offsets and counts in floats */
+typedef struct { size_t dst, src, n; } CcRegion;
+/* a fetch's region: bytes of page-locked host memory at src into a DEV buffer at byte dst */
+typedef struct { const void *src; size_t dst, bytes; } CcFetch;
+/* chain_enc.comp: the decision engines' encoders (decide_cuda.h), every row of a request at
+ * once with no cache and no state. Field for field vk_chain.h's VkcEnc* (its comment has each
+ * op's arithmetic): enc_norm a LayerNorm (+ b with CC_ENC_ADD, the sum written back to a with
+ * CC_ENC_SUM; D <= 4096), enc_bias y = act(y + bias) in place, enc_geglu act(u + bu) * (g + bg),
+ * enc_rope rotate-half RoPE on the query and key heads from a table row pos[r], enc_addrow a
+ * table row per row, enc_attn each row over its range of rows with DeBERTa's two relative
+ * terms (hd <= 128), enc_rel those terms' products. rng, ridx, pos and idx: int32 buffers. */
+#define CC_ENC_ADD 1
+#define CC_ENC_SUM 2
+#define CC_ENC_ACT_NONE      0
+#define CC_ENC_ACT_GELU      1   /* erf */
+#define CC_ENC_ACT_GELU_TANH 2
+#define CC_ENC_ACT_RELU      3
+#define CC_ENC_C2P 1
+#define CC_ENC_P2C 2
+typedef struct { int mode, rows, D, a_off, a_row, b_off, b_row, y_off, y_row, w_off, bias_off, flags; float eps; } CcEncNorm;
+typedef struct { int mode, n, O, y_off, y_row, b_off, act; } CcEncBias;
+typedef struct { int mode, n, I, a_off, a_row, y_off, y_row, b_off, act; } CcEncGeglu;
+typedef struct { int mode, n, H, hd, x_off, x_row, part_off, cos_off, sin_off; } CcEncRope;
+typedef struct { int mode, n, D, y_off, y_row, t_off; } CcEncAddRow;
+typedef struct { int mode, S, H, hd, q_off, k_off, v_off, kv_row, o_off, o_row, flags, c_off, p_off, nr, rc;
+                 float scale; int r0; } CcEncAttn;
+typedef struct { int mode, S, H, hd, x_off, x_row, p_off, p_row, y_off, nr, r0; } CcEncRel;
+/* counters, for the engines' [chain] lines */
+typedef struct {
+    unsigned long long frames, waits, ops, matmuls, bytes_up, bytes_down;
+    double wait_ms;      /* host time blocked in event waits */
+    size_t dev_bytes;    /* live chain buffers on the device */
+} CcStats;
+
+/* The table the backend exports. `size` is the backend's sizeof: a field past it is
+ * not there (an older DLL), and the engine must not call it. */
+/* DeepSeek V4.1's (and V4's) layer ops (cuda_dsv4c.cuh), the Vulkan chain's vkc_mhc and
+ * vkc_dsv4_* with the same fields in the same order (vk_chain.h has their contracts):
+ *   mhc        CC_MHC_SPLIT (the mix's pre, post and Sinkhorn comb), CC_MHC_COLLAPSE,
+ *              CC_MHC_POST (write back), CC_MHC_MEAN, CC_SWIGLU_CLAMP;
+ *   ds_attn    sparse attention with a sink over a per-row list (a prompt chunk's rows from
+ *              8 in three passes, COLI_CUDA_DSV4_PA=0: a block a head and row);
+ *   ds_rope, ds_compress, ds_score, ds_cand, ds_topk, ds_engram. */
+#define CC_MHC_SPLIT    0
+#define CC_MHC_COLLAPSE 1
+#define CC_MHC_POST     2
+#define CC_MHC_MEAN     3
+#define CC_SWIGLU_CLAMP 4
+typedef struct { int S, H, D, iters, x_off, x_row, m_off, m_row, hp_off, hp_row, y_off, y_row, prm_off, n;
+                 float eps, hc_eps, lim; } CcMhc;
+typedef struct { int S, H, hd, cnt, l_off, l_row, nwin, w_off, c_off, q_off, q_row, o_off, o_row, sink_off, flags;
+                 float scale; } CcDsAttn;
+typedef struct { int nseg, per_row, rd, x_off, x_row, x_seg, cs_off, cs_row, inverse, flags; } CcDsRope;
+typedef struct { int S, pos_base, ratio, P, D, overlap, kv_off, kv_row, sc_off, sc_row, ape_off, out_off, out_row,
+                 ring_off; } CcDsComp;
+typedef struct { int S, pos_base, ratio, IH, ID, width, q_off, q_row, w_off, w_row, k_off, k_row, mask_row, sc_row;
+                 float wscale; int sc_off, mask_off; } CcDsScore;
+typedef struct { int S, pos_base, ratio, width, block, topb, sc_row, mask_row, mask_off; } CcDsCand;   /* the mask a byte an entry */
+typedef struct { int S, width, topk, sc_row, l_off, l_row, base, order; } CcDsTopk;
+typedef struct { int S, H, D, kv_off, kv_row, x_off, x_row, qw_off, kw_off; float eps; } CcDsEngram;
+/* GLM-5.3's (and Kimi K3's) linear attention (cuda_glm53c.cuh), the Vulkan chain's vkc_kda_conv
+ * and vkc_kda_rec_flags with the same fields in the same order (vk_chain.h has their contract):
+ * the short convolution's window and the recurrence's state on the device across calls; from
+ * CC_KDA_ROWS rows the recurrence takes a block of rows at a time with the same bits. KD 16, 32,
+ * 64 or 128, VD <= 128; flags as VKC_KDA_EXP_A (1) and VKC_KDA_K3 (2). */
+#define CC_KDA_ROWS 8
+typedef struct { int S, C, K, P, in_off, in_row, in_part, out_off, out_row, w_off, win_off; } CcKdaConv;
+typedef struct { int S, H, VD, P, m_off, m_row, f_off, f_row, b_off, b_row, g_off, g_row, y_off, y_row, st_off, prm_off;
+                 float lb, neps, eps; } CcKdaRec;
+/* GLM-5.3's multi-head latent attention and k-pooled indexer (cuda_glm53c.cuh), the Vulkan chain's
+ * vkc_mla_core, vkc_mla_rope, vkc_mla_lnorm, vkc_dsa_pool_keys and vkc_dsa_pool_select with the same
+ * fields in the same order (vk_chain.h), and vkc_mla_hgemv on a float matrix: w's rows of I floats
+ * from float w_off (a GGUF's k_b and v_b go to the chain as floats). */
+typedef struct { int S, H, K, R, pos_base, kv_start, qa_off, qa_row, qa_seg, qr_off, qr_row, qr_seg,
+                 lat_off, lat_row, rope_off, rope_row, sel_off, sel_row, o_off, o_row, o_seg; float scale; } CcMlaCore;
+typedef struct { int nseg, per_row, rd, seg_len, style, x_off, x_row, x_seg, y_off, y_row, y_seg,
+                 cs_off, cs_row, w_off, b_off, has_b; float eps; } CcMlaRow;
+typedef struct { int trans, S, H, n, hstride, hoff, x_off, x_row, x_seg, y_off, y_row, y_seg, g_off, g_row, has_gate, I, w_off; } CcHgemv;
+typedef struct { int np, pool, p0, ID, g_off, g_row, ape_off, pk_off, k_off, k_row; } CcDsaPool;
+typedef struct { int S, pos_base, IH, ID, topk, pool, q_off, q_row, w_off, w_row, pk_off, tail, sc_row, sel_row;
+                 float wdiv, scale; } CcDsaPick;
+/* GLM-5.2 and GLM-5.3's indexer, not pooled (cuda_glm53c.cuh): every row's top keys over the index
+ * key cache (k_off, ID floats a position) in position order, colibri.c's selection; sel's row is a
+ * count then the positions, -1 for a row whose context is not past topk (force: always a list) */
+typedef struct { int S, pos_base, IH, ID, topk, force, q_off, q_row, w_off, w_row, k_off, sc_row, sel_row; float rs, wsc; } CcDsaSel;
+/* Kimi K3's residual mix and activation (cuda_k3c.cuh), the Vulkan chain's vkc_ares_mix and
+ * vkc_situ with the same fields in the same order (vk_chain.h has their contract; the mix's dot
+ * and squares in double, as kimi_k3.c's res_mix). nb <= 15, y apart from x and blk. */
+typedef struct { int S, D, nb, x_off, x_row, b_off, b_row, w_off, y_off, y_row; float eps; } CcAres;
+/* Inkling's and Inkling-2's ops (cuda_inkc.cuh), the Vulkan chain's vkc_sconv, vkc_relattn and
+ * vkc_ink2_* with the same fields in the same order (vk_chain.h has their contracts) */
+typedef struct { int mode, S, C, CK, x_off, x_row, w_off, ring_off, n; float fc; } CcSconv;
+typedef struct { int S, H, KVH, hd, pos_base, cap, window, ext, d_rel;
+                 int q_off, q_row, o_off, o_row, k_off, v_off, ks_off, vs_off, kv_row;
+                 int r_off, r_row, relp_off, tau_off; float scale;
+                 int has_sink, sink_off; } CcRelAttn;
+typedef struct { int S, D, nb, x_off, x_row, b_off, b_row, w_off, y_off, y_row; float eps, scale; } CcInk2Mix;
+typedef struct { int nseg, n, per_row, x_off, x_row, has_w, w_off; float thr; } CcInk2Clip;
+typedef struct { int S, C, K, hd, x_off, x_row, d_off, d_row, st_off, ring_off; float fc; } CcInk2Dconv;
+typedef struct { int n, g_off, u_off, y_off; float b1, b2; } CcSitu;
+/* DFlash2's two-tap dynamic depthwise convolution (cuda_dflash.cuh): y[r][c] = k0 x[r][c] + k1 x[r-1][c] over
+ * blocks of B rows (x[r-1] 0 at a block's first row), k_t = prm[b_off + t C + c] plus (flags 2: times 1 plus)
+ * kp[kp_off + r kp_row + t kp_tap + g kp_g], g = c / gs (flags 1: c % (C / gs)); y apart from x */
+typedef struct { int n, C, B, gs, x_off, x_row, kp_off, kp_row, kp_tap, kp_g, y_off, y_row, b_off, flags; } CcDfConv;
+/* the top K (<= 32) of R rows of V scores, best first, ties to the lower column: values at out[o_off + r o_row + j],
+ * their columns as ints at out[o_off + r o_row + K + j]; splits (1 to 256) slices of a row in the first pass, its
+ * candidates in sc (R splits 2K floats) (cuda_dflash.cuh) */
+typedef struct { int R, V, K, x_off, x_row, o_off, o_row, splits; } CcDfTopk;
+/* a target layer's rows as the drafter's context: y[y_off + r y_row + c] = sum over b < C of x[x_off + r x_row + b D + c] */
+typedef struct { int n, D, C, x_off, x_row, y_off, y_row; } CcDfTap;
+
+typedef struct ColiCudaChainOps {
+    size_t size;
+    /* after coli_cuda_init, for a configured device; 1 = the chain is up on it. Each
+     * device has a context of its own; cc_device makes one current (returns the
+     * previous), cc_device_now says which. shutdown closes every context. */
+    int  (*init)(int device);
+    int  (*ready)(void);
+    int  (*lost)(void);
+    void (*shutdown)(void);
+    int  (*device)(int d);
+    int  (*device_now)(void);
+    CcBuf *(*buf)(size_t bytes, int kind);                 /* zero-filled; NULL when out of memory */
+    void   (*free)(CcBuf *b);                              /* waits for the frames that may read it */
+    int    (*reserve)(CcBuf **b, size_t bytes, int kind);  /* at least `bytes`; growing drops the contents */
+    void  *(*ptr)(const CcBuf *b);                         /* host mapping (CC_UP, CC_DOWN) */
+    size_t (*bytes)(const CcBuf *b);
+    int  (*begin)(void);
+    int  (*submit)(int wait);
+    int  (*finish)(void);                                  /* wait for every submitted frame */
+    int  (*copy)(CcBuf *dst, size_t doff, CcBuf *src, size_t soff, size_t n);
+    int  (*zero)(CcBuf *dst, size_t off, size_t n);
+    int  (*copy_regions)(CcBuf *dst, CcBuf *src, const CcRegion *r, int n);
+    int  (*write)(CcBuf *dst, size_t off, const void *src, size_t bytes);   /* into the open frame */
+    int  (*read)(CcBuf *src, size_t off, void *dst, size_t bytes);          /* synchronous */
+    /* y[S][O] = x[S][I] @ W^T for a resident tensor (its fmt, I, O); x and y at float offsets */
+    int  (*matmul)(ColiCudaTensor *t, CcBuf *x, size_t xo, CcBuf *y, size_t yo, int S);
+    int  (*norm)(CcBuf *x, CcBuf *w, CcBuf *y, const CcNorm *p);
+    int  (*rope)(CcBuf *x, CcBuf *cs, const CcRope *p);
+    int  (*attn)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *sel, const CcAttn *p);
+    int  (*dnconv)(CcBuf *in, CcBuf *w, CcBuf *ring, CcBuf *out, CcBuf *snap, const CcDnConv *p);
+    int  (*dnrec)(int KD, CcBuf *cv, CcBuf *ab, CcBuf *z, CcBuf *st, CcBuf *prm, CcBuf *y, CcBuf *snap, const CcDnRec *p);
+    int  (*ew)(CcBuf *y, CcBuf *a, CcBuf *b, CcBuf *c, CcBuf *e, const CcEw *p);
+    void (*stats)(CcStats *st);
+    /* Qwen3.8's two: the QSA indexer's block keys and selections, the PLE gate and convolution */
+    int  (*qsa)(CcBuf *src, CcBuf *w, CcBuf *pk, CcBuf *cs, CcBuf *sc, CcBuf *sel, const CcQsa *p);
+    int  (*ple)(CcBuf *keys, CcBuf *hyp, CcBuf *val, CcBuf *prm, CcBuf *gated, CcBuf *normv, CcBuf *conv, CcBuf *ring, const CcPle *p);
+    /* The routed experts in the frame (optional: a table that ends before them has none).
+     * tab: CcExpert entries (written with write, offsets in floats as ever: an entry is
+     * sizeof(CcExpert) / 4 of them). signal: once the frame's earlier ops are done, word
+     * `word` of a DOWN buffer holds v (the host polls it); wait_host: the frame's later
+     * ops wait until word `word` of an UP buffer is at least v (the host writes it), for
+     * COLI_CUDA_HOST_WAIT_S seconds at most on CUDA: past them word `word` + 1 holds v and
+     * the frame is lost (the buffer takes two words). A hybrid step: route, signal, the
+     * device's experts, wait_host, the sum with the host's rows; the host computes its
+     * experts between the two. */
+    int  (*route)(CcBuf *logits, CcBuf *bias, CcBuf *ids, CcBuf *w, const CcRoute *p);
+    int  (*moe)(CcBuf *tab, CcBuf *x, CcBuf *ids, CcBuf *w, CcBuf *hid, CcBuf *y, CcBuf *hy, const CcMoe *p);
+    int  (*signal)(CcBuf *flag, size_t word, unsigned v);
+    int  (*wait_host)(CcBuf *flag, size_t word, unsigned v);
+    /* a resident tensor's device copy, for a CcExpert: its weights, scales and the scales'
+     * group size (fmt 4); 0 for none */
+    int  (*tensor_dev)(const ColiCudaTensor *t, const void **w, const float **sc, int *gs);
+    /* Staging (optional): a DEV buffer filled from page-locked host memory on the device's
+     * copy stream, beside the frame's ops (a prompt chunk's experts from the tier's RAM
+     * cache). fetch: n regions into dst, once the frame's ops recorded before the last
+     * fetch_done are done (the buffer's last reader); fetch_wait: the frame's later ops wait
+     * for the last fetch's copies; fetch_done: the buffer is free again once the frame's
+     * earlier ops are done. dev_addr: a buffer's device address, for a CcExpert (an UP or DOWN
+     * buffer's: where the device reads the host's pages over the bus; NULL from a backend
+     * before the host pool). */
+    int  (*fetch)(CcBuf *dst, const CcFetch *r, int n);
+    int  (*fetch_wait)(void);
+    int  (*fetch_done)(void);
+    const void *(*dev_addr)(const CcBuf *b);
+    /* moe_stage: a DEV buffer the context's cc_moe copies a decode step's host experts
+     * (CcExpert.host) into before its kernels read them, slots of slot_bytes after a
+     * 256-byte map; NULL: none (they read the host's memory where it is). A GGUF's experts
+     * (fmt >= 100) only. */
+    int  (*moe_stage)(CcBuf *b, size_t slot_bytes, int slots);
+    /* host_up: bytes of page-locked host memory at src to the device address dst on the copy
+     * stream, once the frame's ops recorded so far are done; *ticket marks it. host_up_done:
+     * 1 once the copies up to ticket landed (an engine's experts moved into its slots) */
+    int  (*host_up)(void *dst, const void *src, size_t bytes, unsigned *ticket);
+    int  (*host_up_done)(unsigned ticket);
+    /* attn_w: cc_attn with a sliding window and sinks (CcAttnW) */
+    int  (*attn_w)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p);
+    /* muse: 1 when the norm takes CC_NORM_PRESCALE and ew CC_EW_SIGMUL and CC_EW_RESGATE (an
+     * older backend's kernels would skip them without a word) */
+    int  (*muse)(void);
+    /* attn_wr: attn_w over a cache that is a ring of `ring` rows (position t in row t % ring,
+     * p->a.cap == ring): a sliding layer's (qwen36 Flint, Muse Spark), whose rows must hold
+     * the step's rows and their windows (ring >= win + S - 1); 0: attn_w */
+    int  (*attn_wr)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p, int ring);
+    /* kv16: 1 when ew takes CC_EW_F16 (an older backend's kernel would skip it without a word) */
+    int  (*kv16)(void);
+    /* rope_f16: rope on x, then each of a segment's seg values of x, and of v at x's offsets,
+     * rounded to float16 as ew's CC_EW_F16 rounds them: a float16 KV cache's new K and V rows
+     * in one launch, the bits of rope and two ew (qwen36_cuda_chain.h); absent: those three */
+    int  (*rope_f16)(CcBuf *x, CcBuf *v, CcBuf *cs, const CcRope *p, int seg);
+    /* pick: the argmax (lowest index on a tie) of n logits in `logits` into word 0 of `out`
+     * (an int) and its softmax probability (terms within 20 of the maximum) into word 1 (a
+     * float): an MTP head's draft token and confidence without copying the vocabulary down */
+    int  (*pick)(CcBuf *logits, CcBuf *out, int n);
+    /* matmul_rows: y[0..n) = the rows ids[0..n) of a resident tensor (fmt 0 or 1, one input
+     * row x[I]); an MTP head's adaptive draft vocabulary scored from the model's lm_head */
+    int  (*matmul_rows)(ColiCudaTensor *t, CcBuf *ids, CcBuf *x, CcBuf *y, int n);
+    /* A float16 KV cache (half the memory and half the reads of a float32 one): kvh 1 when
+     * the next three take one (0 on HIP); attn_h and attn_wh are attn and attn_wr over caches
+     * of halves (kc, vc and their offsets in halves); copy_regions_h copies float32 regions of
+     * src (offsets in floats) into such a cache (offsets in halves), each value rounded to the
+     * nearest float16 */
+    int  (*kvh)(void);
+    int  (*attn_h)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *sel, const CcAttn *p);
+    int  (*attn_wh)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p, int ring);
+    int  (*copy_regions_h)(CcBuf *dst, CcBuf *src, const CcRegion *r, int n);
+    /* the decision engines' encoders (CcEnc* above) */
+    int  (*enc_norm)(CcBuf *a, CcBuf *b, CcBuf *prm, CcBuf *y, const CcEncNorm *p);
+    int  (*enc_bias)(CcBuf *y, CcBuf *prm, const CcEncBias *p);
+    int  (*enc_geglu)(CcBuf *a, CcBuf *prm, CcBuf *y, const CcEncGeglu *p);
+    int  (*enc_rope)(CcBuf *x, CcBuf *tab, CcBuf *pos, const CcEncRope *p);
+    int  (*enc_addrow)(CcBuf *y, CcBuf *tab, CcBuf *idx, const CcEncAddRow *p);
+    int  (*enc_attn)(CcBuf *qkv, CcBuf *c2p, CcBuf *p2c, CcBuf *o, CcBuf *rng, CcBuf *ridx, CcBuf *pos, const CcEncAttn *p);
+    int  (*enc_rel)(CcBuf *x, CcBuf *pt, CcBuf *y, const CcEncRel *p);
+    /* lfm3: 1 when dnconv takes order 2 and ew CC_EW_HEADGATE (LFM3's convolution and head gate:
+     * an older backend's kernels would skip them without a word) */
+    int  (*lfm3)(void);
+    /* matmul_glu: y[S, O] = silu(x Wg^T) * (x Wu^T) in one pass for two tensors of one GGUF block
+     * type and shape (a prompt chunk's rows of a SwiGLU MLP); 1 done, -1 not taken (another type,
+     * few rows: the caller's two matmuls and CC_EW_SWIGLU), 0 a failure */
+    int  (*matmul_glu)(ColiCudaTensor *wg, ColiCudaTensor *wu, CcBuf *x, CcBuf *y, int S);
+    int  (*addnorm)(CcBuf *x, CcBuf *t, CcBuf *w, CcBuf *y, const CcAddNorm *p);
+    /* pick_rows: pick's argmax and probability for each of `rows` rows of n logits from float
+     * off of `logits`, row r's into words 2r and 2r + 1 of `out`: a greedy decode step's or
+     * verify's tokens without the vocabulary's logits down */
+    int  (*pick_rows)(CcBuf *logits, size_t off, CcBuf *out, int n, int rows);
+    /* host_up_n: n copies as host_up's (dst[i] <- src[i], bytes[i]), once the frame's ops recorded
+     * so far are done, in one call (cudaMemcpyBatchAsync where the runtime has it) with one ticket
+     * for them all: a frame's promotions, where host_up took five calls of the runtime a copy */
+    int  (*host_up_n)(void *const *dst, const void *const *src, const size_t *bytes, int n, unsigned *ticket);
+    /* preload: the chain's and the backend's kernels loaded on the chain's device (the runtime
+     * loads a module at the first launch of one of its kernels otherwise); 1 done */
+    int  (*preload)(void);
+    /* moe_cols: moe's parts 3 for a prompt's rows (more than CC_MOE_FRAME_ROWS) with down and the
+     * rows' sums a slice of cols outputs at a time (cols a multiple of 128), hid of
+     * cc_moe_hid_floats(S, K, cols, I, E) floats: a layer's rows in one call where a chunk's hid
+     * would not hold them. A GGUF's types the f16 tiles take, no host rows (h_off < 0); each row of
+     * y the bits moe gives it. 1 done, -1 not taken (the caller's chunks), 0 a failure */
+    int  (*moe_cols)(CcBuf *tab, CcBuf *x, CcBuf *ids, CcBuf *w, CcBuf *hid, CcBuf *y, const CcMoe *p, int cols);
+    /* matmul_hcmix: a hyper-connection read's up projection of n rows of x (from float x_off) and its
+     * mix in one pass: y (n rows of H) = sum over the C (4) streams b of sigmoid((x t^T)[b H + d]) times
+     * hn's row at b H + d, over fc; matmul then ew's CC_EW_HC_MIX with the same bits, the product never
+     * written. 1 done, -1 not taken (the caller's two ops), 0 a failure */
+    int  (*matmul_hcmix)(ColiCudaTensor *t, CcBuf *x, size_t x_off, CcBuf *hn, CcBuf *y, int n, int H, int C, float fc);
+    /* DeepSeek V4.1's layer ops (cuda_dsv4c.cuh) */
+    int  (*mhc)(int mode, CcBuf *x, CcBuf *m, CcBuf *hp, CcBuf *prm, CcBuf *y, const CcMhc *p);
+    int  (*ds_attn)(CcBuf *q, CcBuf *win, CcBuf *cmp, CcBuf *list, CcBuf *prm, CcBuf *out, const CcDsAttn *p);
+    int  (*ds_rope)(CcBuf *x, CcBuf *cs, const CcDsRope *p);
+    int  (*ds_compress)(CcBuf *kv, CcBuf *sc, CcBuf *ring, CcBuf *prm, CcBuf *out, const CcDsComp *p);
+    int  (*ds_score)(CcBuf *iq, CcBuf *hw, CcBuf *keys, CcBuf *mask, CcBuf *sc, const CcDsScore *p);
+    int  (*ds_cand)(CcBuf *sc, CcBuf *mask, const CcDsCand *p);
+    int  (*ds_topk)(CcBuf *sc, CcBuf *list, const CcDsTopk *p);
+    int  (*ds_engram)(CcBuf *kv, CcBuf *prm, CcBuf *x, const CcDsEngram *p);
+    /* GLM-5.3's layer ops (cuda_glm53c.cuh) */
+    int  (*kda_conv)(CcBuf *in, CcBuf *w, CcBuf *win, CcBuf *out, const CcKdaConv *p);
+    int  (*kda_rec)(int KD, CcBuf *m, CcBuf *f, CcBuf *b, CcBuf *g, CcBuf *prm, CcBuf *st, CcBuf *y, const CcKdaRec *p, int flags);
+    int  (*mla_core)(CcBuf *qabs, CcBuf *qr, CcBuf *lat, CcBuf *rope, CcBuf *sel, CcBuf *clat, const CcMlaCore *p);
+    int  (*mla_rope)(CcBuf *x, CcBuf *cs, CcBuf *y, const CcMlaRow *p);
+    int  (*mla_lnorm)(CcBuf *x, CcBuf *prm, CcBuf *y, const CcMlaRow *p);
+    int  (*mla_hgemv)(CcBuf *w, CcBuf *x, CcBuf *y, CcBuf *gate, const CcHgemv *p);
+    int  (*dsa_pool_keys)(CcBuf *keys, CcBuf *gates, CcBuf *prm, CcBuf *pk, const CcDsaPool *p);
+    int  (*dsa_pool_select)(CcBuf *iq, CcBuf *hw, CcBuf *pk, CcBuf *sc, CcBuf *sel, const CcDsaPick *p);
+    /* GLM-5.2 and GLM-5.3's indexer (cuda_glm53c.cuh) */
+    int  (*dsa_select)(CcBuf *iq, CcBuf *hw, CcBuf *keys, CcBuf *sc, CcBuf *sel, const CcDsaSel *p);
+    /* mla_hgemv's rows on a GGUF's Q8_0 rows as the file has them, w_off in bytes */
+    int  (*mla_hgemv_q8)(CcBuf *w, CcBuf *x, CcBuf *y, const CcHgemv *p);
+    /* Kimi K3's (cuda_k3c.cuh) */
+    int  (*ares_mix)(CcBuf *x, CcBuf *blk, CcBuf *prm, CcBuf *y, const CcAres *p);
+    int  (*situ)(CcBuf *g, CcBuf *u, CcBuf *y, const CcSitu *p);
+    /* DFlash2's drafter (cuda_dflash.cuh): dflash() 1 when the module has its ops */
+    int  (*dflash)(void);
+    int  (*dfconv)(CcBuf *x, CcBuf *kp, CcBuf *prm, CcBuf *y, const CcDfConv *p);
+    int  (*dftopk)(CcBuf *x, CcBuf *sc, CcBuf *out, const CcDfTopk *p);
+    int  (*dftap)(CcBuf *x, CcBuf *y, const CcDfTap *p);
+    /* wait_host_if: wait_host for a hybrid step whose host may have no slots this time. The device
+     * looks up the step's nk routes (ids from int i_off; an id outside 0..E-1 is the device's) in
+     * the table (CcExpert entries from entry t_off): where none is the host's (g NULL), it writes
+     * zeros into the first hn floats of hy (the rows the sum takes as the host's) and goes on
+     * without the host's word; else it waits for the word as wait_host does */
+    int  (*wait_host_if)(CcBuf *flag, size_t word, unsigned v, CcBuf *tab, size_t t_off, CcBuf *ids, size_t i_off,
+                         int nk, int E, CcBuf *hy, size_t hn);
+    /* Inkling's and Inkling-2's (cuda_inkc.cuh) */
+    int  (*sconv)(CcBuf *x, CcBuf *w, CcBuf *ring, const CcSconv *p);
+    int  (*relattn)(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *kvs, CcBuf *r, CcBuf *relp, CcBuf *tau, const CcRelAttn *p);
+    int  (*ink2_mix)(CcBuf *x, CcBuf *blk, CcBuf *prm, CcBuf *y, const CcInk2Mix *p);
+    int  (*ink2_clip)(CcBuf *x, CcBuf *prm, const CcInk2Clip *p);
+    int  (*ink2_dconv)(CcBuf *x, CcBuf *dyn, CcBuf *prm, CcBuf *ring, const CcInk2Dconv *p);
+    /* fetch_at, fetch_wait_at, fetch_done_at: fetch, fetch_wait and fetch_done for the bank
+     * numbered `bank` (0 or 1), each bank with its own pair of events: a second staging bank
+     * is filled while the first is read. fetch, fetch_wait and fetch_done are bank 0's. */
+    int  (*fetch_at)(CcBuf *dst, const CcFetch *r, int n, int bank);
+    int  (*fetch_wait_at)(int bank);
+    int  (*fetch_done_at)(int bank);
+    /* ink2_caps: what the backend takes of Inkling-2-Mini's chain (CC_INK2_*) */
+    int  (*ink2_caps)(void);
+} ColiCudaChainOps;
+#define CC_INK2_MOE      1   /* cc_moe's act 1, esc_off, planar 2 entries and NVFP4 (fmt 140) in a decode step's rows */
+#define CC_INK2_LOOPGATE 2   /* cc_ew's CC_EW_LOOPGATE */
+/* the table's size without the optional ops: a backend at least this big has the chain */
+#define CC_OPS_BASE_SIZE (offsetof(ColiCudaChainOps, route))
+
+/* The backend's table; NULL from a backend without the chain. Optional in the DLL
+ * loader, like every entry point added after the first release. */
+COLI_CUDA_DLLEXPORT const ColiCudaChainOps *coli_cuda_chain_ops(void);
+
+/* ---- the engine's calls, through the table ----------------------------------- */
+#ifndef COLI_CUDA_CHAIN_NO_WRAPPERS
+static inline const ColiCudaChainOps *cc_ops(void) {
+    static const ColiCudaChainOps *t; static int asked;
+    if (!asked) { asked = 1; t = coli_cuda_chain_ops(); if (t && t->size < CC_OPS_BASE_SIZE) t = NULL; }
+    return t;
+}
+static inline int cc_available(void) { return cc_ops() != NULL; }
+static inline int  cc_init(int device) { const ColiCudaChainOps *t = cc_ops(); return t ? t->init(device) : 0; }
+static inline int  cc_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t ? t->ready() : 0; }
+static inline int  cc_lost(void) { const ColiCudaChainOps *t = cc_ops(); return t ? t->lost() : 1; }
+static inline void cc_shutdown(void) { const ColiCudaChainOps *t = cc_ops(); if (t) t->shutdown(); }
+static inline int  cc_device(int d) { const ColiCudaChainOps *t = cc_ops(); return t ? t->device(d) : -1; }
+static inline int  cc_device_now(void) { const ColiCudaChainOps *t = cc_ops(); return t ? t->device_now() : -1; }
+static inline CcBuf *cc_buf(size_t bytes, int kind) { const ColiCudaChainOps *t = cc_ops(); return t ? t->buf(bytes, kind) : NULL; }
+static inline void   cc_free(CcBuf *b) { const ColiCudaChainOps *t = cc_ops(); if (t && b) t->free(b); }
+static inline int    cc_reserve(CcBuf **b, size_t bytes, int kind) { const ColiCudaChainOps *t = cc_ops(); return t ? t->reserve(b, bytes, kind) : 0; }
+static inline void  *cc_ptr(const CcBuf *b) { const ColiCudaChainOps *t = cc_ops(); return t && b ? t->ptr(b) : NULL; }
+static inline size_t cc_bytes(const CcBuf *b) { const ColiCudaChainOps *t = cc_ops(); return t && b ? t->bytes(b) : 0; }
+static inline int cc_begin(void) { const ColiCudaChainOps *t = cc_ops(); return t ? t->begin() : 0; }
+static inline int cc_submit(int wait) { const ColiCudaChainOps *t = cc_ops(); return t ? t->submit(wait) : 0; }
+static inline int cc_finish(void) { const ColiCudaChainOps *t = cc_ops(); return t ? t->finish() : 0; }
+static inline int cc_copy(CcBuf *dst, size_t doff, CcBuf *src, size_t soff, size_t n) { const ColiCudaChainOps *t = cc_ops(); return t ? t->copy(dst, doff, src, soff, n) : 0; }
+static inline int cc_zero(CcBuf *dst, size_t off, size_t n) { const ColiCudaChainOps *t = cc_ops(); return t ? t->zero(dst, off, n) : 0; }
+static inline int cc_copy_regions(CcBuf *dst, CcBuf *src, const CcRegion *r, int n) { const ColiCudaChainOps *t = cc_ops(); return t ? t->copy_regions(dst, src, r, n) : 0; }
+static inline int cc_write(CcBuf *dst, size_t off, const void *src, size_t bytes) { const ColiCudaChainOps *t = cc_ops(); return t ? t->write(dst, off, src, bytes) : 0; }
+static inline int cc_read(CcBuf *src, size_t off, void *dst, size_t bytes) { const ColiCudaChainOps *t = cc_ops(); return t ? t->read(src, off, dst, bytes) : 0; }
+static inline int cc_matmul(ColiCudaTensor *w, CcBuf *x, size_t xo, CcBuf *y, size_t yo, int S) { const ColiCudaChainOps *t = cc_ops(); return t ? t->matmul(w, x, xo, y, yo, S) : 0; }
+static inline int cc_norm(CcBuf *x, CcBuf *w, CcBuf *y, const CcNorm *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->norm(x, w, y, p) : 0; }
+static inline int cc_rope(CcBuf *x, CcBuf *cs, const CcRope *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->rope(x, cs, p) : 0; }
+static inline int cc_attn(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *sel, const CcAttn *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->attn(q, kc, vc, o, gate, sel, p) : 0; }
+static inline int cc_dnconv(CcBuf *in, CcBuf *w, CcBuf *ring, CcBuf *out, CcBuf *snap, const CcDnConv *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->dnconv(in, w, ring, out, snap, p) : 0; }
+static inline int cc_dnrec(int KD, CcBuf *cv, CcBuf *ab, CcBuf *z, CcBuf *st, CcBuf *prm, CcBuf *y, CcBuf *snap, const CcDnRec *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->dnrec(KD, cv, ab, z, st, prm, y, snap, p) : 0; }
+static inline int cc_ew(CcBuf *y, CcBuf *a, CcBuf *b, CcBuf *c, CcBuf *e, const CcEw *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->ew(y, a, b, c, e, p) : 0; }
+static inline void cc_stats(CcStats *st) { const ColiCudaChainOps *t = cc_ops(); if (t) t->stats(st); else memset(st, 0, sizeof *st); }
+static inline int cc_qsa(CcBuf *src, CcBuf *w, CcBuf *pk, CcBuf *cs, CcBuf *sc, CcBuf *sel, const CcQsa *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->qsa(src, w, pk, cs, sc, sel, p) : 0; }
+static inline int cc_ple(CcBuf *keys, CcBuf *hyp, CcBuf *val, CcBuf *prm, CcBuf *gated, CcBuf *normv, CcBuf *conv, CcBuf *ring, const CcPle *p) { const ColiCudaChainOps *t = cc_ops(); return t ? t->ple(keys, hyp, val, prm, gated, normv, conv, ring, p) : 0; }
+/* the routed experts in the frame: a backend whose table has them */
+static inline int cc_moe_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, tensor_dev) + sizeof t->tensor_dev; }
+static inline int cc_route(CcBuf *l, CcBuf *b, CcBuf *ids, CcBuf *w, const CcRoute *p) { return cc_moe_ready() ? cc_ops()->route(l, b, ids, w, p) : 0; }
+static inline int cc_moe(CcBuf *tab, CcBuf *x, CcBuf *ids, CcBuf *w, CcBuf *hid, CcBuf *y, CcBuf *hy, const CcMoe *p) { return cc_moe_ready() ? cc_ops()->moe(tab, x, ids, w, hid, y, hy, p) : 0; }
+static inline int cc_signal(CcBuf *flag, size_t word, unsigned v) { return cc_moe_ready() ? cc_ops()->signal(flag, word, v) : 0; }
+static inline int cc_wait_host(CcBuf *flag, size_t word, unsigned v) { return cc_moe_ready() ? cc_ops()->wait_host(flag, word, v) : 0; }
+/* A hybrid step's wait (cc_wait_host on word 0) has a bound: the device that stopped waiting
+ * wrote the step into word 1. A frame zeroes it before it records (cc_host_wait_arm) and,
+ * done, is lost when it is set (cc_host_wait_gave_up: the device went on without the host's
+ * rows, #2696). COLI_CUDA_HOST_WAIT_FAULT=n (tests): the n-th hybrid step's word is not
+ * written (cc_host_word_skip). */
+static inline void cc_host_wait_arm(CcBuf *flag) { ((volatile unsigned *)cc_ptr(flag))[1] = 0; }
+static inline int cc_host_wait_gave_up(CcBuf *flag, const char *engine) {
+    const unsigned step = ((volatile unsigned *)cc_ptr(flag))[1];
+    if (!step) return 0;
+    const char *ws = getenv("COLI_CUDA_HOST_WAIT_S");
+    fprintf(stderr, "[chain] %s: the device waited %s s for the host's share of hybrid step %u and went on without it: "
+                    "the chain stops and the CPU computes from here (COLI_CUDA_HOST_WAIT_S sets the wait; "
+                    "COLI_CUDA_CHAIN_MOE=0 runs those layers on the host's step instead)\n",
+            engine, ws && *ws ? ws : "30", step);
+    return 1;
+}
+static inline int cc_host_word_skip(unsigned long long step, const char *engine) {
+    static long fault = -1;
+    if (fault < 0) { const char *e = getenv("COLI_CUDA_HOST_WAIT_FAULT"); fault = e && *e ? atol(e) : 0; }
+    if (fault <= 0 || step != (unsigned long long)fault) return 0;
+    fprintf(stderr, "[chain] %s: COLI_CUDA_HOST_WAIT_FAULT: hybrid step %ld's word not written\n", engine, fault);
+    return 1;
+}
+static inline int cc_tensor_dev(const ColiCudaTensor *w, const void **p, const float **sc, int *gs) { return cc_moe_ready() ? cc_ops()->tensor_dev(w, p, sc, gs) : 0; }
+static inline int cc_fetch_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, dev_addr) + sizeof t->dev_addr; }
+static inline int cc_fetch(CcBuf *dst, const CcFetch *r, int n) { return cc_fetch_ready() ? cc_ops()->fetch(dst, r, n) : 0; }
+static inline int cc_fetch_wait(void) { return cc_fetch_ready() ? cc_ops()->fetch_wait() : 0; }
+static inline int cc_fetch_done(void) { return cc_fetch_ready() ? cc_ops()->fetch_done() : 0; }
+static inline const void *cc_dev_addr(const CcBuf *b) { return cc_fetch_ready() && cc_ops()->dev_addr ? cc_ops()->dev_addr(b) : NULL; }
+static inline int cc_dev_addr_ready(void) { return cc_fetch_ready() && cc_ops()->dev_addr != NULL; }
+static inline int cc_host_up_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, host_up_done) + sizeof t->host_up_done; }
+static inline int cc_host_up(void *dst, const void *src, size_t bytes, unsigned *ticket) { return cc_host_up_ready() ? cc_ops()->host_up(dst, src, bytes, ticket) : 0; }
+static inline int cc_host_up_done(unsigned ticket) { return cc_host_up_ready() ? cc_ops()->host_up_done(ticket) : 0; }
+/* n host_up copies, one ticket for them all: host_up_n where the backend has it, else one host_up a
+ * copy (the last one's ticket covers the others: they land in order). 0: refused, maybe after some */
+static inline int cc_host_up_many(void *const *dst, const void *const *src, const size_t *bytes, int n, unsigned *ticket) {
+    const ColiCudaChainOps *t = cc_ops();
+    if (n < 1) return 0;
+    if (t && t->size >= offsetof(ColiCudaChainOps, host_up_n) + sizeof t->host_up_n && t->host_up_n) return t->host_up_n(dst, src, bytes, n, ticket);
+    for (int i = 0; i < n; i++) if (!cc_host_up(dst[i], src[i], bytes[i], ticket)) return 0;
+    return 1;
+}
+static inline int cc_moe_cols_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, moe_cols) + sizeof t->moe_cols && t->moe_cols;
+}
+static inline int cc_moe_cols(CcBuf *tab, CcBuf *x, CcBuf *ids, CcBuf *w, CcBuf *hid, CcBuf *y, const CcMoe *p, int cols) {
+    return cc_moe_cols_ready() ? cc_ops()->moe_cols(tab, x, ids, w, hid, y, p, cols) : -1;
+}
+static inline int cc_matmul_hcmix(ColiCudaTensor *t, CcBuf *x, size_t x_off, CcBuf *hn, CcBuf *y, int n, int H, int C, float fc) {
+    const ColiCudaChainOps *o = cc_ops();
+    return o && o->size >= offsetof(ColiCudaChainOps, matmul_hcmix) + sizeof o->matmul_hcmix && o->matmul_hcmix
+           ? o->matmul_hcmix(t, x, x_off, hn, y, n, H, C, fc) : -1;
+}
+/* DeepSeek V4.1's layer ops: the module has them (an older one does not) */
+static inline int cc_dsv4_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, ds_engram) + sizeof t->ds_engram && t->ds_engram;
+}
+static inline int cc_mhc(int mode, CcBuf *x, CcBuf *m, CcBuf *hp, CcBuf *prm, CcBuf *y, const CcMhc *p) {
+    return cc_dsv4_ready() ? cc_ops()->mhc(mode, x, m, hp, prm, y, p) : 0;
+}
+static inline int cc_ds_attn(CcBuf *q, CcBuf *win, CcBuf *cmp, CcBuf *list, CcBuf *prm, CcBuf *out, const CcDsAttn *p) {
+    return cc_dsv4_ready() ? cc_ops()->ds_attn(q, win, cmp, list, prm, out, p) : 0;
+}
+static inline int cc_ds_rope(CcBuf *x, CcBuf *cs, const CcDsRope *p) { return cc_dsv4_ready() ? cc_ops()->ds_rope(x, cs, p) : 0; }
+static inline int cc_ds_compress(CcBuf *kv, CcBuf *sc, CcBuf *ring, CcBuf *prm, CcBuf *out, const CcDsComp *p) {
+    return cc_dsv4_ready() ? cc_ops()->ds_compress(kv, sc, ring, prm, out, p) : 0;
+}
+static inline int cc_ds_score(CcBuf *iq, CcBuf *hw, CcBuf *keys, CcBuf *mask, CcBuf *sc, const CcDsScore *p) {
+    return cc_dsv4_ready() ? cc_ops()->ds_score(iq, hw, keys, mask, sc, p) : 0;
+}
+static inline int cc_ds_cand(CcBuf *sc, CcBuf *mask, const CcDsCand *p) { return cc_dsv4_ready() ? cc_ops()->ds_cand(sc, mask, p) : 0; }
+static inline int cc_ds_topk(CcBuf *sc, CcBuf *list, const CcDsTopk *p) { return cc_dsv4_ready() ? cc_ops()->ds_topk(sc, list, p) : 0; }
+static inline int cc_ds_engram(CcBuf *kv, CcBuf *prm, CcBuf *x, const CcDsEngram *p) {
+    return cc_dsv4_ready() ? cc_ops()->ds_engram(kv, prm, x, p) : 0;
+}
+/* GLM-5.3's layer ops: the module has them */
+static inline int cc_glm53_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, dsa_pool_select) + sizeof t->dsa_pool_select && t->dsa_pool_select;
+}
+static inline int cc_kda_conv(CcBuf *in, CcBuf *w, CcBuf *win, CcBuf *out, const CcKdaConv *p) {
+    return cc_glm53_ready() ? cc_ops()->kda_conv(in, w, win, out, p) : 0;
+}
+static inline int cc_kda_rec(int KD, CcBuf *m, CcBuf *f, CcBuf *b, CcBuf *g, CcBuf *prm, CcBuf *st, CcBuf *y, const CcKdaRec *p, int flags) {
+    return cc_glm53_ready() ? cc_ops()->kda_rec(KD, m, f, b, g, prm, st, y, p, flags) : 0;
+}
+static inline int cc_mla_core(CcBuf *qabs, CcBuf *qr, CcBuf *lat, CcBuf *rope, CcBuf *sel, CcBuf *clat, const CcMlaCore *p) {
+    return cc_glm53_ready() ? cc_ops()->mla_core(qabs, qr, lat, rope, sel, clat, p) : 0;
+}
+static inline int cc_mla_rope(CcBuf *x, CcBuf *cs, CcBuf *y, const CcMlaRow *p) { return cc_glm53_ready() ? cc_ops()->mla_rope(x, cs, y, p) : 0; }
+static inline int cc_mla_lnorm(CcBuf *x, CcBuf *prm, CcBuf *y, const CcMlaRow *p) { return cc_glm53_ready() ? cc_ops()->mla_lnorm(x, prm, y, p) : 0; }
+static inline int cc_mla_hgemv(CcBuf *w, CcBuf *x, CcBuf *y, CcBuf *gate, const CcHgemv *p) {
+    return cc_glm53_ready() ? cc_ops()->mla_hgemv(w, x, y, gate, p) : 0;
+}
+static inline int cc_dsa_pool_keys(CcBuf *keys, CcBuf *gates, CcBuf *prm, CcBuf *pk, const CcDsaPool *p) {
+    return cc_glm53_ready() ? cc_ops()->dsa_pool_keys(keys, gates, prm, pk, p) : 0;
+}
+static inline int cc_dsa_pool_select(CcBuf *iq, CcBuf *hw, CcBuf *pk, CcBuf *sc, CcBuf *sel, const CcDsaPick *p) {
+    return cc_glm53_ready() ? cc_ops()->dsa_pool_select(iq, hw, pk, sc, sel, p) : 0;
+}
+/* GLM-5.2 and GLM-5.3's ops: the module has them (and GLM-5.3 Flash's MLA ops, which they run with) */
+static inline int cc_glmdsa_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return cc_glm53_ready() && t->size >= offsetof(ColiCudaChainOps, mla_hgemv_q8) + sizeof t->mla_hgemv_q8 && t->dsa_select &&
+           t->mla_hgemv_q8;
+}
+static inline int cc_dsa_select(CcBuf *iq, CcBuf *hw, CcBuf *keys, CcBuf *sc, CcBuf *sel, const CcDsaSel *p) {
+    return cc_glmdsa_ready() ? cc_ops()->dsa_select(iq, hw, keys, sc, sel, p) : 0;
+}
+static inline int cc_mla_hgemv_q8(CcBuf *w, CcBuf *x, CcBuf *y, const CcHgemv *p) {
+    return cc_glmdsa_ready() ? cc_ops()->mla_hgemv_q8(w, x, y, p) : 0;
+}
+/* Kimi K3's ops: the module has them (and GLM-5.2's and GLM-5.3's, which its chain runs with) */
+static inline int cc_k3_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return cc_glmdsa_ready() && t->size >= offsetof(ColiCudaChainOps, situ) + sizeof t->situ && t->ares_mix && t->situ;
+}
+static inline int cc_ares_mix(CcBuf *x, CcBuf *blk, CcBuf *prm, CcBuf *y, const CcAres *p) {
+    return cc_k3_ready() ? cc_ops()->ares_mix(x, blk, prm, y, p) : 0;
+}
+static inline int cc_situ(CcBuf *g, CcBuf *u, CcBuf *y, const CcSitu *p) { return cc_k3_ready() ? cc_ops()->situ(g, u, y, p) : 0; }
+/* Inkling's and Inkling-2's ops: 0 from a backend that predates them */
+static inline int cc_ink_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, ink2_dconv) + sizeof t->ink2_dconv && t->sconv && t->relattn &&
+           t->ink2_mix && t->ink2_clip && t->ink2_dconv;
+}
+static inline int cc_sconv(CcBuf *x, CcBuf *w, CcBuf *ring, const CcSconv *p) { return cc_ink_ready() ? cc_ops()->sconv(x, w, ring, p) : 0; }
+static inline int cc_relattn(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *kvs, CcBuf *r, CcBuf *relp, CcBuf *tau, const CcRelAttn *p) {
+    return cc_ink_ready() ? cc_ops()->relattn(q, kc, vc, o, kvs, r, relp, tau, p) : 0;
+}
+static inline int cc_ink2_mix(CcBuf *x, CcBuf *blk, CcBuf *prm, CcBuf *y, const CcInk2Mix *p) {
+    return cc_ink_ready() ? cc_ops()->ink2_mix(x, blk, prm, y, p) : 0;
+}
+static inline int cc_ink2_clip(CcBuf *x, CcBuf *prm, const CcInk2Clip *p) { return cc_ink_ready() ? cc_ops()->ink2_clip(x, prm, p) : 0; }
+static inline int cc_ink2_dconv(CcBuf *x, CcBuf *dyn, CcBuf *prm, CcBuf *ring, const CcInk2Dconv *p) {
+    return cc_ink_ready() ? cc_ops()->ink2_dconv(x, dyn, prm, ring, p) : 0;
+}
+/* DFlash2's drafter's op: the module has it */
+static inline int cc_dflash_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, dftap) + sizeof t->dftap && t->dflash && t->dfconv && t->dftopk && t->dftap && t->dflash();
+}
+static inline int cc_dftap(CcBuf *x, CcBuf *y, const CcDfTap *p) { return cc_dflash_ready() ? cc_ops()->dftap(x, y, p) : 0; }
+static inline int cc_dftopk(CcBuf *x, CcBuf *sc, CcBuf *out, const CcDfTopk *p) { return cc_dflash_ready() ? cc_ops()->dftopk(x, sc, out, p) : 0; }
+static inline int cc_dfconv(CcBuf *x, CcBuf *kp, CcBuf *prm, CcBuf *y, const CcDfConv *p) {
+    return cc_dflash_ready() ? cc_ops()->dfconv(x, kp, prm, y, p) : 0;
+}
+/* the chain's and the backend's kernels loaded now where the backend can (an older one loads them
+ * at their first launch) */
+static inline int cc_preload(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, preload) + sizeof t->preload && t->preload ? t->preload() : 0;
+}
+static inline int cc_wait_host_if_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return cc_moe_ready() && t->size >= offsetof(ColiCudaChainOps, wait_host_if) + sizeof t->wait_host_if && t->wait_host_if;
+}
+static inline int cc_wait_host_if(CcBuf *flag, size_t word, unsigned v, CcBuf *tab, size_t t_off, CcBuf *ids, size_t i_off,
+                                  int nk, int E, CcBuf *hy, size_t hn) {
+    return cc_wait_host_if_ready() ? cc_ops()->wait_host_if(flag, word, v, tab, t_off, ids, i_off, nk, E, hy, hn) : 0;
+}
+static inline int cc_moe_stage_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, moe_stage) + sizeof t->moe_stage; }
+static inline int cc_moe_stage(CcBuf *b, size_t slot_bytes, int slots) { return cc_moe_stage_ready() ? cc_ops()->moe_stage(b, slot_bytes, slots) : 0; }
+static inline int cc_attn_w_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, attn_w) + sizeof t->attn_w; }
+static inline int cc_attn_w(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p) {
+    return cc_attn_w_ready() ? cc_ops()->attn_w(q, kc, vc, o, gate, snk, p) : 0;
+}
+static inline int cc_attn_wr_ready(void) { const ColiCudaChainOps *t = cc_ops(); return t && t->size >= offsetof(ColiCudaChainOps, attn_wr) + sizeof t->attn_wr; }
+static inline int cc_attn_wr(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p, int ring) {
+    return cc_attn_wr_ready() ? cc_ops()->attn_wr(q, kc, vc, o, gate, snk, p, ring) : 0;
+}
+/* a float16 KV cache's ops (kvh): 0 from an older backend or HIP */
+static inline int cc_kvh_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, copy_regions_h) + sizeof t->copy_regions_h && t->kvh();
+}
+static inline int cc_attn_h(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *sel, const CcAttn *p) {
+    return cc_kvh_ready() ? cc_ops()->attn_h(q, kc, vc, o, gate, sel, p) : 0;
+}
+static inline int cc_attn_wh(CcBuf *q, CcBuf *kc, CcBuf *vc, CcBuf *o, CcBuf *gate, CcBuf *snk, const CcAttnW *p, int ring) {
+    return cc_kvh_ready() ? cc_ops()->attn_wh(q, kc, vc, o, gate, snk, p, ring) : 0;
+}
+static inline int cc_copy_regions_h(CcBuf *dst, CcBuf *src, const CcRegion *r, int n) {
+    return cc_kvh_ready() ? cc_ops()->copy_regions_h(dst, src, r, n) : 0;
+}
+static inline int cc_kv16_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, kv16) + sizeof t->kv16 && t->kv16 && t->kv16();
+}
+static inline int cc_rope_f16_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, rope_f16) + sizeof t->rope_f16 && t->rope_f16;
+}
+static inline int cc_rope_f16(CcBuf *x, CcBuf *v, CcBuf *cs, const CcRope *p, int seg) {
+    return cc_rope_f16_ready() ? cc_ops()->rope_f16(x, v, cs, p, seg) : 0;
+}
+static inline int cc_muse_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, muse) + sizeof t->muse && t->muse && t->muse();
+}
+static inline int cc_pick_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, pick) + sizeof t->pick && t->pick;
+}
+static inline int cc_pick(CcBuf *logits, CcBuf *out, int n) {
+    return cc_pick_ready() ? cc_ops()->pick(logits, out, n) : 0;
+}
+static inline int cc_pick_rows_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, pick_rows) + sizeof t->pick_rows && t->pick_rows;
+}
+static inline int cc_pick_rows(CcBuf *logits, size_t off, CcBuf *out, int n, int rows) {
+    return cc_pick_rows_ready() ? cc_ops()->pick_rows(logits, off, out, n, rows) : 0;
+}
+static inline int cc_matmul_rows_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, matmul_rows) + sizeof t->matmul_rows && t->matmul_rows;
+}
+static inline int cc_matmul_rows(ColiCudaTensor *w, CcBuf *ids, CcBuf *x, CcBuf *y, int n) {
+    return cc_matmul_rows_ready() ? cc_ops()->matmul_rows(w, ids, x, y, n) : 0;
+}
+static inline int cc_enc_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, enc_rel) + sizeof t->enc_rel && t->enc_rel;
+}
+static inline int cc_enc_norm(CcBuf *a, CcBuf *b, CcBuf *prm, CcBuf *y, const CcEncNorm *p) {
+    return cc_enc_ready() ? cc_ops()->enc_norm(a, b, prm, y, p) : 0;
+}
+static inline int cc_enc_bias(CcBuf *y, CcBuf *prm, const CcEncBias *p) { return cc_enc_ready() ? cc_ops()->enc_bias(y, prm, p) : 0; }
+static inline int cc_enc_geglu(CcBuf *a, CcBuf *prm, CcBuf *y, const CcEncGeglu *p) {
+    return cc_enc_ready() ? cc_ops()->enc_geglu(a, prm, y, p) : 0;
+}
+static inline int cc_enc_rope(CcBuf *x, CcBuf *tab, CcBuf *pos, const CcEncRope *p) {
+    return cc_enc_ready() ? cc_ops()->enc_rope(x, tab, pos, p) : 0;
+}
+static inline int cc_enc_addrow(CcBuf *y, CcBuf *tab, CcBuf *idx, const CcEncAddRow *p) {
+    return cc_enc_ready() ? cc_ops()->enc_addrow(y, tab, idx, p) : 0;
+}
+static inline int cc_enc_attn(CcBuf *qkv, CcBuf *c2p, CcBuf *p2c, CcBuf *o, CcBuf *rng, CcBuf *ridx, CcBuf *pos, const CcEncAttn *p) {
+    return cc_enc_ready() ? cc_ops()->enc_attn(qkv, c2p, p2c, o, rng, ridx, pos, p) : 0;
+}
+static inline int cc_enc_rel(CcBuf *x, CcBuf *pt, CcBuf *y, const CcEncRel *p) { return cc_enc_ready() ? cc_ops()->enc_rel(x, pt, y, p) : 0; }
+static inline int cc_lfm3_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, lfm3) + sizeof t->lfm3 && t->lfm3 && t->lfm3();
+}
+/* 1 done, -1 not in this backend (the caller's norm, add and norm), 0 a failure */
+static inline int cc_addnorm(CcBuf *x, CcBuf *t, CcBuf *w, CcBuf *y, const CcAddNorm *p) {
+    const ColiCudaChainOps *o = cc_ops();
+    if (!(o && o->size >= offsetof(ColiCudaChainOps, addnorm) + sizeof o->addnorm && o->addnorm)) return -1;
+    return o->addnorm(x, t, w, y, p);
+}
+static inline int cc_matmul_glu(ColiCudaTensor *wg, ColiCudaTensor *wu, CcBuf *x, CcBuf *y, int S) {
+    const ColiCudaChainOps *t = cc_ops();
+    if (!(t && t->size >= offsetof(ColiCudaChainOps, matmul_glu) + sizeof t->matmul_glu && t->matmul_glu)) return -1;
+    return t->matmul_glu(wg, wu, x, y, S);
+}
+static inline int cc_fetch_at_ready(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, fetch_done_at) + sizeof t->fetch_done_at && t->fetch_at && t->fetch_wait_at && t->fetch_done_at;
+}
+static inline int cc_fetch_at(CcBuf *dst, const CcFetch *r, int n, int bank) { return cc_fetch_at_ready() ? cc_ops()->fetch_at(dst, r, n, bank) : 0; }
+/* the backend's CC_INK2_* bits; 0 from one before them */
+static inline int cc_ink2_caps(void) {
+    const ColiCudaChainOps *t = cc_ops();
+    return t && t->size >= offsetof(ColiCudaChainOps, ink2_caps) + sizeof t->ink2_caps && t->ink2_caps ? t->ink2_caps() : 0;
+}
+static inline int cc_fetch_wait_at(int bank) { return cc_fetch_at_ready() ? cc_ops()->fetch_wait_at(bank) : 0; }
+static inline int cc_fetch_done_at(int bank) { return cc_fetch_at_ready() ? cc_ops()->fetch_done_at(bank) : 0; }
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+#endif

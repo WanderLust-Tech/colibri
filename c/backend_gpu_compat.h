@@ -24,6 +24,26 @@
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+/* The DeepSeek V4 backend was written against CUDA's spellings. Map the two
+ * bf16 names it uses that HIP spells differently, as llama.cpp's
+ * ggml/src/ggml-cuda/vendors/hip.h does. The fp8 names live in
+ * backend_cuda_dsv4_quant.cuh: <hip/hip_fp8.h> has the OCP e4m3 type only
+ * from ROCm 6.3, and backend_cuda.cu (built by the ROCm 6.2 CI image) does
+ * not need it. */
+typedef __hip_bfloat16 __nv_bfloat16;
+typedef __hip_bfloat162 __nv_bfloat162;
+/* HIP's __shfl_*_sync takes a 64-bit mask, which is not the CUDA contract the
+ * backend is written to. Map to the legacy intrinsics (the mask is dropped),
+ * as llama.cpp's vendors/hip.h does. Without a width the group is 32 lanes,
+ * CUDA's warp, not warpSize: the callers' lanes are threadIdx.x & 31, so a
+ * wave64 target (GCN, CDNA) shuffles in 32-lane groups too, like bd_shfl and
+ * cc_shfl_xor. Run on RDNA only. */
+#define COLI_SHFL_WIDTH(_0, width, ...) width
+#define __shfl_sync(mask, var, lane, ...)      __shfl(var, lane, COLI_SHFL_WIDTH(_0, ##__VA_ARGS__, 32))
+#define __shfl_up_sync(mask, var, lane, ...)   __shfl_up(var, lane, COLI_SHFL_WIDTH(_0, ##__VA_ARGS__, 32))
+#define __shfl_down_sync(mask, var, lane, ...) __shfl_down(var, lane, COLI_SHFL_WIDTH(_0, ##__VA_ARGS__, 32))
+#define __shfl_xor_sync(mask, var, lane, ...)  __shfl_xor(var, lane, COLI_SHFL_WIDTH(_0, ##__VA_ARGS__, 32))
 /* rocWMMA requires matrix cores (MFMA: gfx908+, WMMA: gfx11xx); on other
  * targets (gfx906, gfx101x, gfx103x) its headers static_assert. The Makefile
  * passes -DCOLI_HIP_NO_WMMA for those archs: the WMMA kernel bodies stay
@@ -61,17 +81,43 @@ namespace nvcuda { namespace wmma = ::rocwmma; }
 #define cudaError_t              hipError_t
 #define cudaSuccess              hipSuccess
 #define cudaErrorMemoryAllocation hipErrorOutOfMemory
+#define cudaErrorNoKernelImageForDevice hipErrorNoBinaryForGpu
+#define cudaErrorInvalidDeviceFunction hipErrorInvalidDeviceFunction
+#define cudaErrorLaunchFailure hipErrorLaunchFailure
+#define cudaErrorLaunchOutOfResources hipErrorLaunchOutOfResources
+#define cudaDeviceReset hipDeviceReset
+typedef hipFuncAttributes cudaFuncAttributes;
+#define cudaFuncGetAttributes hipFuncGetAttributes
+#define cudaDevAttrCooperativeLaunch hipDeviceAttributeCooperativeLaunch
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaLaunchCooperativeKernel hipLaunchCooperativeKernel
+#define cudaErrorNotReady        hipErrorNotReady
 #define cudaGetErrorString       hipGetErrorString
 #define cudaGetLastError         hipGetLastError
+#define cudaPeekAtLastError      hipPeekAtLastError   /* cu_xb.cu */
 #define cudaSetDevice            hipSetDevice
 #define cudaGetDeviceCount       hipGetDeviceCount
 #define cudaDeviceProp           hipDeviceProp_t
 #define cudaGetDeviceProperties  hipGetDeviceProperties
+#define cudaDevAttrIntegrated    hipDeviceAttributeIntegrated
+#define cudaDevAttrPageableMemoryAccessUsesHostPageTables hipDeviceAttributePageableMemoryAccessUsesHostPageTables
+#define cudaDeviceGetAttribute  hipDeviceGetAttribute
+#define cudaDeviceCanAccessPeer  hipDeviceCanAccessPeer
+#define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define cudaErrorHostMemoryAlreadyRegistered hipErrorHostMemoryAlreadyRegistered
+#define cudaErrorPeerAccessAlreadyEnabled  hipErrorPeerAccessAlreadyEnabled
+#define cudaProfilerStart        hipProfilerStart
+#define cudaProfilerStop         hipProfilerStop
 #define cudaMalloc               hipMalloc
 #define cudaMallocManaged        hipMallocManaged
 #define cudaFree                 hipFree
 #define cudaMemcpy               hipMemcpy
 #define cudaMemcpy2D             hipMemcpy2D
+#define cudaMemcpy2DAsync        hipMemcpy2DAsync
+#define cudaFuncSetAttribute(func, attr, value) \
+    hipFuncSetAttribute((const void *)(func), (hipFuncAttribute)(attr), (int)(value))
+#define cudaGetDevice            hipGetDevice
+#define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 #define cudaMemcpyAsync          hipMemcpyAsync
 #define cudaMemcpyToSymbol       hipMemcpyToSymbol   /* fmt=6 E8 codebook upload */
 #define cudaMemcpyHostToDevice   hipMemcpyHostToDevice
@@ -84,6 +130,22 @@ namespace nvcuda { namespace wmma = ::rocwmma; }
 #define cudaStreamDestroy        hipStreamDestroy
 #define cudaStreamSynchronize    hipStreamSynchronize
 #define cudaStreamWaitEvent      hipStreamWaitEvent
+#define cudaGraph_t              hipGraph_t
+#define cudaGraphExec_t          hipGraphExec_t
+#define cudaGraphDestroy         hipGraphDestroy
+#define cudaGraphExecDestroy     hipGraphExecDestroy
+#define cudaGraphLaunch          hipGraphLaunch
+#define cudaStreamBeginCapture   hipStreamBeginCapture
+#define cudaStreamEndCapture     hipStreamEndCapture
+#define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+/* CUDA's cudaGraphInstantiate(exec, graph, flags) has no 1:1 HIP twin before
+ * HIP 7; hipGraphInstantiate takes error-node/log arguments instead. */
+static inline hipError_t cudaGraphInstantiate(hipGraphExec_t *exec,
+                                              hipGraph_t graph,
+                                              unsigned long long flags) {
+    (void)flags;
+    return hipGraphInstantiate(exec, graph, nullptr, nullptr, 0);
+}
 #define cudaDeviceSynchronize    hipDeviceSynchronize
 #define cudaEvent_t              hipEvent_t
 #define cudaEventCreate          hipEventCreate
@@ -92,13 +154,27 @@ namespace nvcuda { namespace wmma = ::rocwmma; }
 #define cudaEventDestroy         hipEventDestroy
 #define cudaEventRecord          hipEventRecord
 #define cudaEventSynchronize     hipEventSynchronize
+#define cudaEventQuery           hipEventQuery
+#define cudaStreamQuery          hipStreamQuery       /* cuda_chain.cu: a signal's flush */
 #define cudaEventElapsedTime     hipEventElapsedTime
 #define cudaMallocHost           hipHostMalloc
 #define cudaFreeHost             hipHostFree
+#define cudaHostAlloc            hipHostMalloc        /* cuda_chain.cu: mapped host buffers */
+#define cudaHostAllocMapped      hipHostMallocMapped
+#define cudaHostAllocPortable    hipHostMallocPortable   /* cu_xb.cu: the tier's host pool and scratch */
+#define cudaHostAllocWriteCombined hipHostMallocWriteCombined
+#define cudaHostGetDevicePointer hipHostGetDevicePointer
+#define cudaHostRegister         hipHostRegister      /* the qwen36 tier's host pool */
+#define cudaHostRegisterPortable hipHostRegisterPortable
+#define cudaHostUnregister       hipHostUnregister
+#define cudaMemcpyDefault        hipMemcpyDefault
+#define cudaMemcpyHostToHost     hipMemcpyHostToHost
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define cudaMemcpyPeer           hipMemcpyPeer
 #define cudaMemcpyPeerAsync      hipMemcpyPeerAsync
 #define cudaMemsetAsync          hipMemsetAsync
+#define cudaMallocAsync          hipMallocAsync      /* gemv_i8_w4's split-K partials */
+#define cudaFreeAsync            hipFreeAsync
 #define cudaMemset               hipMemset
 /* Device-side kernel abort (weight_at's undecodable-format backstop,
  * backend_cuda.cu). CUDA's __trap() intrinsic has no HIP name-twin; HIP
@@ -116,6 +192,61 @@ namespace nvcuda { namespace wmma = ::rocwmma; }
  * needs sm_75+, which the host checks at run time from the device's compute
  * capability (see the grouped_s4_wmma dispatch in backend_cuda.cu). */
 #define COLI_GPU_HAS_S4_WMMA     1
+#endif
+
+/* Programmatic dependent launch (sm_90 and later). A kernel coli_launch starts may be set up
+ * while the kernel before it on the stream ends, so the launch's latency and the last blocks'
+ * tail no longer leave the device idle between them. Such a kernel's first statement is
+ * COLI_PDL_WAIT(): it returns once every grid before it on the stream has completed and its
+ * writes are visible, so the kernel reads and writes what it would after a plain launch.
+ * Elsewhere (HIP, older archs, COLI_CUDA_PDL=0, a fatbin whose code for this device was built
+ * below sm_90, the legacy default stream) coli_launch is a plain launch and the wait returns at
+ * once. */
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIP__) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define COLI_PDL_WAIT()          asm volatile("griddepcontrol.wait;" ::: "memory")
+#else
+#define COLI_PDL_WAIT()          ((void)0)
+#endif
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIP__)
+#include <cstdlib>
+__global__ static void coli_pdl_probe_k(void) {}
+/* per translation unit (each .cu's fatbin is probed): on where the device is sm_90 or later
+ * and this unit's code for it was compiled from sm_90 or later (code JIT-compiled from older
+ * PTX has no wait in its kernels) */
+static inline int coli_pdl_on(void) {
+    static int env = -1;
+    static signed char on[16];
+    static unsigned char known[16];
+    if (env < 0) { const char *e = std::getenv("COLI_CUDA_PDL"); env = !(e && *e == '0'); }
+    if (!env) return 0;
+    int d = 0;
+    if (cudaGetDevice(&d) != cudaSuccess || d < 0 || d >= 16) { (void)cudaGetLastError(); return 0; }
+    if (!known[d]) {
+        int major = 0;
+        cudaFuncAttributes fa;
+        on[d] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, d) == cudaSuccess && major >= 9 &&
+                cudaFuncGetAttributes(&fa, coli_pdl_probe_k) == cudaSuccess && fa.ptxVersion >= 90;
+        (void)cudaGetLastError();
+        known[d] = 1;
+    }
+    return on[d];
+}
+template <typename... P, typename... A>
+static inline void coli_launch(void (*k)(P...), dim3 g, dim3 b, size_t sm, cudaStream_t st, A... a) {
+    if (st && coli_pdl_on()) {   /* not the legacy default stream, which joins the others */
+        cudaLaunchAttribute at[1];
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        at[0].val.programmaticStreamSerializationAllowed = 1;
+        cudaLaunchConfig_t cf = {};
+        cf.gridDim = g; cf.blockDim = b; cf.dynamicSmemBytes = sm; cf.stream = st; cf.attrs = at; cf.numAttrs = 1;
+        (void)cudaLaunchKernelEx(&cf, k, a...);   /* an error stays for the caller's cudaGetLastError */
+        return;
+    }
+    k<<<g, b, sm, st>>>(a...);
+}
+#else
+template <typename... P, typename... A>
+static inline void coli_launch(void (*k)(P...), dim3 g, dim3 b, size_t sm, cudaStream_t st, A... a) { k<<<g, b, sm, st>>>(a...); }
 #endif
 
 #endif /* COLIBRI_BACKEND_GPU_COMPAT_H */
