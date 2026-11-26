@@ -342,3 +342,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .settings-chip[aria-pressed="true"] { color: var(--primary); opacity: 1; background: color-mix(in srgb, var(--primary) 14%, transparent); }
 .model-details { color: var(--muted-foreground); font-size: 11px; opacity: .85; }
 .model-row.missing { opacity: .6; }
+.tool-card { margin: 10px 0; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); font-size: 12px; line-height: 1.5; }
+.tool-card.error, .tool-card.declined, .tool-card.stopped, .tool-card.expired { border-color: color-mix(in srgb, var(--destructive) 35%, var(--border)); }
+.tool-card.approval.waiting, .tool-card.approval.sending { border-color: rgba(230,170,60,.5); background: rgba(230,170,60,.06); }
+.tool-card.approval.allowed { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
+.tool-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tool-head svg { flex: none; color: var(--muted-foreground); }
+.tool-head strong { font-weight: 600; flex: none; }
+.tool-args { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: 11px; background: none; padding: 0; }
+.tool-state { margin-left: auto; flex: none; color: var(--muted-foreground); font-size: 11px; }
+.tool-summary { margin: 6px 0 0; overflow-wrap: anywhere; }
+.tool-more { margin-top: 6px; }
+.tool-more summary { cursor: pointer; color: var(--muted-foreground); font-size: 11px; }
+.tool-label { margin-top: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted-foreground); }
+.tool-pre { margin: 3px 0 0; max-height: 260px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--input); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.tool-countdown { margin-left: auto; font-size: 11px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.tool-problem { margin: 8px 0 0; font-size: 11px; color: var(--destructive); }
+.tool-note { margin: 6px 0 0; font-size: 11px; color: var(--muted-foreground); }

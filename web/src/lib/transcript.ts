@@ -1,11 +1,40 @@
 import type { ChatMessage } from "./api"
 import type { ReplyStats } from "./replyStats"
+import { addText, foldToolEvent, markSending, resolveApproval, settleParts, type AnswerResult, type ToolEvent } from "./tools"
 
 /* Stream a delta into one bubble of the transcript. Both a fresh answer and a
    continued turn go through here; the only difference is which bubble. */
 export function appendDelta(messages: ChatMessage[], targetId: string, field: "content" | "reasoning", delta: string): ChatMessage[] {
-  return messages.map((item) =>
-    item.id === targetId ? { ...item, [field]: (item[field] ?? "") + delta } : item)
+  return messages.map((item) => {
+    if (item.id !== targetId) return item
+    const grown = { ...item, [field]: (item[field] ?? "") + delta }
+    /* A turn that has used tools keeps its text in order with the calls; `content` still holds all of it. */
+    return field === "content" && item.parts ? { ...grown, parts: addText(item.parts, delta) } : grown
+  })
+}
+
+const edit = (messages: ChatMessage[], targetId: string, change: (item: ChatMessage) => ChatMessage): ChatMessage[] =>
+  messages.map((item) => item.id === targetId ? change(item) : item)
+
+/* One thing the router's tools did, into the turn being streamed. The first one turns the text so far into the first part. */
+export function applyToolEvent(messages: ChatMessage[], targetId: string, event: ToolEvent, now = Date.now()): ChatMessage[] {
+  return edit(messages, targetId, (item) => {
+    const before = item.parts ?? (item.content ? addText([], item.content) : [])
+    return { ...item, parts: foldToolEvent(before, event, now) }
+  })
+}
+
+/* The reply is over, however it ended: no call stays "running" and no question stays open. */
+export function settleTurn(messages: ChatMessage[], targetId: string): ChatMessage[] {
+  return edit(messages, targetId, (item) => item.parts ? { ...item, parts: settleParts(item.parts) } : item)
+}
+
+export function sendingApproval(messages: ChatMessage[], targetId: string, approvalId: string, always: boolean): ChatMessage[] {
+  return edit(messages, targetId, (item) => item.parts ? { ...item, parts: markSending(item.parts, approvalId, always) } : item)
+}
+
+export function answeredApproval(messages: ChatMessage[], targetId: string, approvalId: string, result: AnswerResult, allow: boolean): ChatMessage[] {
+  return edit(messages, targetId, (item) => item.parts ? { ...item, parts: resolveApproval(item.parts, approvalId, result, allow) } : item)
 }
 
 /* Record how the generation streaming into `targetId` ended. A null finish is
@@ -27,7 +56,8 @@ export function setStats(messages: ChatMessage[], targetId: string, stats: Reply
    it finished. "stop" means the model closed the turn,
    and continuing it only makes the model re-emit its stop and add nothing. */
 export function continuable(message: ChatMessage): boolean {
-  return message.role === "assistant" && !!message.content.trim()
+  /* A turn with tool calls in it is not continued: what would follow is a new answer, not the rest of this text. */
+  return message.role === "assistant" && !!message.content.trim() && !message.parts?.length
     && ["length", "aborted", "error", "incomplete"].includes(message.finish ?? "")
 }
 

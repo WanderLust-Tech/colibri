@@ -2,6 +2,7 @@ import { PREFER_ASYNC, runBackground, type Job } from "./jobs"
 import type { ModelDetails } from "./modelDetails"
 import type { LogLine, LogRead } from "./logTail"
 import type { ReplyStats } from "./replyStats"
+import { NO_TOOLS, parseToolsListing, toolEventOf, type AnswerResult, type ToolEvent, type ToolsListing, type TurnPart } from "./tools"
 
 export type ChatRole = "system" | "user" | "assistant"
 
@@ -27,6 +28,10 @@ export interface ChatMessage {
   /* What an assistant turn cost and where it ran: tokens, speed, the share of the prompt that was not read again, and
      which model answered. Set when the reply finishes; kept with the transcript, never sent to the server. */
   stats?: ReplyStats
+  /* What happened inside an assistant turn that used the router's built-in tools, in order: the text pieces, the calls and
+     the questions put to the person (lib/tools.ts). Set only when a tool was used; `content` still holds all of the text, so
+     everything that reads a turn as text (copy, history, resend) is unchanged. Never sent to the server. */
+  parts?: TurnPart[]
   /* Both turns of a text-to-image exchange, the prompt and its picture, carry
      mode "image". They stay in the conversation on screen but are never sent to
      a text model, which would read a question followed by an empty answer. */
@@ -788,9 +793,13 @@ export interface StreamChatOptions {
   maxTokens: number
   enableThinking: boolean
   cacheSlot?: number
+  /* Let the router run its built-in tools while it answers (`colibri_tools: true`, docs/builtin-tools.md). The model's own
+     tool calls are not forwarded; what the router does arrives through onTool. */
+  tools?: boolean
   signal: AbortSignal
   onDelta: (text: string) => void
   onReasoning?: (text: string) => void
+  onTool?: (event: ToolEvent) => void
 }
 
 export async function streamChat(options: StreamChatOptions): Promise<StreamChatResult> {
@@ -813,6 +822,7 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
       max_completion_tokens: options.maxTokens,
       enable_thinking: options.enableThinking,
       ...(options.cacheSlot === undefined ? {} : { cache_slot: options.cacheSlot }),
+      ...(options.tools ? { colibri_tools: true } : {}),
       stream: true,
       stream_options: { include_usage: true },
     }),
@@ -834,6 +844,7 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
       error?: { message?: unknown } | string
       choices?: Array<{ delta?: { content?: string; reasoning_content?: string }; finish_reason?: string | null }>
       usage?: TokenUsage | null
+      colibri?: unknown
     }
     /* An error frame in the middle of the answer is the server saying why it stopped. */
     if (event.error) {
@@ -841,6 +852,9 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
       throw new Error(typeof said === "string" && said.trim() ? said : "The server reported an error while answering.")
     }
     if (!answeredBy && typeof event.model === "string" && event.model) answeredBy = event.model
+    /* A chunk with no choices and a `colibri` object is the router telling what its tools are doing. */
+    const tool = event.colibri === undefined ? null : toolEventOf(event.colibri)
+    if (tool) options.onTool?.(tool)
     const choice = event.choices?.[0]
     const text = choice?.delta?.content
     if (text) options.onDelta(text)
@@ -868,6 +882,29 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
     requestId: response.headers.get("x-request-id"),
     queueWaitMs: parsedQueueWait !== null && Number.isFinite(parsedQueueWait) ? parsedQueueWait : null,
   }
+}
+
+/* The router's built-in tools and the policy that turns them on (GET /v1/tools). A router that predates them, and a plain
+   `coli serve`, answer 404: no tools. */
+export async function listTools(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ToolsListing> {
+  const response = await fetch(endpoint(baseUrl, "tools"), { headers: headers(apiKey), signal })
+  if (response.status === 404) return NO_TOOLS
+  if (!response.ok) throw new Error(await responseError(response))
+  return parseToolsListing(await response.json())
+}
+
+/* A person's answer to a call the router is waiting on (POST /v1/tools/pending). 404 is not an error to show as one: the
+   question was answered already, or timed out, and the router has forgotten it. Anything else that fails throws. */
+export async function answerApproval(
+  baseUrl: string, apiKey: string, id: string, allow: boolean, always: boolean, signal?: AbortSignal,
+): Promise<Exclude<AnswerResult, "failed">> {
+  const response = await fetch(endpoint(baseUrl, "tools/pending"), {
+    method: "POST", headers: headers(apiKey), signal,
+    body: JSON.stringify({ id, allow, ...(always ? { always: true } : {}) }),
+  })
+  if (response.status === 404) return "gone"
+  if (!response.ok) throw new Error(await responseError(response))
+  return "answered"
 }
 
 /* System One mode: the model does not generate, it gives a probability to

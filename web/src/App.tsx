@@ -24,7 +24,7 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar, FileInput, CloudUpload} from "lucide-react"
+  Zap, Wrench, ImagePlus, Pencil, GitBranch, Minimize2, Lightbulb, Camera, Grid3x3, Palette, Music, Waves, Guitar, FileInput, CloudUpload} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -32,7 +32,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { dashboardTags, newChatTag } from "@/lib/tags"
 import {
-  editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, makesEmbeddings, ranksDocuments, setClientTags, streamChat,
+  answerApproval, editsImages, generateImage, generatesImages, generatesMusic, getHealth, listModelInfo, listTools, makesEmbeddings, ranksDocuments, setClientTags, streamChat,
   type ChatMessage, type GeneratedImage, type HealthResponse, type ModelInfo, type MusicLimits, type PresetInfo, type StreamChatResult,
 } from "@/lib/api"
 import { controlDefaults } from "@/lib/presets"
@@ -54,7 +54,8 @@ import { Markdown } from "./components/Markdown"
 import { NavigationDock, type View } from "./components/NavigationDock"
 import { Profiling } from "./Profiling"
 import { persistPublicSettings, stored, takeKeyFromLocation } from "@/lib/storage"
-import { appendDelta, continuable, continuation, setFinish, setStats } from "@/lib/transcript"
+import { answeredApproval, appendDelta, applyToolEvent, continuable, continuation, sendingApproval, setFinish, setStats, settleTurn } from "@/lib/transcript"
+import { NO_TOOLS, hasTools, type ToolsListing } from "@/lib/tools"
 import { buildReplyStats, replyParts } from "@/lib/replyStats"
 import { explainError } from "@/lib/explainError"
 import { cn } from "@/lib/utils"
@@ -62,6 +63,7 @@ import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
 import VoicesPanel from "@/components/VoicesPanel"
 import VoiceControls from "@/components/VoiceControls"
+import { ToolTurn, ToolsPolicyNote } from "@/components/ToolParts"
 import { useVoice } from "@/lib/useVoice"
 import { pickVoiceModels } from "@/lib/voice"
 import LibraryPanel from "@/components/LibraryPanel"
@@ -114,6 +116,10 @@ export default function App() {
   const [maxTokens, setMaxTokens] = useState(4096)
   const [thinking, setThinking] = useState(false)
   const [cacheSlot, setCacheSlot] = useState(0)
+  /* The router's built-in tools (docs/builtin-tools.md): what GET /v1/tools says is on, and whether the person has switched them on
+     for the chat. Off by default and offered only when the router reports at least one tool on. */
+  const [toolsListing, setToolsListing] = useState<ToolsListing>(NO_TOOLS)
+  const [toolsOn, setToolsOn] = useState(() => stored(localStorage, "colibri.tools", "") === "1")
   const [conversations, setConversations] = useState<Record<number, ChatMessage[]>>({ 0: [] })
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [healthError, setHealthError] = useState("")
@@ -177,6 +183,10 @@ export default function App() {
   const capacity = health?.scheduler?.capacity || kvSlots
   const failures = health?.scheduler ? health.scheduler.rejected + health.scheduler.timed_out + health.scheduler.cancelled : 0
   const imageMode = imageModels.includes(model)
+  /* Tools are for conversations with a chat model: a picture, song, embedding or decision model has none to offer them to. */
+  const chatInfo = modelInfos.find((info) => info.id === model)
+  const toolsAvailable = hasTools(toolsListing) && !imageMode && !musicModels[model] && (!chatInfo || isChatModel(chatInfo))
+  const toolsActive = toolsAvailable && toolsOn
   const editLimit = imageMode ? editLimits[model] : undefined
   const canEdit = Boolean(editLimit)
   const attached = canEdit ? pictures : []
@@ -201,6 +211,9 @@ export default function App() {
     try { localStorage.setItem("colibri.background", background ? "1" : "") } catch { /* restricted storage mode */ }
   }, [background])
   useEffect(() => {
+    try { localStorage.setItem("colibri.tools", toolsOn ? "1" : "") } catch { /* restricted storage mode */ }
+  }, [toolsOn])
+  useEffect(() => {
     try { localStorage.setItem("colibri.imageSize", sizeKey(imageSize)); localStorage.setItem("colibri.imageSteps", String(imageSteps)) } catch { /* restricted storage mode */ }
   }, [imageSize, imageSteps])
 
@@ -209,6 +222,7 @@ export default function App() {
     setConnected(false)
     setHealth(null)
     setHealthError("")
+    setToolsListing(NO_TOOLS)
   }, [baseUrl, apiKey])
 
   // EFFECT #3
@@ -251,6 +265,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, model, presetInfos])
 
+  /* The policy is read by the router on every request, so tools can be turned on (or off) on its PC while this page is open:
+     ask again whenever the chat or the settings come into view, and on connecting. No tools, or a router that cannot say, is none. */
+  useEffect(() => {
+    if (!connected || (view !== "chat" && view !== "settings")) return
+    const controller = new AbortController()
+    listTools(baseUrl, apiKey, controller.signal).then(setToolsListing, () => { if (!controller.signal.aborted) setToolsListing(NO_TOOLS) })
+    return () => controller.abort()
+  }, [apiKey, baseUrl, connected, view])
+
   // EFFECT #5
   useEffect(() => {
     if (cacheSlot >= kvSlots) setCacheSlot(0)
@@ -280,6 +303,7 @@ export default function App() {
       setMusicModels(Object.fromEntries(info.filter(generatesMusic).map((item) => [item.id, item.music ?? DEFAULT_MUSIC_LIMITS] as const)))
       if (found.length && !found.includes(model)) setModel(found[0])
       setConnected(true)
+      listTools(baseUrl, apiKey, controller.signal).then(setToolsListing, () => { if (!controller.signal.aborted) setToolsListing(NO_TOOLS) })
       try {
         setHealth(await getHealth(baseUrl, apiKey, controller.signal))
         setHealthError("")
@@ -362,6 +386,12 @@ export default function App() {
     let firstToken = true
     let firstTokenMs: number | null = null
     let count = 0
+    /* Time the router spent on tools (a call, a question to the person, the model reading what came back) is not decoding:
+       it is left out of the speed figure, from the first tool event until the next word. */
+    let idleFrom: number | null = null
+    let idleMs = 0
+    const resume = () => { if (idleFrom !== null) { idleMs += performance.now() - idleFrom; idleFrom = null } }
+    let usedTools = false
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -374,19 +404,27 @@ export default function App() {
         maxTokens,
         enableThinking: thinking,
         cacheSlot: supportsCacheSlots(health) ? cacheSlot : undefined,
+        tools: toolsActive,
         signal: controller.signal,
+        onTool: (event) => {
+          usedTools = true
+          if (idleFrom === null) idleFrom = performance.now()
+          updateMessages((current) => applyToolEvent(current, targetId, event))
+        },
         /* Reasoning tokens are tokens: they count toward the rate, and the
            first one is the real time-to-first-token. The answer's first token
            arrives much later on a reasoning model. */
         onReasoning: (delta) => {
+          resume()
           if (firstToken) { firstTokenMs = performance.now() - t0; setTtft(firstTokenMs); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
           count++
           setTokenCount(count)
-          const since = (performance.now() - decodeStart) / 1000
+          const since = (performance.now() - decodeStart - idleMs) / 1000
           if (count > 1 && since > 0.2) setTokPerSec((count - 1) / since)
           updateMessages((current) => appendDelta(current, targetId, "reasoning", delta))
         },
         onDelta: (delta) => {
+          resume()
           if (firstToken) { firstTokenMs = performance.now() - t0; setTtft(firstTokenMs); setStreamStart(performance.now()); decodeStart = performance.now(); firstToken = false }
           count++
           setTokenCount(count)
@@ -394,14 +432,15 @@ export default function App() {
              from the request, because the prefill wait belongs to TTFT and
              averaging it in makes the number crawl upward for the whole turn
              instead of showing what the engine is doing now. */
-          const since = (performance.now() - decodeStart) / 1000
+          const since = (performance.now() - decodeStart - idleMs) / 1000
           if (count > 1 && since > 0.2) setTokPerSec((count - 1) / since)
           updateMessages((current) => appendDelta(current, targetId, "content", delta))
         },
       })
       /* The turn's own figure keeps the same meaning as the live one, so the
          badge does not jump to a different number the moment it stops moving. */
-      const decodeElapsed = (performance.now() - (decodeStart || t0)) / 1000
+      resume()
+      const decodeElapsed = (performance.now() - (decodeStart || t0) - idleMs) / 1000
       if (count > 1 && decodeElapsed > 0) setTokPerSec((count - 1) / decodeElapsed)
       if (result.usage) setTotalTokens(prev => ({
         prompt: prev.prompt + (result.usage?.prompt_tokens || 0),
@@ -417,9 +456,10 @@ export default function App() {
         tokPerSec: count > 1 && decodeElapsed > 0 ? (count - 1) / decodeElapsed : null,
         ttftMs: firstTokenMs,
         elapsedMs: performance.now() - t0,
-        contextLength: (result.model ? contextLengths[result.model] : undefined) ?? contextLengths[model],
+        /* With tools the usage is summed over every round the router asked the model, so it is not what filled the window. */
+        contextLength: usedTools ? undefined : (result.model ? contextLengths[result.model] : undefined) ?? contextLengths[model],
       })
-      updateMessages((current) => setStats(setFinish(current, targetId, result.finishReason), targetId, stats))
+      updateMessages((current) => settleTurn(setStats(setFinish(current, targetId, result.finishReason), targetId, stats), targetId))
       setConnected(true)
     } catch (cause) {
       /* Drop the target bubble only if it is empty -- a first turn that never got
@@ -428,8 +468,8 @@ export default function App() {
          `|| item.reasoning` keeps a turn stopped while it was still thinking. */
       const finish = controller.signal.aborted ? "aborted" : "error"
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "status.generationFailed")
-      updateMessages((current) => setFinish(current, targetId, finish)
-        .filter((item) => item.id !== targetId || item.content || item.reasoning))
+      updateMessages((current) => settleTurn(setFinish(current, targetId, finish), targetId)
+        .filter((item) => item.id !== targetId || item.content || item.reasoning || item.parts?.length))
     } finally {
       abortRef.current = null
       setLoading(false)
@@ -449,6 +489,15 @@ export default function App() {
     }
     updateMessages([...history, assistant])
     await runStream(history, assistant.id)
+  }
+
+  /* A person's answer to a call the router waits on. The stream says how it ended (approval_answered); this only keeps the buttons
+     off while the answer is on its way, and says so when the router no longer had the question (404). */
+  const answerTool = async (messageId: string, approvalId: string, allow: boolean, always: boolean) => {
+    updateMessages((current) => sendingApproval(current, messageId, approvalId, always))
+    let result: "answered" | "gone" | "failed" = "failed"
+    try { result = await answerApproval(baseUrl, apiKey, approvalId, allow, always) } catch { /* shown on the card, which can be answered again */ }
+    updateMessages((current) => answeredApproval(current, messageId, approvalId, result, allow))
   }
 
   /* Continue the trailing assistant turn instead of opening a new one. Offered
@@ -811,7 +860,7 @@ export default function App() {
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />
             {inferenceControls}
           </section>}
-          {activePage === "system" && <section className="settings-card">{runtimeControls}{metrics}</section>}
+          {activePage === "system" && <section className="settings-card">{runtimeControls}{metrics}<ToolsPolicyNote listing={toolsListing} /></section>}
         </div>
       </section> : view === "brain" ? <BrainWorkspace baseUrl={baseUrl} apiKey={apiKey} connected={connected} />
       : view === "compare" ? <Compare baseUrl={baseUrl} apiKey={apiKey} connected={connected} models={chatModelInfos} settings={{ temperature, maxTokens, thinking }} />
@@ -827,7 +876,7 @@ export default function App() {
                   <summary>{t("sidebar.reasoning")}</summary>
                   <div className="reasoning-body">{item.reasoning}</div>
                 </details>
-              : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
+              : null}{item.role === "assistant" && item.parts?.length ? <ToolTurn parts={item.parts} live={loading && index === messages.length - 1} onAnswer={(approvalId, allow, always) => void answerTool(item.id, approvalId, allow, always)} /> : item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
             {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}{!loading && !imageMode && isPlainTurn(item) && <button className="icon-action" aria-label={t("ui.branch")} title={t("ui.branch")} onClick={() => branchFrom(index)}><GitBranch /></button>}{index === messages.length - 1 && !loading && !imageMode && isPlainTurn(item) && <><button className="icon-action" aria-label={t("ui.rewriteShorter")} title={t("ui.rewriteShorter")} onClick={() => rewrite("shorter")}><Minimize2 /></button><button className="icon-action" aria-label={t("ui.rewriteSimpler")} title={t("ui.rewriteSimpler")} onClick={() => rewrite("simpler")}><Lightbulb /></button></>}</div>}
             {item.role === "user" && !loading && !imageMode && isPlainTurn(item) && <div className="message-actions"><button className="icon-action" aria-label={t("ui.edit")} title={t("ui.edit")} onClick={() => editMessage(index)}><Pencil /></button></div>}
             {item.role === "assistant" && item.stats && (() => { const parts = replyParts(item.stats, t); return parts.length ? <div className="reply-stats" title={t("reply.help")}>{parts.join(" · ")}</div> : null })()}
@@ -895,6 +944,7 @@ export default function App() {
               <button type="button" className="attach-chip" aria-label={t("ui.attachImage")} title={t("ui.attachImage")}
                 onClick={() => fileRef.current?.click()}><ImagePlus /></button>
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
+              {toolsAvailable && <button type="button" className="reasoning-chip" aria-pressed={toolsOn} title={t("tools.chipHelp")} onClick={() => setToolsOn(value => !value)}><Wrench />{t("tools.chip")}</button>}
               {voice.available && <VoiceControls state={voice.state} level={voice.level} replies={speakReplies} onReplies={() => { setSpeakReplies((value) => !value); voice.stopSpeaking() }}
                 handsFree={handsFree} onHandsFree={() => { if (handsFree) { setHandsFree(false); voice.cancel() } else { setHandsFree(true); if (voice.state === "idle" && !loading) void voice.listen() } }}
                 onListen={() => void voice.listen()} onFinish={voice.finish} onStop={() => { setHandsFree(false); voice.cancel() }} />}
