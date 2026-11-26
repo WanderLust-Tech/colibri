@@ -852,6 +852,22 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
+### 2.48 The models use MCP tools: `coli tools` and `coli chat --mcp` (idea I10, branch `main`, 2026-11-26)
+
+- **Decided with the user:** each client runs its own tool loop on its own machine; the router only keeps one shared list of MCP servers. A router
+  that ran tools for any request would let whoever holds its API key make the model run commands on this PC. [mcp-client.md](mcp-client.md)
+- **`c/mcp_registry.py`:** the list (`mcp-servers.json`, Claude's `.mcp.json` shape), checked on every write; a secret must be a `${NAME}` reference
+  (env, headers, URL query, arguments), expanded from the client's own environment; the digest of what a server runs; the client's own trust record.
+  **`c/router.py`:** `GET /v1/mcp/servers`, `POST /v1/mcp/servers` and `/delete`; a write from another machine is refused (`COLI_MCP_REMOTE_EDIT=1`).
+- **`c/mcp_client.py`:** a stdlib MCP client: stdio and Streamable HTTP, paging, timeouts with `notifications/cancelled`, a server's stderr kept so a
+  server that cannot start says why, a server's own requests answered (`ping`) or refused.
+- **`c/mcp_agent.py`:** the toolbox (servers opened after approval, tools named `<server>__<tool>`, include/exclude filters) and the loop (read-only
+  tools run, others ask, refusals and errors are results, results cut in the middle with the cut said, a round limit, Ctrl-C leaves every call answered).
+- **`c/mcp_cli.py`, `coli tools`, `coli chat --mcp`, `/tools`:** add, list, remove, enable, disable, test, trust; the terminal's questions. `coli chat`
+  against a router now picks `--model NAME` when it names a listed model, else the first that chats (it took the first listed: the music model).
+- **Checked:** 105 tests (`test_mcp_registry`, `test_mcp_client`, `test_mcp_agent`, `test_mcp_chat`), and the real thing: `coli chat --mcp` on the live
+  gateway: Gemma 4 E4B called a tool; Gemma 4 26B-A4B with the official filesystem server listed, read and answered, and had a write declined. Not built: the extension reading this list (I12), the dashboard, `coli run --mcp`.
+
 ### 2.47 Gemma 4's attention in registers (branch `main`, 2026-11-25; pushed (`a532f360`) and live)
 
 2.46's last open item: attention was 4.5 s of the 7.4 s of device time of a 7,023-token prompt on the 26B-A4B (2.5 s in the 5 full layers' 512-wide heads, 2.1 s in the 25

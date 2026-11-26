@@ -2244,6 +2244,325 @@
         }
       }
     },
+    "/v1/mcp/servers": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List the MCP servers",
+        "description": "The list of MCP servers the clients run (`coli chat --mcp`, the extension): the router keeps it and serves it, and never starts a server. `problem` says why a file that is not valid could not be read. See `docs/mcp-client.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "listMcpServers",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "problem": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "allOf": [
+                          {
+                            "type": "object",
+                            "description": "One MCP server of the list. A stdio server has `command` (+ `args`, `env`, `cwd`); an http one has `url` (+ `headers`). A secret in `env` or `headers` is a `${NAME}` reference, never a value.",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "command": {
+                                "type": "string"
+                              },
+                              "args": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "env": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "string"
+                                }
+                              },
+                              "cwd": {
+                                "type": "string"
+                              },
+                              "url": {
+                                "type": "string"
+                              },
+                              "headers": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "string"
+                                }
+                              },
+                              "disabled": {
+                                "type": "boolean"
+                              },
+                              "includeTools": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "excludeTools": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "timeoutSeconds": {
+                                "type": "number"
+                              },
+                              "connectTimeoutSeconds": {
+                                "type": "number"
+                              }
+                            }
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "summary": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Add or replace an MCP server",
+        "description": "Changes the list, which is kept by the machine the router runs on: a request from another machine is refused with 403 unless the router has `COLI_MCP_REMOTE_EDIT=1`. A secret must be a `${NAME}` reference. Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "saveMcpServer",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "type": "object",
+                    "description": "One MCP server of the list. A stdio server has `command` (+ `args`, `env`, `cwd`); an http one has `url` (+ `headers`). A secret in `env` or `headers` is a `${NAME}` reference, never a value.",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "args": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "env": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      "cwd": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      },
+                      "headers": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      "disabled": {
+                        "type": "boolean"
+                      },
+                      "includeTools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "excludeTools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "timeoutSeconds": {
+                        "type": "number"
+                      },
+                      "connectTimeoutSeconds": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                ],
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "created",
+                        "replaced"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string",
+                      "description": "What the server runs, on one line."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The change was asked for from another machine."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/mcp/servers/delete": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Remove an MCP server",
+        "description": "Takes the server out of the list (from this machine only, as for adding one). Only `coli router` has this route; a server that serves one model answers 404.",
+        "operationId": "deleteMcpServer",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "deleted"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The change was asked for from another machine."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/v1/requests": {
       "get": {
         "tags": [

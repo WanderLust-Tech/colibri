@@ -44,6 +44,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import features
 import gpu as gpu_mod
 import model_settings as settings_mod
+import mcp_registry as mcp_registry_mod
 import presets as presets_mod
 import voices as voices_mod
 import web_headers
@@ -1917,6 +1918,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.install_job(unquote(path[len("/v1/models/installs/"):])))
             if path == "/v1/presets":
                 return self.send_json(200, self.presets_list())
+            if path == "/v1/mcp/servers":
+                return self.send_json(200, self.mcp_servers_list())
             if path == "/v1/audio/voices":
                 return self.send_json(200, self.voices_list())
             if path == "/v1/requests":
@@ -1964,6 +1967,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.preset_save()
             if path == "/v1/presets/delete":
                 return self.preset_delete()
+            if path == "/v1/mcp/servers":
+                return self.mcp_server_save()
+            if path == "/v1/mcp/servers/delete":
+                return self.mcp_server_delete()
             if path == "/v1/audio/voices":
                 return self.voice_save()
             if path == "/v1/audio/voices/delete":
@@ -2718,6 +2725,55 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(500, f"The presets file could not be changed: {error}", "presets_file_error")
         self.server.presets.reload()
         self.send_json(200, {"status": "replaced" if replaced else "created", "name": name})
+
+    def mcp_servers_list(self):
+        """GET /v1/mcp/servers: the MCP servers the clients run (mcp_registry.py, docs/mcp-client.md). The router only keeps and serves the list; a client
+        starts the servers itself, after a person has approved what each one runs."""
+        file = mcp_registry_mod.path()
+        try:
+            servers, problem = mcp_registry_mod.load(file), None
+        except mcp_registry_mod.RegistryError as error:
+            servers, problem = {}, str(error)
+        return {"object": "list", "path": file, "problem": problem,
+                "data": [dict(cfg, name=name, summary=mcp_registry_mod.describe(cfg)) for name, cfg in sorted(servers.items())]}
+
+    def mcp_write_allowed(self):
+        """The list is edited from this PC, as the owner: anyone who holds the API key can read it, but a change could start a program on every client
+        that approves it, so a request from another machine is refused unless COLI_MCP_REMOTE_EDIT=1."""
+        peer = self.client_address[0] if self.client_address else ""
+        if peer in LOOPBACK or os.environ.get("COLI_MCP_REMOTE_EDIT") == "1":
+            return
+        raise ApiError(403, "The list of MCP servers is changed from the machine the router runs on (or set COLI_MCP_REMOTE_EDIT=1 there).", "forbidden")
+
+    def mcp_server_save(self):
+        """POST /v1/mcp/servers: add or replace one server: {"name", "command" + "args" + "env" ... | "url" + "headers" ...}."""
+        self.mcp_write_allowed()
+        body = self.management_json("/v1/mcp/servers")
+        name = body.pop("name", None)
+        try:
+            kept, replaced = mcp_registry_mod.put(name, body)
+        except mcp_registry_mod.RegistryError as error:
+            raise ApiError(400, str(error), "invalid_request_error")
+        except OSError as error:
+            raise ApiError(500, f"The list of MCP servers could not be changed: {error}", "mcp_servers_error")
+        self.send_json(200, {"status": "replaced" if replaced else "created", "name": name, "summary": mcp_registry_mod.describe(kept)})
+
+    def mcp_server_delete(self):
+        """POST /v1/mcp/servers/delete: {"name"}."""
+        self.mcp_write_allowed()
+        body = self.management_json("/v1/mcp/servers/delete")
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ApiError(400, "`name` must be text.", "invalid_request_error", "name")
+        try:
+            removed = mcp_registry_mod.remove(name.strip())
+        except mcp_registry_mod.RegistryError as error:
+            raise ApiError(409, str(error), "mcp_servers_error")
+        except OSError as error:
+            raise ApiError(500, f"The list of MCP servers could not be changed: {error}", "mcp_servers_error")
+        if not removed:
+            raise ApiError(404, f"No MCP server is called `{name.strip()}`.", "mcp_server_not_found", "name")
+        self.send_json(200, {"status": "deleted", "name": name.strip()})
 
     def voices_list(self):
         """GET /v1/audio/voices: the saved voices of the cloning speech models (voices.py), by name."""

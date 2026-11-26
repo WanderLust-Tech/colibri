@@ -2028,6 +2028,7 @@ def render_gen_stats(st, mode):
 CHAT_COMMANDS = {
     "decide": "a | b | c  System One mode: score the options instead of generating; no options returns to chat",
     "reset": "            start the conversation again",
+    "tools": "            the MCP tools of this session (start the chat with --mcp)",
     "help":  "            this list",
     "quit":  "            leave (also :q)",
 }
@@ -2183,6 +2184,21 @@ def chat_attached(a, base, model_id):
     msgs=[]
     brio_options=[]          # non vuoto = modalita System One accesa (/decide)
     w=term_w()-4
+    box=None                 # --mcp: the tools of the servers in the list (mcp_cli.py, docs/mcp-client.md)
+    session_msgs=[]
+    if getattr(a,"mcp",None):
+        import mcp_cli, atexit, urllib.parse
+        local=(urllib.parse.urlsplit(base).hostname or "") in ("127.0.0.1","localhost","::1","")
+        names=None if a.mcp=="*" else [n.strip() for n in a.mcp.split(",") if n.strip()]
+        box=mcp_cli.open_toolbox(a, mcp_cli.http_api(base, getattr(a,"api_key",None)), local, C, names)
+        if box:
+            atexit.register(box.close)
+            note=mcp_cli.session_notes(box)
+            session_msgs=[note] if note else []
+            msgs=list(session_msgs)
+            if getattr(a,"mcp_yes",False):
+                print(f"  {C.yel}--mcp-yes: every tool call runs without asking.{C.r}")
+            print(f"  {C.dim}/tools lists them · tools that are not marked read-only ask first{C.r}\n")
     while True:
         if TTY:
             print(f"  {C.dgray}╭{'─'*w}╮{C.r}")
@@ -2205,8 +2221,11 @@ def chat_attached(a, base, model_id):
         if name in ("quit",): break
         if name == "help": chat_commands_help(); continue
         if name == "reset":
-            msgs=[]; brio_options=[]
+            msgs=list(session_msgs); brio_options=[]
             print(f"  {C.dim}✦ new conversation{C.r}\n"); continue
+        if name == "tools":
+            import mcp_cli
+            mcp_cli.list_session(box, C); continue
         # ---- modalita System One (/decide) ---------------------------------
         # Lo stesso modello con cui stai chattando smette di generare e comincia
         # a punteggiare: gli si danno le opzioni ammesse e lui dice quanto e
@@ -2239,6 +2258,8 @@ def chat_attached(a, base, model_id):
         payload = message_with_images(msg)
         if payload is None: continue          # percorso sbagliato: gia' detto
         msgs.append({"role":"user","content":payload})
+        if box is not None:
+            chat_tools_turn(a, base, model_id, msgs, arch, box); continue
         # Il livello di ragionamento e' una leva di tempo, non di gusto: su un
         # motore che streamma gli esperti da disco, "max" vuol dire centinaia
         # di token di riflessione prima della prima parola di risposta.
@@ -2325,7 +2346,110 @@ def chat_attached(a, base, model_id):
         footer=render_gen_stats(gen_stats("".join(reply), el, exact_tokens, interrupted), chat_stats_mode(a))
         if footer: print(f"\r  {C.dgray}└─ {footer}{C.r}\n")
         else: print()
+    if box is not None: box.close()
     print(f"  {C.dim}goodbye — the engine keeps running for the next chat 🐦{C.r}")
+
+class ChatRequestError(Exception):
+    """The server refused or could not be reached; the message has been shown."""
+
+def chat_stream_round(a, base, model_id, msgs, arch, tools):
+    """One request of a chat turn that has tools: streamed to the screen the way chat_attached shows it (thinking dim, the answer as Markdown), with
+    the `tool_calls` of the answer put together. Returns (text, calls, interrupted, exact_tokens)."""
+    import urllib.request, urllib.error, mcp_agent
+    request={"model":model_id,"messages":msgs,"stream":True,"max_tokens":ngen_for(a,interactive=True),
+             "stream_options":{"include_usage":True}}
+    if tools: request["tools"]=tools
+    if getattr(a,"effort",None): request["reasoning_effort"]=a.effort
+    if getattr(a,"think",None) is not None: request["enable_thinking"]=a.think
+    elif arch in CHAT_THINK_OFF: request["enable_thinking"]=False
+    req=urllib.request.Request(base.rstrip("/")+"/v1/chat/completions", data=json.dumps(request).encode(),
+                               headers={"Content-Type":"application/json"})
+    if a.api_key: req.add_header("Authorization", f"Bearer {a.api_key}")
+    sp=Spinner("thinking…"); sp.start()
+    md=MDStream("  "); reply=[]; first=True; interrupted=False; think_open=False; exact=None
+    acc=mcp_agent.Accumulator()
+    def begin():
+        nonlocal first
+        if first:
+            sp.stop(); first=False
+            print(f"\n  {C.teal}◆ colibri{C.r}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            for raw in r:
+                line=raw.decode("utf-8","replace").strip()
+                if not line.startswith("data: "): continue
+                data=line[6:]
+                if data=="[DONE]": break
+                try: ev=json.loads(data)
+                except ValueError: continue
+                usage=ev.get("usage")
+                if isinstance(usage,dict) and isinstance(usage.get("completion_tokens"),int): exact=usage["completion_tokens"]
+                for ch in ev.get("choices",[]):
+                    d=ch.get("delta",{})
+                    if d.get("tool_calls"): acc.feed(d["tool_calls"])
+                    rtxt=d.get("reasoning_content")
+                    if rtxt and os.environ.get("COLI_SHOW_THINK","1")=="0": continue
+                    if rtxt:
+                        begin()
+                        if not think_open:
+                            think_open=True
+                            sys.stdout.write(f"  {C.dgray}┌ thinking{C.r}\n  {C.dgray}│{C.r} ")
+                        sys.stdout.write(C.dim+rtxt.replace("\n","\n  "+C.dgray+"│"+C.r+" "+C.dim)+C.r); sys.stdout.flush(); continue
+                    txt=d.get("content")
+                    if not txt: continue
+                    if think_open:
+                        think_open=False
+                        sys.stdout.write(f"{C.r}\n  {C.dgray}└─{C.r}\n")
+                    begin()
+                    md.feed(txt); reply.append(txt)
+    except KeyboardInterrupt:
+        interrupted=True
+    except urllib.error.HTTPError as e:
+        sp.stop()
+        try: detail=json.loads(e.read().decode("utf-8","replace")).get("error",{}).get("message","")
+        except Exception: detail=""
+        print(f"\n  {C.yel}[the server rejected the request: HTTP {e.code}{' — '+detail if detail else ''}]{C.r}")
+        raise ChatRequestError()
+    except OSError as e:
+        sp.stop(); print(f"\n  {C.yel}[server unreachable: {e}]{C.r}"); raise ChatRequestError()
+    if think_open: sys.stdout.write(f"{C.r}\n  {C.dgray}└─{C.r}\n")
+    md.close(); sp.stop()
+    return "".join(reply), ([] if interrupted else acc.result()), interrupted, exact
+
+def chat_tools_turn(a, base, model_id, msgs, arch, box):
+    """One question of a chat with tools (mcp_agent.run_turn): the model answers, asks for tools, they run (the ones not marked read-only after a
+    question), their results go back, until it answers in words. `msgs` ends with the user's message; a request that fails drops the turn."""
+    import mcp_agent, mcp_cli
+    start=len(msgs)-1
+    t0=time.time(); texts=[]; exact=[0, True]; stopped=[False]
+    def complete(messages, tools):
+        text,calls,interrupted,tokens=chat_stream_round(a, base, model_id, messages, arch, tools)
+        texts.append(text); stopped[0]=stopped[0] or interrupted
+        if isinstance(tokens,int): exact[0]+=tokens
+        else: exact[1]=False
+        return text,calls
+    approve=(lambda info,args: "yes") if getattr(a,"mcp_yes",False) else (lambda info,args: mcp_cli.ask_call(info,args,C))
+    try:
+        mcp_agent.run_turn(complete, msgs, box, approve,
+                           on_call=lambda info,args,how: mcp_cli.show_call(info,args,how,C),
+                           on_result=lambda info,text: mcp_cli.show_result(info,text,C))
+    except ChatRequestError:
+        del msgs[start:]                           # the turn is dropped, as a refused plain request is
+        return
+    except KeyboardInterrupt:
+        stopped[0]=True
+    if msgs and msgs[-1].get("role")=="assistant" and not msgs[-1].get("content") and not msgs[-1].get("tool_calls"):
+        msgs.pop()                                 # an empty answer does not stay in the history
+    el=time.time()-t0; text="".join(texts)
+    footer=render_gen_stats(gen_stats(text, el, exact[0] if exact[1] and exact[0] else None, stopped[0]), chat_stats_mode(a))
+    print(f"\r  {C.dgray}└─ {footer}{C.r}\n" if footer else "")
+
+def cmd_tools(a):
+    """`coli tools`: the list of MCP servers that chats and the editor extension use (mcp_cli.py, docs/mcp-client.md)."""
+    banner("tools")
+    import mcp_cli
+    loopback=(getattr(a,"host",None) or "127.0.0.1") in ("127.0.0.1","localhost","::1")
+    return mcp_cli.run(a,lambda method,path,body=None:_api_call(a,method,path,body,timeout=20),C,local_ok=loopback)
 
 def kv_resume_notice(model_dir):
     """SERVE mode silently resumes .coli_kv from disk (glm.c kv_disk_load): a chat
@@ -3370,6 +3494,27 @@ def server_model_entry(base, api_key=None, timeout=1.5):
     except Exception:
         return {}
 
+def server_models(base, api_key=None, timeout=1.5):
+    """The /v1/models entries of a running server ([] when it does not answer)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(base.rstrip("/") + "/v1/models")
+        if api_key: req.add_header("Authorization", f"Bearer {api_key}")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return [m for m in (json.loads(r.read().decode("utf-8", "replace")).get("data") or []) if isinstance(m, dict) and m.get("id")]
+    except Exception:
+        return []
+
+def server_pick(models, want=None):
+    """The /v1/models entry a chat should use: the one `want` names (an id, or a folder whose name is one), else the first that chats, else the
+    first. A `coli serve` lists one model; a `coli router` lists every installed one, alphabetically, and the first is not always one that chats."""
+    names = {str(want), os.path.basename(str(want).rstrip("/\\"))} if want else set()
+    for m in models:
+        if m["id"] in names: return m
+    for m in models:
+        if "chat" in (m.get("capabilities") or []): return m
+    return models[0]
+
 def cmd_chat(a):
     # ATTACH: a running `coli serve` beats a private engine every time — the load
     # (34-136 s) and the cache warmth survive between sessions. Explicit --attach
@@ -3379,7 +3524,11 @@ def cmd_chat(a):
         base=getattr(a,"attach",None) or "http://127.0.0.1:8000"
         mid=server_probe(base, getattr(a,"api_key",None))
         if mid:
-            entry=server_model_entry(base, getattr(a,"api_key",None))
+            models=server_models(base, getattr(a,"api_key",None))
+            if len(models)>1:                      # a router: which of its models this chat is with
+                entry=server_pick(models, a.model); mid=entry["id"]
+            else:
+                entry=server_model_entry(base, getattr(a,"api_key",None))
             serves_images="image_generation" in (entry.get("capabilities") or [])
             wants_images=bool(a.model) and is_image_model(a.model)
             # A server of the other kind is not the model asked for: an image
@@ -4923,6 +5072,10 @@ def main():
                          "Bare --attach probes localhost:8000.")
     pc.add_argument("--no-attach", action="store_true",
                     help="never auto-attach, always spawn a private engine")
+    pc.add_argument("--mcp", nargs="?", const="*", default=None, metavar="SERVERS",
+                    help="let the model use the tools of the MCP servers in the list (coli tools): all of them, or the named ones (--mcp git,web). "
+                         "Tools that are not marked read-only ask first. See docs/mcp-client.md")
+    pc.add_argument("--mcp-yes", action="store_true", help="with --mcp: run every tool call without asking (the model can then change things on this PC)")
     pc.add_argument("--api-key", default=os.environ.get("COLI_API_KEY"))
     pc.add_argument("--stats", choices=list(CHAT_STATS_MODES), default=None,
                     help="generation statistics footer after each answer: full (tokens, seconds, tok/s), "
@@ -5029,6 +5182,16 @@ def main():
     pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)
     pmodel.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pmodel.add_argument("--file",default=None,metavar="FILE",help="with no server running: the settings file (default: the setup folder's model-settings.json)")
+    ptools=sub.add_parser("tools",help="the MCP servers whose tools chats and the editor extension can use: list, add, remove, enable, disable, test, trust (docs/mcp-client.md)")
+    ptools.add_argument("action",nargs="?",default="list",choices=("list","add","remove","enable","disable","test","trust","untrust"))
+    ptools.add_argument("name",nargs="?",default=None,metavar="SERVER")
+    ptools.add_argument("--url",default=None,metavar="ADDRESS",help="add: an http(s) MCP server, instead of a command")
+    ptools.add_argument("--env",action="append",default=None,metavar="NAME=VALUE",help="add: an environment variable for the server (a secret is written NAME=${VARIABLE})")
+    ptools.add_argument("--header",action="append",default=None,metavar="NAME=VALUE",help="add: a header for a --url server (Authorization=Bearer ${TOKEN})")
+    ptools.add_argument("--cwd",default=None,metavar="FOLDER",help="add: the folder the server starts in")
+    ptools.add_argument("--timeout",type=float,default=None,metavar="SECONDS",help="add: how long one call may take (default 120)")
+    ptools.add_argument("--host",default="127.0.0.1"); ptools.add_argument("--port",type=int,default=None)
+    ptools.add_argument("--api-key",default=os.environ.get("COLI_API_KEY"))
     pemb=sub.add_parser("embed",help="turn text into vectors with the server's embedding model; two or more texts also show how alike they are")
     pemb.add_argument("texts",nargs="*",metavar="TEXT",help="the texts (- reads lines from standard input)")
     pemb.add_argument("--file",default=None,metavar="FILE",help="more texts, one a line (- for standard input)")
@@ -5210,14 +5373,15 @@ def main():
     if argv[:1] in (["service"],["tray"]):         # their own options (service.py, tray.py): not for this parser to read
         module=__import__(argv[0])
         sys.exit(module.main(argv[1:]))
-    if argv[:1]==["launch"] and "--" in argv:      # what follows `--` is the tool's, not ours (REMAINDER would swallow --port)
+    if argv[:1] in (["launch"],["tools"]) and "--" in argv:    # what follows `--` is the tool's, not ours (REMAINDER would swallow --port)
         cut=argv.index("--"); argv,tool_args=argv[:cut],argv[cut+1:]
     a=ap.parse_args(argv)
     if a.cmd=="launch": a.args=tool_args
+    if a.cmd=="tools": a.rest=tool_args                  # coli tools add NAME [options] -- COMMAND ARGS...
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"music":cmd_music,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"talk":cmd_talk,"align":cmd_align,"settings":cmd_settings}.get(a.cmd)
+             "convert":cmd_convert,"web":cmd_web,"router":cmd_router,"ps":cmd_ps,"launch":cmd_launch,"preset":cmd_preset,"model":cmd_model,"tools":cmd_tools,"embed":cmd_embed,"rerank":cmd_rerank,"transcribe":cmd_transcribe,"speak":cmd_speak,"voice":cmd_voice,"talk":cmd_talk,"align":cmd_align,"settings":cmd_settings}.get(a.cmd)
     if a.cmd in ("setup","start","status","logs"):
         import setup_flow
         flow={"setup":setup_flow.cmd_setup,"start":setup_flow.cmd_start,

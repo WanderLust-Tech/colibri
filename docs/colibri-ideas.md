@@ -229,13 +229,20 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   started at sign-in by a Run key; 2.13). A native `colibri-tray.exe` (a small C program over the same Win32 calls, or the script frozen) would
   need no Python on the path to show the icon and start the router, give the process a proper name and icon in Task Manager, and could go in an
   installer. The router and `coli` stay Python, so the tray would start them the way it does now.
-- [ ] **I10. Colibri as an MCP client: the models use MCP tools from the CLI, the dashboard and the extension (L).** `coli mcp` is the other
+- [x] **I10. Colibri as an MCP client: the models use MCP tools from the CLI, the dashboard and the extension (L).** The CLI half is built 2026-11-26
+  ([mcp-client.md](mcp-client.md), fork-changes 2.48). The question the idea left open was settled with the user: **each client runs its own loop**, the router
+  keeps only the shared list (a router-side loop would let any API-key holder make a model run commands here). The extension and the dashboard are
+  I12. The original text: `coli mcp` is the other
   direction (Colibri as an MCP server for an assistant, [MCP_SERVER.md](MCP_SERVER.md)). The extension has its own MCP client and its own server
   list. The idea: one list of MCP servers kept by the router (a file in the setup folder, `coli mcp add`), tools offered to a chat request and run
   by the router in a loop (`coli chat --mcp`, a Tools switch and approval cards in the dashboard chat), with the extension able to use the same list.
   The weight is in the agent loop in the gateway (one generation at a time per model, approvals from three clients, a tool result going back into
   the next request), in where an MCP server's process runs and with what rights (they run local commands), and in what happens to the
   extension's own servers. Settle who owns the loop and the approvals before building.
+- [ ] **I12. The extension uses the router's MCP list (M).** The extension has its own `colibri.mcpServers` setting, its own MCP client and its own approvals.
+  Reading `GET /v1/mcp/servers` as a second source (the setting wins on a name clash) needs the same rules the CLI keeps: the secret references expanded from
+  the extension host's environment, and an approval on that machine for the exact definition (a hash like `mcp_registry.digest`, kept by the extension, so a
+  server added to the list from elsewhere is not started unasked). A new vsix; the dashboard's cards for HTTP servers after that.
 - [x] **I11. Choose where a model is installed (S-M).** Built 2026-11-25 (local commits, not pushed or deployed): `root` in `POST /v1/models/install` (one of the new `folders` of the catalog, each with its free space), `coli model install ID --dest FOLDER` and the folders listed by `coli model available`, a folder list in the dashboard's install confirmation and a folder pick in the extension (0.27.0). A folder that is not a models folder is refused with the list and how to add one (`COLI_MODELS_ROOT`); adding a folder from the API was left out. The list now judges a model's room by the folder with the most. docs/model-install.md. Original text: `coli model install` (and the dashboard and the extension's installer) put the model in the
   first models folder with enough free disk (`Installer.install_root`); there is no way to say which. A `--dest FOLDER` (a folder already scanned by
   the catalog, or one to add), a list of the folders with their free space in the dashboard and the extension's menu, and `root` in the install
