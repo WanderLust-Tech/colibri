@@ -19,6 +19,7 @@ case you can accept.
 ## Who runs what
 
 **Each client runs its own tool loop, on its own machine.** The router keeps the list and serves it (`GET /v1/mcp/servers`); it never starts a server.
+(The router does run a few tools of its own, which are not MCP servers and are off until you turn them on at its PC: [builtin-tools.md](builtin-tools.md).)
 `coli chat --mcp` starts the servers on the machine you type at, and the VS Code extension (0.28.0) starts them on the machine it runs on. That is a choice
 about where code runs: the router listens on the network behind one API key, and an MCP server is a program (a stdio server is a command with your
 rights), so a router that ran tools for any request would let whoever holds the key make the model run commands on this PC.

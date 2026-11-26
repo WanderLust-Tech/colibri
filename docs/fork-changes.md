@@ -82,8 +82,8 @@ Deployed 2026-11-10 (the server was idle each time, and you said to): Gemma on t
 `gemma4.exe`, ffmpeg), then the card-or-CPU policy (VK build of `qwen36.exe` with the expert tier, `COLI_GPU=auto`), then
 `context_length` (relink of both engines, router restart). Not installed: the 31B (its container is in `colibri-staging`).
 
-Not in `main` at all: `docs/repo-deep-dive` (the repository deep-dive, `fdb25925`, pushed to the fork on its own branch),
-and `pr-2045`, upstream's image-editing PR, kept only for reference (see 2.1).
+Not in `main` as a branch: `docs/repo-deep-dive` (the repository deep-dive; its content is in `main`; the branch is still on the fork, deleted locally 2026-11-26),
+and `pr-2045`, upstream's image-editing PR (deleted locally 2026-11-26; `git fetch upstream refs/pull/2045/head` gets it back; see 2.1).
 
 ## 2. What changed
 
@@ -851,6 +851,26 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Live check** (2026-11-25, Gemma 4 E2B through the router): no key is a 401; non-streaming gives `response`/`completed` with the text and usage; streaming arrives as the raw HTTP/1.0 body (`Connection: close`, no `Transfer-Encoding`) with the whole event sequence from `response.created` to `response.completed`.
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
+
+### 2.49 The router runs tools itself: fetch, files, git (idea I13, branch `main`, 2026-11-26; built and tested, not pushed or deployed)
+
+- **Decided with the user** (they asked for server-side endpoints instead of MCP, after the MCP trial of 2.48 showed nothing needed fixing but the dashboard could not use it):
+  endpoints a client can call, and a loop the router can run; reads, and writes behind an approval; limited by a policy file on the router's PC that no API route can change.
+  This reverses 2.48's "the router never runs anything" for these tools only, and they are **off until `coli tools allow|web`**. [builtin-tools.md](builtin-tools.md)
+- **`c/tools_policy.py`:** the policy file (folders with a write flag, `web`, `allowSecrets`, `approvalSeconds`, `disabled`) and `resolve`, the check every path goes
+  through (links, junctions and `..` resolved first; network, device and stream paths refused before anything touches them).
+- **`c/web_fetch.py`:** the fetch: every address a name resolves to must be public, connected to by that address, redirects checked by hand, 2 MB, 30 s, HTML to text.
+- **`c/builtin_tools.py`:** thirteen tools (web 1, files 3, git 5, write 4), `BuiltinBox` with the face of `mcp_agent.ToolBox`; git run with no shell, pager,
+  prompts, `GIT_*`, fsmonitor, external diff or hooks, output and time capped, and stopped with its children.
+- **`c/tools_loop.py`:** `colibri_tools` on chat completions: the loop over the router's own loopback with the caller's key and tags, streamed events, the approvals.
+  **`c/router.py`:** `GET /v1/tools`, `POST /v1/tools/NAME` (409 `confirmation_required` unless `confirm`), `GET` and `POST /v1/tools/pending`; the request log keeps
+  tool, target and outcome, never contents. **`coli tools allow | deny | web`**, and a "built in" section in `coli tools`.
+- **Measured:** all thirteen definitions cost 1,621 tokens (Qwen3-Coder) / 935 (Gemma 4); the MCP git and fetch servers' 15 tools 2,964 / 1,695.
+- **Checked:** 158 new tests, 49 of 49 mutants caught (8 survived the first pass and got tests), and a real model through the new loop (approved and declined
+  writes, an outside path refused, a git question answered). Found by that run: a search by file name was missing; `certifi` is used when present because this PC's
+  Python could not verify `example.com`.
+- **Clients (built by the same work, not pushed):** the dashboard (Tools switch, call and approval cards; 374 web tests) and the extension 0.29.0
+  (`colibri-router__<tool>`; 410 unit and 47 host tests, 22 of 22 mutants). One known gap: an extension `WebFetch(domain:...)` deny rule does not cover the router's `web_fetch`.
 
 ### 2.48 The models use MCP tools: `coli tools` and `coli chat --mcp` (idea I10, branch `main`, 2026-11-26)
 

@@ -2563,6 +2563,334 @@
         }
       }
     },
+    "/v1/tools": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List the built-in tools",
+        "operationId": "listTools",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "The tools the router has built in (fetch a web page, read files and git repositories, and with a writable folder change them), in the OpenAI function shape, with whether each is on. What is on is decided by the policy file on the router's PC (`coli tools allow|deny|web`): it is never changed through the API. `problem` says why a policy file that is not valid could not be read (everything is then off). See `docs/builtin-tools.md`. Only `coli router` has this route; a server that serves one model answers 404.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "problem": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "policy": {
+                      "type": "object",
+                      "properties": {
+                        "folders": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string"
+                              },
+                              "write": {
+                                "type": "boolean"
+                              }
+                            }
+                          }
+                        },
+                        "web": {
+                          "type": "boolean"
+                        },
+                        "allowSecrets": {
+                          "type": "boolean"
+                        },
+                        "approvalSeconds": {
+                          "type": "number"
+                        },
+                        "disabled": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "example": "function"
+                          },
+                          "function": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "description": {
+                                "type": "string"
+                              },
+                              "parameters": {
+                                "type": "object"
+                              }
+                            }
+                          },
+                          "colibri": {
+                            "type": "object",
+                            "properties": {
+                              "group": {
+                                "type": "string",
+                                "enum": [
+                                  "web",
+                                  "files",
+                                  "git",
+                                  "write"
+                                ]
+                              },
+                              "read_only": {
+                                "type": "boolean"
+                              },
+                              "enabled": {
+                                "type": "boolean"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/v1/tools/{name}": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Run a built-in tool",
+        "operationId": "runTool",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "Runs one built-in tool for a client that keeps its own tool loop (the editor extension, `coli`). A tool that changes something (`files_write`, `files_edit`, `git_add`, `git_commit`) is refused with 409 `confirmation_required` unless the body says `\"confirm\": true`, which a client sets only after a person has said yes. A tool that fails (a path outside the allowed folders, a missing file) is a 200 with `is_error` true and the reason in `text`. A tool that is off or unknown is 404. Only `coli router` has this route; a server that serves one model answers 404.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "arguments": {
+                    "type": "object"
+                  },
+                  "confirm": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "tool_result"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "is_error": {
+                      "type": "boolean"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/v1/tools/pending": {
+      "get": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "List the tool calls waiting for a yes",
+        "operationId": "listPendingTools",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "The calls a chat request with `colibri_tools` has paused on, each waiting for a person's answer until `expires_in` seconds are gone (then it counts as no). Only `coli router` has this route; a server that serves one model answers 404.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "tool": {
+                            "type": "string"
+                          },
+                          "arguments": {
+                            "type": "object"
+                          },
+                          "summary": {
+                            "type": "string"
+                          },
+                          "expires_in": {
+                            "type": "integer"
+                          },
+                          "client": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Answer a waiting tool call",
+        "operationId": "answerPendingTool",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "Allows or refuses a call the router is waiting on. `always` with `allow` stops the questions for that tool for the rest of that one conversation. 404 when nothing waits under the id (answered already, or it timed out). Only `coli router` has this route; a server that serves one model answers 404.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "allow": {
+                    "type": "boolean"
+                  },
+                  "always": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "id",
+                  "allow"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "answered"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "allow": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/v1/requests": {
       "get": {
         "tags": [
@@ -3371,6 +3699,7 @@
           "messages": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/ChatMessage" } },
           "stream": { "type": "boolean", "default": false },
           "stream_options": { "type": "object", "properties": { "include_usage": { "type": "boolean" } } },
+          "colibri_tools": {"description": "colibri extension (`coli router` only): `true`, or a list of tool and group names (`web`, `files`, `git`, `write`, or a tool such as `git_log`), makes the router run the tool loop itself with its built-in tools and answer once the model has: not streamed, the answer is an ordinary completion plus `colibri.tool_calls` and the summed `usage`; streamed, the chunks are ordinary ones plus chunks with an empty `choices` and a `colibri` object (`tool_call`, `tool_result`, `approval`, `approval_answered`). A tool that changes something waits for `POST /v1/tools/pending`. Not to be sent with `tools`. See `docs/builtin-tools.md`.", "oneOf": [{"type": "boolean"}, {"type": "array", "items": {"type": "string"}}]},
           "max_tokens": { "type": "integer", "minimum": 1 },
           "max_completion_tokens": { "type": "integer", "minimum": 1 },
           "temperature": { "type": "number", "minimum": 0 },

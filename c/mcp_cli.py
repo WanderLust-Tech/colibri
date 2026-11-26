@@ -17,6 +17,7 @@ every place. Colours come in as `C`, the way the other command modules get them.
 import json
 import sys
 
+import builtin_tools
 import mcp_agent
 import mcp_registry as reg
 
@@ -223,14 +224,17 @@ def run(a, api, C, local_ok=True):
                 print(f"  {C.yel}{problem}{C.r}")
             if not servers:
                 print(f"  {C.dim}no MCP servers in the list ({where}). Add one: coli tools add git -- uvx mcp-server-git{C.r}")
-                return 0 if not problem else 1
-            print(f"  {C.dim}the list: {where}{C.r}\n")
-            for n, entry in sorted(servers.items()):
-                state = state_of(n, entry)
-                colour = C.grn if state == "approved here" else C.dim if state == "disabled" else C.yel
-                print(f"  {C.teal}{n}{C.r}  {colour}{state}{C.r}\n      {C.dim}{clip(reg.describe(entry), 110)}{C.r}")
+            else:
+                print(f"  {C.dim}the list: {where}{C.r}\n")
+                for n, entry in sorted(servers.items()):
+                    state = state_of(n, entry)
+                    colour = C.grn if state == "approved here" else C.dim if state == "disabled" else C.yel
+                    print(f"  {C.teal}{n}{C.r}  {colour}{state}{C.r}\n      {C.dim}{clip(reg.describe(entry), 110)}{C.r}")
             print()
-            return 0
+            _built_in(api, local_ok, C)
+            return 0 if not problem else 1
+        if action in ("allow", "deny", "web"):
+            return _policy(a, C, local_ok)
         if action == "add":
             return _add(a, api, C, local_ok)
         if not name:
@@ -280,6 +284,66 @@ def run(a, api, C, local_ok=True):
         return 1
     print(f"  {C.yel}unknown action {action}{C.r}")
     return 1
+
+
+def _built_in(api, local_ok, C):
+    """The router's own tools (builtin_tools.py): what the policy lets them touch, and which are on."""
+    import tools_policy as policy_mod
+    try:
+        if local_ok:
+            policy = policy_mod.load()
+            where, summary, on = policy_mod.path(), policy.summary(), [t.name for t in builtin_tools.enabled(policy)]
+        else:
+            status, body = api("GET", "/v1/tools")
+            if status != 200 or not isinstance(body, dict):
+                print(f"  {C.dim}built-in tools: the router's list could not be read{C.r}")
+                return
+            where, summary = body.get("path"), body.get("policy") or {}
+            on = [t["function"]["name"] for t in body.get("data", []) if t.get("colibri", {}).get("enabled")]
+            if body.get("problem"):
+                print(f"  {C.yel}{body['problem']}{C.r}")
+    except policy_mod.PolicyError as error:
+        print(f"  {C.yel}built-in tools: {error}{C.r}")
+        return
+    print(f"  {C.b}built in{C.r} {C.dim}(the router runs these for any client with its key; the policy: {where}){C.r}")
+    folders = summary.get("folders") or []
+    for f in folders:
+        print(f"  {C.teal}folder{C.r}  {f['path']}  {C.grn if f.get('write') else C.dim}{'read and write' if f.get('write') else 'read only'}{C.r}")
+    print(f"  {C.teal}web{C.r}     {C.grn + 'on' if summary.get('web') else C.dim + 'off'}{C.r}")
+    if summary.get("allowSecrets"):
+        print(f"  {C.yel}secret-looking files can be read{C.r} (allowSecrets)")
+    print(f"  {C.dim}on: {', '.join(on) if on else 'nothing. coli tools allow FOLDER [--write]  or  coli tools web on'}{C.r}\n")
+
+
+def _policy(a, C, local_ok):
+    """`coli tools allow FOLDER [--write]`, `deny FOLDER`, `web on|off`: the policy of the built-in tools, on the router's PC only."""
+    import tools_policy as policy_mod
+    action = a.action
+    if not local_ok:
+        print(f"  {C.yel}the policy of the built-in tools is changed on the PC the router runs on: run `coli tools {action}` there{C.r}")
+        return 1
+    if not a.name:
+        print(f"  {C.yel}" + {"allow": "coli tools allow FOLDER [--write]", "deny": "coli tools deny FOLDER", "web": "coli tools web on|off"}[action] + f"{C.r}")
+        return 1
+    try:
+        if action == "allow":
+            policy, kept = policy_mod.allow(a.name, write=bool(getattr(a, "write", False)))
+            print(f"  {C.grn}allowed{C.r} {kept}: {'read and write' if getattr(a, 'write', False) else 'read only'}")
+            print(f"  {C.dim}the file tools and git read it for anyone with the router's key" + (". The write tools ask a person first." if getattr(a, "write", False) else f". Allow it for changes with --write.") + f"{C.r}")
+        elif action == "deny":
+            policy, was = policy_mod.deny(a.name)
+            print(f"  {C.grn}no longer allowed:{C.r} {policy_mod.normal(a.name)}" if was else f"  {C.yel}{policy_mod.normal(a.name)} was not allowed{C.r}")
+            return 0 if was else 1
+        else:
+            if a.name.lower() not in ("on", "off"):
+                print(f"  {C.yel}coli tools web on|off{C.r}")
+                return 1
+            policy = policy_mod.set_web(a.name.lower() == "on")
+            print(f"  {C.grn}web fetch is {'on' if policy.web else 'off'}{C.r}" + (f" {C.dim}(public addresses only){C.r}" if policy.web else ""))
+    except policy_mod.PolicyError as error:
+        print(f"  {C.yel}{error}{C.r}")
+        return 1
+    return 0
 
 
 def _remote_ok(status, body, C):

@@ -245,6 +245,12 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   The weight is in the agent loop in the gateway (one generation at a time per model, approvals from three clients, a tool result going back into
   the next request), in where an MCP server's process runs and with what rights (they run local commands), and in what happens to the
   extension's own servers. Settle who owns the loop and the approvals before building.
+- [x] **I13. The router runs tools itself: web fetch, files, git (L).** Built 2026-11-26 after the MCP trial of I10 (not pushed, not live): [builtin-tools.md](builtin-tools.md),
+  fork-changes 2.49. What the user chose: both endpoints (`GET /v1/tools`, `POST /v1/tools/NAME`) and a server-side loop (`colibri_tools` on chat completions); web fetch, git read,
+  files read and writes; limits as a policy file on the router's PC (folders, read-only unless granted, writes behind an approval, nothing on until `coli tools allow`). The
+  dashboard has a switch and approval cards and the extension 0.29.0 lists the router's tools (both built, not pushed). Open: per-key scopes (a LAN key that may fetch but not read
+  files), the extension honouring `WebFetch(...)` deny rules for `web_fetch`, a `coli chat` that uses them, a tool-group picker in the dashboard, and the fetch/read leak
+  described in the docs (reading a file and putting it in a URL), which only the policy limits.
 - [x] **I12. The extension uses the router's MCP list (M).** Built 2026-11-26 as extension 0.28.0 ([mcp-client.md](mcp-client.md#the-vs-code-extension)): its own approval of the exact
   definition on that machine, references from its environment, the setting wins a name, a down router breaks nothing; vsix built, not installed. The dashboard's cards
   for HTTP servers stay open. The original text: The extension has its own `colibri.mcpServers` setting, its own MCP client and its own approvals.

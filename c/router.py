@@ -45,6 +45,9 @@ import features
 import gpu as gpu_mod
 import model_settings as settings_mod
 import mcp_registry as mcp_registry_mod
+import builtin_tools
+import tools_loop
+import tools_policy as tools_policy_mod
 import presets as presets_mod
 import voices as voices_mod
 import web_headers
@@ -1730,6 +1733,7 @@ class RouterServer(ThreadingHTTPServer):
         self.presets = presets                 # presets.Presets, or None for a router without any
         self.request_log = request_log         # request_log.RequestLog, or None
         self.settings = settings               # model_settings.ModelSettings, or None
+        self.pending = tools_loop.Pending()    # built-in tool calls waiting for a person's yes (GET and POST /v1/tools/pending)
         self.api_key = api_key
         self.cors_origins = tuple(cors_origins)
         self.allowed_hosts = tuple(h.strip().lower() for h in allowed_hosts if h and h.strip())
@@ -1920,6 +1924,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.presets_list())
             if path == "/v1/mcp/servers":
                 return self.send_json(200, self.mcp_servers_list())
+            if path == "/v1/tools":
+                return self.send_json(200, self.tools_list())
+            if path == "/v1/tools/pending":
+                return self.send_json(200, {"object": "list", "data": self.server.pending.listing()})
             if path == "/v1/audio/voices":
                 return self.send_json(200, self.voices_list())
             if path == "/v1/requests":
@@ -1946,6 +1954,7 @@ class RouterHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         started = time.monotonic()
         seen = {}                                   # what the request log says about it
+        self._seen = seen
         try:
             self._check_host()
             self._check_fetch_site()
@@ -1971,6 +1980,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.mcp_server_save()
             if path == "/v1/mcp/servers/delete":
                 return self.mcp_server_delete()
+            if path == "/v1/tools/pending":
+                return self.tool_answer()
+            if path.startswith("/v1/tools/"):
+                return self.tool_call(path)
             if path == "/v1/audio/voices":
                 return self.voice_save()
             if path == "/v1/audio/voices/delete":
@@ -1984,6 +1997,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             raw = self.read_body(path)
             body = Body(self.headers.get("Content-Type"), raw)
             seen.update(path=path, bytes_in=len(raw), model=body.model, stream=bool(body.json and body.json.get("stream")))
+            if path == "/v1/chat/completions" and body.json is not None and body.json.get("colibri_tools"):
+                return self.tools_chat(body.json, seen)           # the router runs the loop (tools_loop.py)
             if self.server.request_log is not None and self.server.request_log.bodies and body.json is not None:
                 seen["request"] = request_log.shorten(body.json)
             keep = body.keep_alive                  # read before anything loads: a bad value must not cost a load
@@ -2725,6 +2740,61 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise ApiError(500, f"The presets file could not be changed: {error}", "presets_file_error")
         self.server.presets.reload()
         self.send_json(200, {"status": "replaced" if replaced else "created", "name": name})
+
+    # ---- the built-in tools (builtin_tools.py, tools_policy.py, tools_loop.py; docs/builtin-tools.md)
+    def tools_policy(self):
+        try:
+            return tools_policy_mod.load()
+        except tools_policy_mod.PolicyError as error:
+            raise ApiError(500, f"The tools policy file is not valid: {error}", "tools_policy_error")
+
+    def tools_list(self):
+        """GET /v1/tools: the built-in tools in the OpenAI function shape, which of them are on, and the policy that decides it.
+        The policy is changed on this PC (`coli tools allow|deny|web`), never through the API."""
+        file = tools_policy_mod.path()
+        try:
+            policy, problem = tools_policy_mod.load(file), None
+        except tools_policy_mod.PolicyError as error:
+            policy, problem = tools_policy_mod.Policy(), str(error)
+        return {"object": "list", "path": file, "problem": problem, "policy": policy.summary(), "data": builtin_tools.listing(policy)}
+
+    def tool_call(self, path):
+        """POST /v1/tools/<name>: run one built-in tool: {"arguments": {...}, "confirm": true}. A tool that changes something is
+        refused (409) unless the caller says `confirm`, which a client sets only after a person has said yes."""
+        name = unquote(path[len("/v1/tools/"):])
+        body = self.management_json(path)
+        policy = self.tools_policy()
+        tool = builtin_tools.BY_NAME.get(name)
+        if tool is None or tool.name not in {t.name for t in builtin_tools.enabled(policy)}:
+            raise ApiError(404, f"No built-in tool `{name}` is on. GET /v1/tools lists them; the policy is on the router's PC (`coli tools`).",
+                           "tool_not_found")
+        arguments = body.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise ApiError(400, "`arguments` must be an object.", "invalid_request_error", "arguments")
+        if not tool.read_only and body.get("confirm") is not True:
+            raise ApiError(409, f"`{name}` changes things and needs `\"confirm\": true`, which a person must have said yes to: "
+                                + tool.describe(arguments, policy), "confirmation_required", "confirm")
+        text, is_error = builtin_tools.run(name, arguments, policy)
+        self._seen.update(path=path, tool=name, target=tool.target(arguments), ok=not is_error)
+        self.send_json(200, {"object": "tool_result", "name": name, "is_error": is_error, "text": text})
+
+    def tool_answer(self):
+        """POST /v1/tools/pending: a person's answer to a call the router is waiting on: {"id", "allow", "always"}."""
+        body = self.management_json("/v1/tools/pending")
+        id_, allow = body.get("id"), body.get("allow")
+        if not isinstance(id_, str) or not isinstance(allow, bool):
+            raise ApiError(400, "`id` must be text and `allow` true or false.", "invalid_request_error", "allow")
+        if not self.server.pending.answer(id_, allow, body.get("always") is True):
+            raise ApiError(404, "No call is waiting under that id (answered already, or it timed out).", "approval_not_found", "id")
+        self.send_json(200, {"status": "answered", "id": id_, "allow": allow})
+
+    def tools_chat(self, data, seen):
+        """POST /v1/chat/completions with `colibri_tools`: the router asks the model, runs its tool calls and answers (tools_loop.py)."""
+        policy = self.tools_policy()
+        try:
+            tools_loop.serve(self, tools_loop.loopback(self.server.server_address[1]), data, policy, self.server.pending, seen)
+        except tools_loop.LoopError as error:
+            raise ApiError(error.status, error.message, error.code, error.param)
 
     def mcp_servers_list(self):
         """GET /v1/mcp/servers: the MCP servers the clients run (mcp_registry.py, docs/mcp-client.md). The router only keeps and serves the list; a client

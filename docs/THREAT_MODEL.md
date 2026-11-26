@@ -16,9 +16,11 @@ Every statement below was checked against the code on `main` (file names are giv
 | The VS Code extension | your editor | nothing; it calls the router and runs tools itself |
 
 The router is the only door. It holds the API key and relays to the workers (`c/router.py`, which also removes
-`COLI_API_KEY` from the workers' environment on purpose). The server never runs a tool: it turns the model's tool call
+`COLI_API_KEY` from the workers' environment on purpose). **By default the server never runs a tool**: it turns the model's tool call
 into JSON for the client and stops. Reading files, writing files, running commands and fetching pages happen in the
-extension, with your user's rights.
+extension, with your user's rights. The one exception is the router's **built-in tools** ([builtin-tools.md](builtin-tools.md)): a fetch of public
+web pages, reading files and git repositories, and changing files, each **off until you turn it on at the router's PC** (`coli tools allow|web`), confined to
+the folders you name, and never able to run a command. With one on, the router does those things for whoever holds the key.
 
 ## Who is trusted
 
@@ -41,8 +43,14 @@ Everything the router offers. Concretely, with the key a client can:
   later request to its name does;
 - read the request log summaries (`/v1/requests`) and the health and metrics detail.
 
+If the built-in tools are on ([builtin-tools.md](builtin-tools.md)), a key holder can also **read every file and git repository under the folders you allowed**
+(not secret-looking ones), **fetch any public web page from this machine**, and where a folder was allowed for writing, **write files and make commits there**
+(`POST /v1/tools/NAME` with `confirm`, which the key holder sets). They cannot change that policy: it is a file on the router's PC, with no route that edits it.
+Nothing in this paragraph is possible until you run `coli tools allow` or `coli tools web on`.
+
 What a key holder cannot do through the API: read files on the machine (a local image path in a request is refused
-unless the server was started with `COLI_IMAGE_ROOT`, and then only under that folder, `..` refused), run commands, or
+unless the server was started with `COLI_IMAGE_ROOT`, and then only under that folder, `..` refused; and, unless a folder was allowed for the built-in tools, no file at all),
+run commands (the built-in tools never start a program of the model's choosing; git is run with no hooks, no fsmonitor, no external diff and no textconv, and no setting of its environment), or
 read another client's conversation (the server keeps no transcript; the request log holds what happened, not what was
 said, unless you start it with bodies on). Finished pictures are kept as files in `~/colibri-images` on the server
 machine (`c/image_engine.py`); the API does not serve that folder. The pictures and songs carry the settings that made them
@@ -70,6 +78,11 @@ contain no secret), and everything under `/v1/` is refused with 401.
 - **The dashboard keeps the key in memory only.** A link `http://host:8000/#key=...` puts it in the address-bar
   fragment, which a browser never sends to a server; the page reads it once and removes it from the address bar. It is
   not written to local storage (older releases did; the page deletes that copy).
+- **The built-in tools are confined** ([builtin-tools.md](builtin-tools.md)): off until a person enables them on the router's PC; files and git only inside the allowed
+  folders, with every path resolved through links, junctions and `..` first (tested with real links), a repository's top folder inside too, secret-looking files
+  refused, writes only in a folder granted for them, only in text files, never in a `.git` folder, and each after a person's yes (the loop's approval, or `confirm`
+  from a client that asked); the fetch tool refuses every address that is not public (checked on every address a name resolves to, connected to by that address,
+  and again on each redirect), takes no credentials in the address, and labels what it returns as web text. No tool runs a program the model chose (git itself is the only program started, with the options above).
 - **The extension asks before it acts.** Tools that are not read-only ask first (`colibri.toolApproval`); permission
   rules (`deny` beats `ask` beats `allow`, shell commands split at `&&`, `|`, `;`) decide ahead of time; MCP servers and
   workspace rule files are not read in an untrusted workspace; a hook or a rule can block a call.
@@ -84,6 +97,9 @@ contain no secret), and everything under `/v1/` is refused with 401.
 - **A leaked key.** There is no expiry, no per-device key, no rate limit beyond the queue length (`--max-queue`). If the
   key leaks (a shared dashboard link, a screenshot, a chat paste, the restart script's console output, the key file),
   rotate it: `restart-colibri.ps1 -NewKey` makes a new one and the old one stops working at once.
+- **A key holder reading what the built-in tools may read, and leaking it.** With the web tool and a readable folder both on, a page (or a file) can talk
+  the model into reading a file and putting it in the address it fetches next. There are no per-key scopes. Allow only folders you would be content to have read, and
+  leave `web` off if you do not need it ([builtin-tools.md](builtin-tools.md#what-it-does-not-defend)).
 - **A busy server.** Anyone with the key can fill the queue. Requests beyond it get 429, and a long prompt can occupy
   the single KV slot, which also throws away your own chat's cached start.
 - **Other people on the machine** (see "Who is trusted").
@@ -121,6 +137,7 @@ carry permission rules, the way its `CLAUDE.md` can steer the model: open unknow
 ## Checked where
 
 `c/openai_server.py` (`_is_authed`, `_check_host`, `serve`, CORS and the model-switch origin check, image-path rule),
-`c/router.py` (`do_GET` / `do_POST` auth, worker command and environment, bind refusal), `web/src/lib/storage.ts`
+`c/router.py` (`do_GET` / `do_POST` auth, worker command and environment, bind refusal, the `/v1/tools` routes), `c/tools_policy.py`, `c/builtin_tools.py`, `c/web_fetch.py`
+and `c/tools_loop.py` (the built-in tools and their limits), `web/src/lib/storage.ts`
 (`takeKeyFromLocation`, `persistPublicSettings`), the extension's `permissions.ts` and `untrusted.ts`. If you change one
 of these, change this page.
