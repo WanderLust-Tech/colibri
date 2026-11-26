@@ -206,7 +206,10 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   buffer (unsaved text, the selection, a range), edit a buffer with a `WorkspaceEdit` (one undo step, through the approval and editable diff that
   `write_file` already has), read the diagnostics (errors and warnings of a file), open a file at a line. Open questions: what to do when a buffer
   is dirty and the model edits the file on disk, and whether an edit to a file that is not open should open it.
-- [ ] **I6. Music: mixes (M, to be pinned down).** Two readings: a transition between two songs, or a remix. The first fits what the engine does
+- [~] **I6. Music: mixes (M, to be pinned down).** **The transition reading was tried 2026-11-26** ([acestep.md](acestep.md#a-transition-between-two-songs-by-repaint)): it works with
+  what the engine has, but needs a caption, `balanced` or `conservative` (never `aggressive`), and a level match the engine does not do; whether it *sounds* good is for a
+  listener (the files are in `~/colibri-music/transition-test/`). A `coli music blend A B` that does the steps below is the build, if wanted. The remix reading still needs I7.
+  The original text: Two readings: a transition between two songs, or a remix. The first fits what the engine does
   today: join the tail of clip A and the head of clip B with a gap and repaint the seam with a prompt (the repaint task, 2.33), a cheap thing to try
   before building anything; the second is stems recombined (see I7). Ask which is meant before choosing.
 - [ ] **I7. Music: vocals out of a song (M-L).** Three routes. (a) The extract task pulls a named track (`vocals`, `drums` ...) out of a clip

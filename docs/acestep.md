@@ -344,6 +344,33 @@ python3 tools/mutate_acestep_tok.py ~/models/ace-step-1.5 task_ref/cover10 task_
 python3 tools/mutate_acestep_audioin.py ~/models/ace-step-1.5 task_ref/cover10 task_ref/repaint_mid ...
 ```
 
+### A transition between two songs, by repaint
+
+Nothing new is needed to make a bridge from one piece into another: join the end of A and the start of B with a silent gap, and repaint the span that
+covers the gap and a little of each side. The kept parts are the originals (a repaint splices the source's own waveform back), and the engine writes what
+joins them.
+
+```sh
+# the last 8 s of A, 8 s of silence, the first 8 s of B (24 s); keep the outer 5 s on each side, make 5 s to 19 s again
+ffmpeg -i A.wav -i B.wav -filter_complex "[0:a]atrim=2:10,asetpts=PTS-STARTPTS[a];[1:a]atrim=0:8,asetpts=PTS-STARTPTS[b];aevalsrc=0|0:d=8:s=48000[s];[a][s][b]concat=n=3:v=0:a=1[o]" -map "[o]" -c:a pcm_s16le mix.wav
+coli music "a smooth transition from upbeat funk into heavy nu-metal, building up energy" --repaint mix.wav --from 5 --to 19 --repaint-mode balanced --seed 11 --out bridge.wav
+```
+
+Tried on the 5090 with a 10 s funk clip and a 151 s nu-metal song (2026-11-26, through the router; 24 s of audio took 7.3 to 7.8 s once the model was loaded, 16 s the
+first time). What was measured, with the clips in `~/colibri-music/transition-test/` for a person to listen to (the sound of it is not something these numbers judge):
+
+- **`balanced` and `conservative` keep the originals**: the outer parts differ from the source by about -90 dB (rounding), and there is no click at either seam. **`aggressive`
+  does not**: it remakes the parts that should be kept (the funk by -5 dB of its own level, the metal part came out 15 dB louder), so it is the wrong mode for this.
+- **The caption matters.** With it, the silent gap was filled (the quietest second of the bridge was -17 dB and -23 dB for two seeds); with none, one second fell to -55 dB.
+- **The bridge is louder than the clips it joins.** The engine writes new audio at about -15 to -18 dB RMS; those clips sat at -23 to -31 dB, so the bridge was 10 to 15 dB
+  louder, a jump of 16.5 dB between two neighbouring seconds. A gain on the bridge to the level of the kept parts, applied from the seam with a ramp of 0.1 s, brought the
+  largest jump to 5.5 dB (5.6 dB for the second seed). A repaint does not do this itself.
+- **The genre change does not happen in the middle.** A crude brightness measure (zero crossings) stayed at the funk's level for most of the bridge and rose to the metal's only
+  in its last two seconds, so the change was mostly at the second seam. The seed and the caption decide it; this was two seeds, not a study.
+
+A `coli music blend A B` that does the steps (the tail and head, the gap, the repaint in a safe mode, the level match and the assembly of the whole of A, the bridge and the
+whole of B) would be a small command on this; it is not built.
+
 ## The base and SFT DiTs: guidance, extract, lego, complete
 
 The turbo DiT has classifier-free guidance distilled into it: eight steps, one call each. The checkpoint's other DiTs, `acestep-v15-base`
