@@ -1074,8 +1074,8 @@ Status as of today (the file itself has been brought into line with this):
 
 - **Catching up with upstream**: 1,412 commits behind. Merging them is a large job with conflicts in `openai_server.py`, `coli`,
   `family_registry.py` and the Makefile; decide whether to do it, or to cherry-pick what is wanted.
-- **Qwen-Image editing**: Linux, ASan and UBSan runs; a real edit at the 1024
-  reference (the chain with an edit prefix was checked on the card 2026-11-21, 2.29); translated READMEs (it, ja, zh, id) for editing.
+- **Qwen-Image editing**: Linux, ASan and UBSan runs; translated READMEs (it, ja, zh, id) for editing. (A real edit at the 1024 reference
+  was done on the card 2026-11-25: 93.5 s against 51 s at 768, the same result to the eye, [qwen-image.md](qwen-image.md).)
 - **Graphics card**: The text encoder of Qwen-Image is the one piece of the picture models still on the CPU; All of ACE-Step's stages run on it (2.36). Making room on the card **is
   built** (2.15, [router.md](router.md)): a model that would start on the CPU only because the
   card is full makes the router demote (qwen36 engines) or stop (the others) an idle holder of the card, but only one idle for 60 s.

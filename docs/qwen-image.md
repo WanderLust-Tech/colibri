@@ -423,8 +423,7 @@ matrices-one-by-one path took a 512x512 step in 4.5 s on an RTX 5060 Ti 16 GB
 through `coli serve`: on the card 10 s once loaded (26 s to start the server, the transformer and the text encoder), on the CPU 95 s. The
 card's picture is the CPU's: the structural similarity of the two is 0.999999 and no pixel differs by more than 1 of 255. The CPU ran the
 f32 path in both of its runs here (`COLI_IMG_ACT8=0` gave a byte-identical picture, so the int8-activation path was not taken on this
-machine), which is the reference the device is meant to reproduce. Not measured: 1024x1024 (the VAE's bands, the attention over 4096
-tokens) and a card with less room than the 7 GB transformer.
+machine), which is the reference the device is meant to reproduce. Not measured there: a card with less room than the 7 GB transformer. (1024x1024 was measured on 2026-11-25, below.)
 
 **Again on 2026-11-21, with an edit (same RTX 5090 and 24-core i9).** 768x512, 8 steps, seed 42, straight from the engine: denoise **6.0 s
 on the card** (0.69 s a step) against 94.0 s on the CPU (11.7 s a step), the VAE decode 1.8 s against 6.4 s. The card matches the CPU's f32 path
@@ -434,6 +433,19 @@ either: here two foxes where the other two have one), so `COLI_IMG_ACT8=0` is th
 the two pictures differ by at most 1 of 255 (86.2 dB). Through `coli router` a warm 768x512 generation is 6.1 s from request to picture
 (36.5 s the first time, with the load) and an edit 37 s the first time. Peak use of the card: 13.3 GB for a render, 17.9 GB for an edit.
 The text encoder (6.95 GB) stays on the CPU.
+
+**1024x1024 and the 1024 reference, on the same card (2026-11-25, through `coli router`, a warm server, seed 42, the card totals include
+about 4 GB another program was already using).** A render, 8 steps: 768x512 3.6 s, 768x768 5.9 s, 1024x576 6.0 s, **1024x1024 14.3 s**
+(denoise 13.1 s, 1.64 s a step, decode 1.0 s; peak 18.2 GB); 16 steps at 1024x1024 27.4 s. A step costs 2.5 times a 768x768 one for 1.8
+times the pixels, since the attention over 4096 image tokens grows with the square. Looked at: eight steps at 1024x1024 are a good
+picture with soft architecture and no wrong anatomy; sixteen steps give cleaner edges and a different, tidier building from the same
+seed (SSIM 0.84 between the two), so for a size this large the second step up in quality is worth the time. An **edit** of that picture
+("make the sky a vivid purple and orange sunset", 1024x1024 out, 8 steps, seed 7): a 768 reference took **51 s** (encode 27.6 s, denoise
+22.4 s; peak 21.9 GB), a **1024 reference 93.5 s** (encode 57.0 s, denoise 35.1 s; peak 24.3 GB). Both did the edit: the sky changed
+and the lighthouse, house, rocks and sea stayed where they were. The two results score 0.967 against each other, so on this picture the
+1024 reference bought nothing a person can see for 1.8 times the time and 2.4 GB more of the card (the encode is the vision tower on the
+CPU). One picture and one instruction: it is a check, not a study. The default of 768 stays; 1024 fits the card (4096 reference tokens,
+under the 7168 the engine accepts) for a picture where fine detail in the reference has to survive.
 
 ### Checking a picture against a baseline
 

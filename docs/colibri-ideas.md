@@ -194,8 +194,9 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   below: the user declined work there once, so settle that first.
 - [ ] **I3. Gemma's chain and tier on an integrated GPU (S, a measurement).** Both are off by default there because they were never measured on a card
   that shares the CPU's RAM ([gemma4.md](gemma4.md), the chain and the tier). Needs a machine with one; the question is whether either wins.
-- [ ] **I4. Qwen-Image at 1024 x 1024 (S, a check).** Quality and time at that size, and a real edit at the 1024 reference (fork-changes 3.4; the
-  chain with an edit prefix was checked on the card 2026-11-21, 2.29).
+- [x] **I4. Qwen-Image at 1024 x 1024 (S, a check).** Done 2026-11-25 on the 5090, through the router ([qwen-image.md](qwen-image.md)): a
+  1024x1024 render takes 14.3 s at 8 steps (27.4 s at 16, which looks visibly better at that size); an edit with a 1024 reference takes 93.5 s
+  against 51 s with a 768 one and gives the same result to the eye (SSIM 0.967), so the default stays 768.
 
 **New**
 
