@@ -228,7 +228,7 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   The weight is in the agent loop in the gateway (one generation at a time per model, approvals from three clients, a tool result going back into
   the next request), in where an MCP server's process runs and with what rights (they run local commands), and in what happens to the
   extension's own servers. Settle who owns the loop and the approvals before building.
-- [ ] **I11. Choose where a model is installed (S-M).** `coli model install` (and the dashboard and the extension's installer) put the model in the
+- [x] **I11. Choose where a model is installed (S-M).** Built 2026-11-25 (local commits, not pushed or deployed): `root` in `POST /v1/models/install` (one of the new `folders` of the catalog, each with its free space), `coli model install ID --dest FOLDER` and the folders listed by `coli model available`, a folder list in the dashboard's install confirmation and a folder pick in the extension (0.27.0). A folder that is not a models folder is refused with the list and how to add one (`COLI_MODELS_ROOT`); adding a folder from the API was left out. The list now judges a model's room by the folder with the most. docs/model-install.md. Original text: `coli model install` (and the dashboard and the extension's installer) put the model in the
   first models folder with enough free disk (`Installer.install_root`); there is no way to say which. A `--dest FOLDER` (a folder already scanned by
   the catalog, or one to add), a list of the folders with their free space in the dashboard and the extension's menu, and `root` in the install
   request; the model must end up in a folder the router scans, or be added to them.

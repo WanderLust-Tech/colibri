@@ -155,10 +155,10 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
   }
 
   /* Router with install routes only. The confirmation (size and licence) was asked by ModelInstaller. */
-  const install = async (row: CatalogRow) => {
+  const install = async (row: CatalogRow, folder?: string) => {
     setResult(null)
     try {
-      await installModel(baseUrl, apiKey, row.id)
+      await installModel(baseUrl, apiKey, row.id, folder)
       const next = await getModelCatalog(baseUrl, apiKey)
       if (next) setCatalog(next)
     } catch (cause) {
@@ -323,7 +323,7 @@ export default function ModelSwitcher({ baseUrl, apiKey, connected, busy, onSwit
       </ul>
       {installed && installed.models.length <= 1 && !catalog && <p className="field-help">{t("models.empty")}</p>}
       {router && catalog && (
-        <ModelInstaller catalog={catalog} onInstall={(row) => void install(row)} onStop={(row) => void stopInstall(row)} onRemoveAddon={(row) => void removeAddon(row)} disabled={!!switching || removing !== null} />
+        <ModelInstaller catalog={catalog} onInstall={(row, folder) => void install(row, folder)} onStop={(row) => void stopInstall(row)} onRemoveAddon={(row) => void removeAddon(row)} disabled={!!switching || removing !== null} />
       )}
     </section>
   )

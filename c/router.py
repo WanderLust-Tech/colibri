@@ -2611,7 +2611,9 @@ class RouterHandler(BaseHTTPRequestHandler):
         if roots:
             import setup_hw
             free = setup_hw.disk_free(installer.install_root() or roots[0])
-        return {"object": "list", "data": installer.catalog_rows(), "roots": roots,
+        folders = [{"path": f["path"], "free_gb": round(f["free_bytes"] / 1e9, 1) if f["free_bytes"] is not None else None,
+                    "preferred": f["preferred"]} for f in installer.folders()]
+        return {"object": "list", "data": installer.catalog_rows(), "roots": roots, "folders": folders,
                 "free_gb": round(free / 1e9, 1) if free is not None else None}
 
     def install_job(self, model_id):
@@ -2624,15 +2626,19 @@ class RouterHandler(BaseHTTPRequestHandler):
         return ApiError(error.status, error.message, error.code, error.param)
 
     def install_start(self):
-        """Fetch a catalog model: body `id` and `confirm: true` (the caller has shown the size and the licence). Answers 202
-        with the job; GET /v1/models/installs/{id} follows it."""
+        """Fetch a catalog model: body `id` and `confirm: true` (the caller has shown the size and the licence), and `root`,
+        one of the `folders` of GET /v1/models/catalog, to say where (else the first with room). Answers 202 with the job;
+        GET /v1/models/installs/{id} follows it."""
         installer = self.need_installer()
         body = self.management_json("/v1/models/install")
         model_id = body.get("id")
         if not isinstance(model_id, str) or not model_id:
             raise ApiError(400, "`id` must name a model of GET /v1/models/catalog.", "invalid_request_error", "id")
+        root = body.get("root")
+        if root is not None and (not isinstance(root, str) or not root.strip()):
+            raise ApiError(400, "`root` must be one of the `folders` of GET /v1/models/catalog.", "invalid_request_error", "root")
         try:
-            job = installer.start(model_id, confirm=body.get("confirm"))
+            job = installer.start(model_id, confirm=body.get("confirm"), root=root.strip() if root else None)
         except model_installer.InstallError as error:
             raise self.install_error(error)
         self.send_json(202, job)

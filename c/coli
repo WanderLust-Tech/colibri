@@ -5023,6 +5023,7 @@ def main():
     pmodel.add_argument("action",nargs="?",default="list",choices=("list","enable","disable","gpu","context","info","verify","available","install","uninstall"))
     pmodel.add_argument("-y","--yes",action="store_true",help="install, uninstall: do not ask (the size, the licence and what goes are still printed)")
     pmodel.add_argument("--quick",action="store_true",help="verify: sizes only, no checksums (fast on a slow drive)")
+    pmodel.add_argument("--dest",default=None,metavar="FOLDER",help="install: put the model in this models folder (one that is listed by `coli model available`), not the first with room")
     pmodel.add_argument("name",nargs="?",default=None,metavar="MODEL")
     pmodel.add_argument("value",nargs="?",default=None,help="gpu: auto, vulkan or cpu; context: a number of tokens (32768, 32k) or auto")
     pmodel.add_argument("--host",default="127.0.0.1"); pmodel.add_argument("--port",type=int,default=None)

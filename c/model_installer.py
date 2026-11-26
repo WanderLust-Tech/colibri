@@ -205,6 +205,37 @@ class Installer:
                 return root
         return None
 
+    def folders(self):
+        """The models folders an install can go to, in the order an install prefers them, with the room each has (None when it
+        cannot be told). `preferred` marks the one a model goes to when nobody chooses: the first with room for `need_bytes`."""
+        roots = [r for r in self.roots() if r] or [os.path.join(os.path.expanduser("~"), "colibri-models")]
+        first = self.install_root()
+        return [{"path": r, "free_bytes": setup_hw.disk_free(r), "preferred": r == first} for r in roots]
+
+    def most_free(self):
+        """The most room any models folder has (None when none can be told): what a model that is not here yet can count on,
+        since an install goes to the first folder with room."""
+        roots = [r for r in self.roots() if r] or [os.path.join(os.path.expanduser("~"), "colibri-models")]
+        seen = [free for free in (setup_hw.disk_free(r) for r in roots) if free is not None]
+        return max(seen) if seen else None
+
+    def pick_root(self, root, need_bytes, name):
+        """The folder the caller chose for a new model: one of the models folders (the folders the catalog scans, so the model is
+        listed when it arrives) with room for it. Raises InstallError otherwise, saying which folders there are."""
+        roots = [r for r in self.roots() if r] or [os.path.join(os.path.expanduser("~"), "colibri-models")]
+        wanted = _real(os.path.expanduser(root))
+        chosen = next((r for r in roots if _real(r) == wanted), None)
+        if chosen is None:
+            raise InstallError(409, f"{root} is not one of the models folders ({', '.join(roots)}); a model goes into a folder "
+                                    f"that is listed, so that it is found when it arrives. Add the folder to COLI_MODELS_ROOT "
+                                    f"(folders separated by {os.pathsep!r}) and restart the server to have another.",
+                               "unknown_folder", "root")
+        free = setup_hw.disk_free(chosen)
+        if free is not None and free < need_bytes:
+            raise InstallError(409, f"{name} needs {need_bytes / GB:.0f} GB free; {free / GB:.0f} GB is free in {chosen}.",
+                               "insufficient_disk", "root")
+        return chosen
+
     def catalog_rows(self):
         """GET /v1/models/catalog: every model that can be fetched, what a machine like this makes of it, whether it is
         here, and the job that is fetching it."""
@@ -221,8 +252,8 @@ class Installer:
             if here is not None:
                 manifest = setup_download.read_manifest(here["path"])
                 have = setup_download.bytes_present(here["path"], manifest.get("files", [])) if manifest else 0
-            root = self.install_root() if here is None else os.path.dirname(here["path"])
-            status, reason = setup_catalog.assess(entry, ram, setup_hw.disk_free(root) if root else None,
+            free = self.most_free() if here is None else setup_hw.disk_free(os.path.dirname(here["path"]))
+            status, reason = setup_catalog.assess(entry, ram, free,
                                                   os_name=sys.platform, machine=setup_hw.platform.machine().lower(),
                                                   already_downloaded=have)
             row = {"id": entry.id, "name": entry.name, "kind": entry.modality, "family": entry.family,
@@ -288,17 +319,18 @@ class Installer:
             if job is not None:
                 job.update(fields)
 
-    def start(self, model_id, confirm=False, background=True):
-        """Begin fetching a catalog model. Returns the job. Raises InstallError."""
+    def start(self, model_id, confirm=False, background=True, root=None):
+        """Begin fetching a catalog model, into `root` (one of the models folders) when the caller names one, else into the
+        first folder with room. Returns the job. Raises InstallError."""
         with self._start_lock:                 # the check for a running install and the registering of this one are one step
-            entry, model_dir = self._begin(model_id, confirm)
+            entry, model_dir = self._begin(model_id, confirm, root)
         if background:
             threading.Thread(target=self._run, args=(entry, model_dir), name=f"install-{entry.id}", daemon=True).start()
         else:
             self._run(entry, model_dir)
         return self.job(entry.id)
 
-    def _begin(self, model_id, confirm):
+    def _begin(self, model_id, confirm, root=None):
         """Everything that can refuse an install, then the job and the folder's lock. Returns (entry, folder)."""
         if confirm is not True:
             raise InstallError(400, "Send `confirm`: true once the size and the licence have been shown.",
@@ -326,6 +358,12 @@ class Installer:
         if running is not None:
             raise InstallError(409, f"{running['name']} is being downloaded; one install at a time.", "install_busy")
         need = int(entry.disk_gb * GB * 1.02 + 2 * GB)
+        if root is not None and (addon is not None or here is not None):
+            # an add-on goes into its parent's folder and a part-fetched model stays where it was begun: moving either is a different job
+            where = addon[0] if addon is not None else here["path"]
+            raise InstallError(409, f"{entry.name} " + (f"goes into its parent's folder ({where})" if addon is not None else
+                                                       f"is partly fetched in {where}, and carries on there") +
+                                    "; leave out the folder to continue, or remove what is there first.", "folder_fixed", "root")
         if addon is not None:
             model_dir = addon[0]
             manifest = setup_download.read_manifest(model_dir)
@@ -343,7 +381,10 @@ class Installer:
             manifest = setup_download.read_manifest(model_dir) or {}
             need = max(0, need - setup_download.bytes_present(model_dir, manifest.get("files", [])))
         else:
-            root = self.install_root(need)
+            if root is not None:
+                root = self.pick_root(root, need, entry.name)
+            else:
+                root = self.install_root(need)
             if root is None:
                 free = max((setup_hw.disk_free(r) or 0) for r in (self.roots() or [os.path.expanduser("~")]))
                 raise InstallError(409, f"{entry.name} needs {need / GB:.0f} GB free; the most any models folder has is "

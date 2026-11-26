@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import type { CatalogRow, InstallJob } from "./api"
-import { anyInstalling, canInstall, etaText, formatBytes, installable, installedAddons, installPercent, progressLine } from "./installs"
+import type { CatalogRow, InstallJob, ModelFolder } from "./api"
+import { anyInstalling, canInstall, defaultFolder, etaText, formatBytes, installable, installedAddons, installPercent, offersFolder, progressLine } from "./installs"
 
 const job = (extra: Partial<InstallJob> = {}): InstallJob => ({
   id: "z-image-turbo", name: "Z-Image-Turbo", state: "downloading", done: 13_500_000_000, total: 32_900_000_000,
@@ -68,5 +68,30 @@ describe("what to offer", () => {
     expect(anyInstalling([row({ job: job({ state: "failed" }) })])).toBe(false)
     expect(anyInstalling([row(), row({ job: job({ state: "downloading" }) })])).toBe(true)
     expect(anyInstalling([row({ job: job({ state: "finishing" }) })])).toBe(true)
+  })
+})
+
+describe("choosing the folder an install goes to", () => {
+  const folders: ModelFolder[] = [
+    { path: "D:\models", free_gb: 12, preferred: false },
+    { path: "C:\models", free_gb: 800, preferred: true },
+  ]
+
+  it("offers the choice only when there is more than one folder", () => {
+    expect(offersFolder(folders, row())).toBe(true)
+    expect(offersFolder(folders.slice(0, 1), row())).toBe(false)
+    expect(offersFolder([], row())).toBe(false)
+    expect(offersFolder(undefined, row())).toBe(false)
+  })
+
+  it("does not offer it for an add-on or a part-fetched model, which have a folder already", () => {
+    expect(offersFolder(folders, row({ into: "z-image-turbo" }))).toBe(false)
+    expect(offersFolder(folders, row({ unfinished: true }))).toBe(false)
+  })
+
+  it("starts the choice at the router's own pick, else the first folder", () => {
+    expect(defaultFolder(folders)).toBe("C:\models")
+    expect(defaultFolder(folders.map((folder) => ({ ...folder, preferred: false })))).toBe("D:\models")
+    expect(defaultFolder([])).toBe("")
   })
 })

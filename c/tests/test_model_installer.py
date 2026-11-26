@@ -254,6 +254,126 @@ class Install(InstallerCase):
         self.assertIsNone(model_installer.lock_holder(folder))
 
 
+class InstallFolders(InstallerCase):
+    """`root`: the caller says which models folder a new model goes into (I11)."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = os.path.join(self.tmp.name, "models-two")
+        os.makedirs(self.other)
+        self.installer.roots = lambda: [self.root, self.other]
+        self.installer.installed = self.installed_both
+
+    def installed_both(self):
+        out = []
+        for root in (self.root, self.other):
+            for name in sorted(os.listdir(root)):
+                path = os.path.join(root, name)
+                manifest = setup_download.read_manifest(path) if os.path.isdir(path) else None
+                # as the real scan: a model has its index, and a folder the downloader began is listed as unfinished
+                if os.path.isfile(os.path.join(path, "model_index.json")) or manifest:
+                    out.append({"key": model_switch.model_key(path), "path": os.path.realpath(path), "id": name, "name": name,
+                                "unfinished": bool(manifest and not manifest.get("complete")), "state": "idle"})
+        return out
+
+    def free(self, mapping):
+        """setup_hw.disk_free as `mapping` (a folder's real path -> bytes) says; any other folder has plenty."""
+        real = {os.path.realpath(k): v for k, v in mapping.items()}
+        return mock.patch.object(model_installer.setup_hw, "disk_free", lambda path: real.get(os.path.realpath(path), 10 ** 12))
+
+    def test_the_folders_are_listed_with_their_room_and_the_default_marked(self):
+        with self.free({self.root: 5 * 10 ** 9, self.other: 7 * 10 ** 9}):
+            folders = self.installer.folders()
+        self.assertEqual([(f["path"], f["free_bytes"], f["preferred"]) for f in folders],
+                         [(self.root, 5 * 10 ** 9, True), (self.other, 7 * 10 ** 9, False)])
+
+    def test_without_a_choice_the_first_folder_with_room_is_used(self):
+        with self.free({self.root: 1000}):                      # the first has no room for even a tiny model
+            job = self.installer.start("tiny-image", confirm=True, background=False)
+        self.assertEqual(job["state"], "done", job)
+        self.assertTrue(os.path.isdir(os.path.join(self.other, "tiny-image")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "tiny-image")))
+
+    def test_the_list_counts_the_folder_with_the_most_room(self):
+        self.entries[0] = entry(disk_gb=50)
+        with self.free({self.root: 10 ** 9, self.other: 10 ** 12}):          # the first is nearly full, the second is not
+            row = self.installer.catalog_rows()[0]
+        self.assertNotEqual(row["status"], "needs-disk", row)
+        with self.free({self.root: 10 ** 9, self.other: 2 * 10 ** 9}):       # neither has room
+            self.assertEqual(self.installer.catalog_rows()[0]["status"], "needs-disk")
+        with self.free({self.root: 10 ** 9, self.other: 10 ** 12}):          # and the install does go to the second
+            job = self.installer.start("tiny-image", confirm=True, background=False)
+        self.assertTrue(os.path.isdir(os.path.join(self.other, "tiny-image")), job)
+
+    def test_a_chosen_folder_gets_the_model_even_when_an_earlier_one_has_room(self):
+        job = self.installer.start("tiny-image", confirm=True, background=False, root=self.other)
+        self.assertEqual(job["state"], "done", job)
+        folder = os.path.join(self.other, "tiny-image")
+        self.assertEqual(os.path.realpath(job["dir"]), os.path.realpath(folder))
+        self.assertTrue(setup_download.is_complete(folder))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "tiny-image")))
+
+    def test_the_folder_may_be_spelled_another_way(self):
+        spelled = os.path.join(self.other, "..", os.path.basename(self.other)) + os.sep
+        job = self.installer.start("tiny-image", confirm=True, background=False, root=spelled)
+        self.assertEqual(job["state"], "done", job)
+        self.assertTrue(os.path.isdir(os.path.join(self.other, "tiny-image")))
+
+    def test_a_folder_that_is_not_a_models_folder_is_refused_and_nothing_is_written(self):
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(elsewhere)
+        with self.assertRaises(model_installer.InstallError) as caught:
+            self.installer.start("tiny-image", confirm=True, root=elsewhere)
+        error = caught.exception
+        self.assertEqual((error.status, error.code, error.param), (409, "unknown_folder", "root"))
+        self.assertIn(self.root, error.message)
+        self.assertIn(self.other, error.message)
+        self.assertIn("COLI_MODELS_ROOT", error.message)
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(os.listdir(self.root) + os.listdir(self.other), [])
+        self.assertIsNone(self.installer.active())
+
+    def test_a_chosen_folder_without_room_is_refused_though_another_has_it(self):
+        with self.free({self.other: 1000}):
+            with self.assertRaises(model_installer.InstallError) as caught:
+                self.installer.start("tiny-image", confirm=True, root=self.other)
+        self.assertEqual((caught.exception.code, caught.exception.param), ("insufficient_disk", "root"))
+        self.assertIn(self.other, caught.exception.message)
+        self.assertFalse(os.path.exists(os.path.join(self.other, "tiny-image")))
+
+    def test_a_model_part_fetched_in_one_folder_carries_on_there_and_is_not_moved(self):
+        real = setup_download.download_repo
+
+        def cancelling(repo, revision, model_dir, files, **kw):
+            def watch(event):
+                self.installer.cancel_job("tiny-image")
+                kw["progress"](event)
+            return real(repo, revision, model_dir, files, **{**kw, "progress": watch})
+
+        with mock.patch.object(setup_download, "download_repo", cancelling):
+            self.installer.start("tiny-image", confirm=True, background=False)       # begun in the first folder, cut short
+        with self.assertRaises(model_installer.InstallError) as caught:
+            self.installer.start("tiny-image", confirm=True, root=self.other)
+        self.assertEqual((caught.exception.code, caught.exception.param), ("folder_fixed", "root"))
+        self.assertFalse(os.path.exists(os.path.join(self.other, "tiny-image")))
+        again = self.installer.start("tiny-image", confirm=True, background=False)    # no folder named: it resumes where it was
+        self.assertEqual(again["state"], "done", again)
+        self.assertTrue(setup_download.is_complete(os.path.join(self.root, "tiny-image")))
+
+    def test_an_add_on_goes_into_its_parents_folder_and_a_folder_is_refused(self):
+        parent = entry(id="parent-image", name="Parent", repo=REPO)
+        addon = entry(id="parent-extra", name="Extra", repo=REPO, into="parent-image", subdir="extra",
+                      include=("weights.safetensors",), check=("weights.safetensors",))
+        self.entries[:] = [parent, addon]
+        self.installer.start("parent-image", confirm=True, background=False, root=self.other)
+        with self.assertRaises(model_installer.InstallError) as caught:
+            self.installer.start("parent-extra", confirm=True, root=self.root)
+        self.assertEqual((caught.exception.code, caught.exception.param), ("folder_fixed", "root"))
+        job = self.installer.start("parent-extra", confirm=True, background=False)
+        self.assertEqual(job["state"], "done", job)
+        self.assertTrue(os.path.isfile(os.path.join(self.other, "parent-image", "extra", "weights.safetensors")))
+
+
 class Uninstall(InstallerCase):
     def setUp(self):
         super().setUp()

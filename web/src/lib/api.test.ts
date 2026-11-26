@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, editsImages, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  getModelSettings, listInstalledModels, listModelInfo, makesEmbeddings, ranksDocuments, serverEndpoint, setModelSettings, streamChat, switchModel, unloadModel,
+  getModelCatalog, getModelSettings, installModel, listInstalledModels, listModelInfo, makesEmbeddings, ranksDocuments, serverEndpoint, setModelSettings, streamChat, switchModel, unloadModel,
   waitForModel,
   type GenerateImageOptions, type ImageProgress,
 } from "./api"
@@ -473,6 +473,25 @@ describe("model switching", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/v1/models/installed", expect.objectContaining({
       headers: expect.objectContaining({ Authorization: "Bearer secret" }),
     }))
+  })
+
+  it("installs into the folder that was chosen, and says nothing of a folder when none was", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json({ id: "z-image-turbo", state: "starting" })))
+    vi.stubGlobal("fetch", fetchMock)
+    await installModel("http://localhost:8000/v1", "k", "z-image-turbo", "D:\models")
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ id: "z-image-turbo", confirm: true, root: "D:\models" })
+    await installModel("http://localhost:8000/v1", "k", "z-image-turbo")
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ id: "z-image-turbo", confirm: true })
+    await installModel("http://localhost:8000/v1", "k", "z-image-turbo", "")
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ id: "z-image-turbo", confirm: true })
+  })
+
+  it("reads the folders of the catalog, and an older router without them has none", async () => {
+    const folders = [{ path: "C:\models", free_gb: 800, preferred: true }, { path: "D:\models", free_gb: 12.5, preferred: false }]
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ data: [], roots: ["C:\models", "D:\models"], folders, free_gb: 800 })))
+    expect((await getModelCatalog("http://localhost:8000/v1", ""))?.folders).toEqual(folders)
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ data: [], roots: ["C:\models"], free_gb: 800 })))
+    expect((await getModelCatalog("http://localhost:8000/v1", ""))?.folders).toEqual([])
   })
 
   it("treats a server that does not say it can switch as unable to", async () => {

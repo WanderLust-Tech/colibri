@@ -253,6 +253,8 @@ const en: Record<string, string> = {
   "install.install": "Install",
   "install.confirm": "Download {{size}} GB of {{name}} and accept its licence?",
   "install.confirmYes": "Download",
+  "install.folder": "Into",
+  "install.folderFree": "{{path}} ({{gb}} GB free)",
   "install.cancel": "Cancel",
   "install.stop": "Stop download",
   "install.licence": "Licence: {{text}}",

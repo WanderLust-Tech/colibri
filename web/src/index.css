@@ -207,6 +207,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .model-select { background: transparent; color: inherit; border: 1px solid var(--border); border-radius: 8px; padding: 2px 6px; font: inherit; }
 .model-select option { color: initial; }
 .model-gpu-policy { margin-top: 0; }
+.install-folder { display: flex; align-items: center; gap: 6px; }
+.install-folder select { max-width: 280px; font-size: 11px; background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; }
 .model-confirm { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--muted-foreground); }
 .model-switching { display: flex; align-items: flex-start; gap: 10px; padding: 12px 13px; border-radius: 12px; background: var(--secondary); }
 .model-switching > div { display: flex; flex-direction: column; gap: 4px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }

@@ -4,12 +4,13 @@ import { Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useLocale } from "@/i18n"
 import { installActive, type CatalogRow, type ModelCatalog } from "@/lib/api"
-import { canInstall, formatBytes, installable, installedAddons, installPercent, progressLine } from "@/lib/installs"
+import { canInstall, defaultFolder, formatBytes, installable, installedAddons, installPercent, offersFolder, progressLine } from "@/lib/installs"
 
 interface ModelInstallerProps {
   catalog: ModelCatalog
-  /* Starts the download; the licence and size were shown by the confirmation this component asks for. */
-  onInstall: (row: CatalogRow) => void
+  /* Starts the download; the licence and size were shown by the confirmation this component asks for. `folder` is the models
+     folder the person chose, when there is more than one to choose from. */
+  onInstall: (row: CatalogRow, folder?: string) => void
   onStop: (row: CatalogRow) => void
   /* Deletes an installed add-on's files; the confirmation was asked here. */
   onRemoveAddon: (row: CatalogRow) => void
@@ -22,6 +23,7 @@ interface ModelInstallerProps {
 export default function ModelInstaller({ catalog, onInstall, onStop, onRemoveAddon, disabled }: ModelInstallerProps) {
   const { t } = useLocale()
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  const [folder, setFolder] = useState("")
   const [removeId, setRemoveId] = useState<string | null>(null)
   const rows = installable(catalog.rows)
   const addons = installedAddons(catalog.rows)
@@ -64,12 +66,24 @@ export default function ModelInstaller({ catalog, onInstall, onStop, onRemoveAdd
               ) : confirmId === row.id ? (
                 <div className="model-confirm">
                   <span>{t("install.confirm", { size: row.download_gb.toFixed(1), name: row.name })}</span>
-                  <Button type="button" size="sm" onClick={() => { setConfirmId(null); onInstall(row) }}>{t("install.confirmYes")}</Button>
+                  {offersFolder(catalog.folders, row) && (
+                    <label className="install-folder">
+                      {t("install.folder")}
+                      <select value={folder} onChange={(event) => setFolder(event.target.value)} aria-label={t("install.folder")}>
+                        {catalog.folders.map((entry) => (
+                          <option key={entry.path} value={entry.path}>
+                            {entry.free_gb !== null ? t("install.folderFree", { path: entry.path, gb: Math.round(entry.free_gb) }) : entry.path}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <Button type="button" size="sm" onClick={() => { setConfirmId(null); onInstall(row, offersFolder(catalog.folders, row) ? folder : undefined) }}>{t("install.confirmYes")}</Button>
                   <Button type="button" size="sm" variant="secondary" onClick={() => setConfirmId(null)}>{t("install.cancel")}</Button>
                 </div>
               ) : (
                 <Button type="button" size="sm" variant="secondary" disabled={disabled || running || !canInstall(row, false)}
-                  aria-label={`${t("install.install")} ${row.name}`} onClick={() => setConfirmId(row.id)}>{t("install.install")}</Button>
+                  aria-label={`${t("install.install")} ${row.name}`} onClick={() => { setFolder(defaultFolder(catalog.folders)); setConfirmId(row.id) }}>{t("install.install")}</Button>
               )}
               {active && job && (
                 <div className="install-progress" role="status" aria-live="polite">

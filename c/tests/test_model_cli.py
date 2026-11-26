@@ -38,13 +38,14 @@ class RouterStub:
         self.rows, self.installed_items, self.jobs = rows or [row()], installed or [], list(jobs or [])
         self.calls, self.status = [], status
         self.removed = None
+        self.folders = []
 
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, body))
         if self.status != 200 and path == "/v1/models/catalog":
             return self.status, None
         if (method, path) == ("GET", "/v1/models/catalog"):
-            return 200, {"data": self.rows}
+            return 200, {"data": self.rows, **({"folders": self.folders} if self.folders else {})}
         if (method, path) == ("GET", "/v1/models/installed"):
             return 200, {"data": self.installed_items}
         if (method, path) == ("POST", "/v1/models/install"):
@@ -60,11 +61,11 @@ class RouterStub:
         return [c for c in self.calls if c[0] == "POST" and c[1] == path]
 
 
-def run(action, name=None, stub=None, yes=False, interactive=False, **kw):
+def run(action, name=None, stub=None, yes=False, interactive=False, dest=None, **kw):
     stub = stub or RouterStub()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = model_cli.run(SimpleNamespace(action=action, name=name, yes=yes), stub, NO_COLOR,
+        code = model_cli.run(SimpleNamespace(action=action, name=name, yes=yes, **({"dest": dest} if dest else {})), stub, NO_COLOR,
                              interactive=interactive, tty=False, poll=0, **kw)
     return code, out.getvalue(), stub
 
@@ -122,6 +123,50 @@ class Install(unittest.TestCase):
         self.assertEqual(stub.posted("/v1/models/install")[0][2], {"id": "tiny-image", "confirm": True})
         self.assertIn("25.0%", text)
         self.assertIn("installed in /models/tiny-image", text)
+
+    def test_dest_names_the_folder_in_the_request(self):
+        stub = RouterStub(jobs=[job("done", 1000)])
+        code, text, stub = run("install", "tiny-image", stub=stub, yes=True, dest="/big/models")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(stub.posted("/v1/models/install")[0][2], {"id": "tiny-image", "confirm": True, "root": "/big/models"})
+
+    def test_without_dest_the_request_has_no_folder(self):
+        stub = RouterStub(jobs=[job("done", 1000)])
+        run("install", "tiny-image", stub=stub, yes=True)
+        self.assertNotIn("root", stub.posted("/v1/models/install")[0][2])
+
+    def test_a_server_that_refuses_the_folder_is_told_to_the_user(self):
+        class Refusing(RouterStub):
+            def __call__(self, method, path, body=None):
+                if (method, path) == ("POST", "/v1/models/install"):
+                    return 409, {"error": {"message": "/nope is not one of the models folders (/a, /b)"}}
+                return super().__call__(method, path, body)
+        code, text, _ = run("install", "tiny-image", stub=Refusing(), yes=True, dest="/nope")
+        self.assertEqual(code, 1)
+        self.assertIn("is not one of the models folders", text)
+
+    def test_no_room_in_the_default_folder_does_not_stop_a_chosen_one(self):
+        full = row(status="needs-disk", fits=False, reason="needs 20 GB free; 3 GB is free")
+        stub = RouterStub(rows=[full], jobs=[job("done", 1000)])
+        code, text, stub = run("install", "tiny-image", stub=stub, yes=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(stub.posted("/v1/models/install"), [])
+        stub = RouterStub(rows=[full], jobs=[job("done", 1000)])
+        code, text, stub = run("install", "tiny-image", stub=stub, yes=True, dest="/big")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(stub.posted("/v1/models/install")[0][2]["root"], "/big")
+
+    def test_available_lists_the_folders_when_there_are_several(self):
+        stub = RouterStub()
+        stub.folders = [{"path": "/small", "free_gb": 12.0, "preferred": False}, {"path": "/big", "free_gb": 800.0, "preferred": True}]
+        code, text, _ = run("available", stub=stub)
+        self.assertEqual(code, 0)
+        self.assertIn("/big  (800 GB free)  <- default", text)
+        self.assertIn("/small  (12 GB free)", text)
+        self.assertIn("--dest FOLDER", text)
+        one = RouterStub()
+        one.folders = [{"path": "/only", "free_gb": 5.0, "preferred": True}]
+        self.assertNotIn("/only", run("available", stub=one)[1])
 
     def test_a_failed_job_says_why(self):
         stub = RouterStub(jobs=[job("downloading", 100), job("failed", error="disk full")])

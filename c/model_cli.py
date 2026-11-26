@@ -60,8 +60,11 @@ class RemoteBackend:
     def installed(self):
         return self._call("GET", "/v1/models/installed")["data"]
 
-    def start(self, model_id):
-        return self._call("POST", "/v1/models/install", {"id": model_id, "confirm": True})
+    def folders(self):
+        return self._call("GET", "/v1/models/catalog").get("folders") or []
+
+    def start(self, model_id, root=None):
+        return self._call("POST", "/v1/models/install", {"id": model_id, "confirm": True, **({"root": root} if root else {})})
 
     def job(self, model_id):
         return self._call("GET", f"/v1/models/installs/{model_id}")
@@ -127,9 +130,13 @@ class LocalBackend:
     def installed(self):
         return self.scan()
 
-    def start(self, model_id):
+    def folders(self):
+        return [{"path": f["path"], "free_gb": round(f["free_bytes"] / 1e9, 1) if f["free_bytes"] is not None else None,
+                 "preferred": f["preferred"]} for f in self.installer.folders()]
+
+    def start(self, model_id, root=None):
         try:
-            return self.installer.start(model_id, confirm=True)
+            return self.installer.start(model_id, confirm=True, root=root)
         except self.mi.InstallError as error:
             raise Refused(error.message)
 
@@ -207,7 +214,13 @@ def show_available(backend, C):
         print()
         for row in notes[:6]:
             print(f"  {C.dim}{row['id']}: {row['reason']}{C.r}")
-    print(f"\n  {C.dim}fetch one:  coli model install ID      remove one:  coli model uninstall NAME{C.r}")
+    folders = backend.folders()
+    if len(folders) > 1:
+        print(f"\n  models folders (an install goes to the first with room; --dest FOLDER chooses):")
+        for f in folders:
+            room = f"{f['free_gb']:.0f} GB free" if f.get("free_gb") is not None else "free space unknown"
+            print(f"    {f['path']}  ({room}){'  <- default' if f.get('preferred') else ''}")
+    print(f"\n  {C.dim}fetch one:  coli model install ID [--dest FOLDER]      remove one:  coli model uninstall NAME{C.r}")
     return 0
 
 
@@ -285,14 +298,15 @@ def install(backend, a, C, interactive, tty=False, poll=1.0):
     print(f"    download  {row['download_gb']:.1f} GB" + (f"   ({human(row.get('partial_bytes'))} already here)" if row.get("unfinished") else ""))
     print(f"    licence   {row.get('license_note') or 'not stated in the catalog; see its page on Hugging Face'}")
     print(f"    this PC   {row['reason']}")
-    if row["status"] in ("needs-disk", "unsupported"):
-        raise Refused(row["reason"])
+    dest = getattr(a, "dest", None)
+    if row["status"] == "unsupported" or (row["status"] == "needs-disk" and not dest):
+        raise Refused(row["reason"])           # with --dest the folder named is the one that has to have room: the server says
     if row["status"] == "needs-ram" and not ask("It needs more RAM than this machine has. Install anyway?", False, a.yes, interactive):
         return 1
     if not ask(f"Fetch {row['download_gb']:.1f} GB and accept the licence above?", True, a.yes, interactive):
         print("  not installed")
         return 1
-    backend.start(row["id"])
+    backend.start(row["id"], dest) if dest else backend.start(row["id"])
     job = follow(backend, row["id"], C, tty, poll=poll)
     if job["state"] == "done":
         print(f"  {C.grn}✓{C.r} {row['name']} installed in {job.get('dir', '')}")

@@ -1,4 +1,4 @@
-import type { CatalogRow, InstallJob } from "./api"
+import type { CatalogRow, InstallJob, ModelFolder } from "./api"
 
 /* The numbers an install row shows. Plain digits and unit letters, the same in every language. */
 
@@ -9,6 +9,17 @@ export function formatBytes(bytes: number | null | undefined): string {
   let unit = 0
   while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1 }
   return unit <= 1 ? `${Math.round(value)} ${units[unit]}` : value >= 100 ? `${Math.round(value)} ${units[unit]}` : `${value.toFixed(1)} ${units[unit]}`
+}
+
+/* Whether the confirmation offers a choice of folder: more than one models folder, and a model that is not an add-on (it goes into
+   its parent's folder) or a part-fetched one (it carries on where it was begun). */
+export function offersFolder(folders: ModelFolder[] | undefined, row: Pick<CatalogRow, "into" | "unfinished">): boolean {
+  return (folders?.length ?? 0) > 1 && !row.into && !row.unfinished
+}
+
+/* The folder the choice starts at: the router's own pick, else the first. */
+export function defaultFolder(folders: ModelFolder[]): string {
+  return (folders.find((folder) => folder.preferred) ?? folders[0])?.path ?? ""
 }
 
 export function installPercent(job: Pick<InstallJob, "done" | "total">): number {

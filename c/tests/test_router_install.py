@@ -139,6 +139,32 @@ class Install(unittest.TestCase):
         self.assertEqual([j["id"] for j in listing["data"]], ["tiny-image"])
         self.assertGreaterEqual(rig.refreshed, 1)
 
+    def test_the_catalog_lists_the_folders_with_their_room(self):
+        rig = InstallRig(self, api_key="sekrit")
+        body = rig.call("GET", "/v1/models/catalog", headers=AUTH)[3]
+        self.assertEqual([(f["path"], f["preferred"]) for f in body["folders"]], [(rig.root, True)])
+        self.assertIsNotNone(body["folders"][0]["free_gb"])
+
+    def test_a_folder_can_be_chosen_and_must_be_a_models_folder(self):
+        rig = InstallRig(self, api_key="sekrit")
+        other = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
+        rig.server.installer.roots = lambda: [rig.root, other]
+        folders = rig.call("GET", "/v1/models/catalog", headers=AUTH)[3]["folders"]
+        self.assertEqual([f["path"] for f in folders], [rig.root, other])
+        for bad in (7, "", "   ", ["x"]):
+            status, _, _, body = rig.call("POST", "/v1/models/install", {"id": "tiny-image", "confirm": True, "root": bad}, headers=AUTH)
+            self.assertEqual((status, body["error"]["param"]), (400, "root"), bad)
+        nowhere = os.path.join(rig.root, "_nowhere")
+        status, _, _, body = rig.call("POST", "/v1/models/install", {"id": "tiny-image", "confirm": True, "root": nowhere}, headers=AUTH)
+        self.assertEqual((status, body["error"]["code"], body["error"]["param"]), (409, "unknown_folder", "root"))
+        self.assertEqual(rig.hub.requests, [], "something was fetched into a folder that is not a models folder")
+        status, _, _, job = rig.call("POST", "/v1/models/install", {"id": "tiny-image", "confirm": True, "root": other}, headers=AUTH)
+        self.assertEqual(status, 202, job)
+        self.assertEqual(rig.wait_job("tiny-image")["state"], "done")
+        self.assertTrue(setup_download.is_complete(os.path.join(other, "tiny-image")))
+        self.assertFalse(os.path.exists(os.path.join(rig.root, "tiny-image")))
+
     def test_a_job_that_does_not_exist(self):
         rig = InstallRig(self, api_key="sekrit")
         self.assertEqual(rig.call("GET", "/v1/models/installs/nope", headers=AUTH)[0], 404)

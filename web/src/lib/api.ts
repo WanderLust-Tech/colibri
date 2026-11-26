@@ -400,9 +400,18 @@ export interface CatalogRow {
   job: InstallJob | null
 }
 
+/* A models folder an install can go to, with the room it has (GET /v1/models/catalog `folders`); `preferred` is the one a model
+   goes to when nobody chooses. */
+export interface ModelFolder {
+  path: string
+  free_gb: number | null
+  preferred: boolean
+}
+
 export interface ModelCatalog {
   rows: CatalogRow[]
   roots: string[]
+  folders: ModelFolder[]
   freeGb: number | null
 }
 
@@ -411,15 +420,16 @@ export async function getModelCatalog(baseUrl: string, apiKey: string, signal?: 
   const response = await fetch(endpoint(baseUrl, "models/catalog"), { headers: headers(apiKey), signal })
   if (response.status === 404) return null
   if (!response.ok) throw new Error(await responseError(response))
-  const body = (await response.json()) as { data?: CatalogRow[]; roots?: string[]; free_gb?: number | null }
-  return { rows: body.data ?? [], roots: body.roots ?? [], freeGb: body.free_gb ?? null }
+  const body = (await response.json()) as { data?: CatalogRow[]; roots?: string[]; folders?: ModelFolder[]; free_gb?: number | null }
+  return { rows: body.data ?? [], roots: body.roots ?? [], folders: body.folders ?? [], freeGb: body.free_gb ?? null }
 }
 
 /* Starts fetching a catalog model. `confirm` is sent because the person was shown its size and licence first; the router
-   refuses without it. Answers the job (202); follow it through getModelCatalog's `job`. */
-export async function installModel(baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<InstallJob> {
+   refuses without it. `root` is one of the catalog's `folders`, to say where it goes (else the router picks the first with room).
+   Answers the job (202); follow it through getModelCatalog's `job`. */
+export async function installModel(baseUrl: string, apiKey: string, id: string, root?: string | null, signal?: AbortSignal): Promise<InstallJob> {
   const response = await fetch(endpoint(baseUrl, "models/install"), {
-    method: "POST", headers: headers(apiKey), body: JSON.stringify({ id, confirm: true }), signal,
+    method: "POST", headers: headers(apiKey), body: JSON.stringify(root ? { id, confirm: true, root } : { id, confirm: true }), signal,
   })
   if (!response.ok) throw new Error(await responseError(response))
   return (await response.json()) as InstallJob

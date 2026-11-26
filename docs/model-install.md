@@ -27,7 +27,11 @@ coli model uninstall z-image-turbo   show what goes and how much space it frees,
   fetched; run the command again to continue. A failed one says why and also keeps its part.
 * One install runs at a time. A second says so.
 * A model goes into the first models folder with room: `COLI_MODELS_ROOT`, the folder `coli setup` chose, then
-  `~/colibri-models`. The router lists it as soon as its files are there; the engine it needs must be built or installed (`coli setup`
+  `~/colibri-models`. To choose, `coli model install ID --dest FOLDER` puts it in that folder, which has to be one of the models
+  folders (`coli model available` lists them with their free space when there are several); a folder that is not listed is refused
+  with the list, since a model outside them would not be found. To have another folder, add it to `COLI_MODELS_ROOT` (folders
+  separated by `;` on Windows, `:` elsewhere) and restart the server. An add-on goes into its parent's folder and a model that is
+  part-fetched carries on where it was begun, so `--dest` is refused for those. The list calls a model too big for the disk only when no models folder has room for it. The router lists it as soon as its files are there; the engine it needs must be built or installed (`coli setup`
   does that, or a release archive has it), and the list says so when it is not.
 * `uninstall` refuses a model that is loaded (`coli stop NAME` first), a folder that is not directly inside a models folder, a link,
   and a folder a download is writing. The folder is renamed out of the model list first and then deleted, so a router never lists
@@ -61,9 +65,11 @@ into that machine's models folder.
 ## In the dashboard and the editor
 
 The dashboard's **Models** tab has an *Install a model* list below the models that are here: each row shows the size, the kind, the
-licence and whether it fits, and an Install button that asks first. A running install shows its progress and a Cancel button.
+licence and whether it fits, and an Install button that asks first (with more than one models folder, the question has a list of
+them with their free space, the default first). A running install shows its progress and a Cancel button.
 A model that is here has a Remove button, which asks too and is off while the model is loaded. The editor extension's models menu
-has the same two entries (*Install a model...*, *Remove a model...*). Both hide them when the router does not have
+has the same two entries (*Install a model...*, *Remove a model...*); with more than one models folder it asks which one after you
+accept the download. Both hide them when the router does not have
 `features.model_install`.
 
 ## The API
@@ -73,8 +79,8 @@ answers 404). The write routes take `application/json` and refuse a cross-origin
 
 | Route | |
 |---|---|
-| `GET /v1/models/catalog` | every model that can be fetched: `id`, `name`, `kind` (`text`, `image`, `audio`), `download_gb`, `ram_min_gb`, `ram_good_gb`, `summary`, `license_note`, `status` (`good`, `tight`, `needs-ram`, `needs-disk`, `unsupported`, `needs-parent`), `fits`, `reason`, `installed` (`key`, `id`, `state`, or null; an add-on's `key` is null), `unfinished` (a download was started), `job`, and `into` for an add-on (the catalog id of the model it goes into). Also `roots` (the models folders) and `free_gb` |
-| `POST /v1/models/install` | `{"id": "z-image-turbo", "confirm": true}`. `confirm` must be `true`: the caller has shown the size and the licence. Answers `202` with the job |
+| `GET /v1/models/catalog` | every model that can be fetched: `id`, `name`, `kind` (`text`, `image`, `audio`), `download_gb`, `ram_min_gb`, `ram_good_gb`, `summary`, `license_note`, `status` (`good`, `tight`, `needs-ram`, `needs-disk`, `unsupported`, `needs-parent`), `fits`, `reason`, `installed` (`key`, `id`, `state`, or null; an add-on's `key` is null), `unfinished` (a download was started), `job`, and `into` for an add-on (the catalog id of the model it goes into). Also `roots` (the models folders), `folders` (each with `path`, `free_gb` and `preferred`, the first) and `free_gb` |
+| `POST /v1/models/install` | `{"id": "z-image-turbo", "confirm": true}`, and optionally `"root": FOLDER`, one of the catalog's `folders` (else the first with room; `409` `unknown_folder`, `insufficient_disk` or `folder_fixed` when it cannot be). `confirm` must be `true`: the caller has shown the size and the licence. Answers `202` with the job |
 | `GET /v1/models/installs` | the jobs, newest first (the last 8) |
 | `GET /v1/models/installs/{id}` | one job: `state` (`starting`, `downloading`, `finishing`, `done`, `failed`, `cancelled`), `done` and `total` bytes, `rate`, `eta_seconds`, `file`, `error`, `license_note` |
 | `POST /v1/models/install/cancel` | `{"id": ...}`. The part fetched is kept |
@@ -94,7 +100,7 @@ another process), `outside_models_folder`, `model_is_link`.
   puts its files in place. A model whose engine is missing is listed as not startable, with the reason.
 * **Gated models.** A repository that needs a Hugging Face login uses `HF_TOKEN` of the router's environment, as `coli setup` does.
 * **Several downloads at once**, a download queue, or a bandwidth limit.
-* **Moving a model** to another folder or drive.
+* **Moving a model** to another folder or drive, or adding a models folder from the API (it is `COLI_MODELS_ROOT`, then a restart).
 * **Models outside the models folders.** A model the router was given by path (`--model`), or one that is a link, is not removed.
 
 ## Tests
