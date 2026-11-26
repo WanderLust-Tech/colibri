@@ -239,7 +239,9 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   The weight is in the agent loop in the gateway (one generation at a time per model, approvals from three clients, a tool result going back into
   the next request), in where an MCP server's process runs and with what rights (they run local commands), and in what happens to the
   extension's own servers. Settle who owns the loop and the approvals before building.
-- [ ] **I12. The extension uses the router's MCP list (M).** The extension has its own `colibri.mcpServers` setting, its own MCP client and its own approvals.
+- [x] **I12. The extension uses the router's MCP list (M).** Built 2026-11-26 as extension 0.28.0 ([mcp-client.md](mcp-client.md#the-vs-code-extension)): its own approval of the exact
+  definition on that machine, references from its environment, the setting wins a name, a down router breaks nothing; vsix built, not installed. The dashboard's cards
+  for HTTP servers stay open. The original text: The extension has its own `colibri.mcpServers` setting, its own MCP client and its own approvals.
   Reading `GET /v1/mcp/servers` as a second source (the setting wins on a name clash) needs the same rules the CLI keeps: the secret references expanded from
   the extension host's environment, and an approval on that machine for the exact definition (a hash like `mcp_registry.digest`, kept by the extension, so a
   server added to the list from elsewhere is not started unasked). A new vsix; the dashboard's cards for HTTP servers after that.

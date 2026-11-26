@@ -866,7 +866,11 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **`c/mcp_cli.py`, `coli tools`, `coli chat --mcp`, `/tools`:** add, list, remove, enable, disable, test, trust; the terminal's questions. `coli chat`
   against a router now picks `--model NAME` when it names a listed model, else the first that chats (it took the first listed: the music model).
 - **Checked:** 105 tests (`test_mcp_registry`, `test_mcp_client`, `test_mcp_agent`, `test_mcp_chat`), and the real thing: `coli chat --mcp` on the live
-  gateway: Gemma 4 E4B called a tool; Gemma 4 26B-A4B with the official filesystem server listed, read and answered, and had a write declined. Not built: the extension reading this list (I12), the dashboard, `coli run --mcp`.
+  gateway: Gemma 4 E4B called a tool; Gemma 4 26B-A4B with the official filesystem server listed, read and answered, and had a write declined. The extension reads the list too since 0.28.0 (I12, below). Not built: the dashboard, `coli run --mcp`.
+- **The extension side (idea I12, extension 0.28.0, 2026-11-26; built, vsix not installed):** `src/routerServers.ts` (a digest byte for byte `mcp_registry.digest`,
+  `${NAME}` references, the plan), `RouterApi.mcpServers()`, `McpManager` with the router as a second source (started in parallel, approvals kept in VS Code's
+  storage, `colibri.routerMcpServers`), **Colibri: Review MCP Servers from the Router**, the menu's approve and revoke. 24 new tests (8 in a real VS Code with a real
+  MCP server), 25 of 25 mutants caught. Extension repo, not yet pushed.
 
 ### 2.47 Gemma 4's attention in registers (branch `main`, 2026-11-25; pushed (`a532f360`) and live)
 

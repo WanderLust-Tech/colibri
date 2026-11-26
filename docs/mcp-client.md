@@ -19,7 +19,7 @@ case you can accept.
 ## Who runs what
 
 **Each client runs its own tool loop, on its own machine.** The router keeps the list and serves it (`GET /v1/mcp/servers`); it never starts a server.
-`coli chat --mcp` starts the servers on the machine you type at, and the VS Code extension would start them on the machine it runs on. That is a choice
+`coli chat --mcp` starts the servers on the machine you type at, and the VS Code extension (0.28.0) starts them on the machine it runs on. That is a choice
 about where code runs: the router listens on the network behind one API key, and an MCP server is a program (a stdio server is a command with your
 rights), so a router that ran tools for any request would let whoever holds the key make the model run commands on this PC.
 
@@ -102,10 +102,22 @@ older two-endpoint SSE transport, and OAuth for remote servers (put a token in a
 used: no resources, prompts, sampling, roots or elicitation (a server that asks for them is told this client does not offer them). Tool results
 that are images or audio reach a text model as a note that says what they were.
 
+## The VS Code extension
+
+Extension 0.28.0 reads this list (`GET /v1/mcp/servers`) as a second source after its own `colibri.mcpServers`, with the rules above kept on its side:
+
+- its own approval, **on the machine VS Code runs on** and in VS Code's storage (not `mcp-trust.json`, which `coli` keeps), shown as the exact command line,
+  arguments, environment and folder, with a **Review** message the first time and **Colibri: Review MCP Servers from the Router**; it computes the same
+  digest as `mcp_registry.digest` (checked against values the Python computes, accents, DEL and emoji included), so a changed definition asks again;
+- `${NAME}` references filled from the environment VS Code runs in; an unset name is an error that names it, and nothing starts;
+- a server of the same name in `colibri.mcpServers` wins, and naming a router server there with `"disabled": true` switches it off for the extension;
+  `colibri.routerMcpServers` turns the whole second source off;
+- a router that is down, slow or older (no such route) delays and breaks nothing: the extension's own servers and the built-in tools start at once.
+
+An approval made with `coli` does not count in the extension and the other way round: each client asks for itself.
+
 ## Not built
 
-- The **VS Code extension** still has its own list (`colibri.mcpServers`) and its own approvals. Reading this list from it, with its own approval, is the
-  next step and a new vsix; until then the two do not share.
 - The **dashboard** cannot start a server (a browser cannot run a command), so it would only ever use HTTP servers, through its own approval cards; not built.
 - `coli run --mcp` (one-shot), per-tool approval policies kept in a file, resources and prompts, OAuth.
 - Third-party servers tried: only the official filesystem one (above), besides the tests' fake server and `coli mcp` itself. The git, web, GitHub and
