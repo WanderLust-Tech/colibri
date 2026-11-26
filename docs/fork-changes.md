@@ -852,7 +852,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Not done**: a real Codex run (Codex is not installed here); `/v1/responses` on the standalone gateway; the `ui/` page and `agents.py` of upstream (not
   wanted).
 
-### 2.49 The router runs tools itself: fetch, files, git (idea I13, branch `main`, 2026-11-26; built and tested, not pushed or deployed)
+### 2.49 The router runs tools itself: fetch, files, git (idea I13, branch `main`, 2026-11-26; pushed (fork 537cf54a) and DEPLOYED 2026-11-26: router restarted, web/dist rebuilt, certifi installed for C:\Python314; no folder or web access granted yet)
 
 - **Decided with the user** (they asked for server-side endpoints instead of MCP, after the MCP trial of 2.48 showed nothing needed fixing but the dashboard could not use it):
   endpoints a client can call, and a loop the router can run; reads, and writes behind an approval; limited by a policy file on the router's PC that no API route can change.
@@ -869,7 +869,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Checked:** 158 new tests, 49 of 49 mutants caught (8 survived the first pass and got tests), and a real model through the new loop (approved and declined
   writes, an outside path refused, a git question answered). Found by that run: a search by file name was missing; `certifi` is used when present because this PC's
   Python could not verify `example.com`.
-- **Clients (built by the same work, not pushed):** the dashboard (Tools switch, call and approval cards; 374 web tests) and the extension 0.29.0
+- **Clients (pushed; the dashboard is live, extension 0.29.0 vsix built, not installed):** the dashboard (Tools switch, call and approval cards; 374 web tests) and the extension 0.29.0
   (`colibri-router__<tool>`; 410 unit and 47 host tests, 22 of 22 mutants). One known gap: an extension `WebFetch(domain:...)` deny rule does not cover the router's `web_fetch`.
 
 ### 2.48 The models use MCP tools: `coli tools` and `coli chat --mcp` (idea I10, branch `main`, 2026-11-26)

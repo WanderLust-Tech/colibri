@@ -119,11 +119,11 @@ a model that wanted to find a file *by name* and made 15 calls because the searc
 
 ## The clients
 
-- **The dashboard** (built, not pushed or live): a Tools switch next to Reasoning, shown when the router has tools on; a card per call with its result as plain text (never
+- **The dashboard** (pushed, live since 2026-11-26): a Tools switch next to Reasoning, shown when the router has tools on; a card per call with its result as plain text (never
   markup); an approval card with the summary, a countdown and Allow / Allow always / Decline; a read-only line in Settings saying what the router allows and that
   it is changed with `coli tools allow`, with no control that changes it. It sends `colibri_tools: true` and has no group picker. 374 tests, and a headless-browser
   check against a fixture server. Not tried against a real router and model.
-- **The VS Code extension** (0.29.0, built, vsix not installed): it keeps its own loop, lists the router's tools (`GET /v1/tools`), offers them as
+- **The VS Code extension** (0.29.0, pushed; vsix built, not installed): it keeps its own loop, lists the router's tools (`GET /v1/tools`), offers them as
   `colibri-router__<tool>` next to its own and MCP tools, and calls `POST /v1/tools/NAME`, sending `confirm: true` only after its own approval flow. Permission
   rules address them as `mcp__colibri-router__files_write` (one tool) or `mcp__colibri-router` (all); **a `WebFetch(domain:...)` deny rule does not cover the
   router's `web_fetch`** (nor do `Read(...)` / `Edit(...)` rules cover the file tools, on purpose: those are paths on another PC). Off with `colibri.routerTools`, and
