@@ -212,7 +212,10 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   The original text: Two readings: a transition between two songs, or a remix. The first fits what the engine does
   today: join the tail of clip A and the head of clip B with a gap and repaint the seam with a prompt (the repaint task, 2.33), a cheap thing to try
   before building anything; the second is stems recombined (see I7). Ask which is meant before choosing.
-- [ ] **I7. Music: vocals out of a song (M-L).** Three routes. (a) The extract task pulls a named track (`vocals`, `drums` ...) out of a clip
+- [~] **I7. Music: vocals out of a song (M-L).** **Measured 2026-11-26** ([acestep.md](acestep.md#taking-the-voice-out-of-a-song-what-the-engines-own-tasks-do)) on a mix of known parts:
+  (a) extract-and-subtract leaves the voice in (0.75 of it, against 0.77 for the mix), (b) a cover removes it and the song with it (SDR -5 dB, and not the tempo or key), and (c) HT-Demucs
+  gives the instrumental back at +17.7 dB SDR and the voice at +11.0 dB, 2.9 s for 10 s of audio on the CPU. So (c) is the only route that does the job; it is a port of a 42 M-parameter model
+  (a week), not built, and its weights' licence needs checking first. The original text: Three routes. (a) The extract task pulls a named track (`vocals`, `drums` ...) out of a clip
   ([acestep.md](acestep.md), tasks table), but it regenerates the stem with the DiT, so it is not the original sound and subtracting it from the mix
   does not give a clean instrumental. (b) A cover at low strength with an instrumental caption keeps the tune and drops the voice (no new code; try
   it). (c) A proper stem separator (an HT-Demucs or MDX-style model, tens of MB) as a new engine like the ASR and TTS ports: exact stems from the

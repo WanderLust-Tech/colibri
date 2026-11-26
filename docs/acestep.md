@@ -371,6 +371,26 @@ first time). What was measured, with the clips in `~/colibri-music/transition-te
 A `coli music blend A B` that does the steps (the tail and head, the gap, the repaint in a safe mode, the level match and the assembly of the whole of A, the bridge and the
 whole of B) would be a small command on this; it is not built.
 
+### Taking the voice out of a song: what the engine's own tasks do
+
+The engine regenerates; it does not separate. Both of its ways of getting a song without its voice make *new* audio, which was measured on a mix whose parts are known
+(2026-11-26): a 10 s funk instrumental from the engine, plus a spoken sentence from the Qwen3-TTS model 3 dB under it (speech, not singing, so this is a crude test of
+voice removal and one clip; the numbers are for ordering the routes, not for quoting). The files are in `~/colibri-music/vocals-test/`. SDR is the usual score for
+separation: how close the estimate is to the true instrumental in the waveform, in dB (0 dB is no better than noise of the same size); *voice left* follows the voice's
+loudness in the 300 to 3400 Hz band, 1 meaning it is all still there, and 0.47 is what the clean instrumental itself scores.
+
+| what | instrumental, SDR | voice left | what it is |
+|---|---|---|---|
+| the mix as it is | +7.0 dB | 0.77 | the starting point |
+| (a) `extract` the vocals, subtract them from the mix | +9.0 dB | 0.75 | what it returned is a *new* voice (SDR +1.9 dB against the real one, 0.90 left), so subtracting it takes away almost nothing |
+| (b) `cover` at strength 0.4, 0.7 and 1.0, "instrumental, no vocals" | -4.2 to -5.3 dB | 0.44 to 0.49 | the voice **is** gone, but so is the song: the waveform is a new performance, and its tempo and key were not kept either (75 and 120 BPM against 92; the same on the clean instrumental alone, 63 to 133 BPM) |
+| (c) a separator model, HT-Demucs (reference run in PyTorch on the CPU) | **+17.7 dB** (the voice +11.0 dB) | 0.48 | the original sound of each part, 2.9 s for 10 s of audio |
+
+So the first two routes cannot do what "strip the vocals" asks: (a) leaves the voice and (b) leaves nothing of the song. Only a separator gives the original audio back.
+HT-Demucs is 42 M parameters (an 80 MB checkpoint), with a 4096-point STFT, four-deep time and frequency encoders and a five-layer cross-domain transformer: a port in
+the way of the other engines (C, checked against the PyTorch model, the weights from a safetensors file) is a week's work, not a small command; it is not built. Check
+the weights' licence before shipping them: the Demucs code is MIT, and the Hugging Face card of the weights used here states none.
+
 ## The base and SFT DiTs: guidance, extract, lego, complete
 
 The turbo DiT has classifier-free guidance distilled into it: eight steps, one call each. The checkpoint's other DiTs, `acestep-v15-base`
