@@ -264,6 +264,11 @@ Real constrained decoding for `response_format` on Gemma 4 and Qwen3.6/Qwen3-Cod
 - **`c/tray.py` / `coli tray`:** the notification-area icon (ctypes, nothing to install) with a menu: state, unload a loaded model,
   dashboard, copy key or link, start/stop/restart (with a "will be lost" wording while busy), logs, start with Windows (the `Run`
   key). [tray.md](tray.md)
+- **`c/colibri_tray.c` / `colibri-tray.exe` (idea I9, 2026-11-26):** the same tray as a program of its own (`make colibri-tray.exe`; Win32,
+  WinHTTP, the repository's `json.h`): its own icon and name in Task Manager, no Python to draw the icon or watch the server. It reads
+  `service.json`, builds the same menu and icon, and leaves start, stop and restart to `coli service` (which gained `--wait`).
+  `coli tray` and `coli tray --install` use it when it is built. `tests/test_tray_exe.py` holds it to `tray.py` and `service.py`
+  (menu for every state, icon pixels, status, settings, a real router started and stopped through it). [tray.md](tray.md)
 - 44 tests (`tests/test_service.py`): config, the command line, a fake `/health` server, the stop rules, a real router started
   and stopped on a free port, the menu and icon logic, and on Windows the window, its menu and the `Run` key. The real window was
   also run: icon added, changed and removed, a message shown. Not done: a person clicking the menu.

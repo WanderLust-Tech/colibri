@@ -1739,6 +1739,16 @@ endif
 qwen3embed$(EXE): qwen3embed.c acestep_text.h acestep_dit.h tok.h qwen38_nfc.h st.h json.h qi_gemm.h $(VK_OBJ) $(VK_SPV) .build-config
 	$(CC) $(CFLAGS) qwen3embed.c $(VK_OBJ) -o qwen3embed$(EXE) $(LDFLAGS)
 
+# The tray icon as a program of its own (docs/tray.md): colibri-tray.exe is c/tray.py's icon and menu without Python to draw them. Windows only;
+# the icon and the name in Task Manager come from colibri_tray.rc (tray.ico is written by tools/make_tray_ico.py from tray.py's own drawing).
+ifneq ($(EXE),)
+.PHONY: tray
+tray: colibri-tray$(EXE)
+colibri-tray$(EXE): colibri_tray.c json.h colibri_tray.rc tray.ico
+	windres colibri_tray.rc -O coff -o colibri_tray_res.o
+	$(CC) -O2 -Wall -Wno-unused-function -Wno-format-truncation -mwindows colibri_tray.c colibri_tray_res.o -o colibri-tray$(EXE) -lwinhttp -lws2_32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lm
+endif
+
 # Qwen3-ASR (0.6B, 1.7B): speech to text for POST /v1/audio/transcriptions (docs/qwen3-asr.md). An audio encoder and a Qwen3 decoder, both
 # computed with ACE-Step's kernels and layer code (acestep_dit.h, qi_gemm.h) and its text tokenizer header.
 ifneq ($(EXE),)

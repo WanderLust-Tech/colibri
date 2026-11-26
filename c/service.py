@@ -419,6 +419,7 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="stop even if a request is running (it is lost)")
     ap.add_argument("--local-only", action="store_true", help="listen on this PC only (still with a key)")
     ap.add_argument("--open", action="store_true", help="open the dashboard, signed in")
+    ap.add_argument("--wait", type=float, default=120.0, metavar="SECONDS", help="how long start and restart wait for the server to answer (default 120)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -443,7 +444,8 @@ def main(argv=None):
             print(f"stopped (process {', '.join(map(str, pids))})" if pids else "was not running")
             return 0
         say = lambda text: print(text)          # noqa: E731
-        now = restart(cfg, a.new_key, a.force, out=say) if a.action == "restart" else start(cfg, a.new_key, out=say)
+        now = (restart(cfg, a.new_key, a.force, wait=a.wait, out=say) if a.action == "restart"
+               else start(cfg, a.new_key, wait=a.wait, out=say))
         key = ensure_key(cfg)
         shown = links(cfg, key)
         print(f"up on port {cfg['port']}. API key in {paths(cfg)['key']}")

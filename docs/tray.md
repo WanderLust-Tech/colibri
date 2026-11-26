@@ -17,6 +17,44 @@ coli service link       the dashboard link, signed in
 coli service config     the settings in effect
 ```
 
+## The tray as a program of its own
+
+`coli tray` runs `c/tray.py` under `pythonw`. The same tray also exists as **`colibri-tray.exe`**, built from `c/colibri_tray.c`
+(Windows, MSYS2 UCRT64, in `c/`):
+
+```
+make colibri-tray.exe
+coli tray --install          # the sign-in entry now runs the program (it replaces the pythonw one)
+```
+
+When the program is built, `coli tray` and `coli tray --install` use it; when it is not, they use the script, as before.
+Nothing else changes: the icon, the menu and its words, the settings, the key file, and the single-instance rule (one tray runs,
+whichever of the two it is: they take the same mutex). What changes is what Windows shows: a process called *Colibri tray*, with
+its icon, in Task Manager, instead of `pythonw.exe`; and the icon is drawn, and the server watched, without a Python process.
+
+- **What the program does itself:** reads `service.json` (the same file, the same names for the key and the logs, the same
+  refusal of a setting it does not know or a port out of range), asks `/health` every 3 seconds with the key (WinHTTP), works out
+  the state, draws the icon and the menu, unloads a model, copies the key or the link (to the clipboard), opens the dashboard,
+  the request log and the log folder, and keeps the `Run` entry.
+- **What it leaves to `coli service`:** starting the server (the key, the environment, the router's command line), stopping it
+  (the refusal while a request runs, the process tree) and restarting it. The program runs
+  `python coli service start|stop|restart [--force] --wait 300` with no window and shows its last line in the pop-up. So **Python
+  is still needed to start the server** (it is the router's language), and is not needed to show the icon or to unload a model.
+  The interpreter is `--python PYTHON.EXE` (what `coli tray --install` writes, the one `coli` runs with), else `COLI_PYTHON`, else
+  `python.exe` on the PATH (the Microsoft Store's stub is skipped).
+- **One drawing, two programs:** the C code is a second copy of `summarize`, `build_menu` and `icon_pixels`, so
+  `tests/test_tray_exe.py` runs both on the same input: the summary and the menu for every kind of state (with a request running,
+  a model loading, a model with no size, the unit boundaries of "unloads in ..."), the pixels of every icon (equal, byte for
+  byte), `service.status` against the program's `--status` for a fake server and for a socket that does not answer,
+  `service.load_config` and `service.paths` against `--print-config` for a range of files, and a real `coli router` started,
+  asked about, restarted and stopped through `--do`. 29 deliberate breakages of the C were each caught.
+- **The file icon** (`c/tray.ico`, which the program carries) is the idle green disc drawn by `tray.icon_pixels` at 16 to 64 pixels:
+  `python tools/make_tray_ico.py` writes it, `--check` says whether it is up to date, and a test holds it to that.
+- **For tests and for you:** `colibri-tray.exe --status` prints what `coli service status --json` does, `--print-config` the
+  settings and file names in effect, `--do start|stop|restart|stop_force|restart_force|unload:KEY` does what the menu item does
+  with no window and prints the message it would show, `--dump-menu FILE` and `--dump-icon KIND` print what the tests compare.
+  `COLI_TRAY_MUTEX=name` makes the single-instance mutex another one, so a test can run beside a real tray.
+
 ## The icon
 
 | Circle | Meaning |
@@ -86,6 +124,10 @@ A port other than 8000 puts it in the file names (`colibri-api-key-8100.txt`), a
 
 ## Not built
 
+- The program is not built by the release archives or signed (an unsigned program may be questioned by SmartScreen the first
+  time), and there is no installer: `make colibri-tray.exe` and `coli tray --install` are the way. An MSVC build is not tried.
+- The program checks the settings it reads (port, the flags, the file names, unknown keys); the others (`cap`, `ctx`, `env`...) are
+  checked by `coli service` when it starts the server, and a mistake there comes back as the pop-up message.
 - It is Windows only (`coli service` is not). A tray on macOS or Linux would be another window layer under the same menu.
 - The menu does not switch models or edit presets; the dashboard does.
 - The tray does not install a Windows service that runs before anyone signs in; it starts with you.

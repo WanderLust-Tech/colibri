@@ -711,6 +711,8 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_JOBS` | `jobs.jsonl` in the setup folder | Where `coli router` keeps the records of its background jobs ([api](api.md#background-jobs)). |
 | `COLI_MEDIA_META` | `1` | `0` (or `false`, `no`, `off`) stops the gateway writing the prompt, seed and other settings inside the pictures and songs it makes (a PNG text chunk, a WAV comment); they come out plain. |
 | `COLI_PRESETS` | `presets.json` in the setup folder | The presets file `coli router` reads: named presets, a model with settings baked in ([presets.md](presets.md), `coli preset`). Same as `coli router --presets`. |
+| `COLI_PYTHON` | `python.exe` on the PATH | `colibri-tray.exe`: the interpreter that runs `coli service` when the program is not given `--python` ([tray.md](tray.md#the-tray-as-a-program-of-its-own)). |
+| `COLI_TRAY_MUTEX` | unset | `colibri-tray.exe`: another name for the one-tray-at-a-time mutex, so a test can run beside the real tray. |
 | `COLI_SERVICE` | `service.json` in the setup folder | The settings file of `coli service` and `coli tray` (port, keep-alive, whether the network may reach it...; [tray.md](tray.md)). |
 | `COLI_REQUEST_LOG` | unset (no log) | A file that gets one JSON line per request, from the router and the gateway behind it ([request-log.md](request-log.md)). Same as `--request-log`. |
 | `COLI_REQUEST_LOG_BODIES` | `0` | `1` adds the text of each request to its log line (long strings cut to 500 characters). Off by default: a log of prompts is a privacy decision. |

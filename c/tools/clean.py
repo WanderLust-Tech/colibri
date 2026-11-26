@@ -11,6 +11,7 @@ import shutil
 # Files (relative to c/) to remove if present.
 FILES = [
     "colibri", "colibri.exe",
+    "colibri-tray.exe", "colibri_tray_res.o",
     "inkling", "inkling.exe",
     "kimi_k3", "kimi_k3.exe",
     "olmoe", "olmoe.exe",

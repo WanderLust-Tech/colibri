@@ -193,3 +193,5 @@ c/mimo_tiny/image.json
 c/mimo_tiny/patches.f32
 c/mimo
 c/mimo.exe
+c/colibri-tray.exe
+c/colibri_tray_res.o

@@ -223,7 +223,9 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   `video_url`; fork-changes 2.14, G5), so a video question works today. The Kimi K3 engine in this fork (`c/kimi_k3.c`) is text-only and nothing in
   the repository says the model takes pictures or video; check the model card before planning a vision tower port (L). If what is wanted is
   "a better video model than Gemma 4", name it and see whether its weights and architecture are a port worth making.
-- [ ] **I9. The tray as a real program, not a Python script (M).** `coli tray` is `c/tray.py` (ctypes over the Win32 API, run with `pythonw`,
+- [x] **I9. The tray as a real program, not a Python script (M).** Built 2026-11-26: `colibri-tray.exe` ([tray.md](tray.md#the-tray-as-a-program-of-its-own),
+  fork-changes 2.13): a C program over the same Win32 calls, held to `tray.py` by tests that run both; it leaves starting and stopping the
+  server to `coli service`, so Python is needed for that and not for the icon. Not done: an installer, signing, release archives. The original text: `coli tray` is `c/tray.py` (ctypes over the Win32 API, run with `pythonw`,
   started at sign-in by a Run key; 2.13). A native `colibri-tray.exe` (a small C program over the same Win32 calls, or the script frozen) would
   need no Python on the path to show the icon and start the router, give the process a proper name and icon in Task Manager, and could go in an
   installer. The router and `coli` stay Python, so the tray would start them the way it does now.

@@ -166,7 +166,24 @@ def windowless_python():
     return exe
 
 
+def native_exe():
+    """colibri-tray.exe next to this file (`make colibri-tray.exe`), or None: the same tray as a program of its own, which needs no
+    Python to show the icon. It is used when it is there, for `coli tray` and for the sign-in entry; this file is the fallback."""
+    path = os.path.join(HERE, "colibri-tray.exe")
+    return path if sys.platform == "win32" and os.path.isfile(path) else None
+
+
+def native_command(config=None):
+    """The command line of the native tray: it is told which Python runs `coli service` (it does not have to find one)."""
+    command = [native_exe(), "--python", service.python_exe()]
+    if config:
+        command += ["--config", config]
+    return command
+
+
 def autostart_command():
+    if native_exe():
+        return subprocess.list2cmdline(native_command())
     return f'"{windowless_python()}" "{os.path.join(HERE, "tray.py")}" --here'
 
 
@@ -553,7 +570,7 @@ def main(argv=None):
             return 0
         cfg = service.load_config(a.config)
         if not a.here:
-            command = [windowless_python(), os.path.join(HERE, "tray.py"), "--here"] + (["--config", a.config] if a.config else [])
+            command = native_command(a.config) if native_exe() else                 [windowless_python(), os.path.join(HERE, "tray.py"), "--here"] + (["--config", a.config] if a.config else [])
             subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=0x08000000 | 0x00000200)
             print("the tray is starting: look for the circle in the notification area (the ^ by the clock)")

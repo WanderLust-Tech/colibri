@@ -441,7 +441,8 @@ class IconTest(unittest.TestCase):
 
 class AutostartTest(unittest.TestCase):
     def test_the_command_runs_this_file_without_a_window(self):
-        command = tray.autostart_command()
+        with patch.object(tray, "native_exe", return_value=None):         # the script, as when colibri-tray.exe is not built
+            command = tray.autostart_command()
         self.assertIn("tray.py", command)
         self.assertTrue(command.endswith("--here"))
         self.assertTrue(command.startswith('"'))
