@@ -126,6 +126,20 @@ torchvision where the image processor uses PIL: the patches agree to within 2 of
 soft tokens are identical (`tests/test_gemma4_media.py` compares them where torchvision is installed). Not done: the sound of
 a video, frames chosen by a frame rate (`fps` sampling) instead of a count, and remote URLs.
 
+**Measured on the RTX 5090, 2026-11-26** (through the router, both models on the card, temperature 0; a 6-second 640x360 clip at 10
+frames a second, which is 32 frames and 2,430 tokens of prompt). *Does it read a video?* A red square crossing a white frame from left to
+right: the 26B-A4B said red, left to right, and on the same clip played backwards, right to left; the E4B said red and left to right to
+both, so it got the colour and not the order of the reversed clip. Two pictures that fade into each other (a grey dusk, then the same
+scene at sunset): both described a sky going from pale blue to purple and orange. *A caution:* given a clip that was entirely white by
+mistake and asked what moved, the 26B-A4B invented "a small, dark, circular object moves from the centre towards the bottom right";
+the E4B said the frames were blank. Ask "is there anything moving" before trusting "what moves". *What it costs:* a video that has not
+been seen before takes **38 s on the E4B and 52 s on the 26B-A4B** from request to answer; the same video again, 0.7 to 0.9 s (the
+prefix is reused). Of the E4B's 38 s, the vision tower is 23.1 s (0.72 s a frame, 0.60 s of it in its matrices: 32 small frames of 594
+patches, not one large picture; `COLI_PREFIX_LOG=1` prints the line for each), ffmpeg, sampling and the image processor are 0.3 s, and
+about 14 s is in the engine after the tower, which has not been taken apart (the prompt, 17 tokens of answer). So a video is slow
+because of its frames, not because of the model: it is worth trying fewer frames (`video.frames` with the ones you pick) before
+anything else.
+
 ## What is in the container
 
 Dense matrices (attention, the dense MLP, the embedding table that is also the output head, the vision and audio towers'

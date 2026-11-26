@@ -214,7 +214,12 @@ Collected in one go; what each rests on is stated, so the next look does not sta
   does not give a clean instrumental. (b) A cover at low strength with an instrumental caption keeps the tune and drops the voice (no new code; try
   it). (c) A proper stem separator (an HT-Demucs or MDX-style model, tens of MB) as a new engine like the ASR and TTS ports: exact stems from the
   original audio, which is what "strip the vocals" and any later remix need. (c) is the real answer and the larger job.
-- [ ] **I8. Video understanding (S to measure, L to extend).** Gemma 4 already takes video (frames and, on the E models, the soundtrack, through
+- [x] **I8. Video understanding (S to measure, L to extend).** Measured 2026-11-26: Gemma 4 reads video on the card (the 26B-A4B gets the
+  direction of motion right both ways, the E4B not; 38 to 52 s for a 6-second clip, 61% of it the vision tower; the numbers and one hallucination
+  caution are in [gemma4.md](gemma4.md#video)). Kimi K3 is **not** the answer: its card says 2.8T parameters (104B active, MXFP4), a 401M
+  MoonViT-V2 vision encoder, and "text, images, and video" in its prose but "Text, Image" in its spec table, with no video example in the
+  vLLM or SGLang usage; the weights are about 1.5 TB, so a vision port would be work for a model this machine cannot run. What is left is to
+  name a better video model than Gemma 4, or to take the time down (fewer frames, and finding what the 14 s after the tower is). The original text: Gemma 4 already takes video (frames and, on the E models, the soundtrack, through
   `video_url`; fork-changes 2.14, G5), so a video question works today. The Kimi K3 engine in this fork (`c/kimi_k3.c`) is text-only and nothing in
   the repository says the model takes pictures or video; check the model card before planning a vision tower port (L). If what is wanted is
   "a better video model than Gemma 4", name it and see whether its weights and architecture are a port worth making.
