@@ -869,7 +869,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Checked:** 158 new tests, 49 of 49 mutants caught (8 survived the first pass and got tests), and a real model through the new loop (approved and declined
   writes, an outside path refused, a git question answered). Found by that run: a search by file name was missing; `certifi` is used when present because this PC's
   Python could not verify `example.com`.
-- **The policy from the clients (2026-11-26, built, not pushed):** `POST /v1/tools/policy` (`allow` with `write`, `deny`, `web`), the same edits as `coli tools allow|deny|web`,
+- **The policy from the clients (2026-11-26, pushed (fork 3e8f26a1) and DEPLOYED the same day; extension 0.30.0 vsix built, not installed):** `POST /v1/tools/policy` (`allow` with `write`, `deny`, `web`), the same edits as `coli tools allow|deny|web`,
   for the dashboard's Settings ("Tools access": list, add, read-only/write, remove, web) and the extension (0.30.0 commands to allow, stop allowing, switch web). The user
   decided it should have **no limit beyond the key** (I had proposed router-PC only), so any key holder can widen the policy (THREAT_MODEL.md says so now).
   Not a tool, so no model calls it; `files_write` / `files_edit` refuse the policy file itself; a deny of a folder not in the list leaves the file untouched.
