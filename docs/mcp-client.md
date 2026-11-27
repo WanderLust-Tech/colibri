@@ -169,9 +169,13 @@ instead, `tools_search` and `tools_call`:
 - `includeTools` and `excludeTools` still apply first: what they hide is not searchable either.
 
 The definitions are the same on every request, so the model's cache of the conversation holds (adding the found tools to the list instead would change it each time).
-Used by `coli chat --mcp` and anything built on `mcp_agent.ToolBox`; the router's loop and the extension do not have it yet. **A list with `toolMode` in it is
-rejected by a router or extension that does not know the setting** (the whole list is reported as not valid), so it should be added only where every client
-that reads the list has this code.
+Used by `coli chat --mcp` (anything built on `mcp_agent.ToolBox`) and by the VS Code extension from 0.31.0 (`src/toolsOnDemand.ts`: the same search, byte for byte
+on 114 searches over 140 random tools; a call-through is the real tool for the approval card, the permission rules `mcp__rea__<tool>`, "always" and the log). The
+router keeps and serves the setting (`POST` / `GET /v1/mcp/servers`, checked: a value other than `all` or `search` is a 400) but never runs a server, so it has no
+loop to change; its own 13 built-in tools are all listed. The dashboard does not run MCP servers. **A list with `toolMode` in it is rejected by a router or
+extension that does not know the setting** (the whole list is reported as not valid): add it only where every client that reads the list has this code. Here that
+was done 2026-11-26, after the router (restarted) and the extension (0.31.0, installed by the user) had it: the live `rea` entry is on demand with the families that run or
+change things excluded (151 of its 263 tools can be searched).
 
 Measured with REA (263 tools) on Gemma 4 26B-A4B, the same question, 2026-11-26 (the tools that run or change things excluded): the first request carried **390
 tokens** (4,077 with 20 tools listed, about 64,000 with all 263). First version, with each search answering 4,000 to 6,000 characters of full schemas ranked by a
