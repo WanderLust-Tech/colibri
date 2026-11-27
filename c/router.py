@@ -2334,6 +2334,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             else:
                 item, card = state.cached_entry(entry["key"])
                 item = dict(item) if item else self.stub(entry)
+            item["id"] = entry["id"]       # the catalog's: what it announced last time may carry an id the folder has since changed (colibri-model-id.txt)
             item["state"] = "loaded" if ready else "idle"
             if self.disabled(entry):
                 item["state"] = "disabled"

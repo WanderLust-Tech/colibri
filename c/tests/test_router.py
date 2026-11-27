@@ -180,6 +180,17 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((idle["state"], idle["image"]), ("idle", {"default_width": 640}))
         self.assertEqual(listing["music-m-colibri"]["audio"], {})                                 # never ran: from the modality
 
+    def test_an_idle_model_is_listed_under_the_catalogs_id_not_the_one_it_announced_before(self):
+        path = os.path.join(tempfile.mkdtemp(), "router.json")
+        rig = Rig(self, [entry("image-b", "image")], state_path=path, measure=lambda pid, job: 1 * GB)
+        rig.call("POST", "/v1/images/generations", {"model": "image-b-colibri", "prompt": "x"})
+        rig.pool.unload(rig.entries[0]["key"])
+        rig.entries[0]["id"] = "image-b-renamed-colibri"        # the folder now names itself (colibri-model-id.txt)
+        rig.catalog.invalidate()
+        listing = rig.call("GET", "/v1/models")[3]["data"]
+        self.assertEqual([m["id"] for m in listing], ["image-b-renamed-colibri"])
+        self.assertEqual(listing[0]["image"], {"default_width": 640})       # still what its engine said
+
     def test_the_same_worker_serves_the_next_request(self):
         rig = Rig(self, [entry("text-a")])
         first = rig.chat("text-a-colibri")[3]["pid"]
