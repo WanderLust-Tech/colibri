@@ -1332,6 +1332,7 @@ static int q36c_spec_slots(Q36Chain *ch, Model *m, int rows) {
     }
     return 1;
 }
+#define Q36C_UP_FLUSH ((size_t)32 << 20)   /* K/V bytes staged in one frame before it goes off (q36c_push_state) */
 /* Record the uploads that make the device state the host's, as the step at pos_base needs it. */
 static int q36c_push_state(Q36Chain *ch, Model *m, int pos_base, int n_rows) {
     Cfg *c = &m->c; int ok = 1;
@@ -1346,6 +1347,7 @@ static int q36c_push_state(Q36Chain *ch, Model *m, int pos_base, int n_rows) {
         ch->dn_where = Q36C_BOTH;
     }
     int kvd = c->k_head_dim, KV = c->kv_heads;
+    size_t up = 0;   /* the K/V bytes staged in the open frame since its start (or the last flush) */
     for (int i = ch->lo; i < ch->lo + ch->n && ok; i++) {
         if (c->is_attn[i] && ch->ks.on) {     /* the split: the window placed, its rows below pos_base uploaded */
             VkcKvPart pt[2] = {{KV, kvd, m->K[i], (size_t)m->max_t * kvd, ch->kc[i], 0, q36_kv16()},
@@ -1381,6 +1383,14 @@ static int q36c_push_state(Q36Chain *ch, Model *m, int pos_base, int n_rows) {
             size_t src = ((size_t)h * m->max_t + t0) * kvd, dst = ((size_t)h * ch->dev_rows + t0) * kvd;
             ok = q36c_kv_up(ch->kvh, ch->kc[i], dst, m->K[i], (int64_t)src, (size_t)n * kvd) &&
                  q36c_kv_up(ch->kvh, ch->vc[i], dst, m->V[i], (int64_t)src, (size_t)n * kvd);
+            /* A grown mirror takes every row again from the host, and vkc_write stages them all in
+             * this one frame, its buffer doubling to hold them: 4.6 GB at 47K positions of Qwen3-Coder-30B,
+             * more than a card with the experts on it has left, so the allocation failed and the
+             * chain took it for a lost device (2026-11-27: three times, each as the mirror grew
+             * past 40K positions, the rest of the process on the CPU). The frame goes off every
+             * Q36C_UP_FLUSH bytes instead; the next waits for the ring's oldest to come back. */
+            up += (size_t)n * kvd * 2 * (ch->kvh ? 2 : 4);
+            if (ok && up >= Q36C_UP_FLUSH) { ok = vkc_submit(0) && vkc_begin(); up = 0; }
         }
         ch->kv_valid[i] = pos_base;
     }
