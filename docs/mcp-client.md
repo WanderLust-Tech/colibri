@@ -155,7 +155,22 @@ real, large server, and a lesson in what `includeTools` is for:
   or `/decompile-exe PATH [FUNCTION]`, or the model loads one itself): `disassemble-exe` opens the program, finds the function (`procedure_info`, `search_procedures`) and shows
   `procedure_assembly`, explaining it in words and writing no C; `decompile-exe` shows `procedure_pseudo_code` as C or C++ style code, says it is a decompiler's reconstruction,
   and rewrites it with marked inferred names only when asked. Checked: the extension's own skill parser loads both, and `$1`/`$2` are filled (a quoted path with spaces
-  works). Not tried with a model.
+  works). Not tried with a model. A third, `decompile-to-files` (`/decompile-to-files PATH FOLDER [NAME]`), uses REA's `decompile_all`, which writes one `.c` file per
+  function (`functions/0x<address>.c`, with a header comment naming the function, its range and the provider's limits) plus `decompile-index.json` and a journal,
+  straight from REA to disk, so the code never goes through the model's context; `resume` continues a run that timed out. Tried directly on the 40 KB test program (86
+  functions selected, 38 files written, imports get none); not through a model. **`decompile_all` refuses an output folder that already exists, even an empty one**
+  ("Output directory already exists. Pass resume ...", which sent a model in the extension the wrong way), and a folder whose parent is missing; it creates the folder itself, and `resume`
+  is only for continuing a folder that holds `decompile-index.json`. Checked directly: existing empty folder refused, a new folder inside an existing one fine, a second run on it
+  refused without `resume` and fine with it. The first version of the skill told the model to check the folder and make a subfolder; Qwen3-Coder (in the extension) checked it, found it missing, ran `mkdir`
+  itself and was then refused, twice. The skill now forbids creating or checking the folder and names it from the program's hash (`<folder>\<program>-<first 8 of sha256>`), then
+  tells the model what to do for each error REA gives (parent missing: make only the parent; already exists: that is an earlier export of the same program, so `resume`).
+- **A Unity (Mono) game is not a job for REA.** The test target (a Steam game folder) was a 650 KB Unity launcher `.exe`, the 31 MB engine `UnityPlayer.dll`, 147 .NET assemblies in
+  `<name>_Data\Managed` (the game's own code: `Assembly-CSharp.dll`, 580 KB, and `-firstpass`, 50 KB; the rest Unity and third-party), no `GameAssembly.dll` (so not IL2CPP) and 3 GB of
+  asset bundles (`.bundle`, `.assets`, `.resS`). Ghidra on the launcher gives Unity start-up code; the game is .NET, which decompiles to real C#. The skill `decompile-unity-game`
+  (`/decompile-unity-game GAMEFOLDER OUTFOLDER [extra assemblies]`) runs **ilspycmd** (`dotnet tool install -g ilspycmd`, 11.2, installed 2026-11-27 for the user; .NET SDK 8 and 10 were
+  there) on the game's own assemblies with `-p -r <Managed>`: `Assembly-CSharp.dll` gave 288 `.cs` files (875 KB) in 5 s, `-firstpass` 11. It runs again on an existing output folder
+  without complaint (unlike `decompile_all`). It stops with a clear message for an IL2CPP game, never opens asset bundles (it names AssetRipper / AssetStudio for the user to run) and
+  does not decompile the engine or third-party DLLs unless named. The commands in it were run by hand; the skill was not run through a model.
 - **Not tried:** an obfuscated or large program, the extension's approval flow for it (every call asks first, which is many questions in a real analysis; REA marks
   few tools read-only).
 
