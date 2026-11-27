@@ -2394,15 +2394,24 @@ MODEL_ID_FILE = "colibri-model-id.txt"
 _MODEL_ID_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
-def folder_model_id(model_dir):
-    """The id a model folder asks for in colibri-model-id.txt (one line), or "" when it has none or it is not a plain id.
-    A fine-tune of a model keeps its geometry, so it would get the original's id and the router could not tell the two
-    apart: the folder names itself instead (Qwen3.6-35B-A3B and an abliterated copy of it)."""
+def folder_identity(model_dir):
+    """(id, name) a model folder asks for in colibri-model-id.txt: the first line is the id, an optional second the name the model
+    menus show; "" for what is missing or not plain (an id of letters, digits, `.`, `_`, `-`, at most 64; a name of at most 80
+    printable characters). A fine-tune of a model keeps its geometry, so it would get the original's id and name and nothing could
+    tell the two apart: the folder names itself instead (Qwen3.6-35B-A3B and an abliterated copy of it)."""
     try:
-        text = (Path(model_dir) / MODEL_ID_FILE).read_text(encoding="utf-8").strip()
+        lines = (Path(model_dir) / MODEL_ID_FILE).read_text(encoding="utf-8").splitlines()
     except (OSError, ValueError):
-        return ""
-    return text if _MODEL_ID_OK.fullmatch(text) else ""
+        return "", ""
+    ident = lines[0].strip() if lines else ""
+    if not _MODEL_ID_OK.fullmatch(ident):
+        return "", ""
+    name = lines[1].strip() if len(lines) > 1 else ""
+    return ident, (name if name and len(name) <= 80 and name.isprintable() else "")
+
+
+def folder_model_id(model_dir):
+    return folder_identity(model_dir)[0]
 
 
 def default_model_id(resolved):

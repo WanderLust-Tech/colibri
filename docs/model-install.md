@@ -110,7 +110,9 @@ others: for Qwen3.6-35B-A3B and its relatives `python c/tools/convert_qwen36.py 
 (needs `torch`, `safetensors` and `huggingface_hub`; [qwen36.md](qwen36.md)). The id comes from the model's geometry, so a fine-tune
 of Qwen3.6-35B-A3B would be listed as `qwen3.6-colibri` beside the original, and a request for that id gets the first of them. To
 tell them apart, put one line in the folder, `colibri-model-id.txt`, holding the id the copy should answer to (letters, digits, `.`, `_`,
-`-`; at most 64): the router and the model's own server both read it (`family_registry.folder_model_id`). `coli model enable`, `gpu` and
+`-`; at most 64): the router and the model's own server both read it (`family_registry.folder_identity`). An optional second line is
+the name the model menus show (at most 80 characters), so two copies of one model can be told apart there: `qwen3.6-abliterated-colibri`
+then `Qwen3.6-35B-A3B Abliterated`. `coli model enable`, `gpu` and
 `context` are kept by id, so they follow the id the file gives.
 
 ## Tests

@@ -115,6 +115,13 @@ class ScanTest(unittest.TestCase):
         self.assertTrue(flash["switchable"])
         self.assertEqual(len(entries), 3)                                 # the half-downloaded one is listed too, with a reason
 
+    def test_a_folder_names_itself_with_colibri_model_id_txt(self):
+        (Path(self.flash) / "colibri-model-id.txt").write_text("mimo-copy-colibri\nMiMo Copy\n", encoding="utf-8")
+        flash = next(e for e in self.scan() if e["path"] == os.path.realpath(self.flash))
+        self.assertEqual((flash["id"], flash["name"]), ("mimo-copy-colibri", "MiMo Copy"))
+        glm = next(e for e in self.scan() if e["current"])
+        self.assertEqual((glm["id"], glm["name"] == "MiMo Copy"), ("glm-5.2-colibri", False))      # the others keep theirs
+
     def test_lists_downloads_in_progress_with_why_they_cannot_be_used_and_leaves_out_folders_we_do_not_serve(self):
         found = {e["path"]: e for e in self.scan()}
         half = found[os.path.realpath(self.root / "half-downloaded")]

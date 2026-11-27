@@ -1582,8 +1582,31 @@ class FolderModelIdTest(unittest.TestCase):
         self.assertEqual(self._id(b"qwen3.6-abliterated-colibri\r\n"), "qwen3.6-abliterated-colibri")
 
     def test_a_bad_id_is_ignored(self):
-        for text in (b"", b"  \n", b"has space", b"../x", b"-lead", b"x" * 65, b"\xff\xfe", b"two\nlines"):
+        for text in (b"", b"  \n", b"has space", b"../x", b"-lead", b"x" * 65, b"\xff\xfe"):
             self.assertEqual(self._id(text), "qwen3.6-colibri", text)
+
+
+class FolderNameTest(unittest.TestCase):
+    """The second line of colibri-model-id.txt is the name the model menus show."""
+
+    def _identity(self, text):
+        from family_registry import folder_identity
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "colibri-model-id.txt").write_bytes(text)
+            return folder_identity(tmp)
+
+    def test_id_and_name(self):
+        self.assertEqual(self._identity(b"qwen3.6-abliterated-colibri\r\nQwen3.6-35B-A3B Abliterated\r\n"),
+                         ("qwen3.6-abliterated-colibri", "Qwen3.6-35B-A3B Abliterated"))
+
+    def test_the_name_is_optional_and_a_bad_one_is_dropped_not_the_id(self):
+        self.assertEqual(self._identity(b"my-id"), ("my-id", ""))
+        self.assertEqual(self._identity(b"my-id\n   \n"), ("my-id", ""))
+        self.assertEqual(self._identity(b"my-id\n" + b"x" * 81), ("my-id", ""))
+        self.assertEqual(self._identity(b"my-id\nbad\x07name"), ("my-id", ""))
+
+    def test_a_bad_id_drops_the_name_too(self):
+        self.assertEqual(self._identity(b"has space\nA Name"), ("", ""))
 
 
 class DisplayVariantTest(unittest.TestCase):

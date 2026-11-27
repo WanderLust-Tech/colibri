@@ -150,7 +150,7 @@ def why_not(family, ctx, engine_ready):
 def scan_installed(ctx, engine_ready):
     """Every model in the roots (plus the one being served), current first. Each
     entry has `path` for the server's own use; use public() before sending it out."""
-    from family_registry import default_model_id, display_for, resolve_model
+    from family_registry import default_model_id, display_for, folder_identity, resolve_model
 
     seen, entries = set(), []
     dirs = [ctx.current_dir]
@@ -172,6 +172,7 @@ def scan_installed(ctx, engine_ready):
         family = resolved.descriptor
         name, scale = display_for(resolved)
         label = name if not scale or scale in name else f"{name} {scale}"
+        label = folder_identity(real)[1] or label      # a folder that names itself (colibri-model-id.txt)
         size = None
         if manifest:
             size = sum(int(spec.get("size") or 0) for spec in manifest.get("files", []))

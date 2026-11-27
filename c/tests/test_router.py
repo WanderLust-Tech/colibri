@@ -191,6 +191,22 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in listing], ["image-b-renamed-colibri"])
         self.assertEqual(listing[0]["image"], {"default_width": 640})       # still what its engine said
 
+    def test_an_idle_model_is_listed_with_the_context_window_it_will_be_given(self):
+        import model_settings
+        path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        settings = model_settings.ModelSettings(path)
+        state_path = os.path.join(tempfile.mkdtemp(), "router.json")
+        rig = Rig(self, [entry("text-a")], settings=settings, state_path=state_path, measure=lambda pid, job: 1 * GB)
+        rig.call("POST", "/v1/chat/completions", {"model": "text-a-colibri"})
+        key = rig.entries[0]["key"]
+        rig.pool.unload(key)
+        rig.pool.state.record(key, "text-a-colibri", 1 * GB, entry={"id": "text-a-colibri", "object": "model", "context_length": 65536})
+        item = rig.call("GET", "/v1/models")[3]["data"][0]
+        self.assertEqual((item["state"], item["context_length"]), ("idle", 65536))        # what it said when it last ran
+        model_settings.update(path, "text-a-colibri", context=262144)
+        item = rig.call("GET", "/v1/models")[3]["data"][0]
+        self.assertEqual((item["state"], item["context_length"]), ("idle", 262144))       # what it will be given now
+
     def test_the_same_worker_serves_the_next_request(self):
         rig = Rig(self, [entry("text-a")])
         first = rig.chat("text-a-colibri")[3]["pid"]
