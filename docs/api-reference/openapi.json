@@ -2891,6 +2891,91 @@
         }
       }
     },
+    "/v1/tools/policy": {
+      "post": {
+        "tags": [
+          "Router"
+        ],
+        "summary": "Change which folders and which web access the built-in tools have",
+        "operationId": "editToolsPolicy",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "description": "What `coli tools allow|deny|web` does, for a client a person is using (the dashboard's Settings, the VS Code extension's commands). `allow` adds a folder or replaces its entry (this is how it switches between read-only and `write`); the folder must exist on the router's PC and may not be the top of a drive. `deny` takes a folder out (404 when it is not in the list). `web` switches `web_fetch`. The change is written to the policy file and takes effect at once; a policy file that is not valid is refused (400) and left as it is. Any holder of the API key can call it; it is not a tool, so a model cannot. The request log keeps the action and the folder (`policy:allow`, `policy:deny`, `policy:web`). Only `coli router` has this route; a server that serves one model answers 404.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "allow",
+                      "deny",
+                      "web"
+                    ]
+                  },
+                  "folder": {
+                    "type": "string",
+                    "description": "For `allow` and `deny`: the folder, on the router's PC."
+                  },
+                  "write": {
+                    "type": "boolean",
+                    "description": "For `allow`: let the write tools change files there. Default false."
+                  },
+                  "on": {
+                    "type": "boolean",
+                    "description": "For `web`: whether web_fetch is on."
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "action": {
+                      "type": "string"
+                    },
+                    "folder": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The folder as the file keeps it (absolute, normalised); null for `web`."
+                    },
+                    "policy": {
+                      "type": "object",
+                      "description": "The policy as it is now: `folders` (`path`, `write`), `web`, `allowSecrets`, `approvalSeconds`, `disabled`."
+                    }
+                  }
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/v1/requests": {
       "get": {
         "tags": [

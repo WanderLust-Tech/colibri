@@ -1982,6 +1982,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self.mcp_server_delete()
             if path == "/v1/tools/pending":
                 return self.tool_answer()
+            if path == "/v1/tools/policy":
+                return self.tools_policy_edit()
             if path.startswith("/v1/tools/"):
                 return self.tool_call(path)
             if path == "/v1/audio/voices":
@@ -2750,7 +2752,7 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def tools_list(self):
         """GET /v1/tools: the built-in tools in the OpenAI function shape, which of them are on, and the policy that decides it.
-        The policy is changed on this PC (`coli tools allow|deny|web`), never through the API."""
+        The policy is changed with `coli tools allow|deny|web` or POST /v1/tools/policy (a person's action in a client; no tool can call it)."""
         file = tools_policy_mod.path()
         try:
             policy, problem = tools_policy_mod.load(file), None
@@ -2777,6 +2779,35 @@ class RouterHandler(BaseHTTPRequestHandler):
         text, is_error = builtin_tools.run(name, arguments, policy)
         self._seen.update(path=path, tool=name, target=tool.target(arguments), ok=not is_error)
         self.send_json(200, {"object": "tool_result", "name": name, "is_error": is_error, "text": text})
+
+    def tools_policy_edit(self):
+        """POST /v1/tools/policy: what `coli tools allow|deny|web` does, for a client a person is using: {"action": "allow", "folder": "D:/code", "write": false},
+        {"action": "deny", "folder": ...} or {"action": "web", "on": true}. Needs the key like every other route; there is no tool that calls it, so a
+        model cannot widen its own access. Answers the policy as it is now."""
+        body = self.management_json("/v1/tools/policy")
+        action, folder = body.get("action"), body.get("folder")
+        if action not in ("allow", "deny", "web"):
+            raise ApiError(400, "`action` must be `allow`, `deny` or `web`.", "invalid_request_error", "action")
+        if action in ("allow", "deny") and (not isinstance(folder, str) or not folder.strip() or "\0" in folder):
+            raise ApiError(400, "`folder` must be the path of a folder.", "invalid_request_error", "folder")
+        if action == "allow" and not isinstance(body.get("write", False), bool):
+            raise ApiError(400, "`write` must be true or false.", "invalid_request_error", "write")
+        if action == "web" and not isinstance(body.get("on"), bool):
+            raise ApiError(400, "`on` must be true or false.", "invalid_request_error", "on")
+        try:
+            if action == "allow":
+                policy, kept = tools_policy_mod.allow(folder.strip(), bool(body.get("write", False)))
+            elif action == "deny":
+                kept = tools_policy_mod.normal(folder.strip())
+                if not any(tools_policy_mod._key(f["path"]) == tools_policy_mod._key(kept) for f in tools_policy_mod.load().folders):
+                    raise ApiError(404, f"{folder.strip()} is not one of the folders allowed.", "folder_not_found", "folder")   # the file is left as it is
+                policy, _ = tools_policy_mod.deny(kept)
+            else:
+                policy, kept = tools_policy_mod.set_web(body["on"]), None
+        except tools_policy_mod.PolicyError as error:
+            raise ApiError(400, str(error), "invalid_request_error", "folder" if action != "web" else None)
+        self._seen.update(path="/v1/tools/policy", tool=f"policy:{action}", target=kept if kept else ("on" if body.get("on") else "off"), ok=True)
+        self.send_json(200, {"status": "ok", "action": action, "folder": kept, "policy": policy.summary()})
 
     def tool_answer(self):
         """POST /v1/tools/pending: a person's answer to a call the router is waiting on: {"id", "allow", "always"}."""

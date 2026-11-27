@@ -19,7 +19,7 @@ The router is the only door. It holds the API key and relays to the workers (`c/
 `COLI_API_KEY` from the workers' environment on purpose). **By default the server never runs a tool**: it turns the model's tool call
 into JSON for the client and stops. Reading files, writing files, running commands and fetching pages happen in the
 extension, with your user's rights. The one exception is the router's **built-in tools** ([builtin-tools.md](builtin-tools.md)): a fetch of public
-web pages, reading files and git repositories, and changing files, each **off until you turn it on at the router's PC** (`coli tools allow|web`), confined to
+web pages, reading files and git repositories, and changing files, each **off until you turn it on** (`coli tools allow|web` at the router's PC, or the dashboard and extension, which need the key), confined to
 the folders you name, and never able to run a command. With one on, the router does those things for whoever holds the key.
 
 ## Who is trusted
@@ -45,8 +45,11 @@ Everything the router offers. Concretely, with the key a client can:
 
 If the built-in tools are on ([builtin-tools.md](builtin-tools.md)), a key holder can also **read every file and git repository under the folders you allowed**
 (not secret-looking ones), **fetch any public web page from this machine**, and where a folder was allowed for writing, **write files and make commits there**
-(`POST /v1/tools/NAME` with `confirm`, which the key holder sets). They cannot change that policy: it is a file on the router's PC, with no route that edits it.
-Nothing in this paragraph is possible until you run `coli tools allow` or `coli tools web on`.
+(`POST /v1/tools/NAME` with `confirm`, which the key holder sets). **They can also change that policy** (`POST /v1/tools/policy`, the route behind the dashboard's
+"Tools access" list and the extension's commands): allow any folder that exists on the router's PC (not a drive's top), for writing too, and turn the web
+tool on. The route is not limited to the router's own PC and the key is all it asks. No model can call it (it is not a tool), and no tool can write the policy
+file, but a client that holds the key, or a model that can make that client call it, is as free as the key holder. Nothing in this paragraph is possible until someone
+allows a folder or turns the web on, by `coli tools allow` / `coli tools web on` or that route.
 
 What a key holder cannot do through the API: read files on the machine (a local image path in a request is refused
 unless the server was started with `COLI_IMAGE_ROOT`, and then only under that folder, `..` refused; and, unless a folder was allowed for the built-in tools, no file at all),

@@ -855,7 +855,7 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 ### 2.49 The router runs tools itself: fetch, files, git (idea I13, branch `main`, 2026-11-26; pushed (fork 537cf54a) and DEPLOYED 2026-11-26: router restarted, web/dist rebuilt, certifi installed for C:\Python314; no folder or web access granted yet)
 
 - **Decided with the user** (they asked for server-side endpoints instead of MCP, after the MCP trial of 2.48 showed nothing needed fixing but the dashboard could not use it):
-  endpoints a client can call, and a loop the router can run; reads, and writes behind an approval; limited by a policy file on the router's PC that no API route can change.
+  endpoints a client can call, and a loop the router can run; reads, and writes behind an approval; limited by a policy file on the router's PC (first built so that no API route could change it; the same day the user asked for one, see the end of this section).
   This reverses 2.48's "the router never runs anything" for these tools only, and they are **off until `coli tools allow|web`**. [builtin-tools.md](builtin-tools.md)
 - **`c/tools_policy.py`:** the policy file (folders with a write flag, `web`, `allowSecrets`, `approvalSeconds`, `disabled`) and `resolve`, the check every path goes
   through (links, junctions and `..` resolved first; network, device and stream paths refused before anything touches them).
@@ -869,6 +869,10 @@ Responses API to chat completions, which is all Codex speaks; the fork's `coli l
 - **Checked:** 158 new tests, 49 of 49 mutants caught (8 survived the first pass and got tests), and a real model through the new loop (approved and declined
   writes, an outside path refused, a git question answered). Found by that run: a search by file name was missing; `certifi` is used when present because this PC's
   Python could not verify `example.com`.
+- **The policy from the clients (2026-11-26, built, not pushed):** `POST /v1/tools/policy` (`allow` with `write`, `deny`, `web`), the same edits as `coli tools allow|deny|web`,
+  for the dashboard's Settings ("Tools access": list, add, read-only/write, remove, web) and the extension (0.30.0 commands to allow, stop allowing, switch web). The user
+  decided it should have **no limit beyond the key** (I had proposed router-PC only), so any key holder can widen the policy (THREAT_MODEL.md says so now).
+  Not a tool, so no model calls it; `files_write` / `files_edit` refuse the policy file itself; a deny of a folder not in the list leaves the file untouched.
 - **Clients (pushed; the dashboard is live, extension 0.29.0 vsix built, not installed):** the dashboard (Tools switch, call and approval cards; 374 web tests) and the extension 0.29.0
   (`colibri-router__<tool>`; 410 unit and 47 host tests, 22 of 22 mutants). One known gap: an extension `WebFetch(domain:...)` deny rule does not cover the router's `web_fetch`.
 

@@ -131,6 +131,8 @@ class Policy:
         if ":" in os.path.splitdrive(candidate)[1]:      # an NTFS stream (`file.txt:hidden`)
             raise PolicyError("a path with a colon in it is not allowed")
         real = os.path.realpath(candidate)
+        if write and _key(real) == _key(os.path.realpath(path())):
+            raise PolicyError("the tools policy file is changed with `coli tools` or the dashboard's folder list, not by a tool")
         for folder in self.folders:
             if write and not folder.get("write"):
                 continue

@@ -79,8 +79,20 @@ fails (a path outside the folders, no such file) is a 200 with `is_error` and th
 `approvalSeconds`, `disabled` (tool names). It is read on every request, so an edit takes effect at once; a file that is not valid turns everything off
 and is reported (`GET /v1/tools` `problem`). Allowing the top of a drive is refused.
 
+**Changing it:** `coli tools allow FOLDER [--write]`, `coli tools deny FOLDER`, `coli tools web on|off` on the router's PC, or from a client with the key:
+`POST /v1/tools/policy` (`{"action": "allow", "folder": ..., "write": false}`, `{"action": "deny", "folder": ...}`, `{"action": "web", "on": true}`), which is what the
+dashboard's Settings ("Tools access") and the VS Code extension's commands ("Colibri: Allow a Folder for the Router's Tools" and the others) call. The route
+has no limit beyond the key (it is not restricted to the router's own PC), checks the folder exists and is not a drive's top, and is not a tool: no model can call
+it. `allowSecrets`, `approvalSeconds` and `disabled` are edited in the file only, and a change from the route keeps them. No tool may write the policy file
+itself (`files_write` and `files_edit` refuse it, even in a folder allowed for writing).
+
 ## What it does not defend
 
+- **A key holder can grant themselves folders.** `POST /v1/tools/policy` needs only the key, so whoever holds it can allow any folder that exists on the
+  router's PC (except a drive's top; secret-looking files stay unreadable unless `allowSecrets` is set in the file, which the route cannot change) and read it,
+  or allow it for writing and write there. Before this route existed the policy could only be widened by someone at the router's PC; now it is as
+  strong as the key, like everything else a key holder can do. If that is not acceptable on your network, do not expose the router to it, or keep the
+  key off the machines you do not trust.
 - **A key holder with a granted folder can read it, and a client that sends `confirm: true` can write there.** The key is the only credential, so this
   is as strong as the key. Keep the folders few, keep writes to a scratch folder, and do not put the router on a network you do not trust
   ([THREAT_MODEL.md](THREAT_MODEL.md)). There are no per-key scopes (a LAN key that may fetch but not read); that is the next step if the router is shared.

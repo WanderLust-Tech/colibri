@@ -235,7 +235,7 @@ class EndpointTest(ToolsTest):
 
     def test_what_is_off_or_unknown_is_a_404_that_says_where_the_switch_is(self):
         self.policy()
-        for name in ("web_fetch", "nonesuch", "policy", "pending2"):
+        for name in ("web_fetch", "nonesuch", "allow", "pending2"):
             with self.subTest(name=name):
                 status, _, _, body = self.rig.call("POST", f"/v1/tools/{name}", {"arguments": {}})
                 self.assertEqual((status, body["error"]["code"]), (404, "tool_not_found"))
@@ -243,7 +243,7 @@ class EndpointTest(ToolsTest):
         self.policy(disabled=["files_read"])
         self.assertEqual(self.rig.call("POST", "/v1/tools/files_read", {"arguments": {"path": self.notes}})[0], 404)
 
-    def test_no_route_changes_the_policy(self):
+    def test_no_other_route_and_no_malformed_request_changes_the_policy(self):
         self.policy()
         before = Path(self.policy_file).read_text()
         for method, path, body in (("POST", "/v1/tools", {"folders": ["/"]}), ("POST", "/v1/tools/policy", {"folders": ["/"]}), ("POST", "/v1/tools/allow", {"path": "/"}),
@@ -278,6 +278,112 @@ class EndpointTest(ToolsTest):
             self.assertEqual(self.rig.call("POST", "/v1/tools/pending", payload)[0], 400, payload)
         status, _, _, body = self.rig.call("POST", "/v1/tools/pending", {"id": "nope", "allow": True})
         self.assertEqual((status, body["error"]["code"]), (404, "approval_not_found"))
+
+
+class PolicyEditTest(ToolsTest):
+    def edit(self, body, headers=None):
+        return self.rig.call("POST", "/v1/tools/policy", body, headers=headers)
+
+    def folders(self):
+        return json.loads(Path(self.policy_file).read_text())["folders"]
+
+    def test_a_folder_can_be_allowed_read_only_then_with_write_then_taken_out(self):
+        status, _, _, body = self.edit({"action": "allow", "folder": self.proj})
+        self.assertEqual((status, body["status"], body["folder"]), (200, "ok", os.path.normpath(self.proj)))
+        self.assertEqual(body["policy"]["folders"], [{"path": os.path.normpath(self.proj), "write": False}])
+        self.assertEqual(self.folders(), [{"path": os.path.normpath(self.proj), "write": False}], "it is in the file, where the CLI reads it too")
+        on = {t["function"]["name"] for t in self.rig.call("GET", "/v1/tools")[3]["data"] if t["colibri"]["enabled"]}
+        self.assertIn("files_read", on)
+        self.assertNotIn("files_write", on, "read-only: the write tools stay off")
+        self.assertEqual(self.edit({"action": "allow", "folder": self.proj, "write": True})[3]["policy"]["folders"],
+                         [{"path": os.path.normpath(self.proj), "write": True}], "allowing it again replaces its entry")
+        self.assertEqual(self.rig.call("POST", "/v1/tools/files_read", {"arguments": {"path": self.notes}})[0], 200)
+        status, _, _, body = self.edit({"action": "deny", "folder": self.proj})
+        self.assertEqual((status, body["policy"]["folders"]), (200, []))
+        self.assertEqual(self.rig.call("POST", "/v1/tools/files_read", {"arguments": {"path": self.notes}})[0], 404, "nothing is on again")
+
+    def test_the_web_can_be_switched(self):
+        self.assertTrue(self.edit({"action": "web", "on": True})[3]["policy"]["web"])
+        self.assertTrue(self.rig.call("GET", "/v1/tools")[3]["policy"]["web"])
+        self.assertFalse(self.edit({"action": "web", "on": False})[3]["policy"]["web"])
+
+    def test_other_settings_of_the_file_are_kept(self):
+        self.policy(allowSecrets=True, approvalSeconds=30, disabled=["git_commit"])
+        self.edit({"action": "allow", "folder": self.root})
+        kept = json.loads(Path(self.policy_file).read_text())
+        self.assertEqual((kept["allowSecrets"], kept["approvalSeconds"], kept["disabled"]), (True, 30, ["git_commit"]))
+
+    def test_a_request_that_is_wrong_is_refused_and_changes_nothing(self):
+        self.policy()
+        before = Path(self.policy_file).read_text()
+        for body, code, param in (
+                ({}, 400, "action"), ({"action": "erase"}, 400, "action"), ({"action": "allow"}, 400, "folder"),
+                ({"action": "allow", "folder": ""}, 400, "folder"), ({"action": "allow", "folder": 5}, 400, "folder"),
+                ({"action": "allow", "folder": self.proj, "write": "yes"}, 400, "write"),
+                ({"action": "web"}, 400, "on"), ({"action": "web", "on": "yes"}, 400, "on"),
+                ({"action": "allow", "folder": os.path.join(self.root, "no-such-folder")}, 400, "folder"),
+                ({"action": "allow", "folder": os.path.splitdrive(self.root)[0] + os.sep}, 400, "folder"),
+                ({"action": "allow", "folder": self.notes}, 400, "folder"),
+                ({"action": "deny", "folder": os.path.join(self.root, "never-allowed")}, 404, "folder")):
+            with self.subTest(body=body):
+                status, _, _, got = self.edit(body)
+                self.assertEqual((status, got["error"]["param"]), (code, param))
+        self.assertEqual(Path(self.policy_file).read_text(), before)
+
+    def test_a_policy_file_that_is_not_valid_is_not_overwritten(self):
+        Path(self.policy_file).write_text('{"surprise": 1}')
+        status, _, _, got = self.edit({"action": "web", "on": True})
+        self.assertEqual(status, 400)
+        self.assertIn("surprise", got["error"]["message"])
+        self.assertEqual(Path(self.policy_file).read_text(), '{"surprise": 1}')
+
+    def test_the_key_is_needed_like_every_other_route(self):
+        self.rig.server.api_key = "secret"
+        self.assertEqual(self.edit({"action": "web", "on": True})[0], 401)
+        self.assertFalse(os.path.exists(self.policy_file))
+        self.assertEqual(self.edit({"action": "web", "on": True}, headers={"Authorization": "Bearer secret"})[0], 200)
+
+    def test_another_site_cannot_change_it_from_a_browser(self):
+        status, _, _, got = self.edit({"action": "web", "on": True}, headers={"Origin": "http://evil.example"})
+        self.assertEqual((status, got["error"]["code"]), (403, "forbidden"))
+        self.assertFalse(os.path.exists(self.policy_file))
+
+    def test_it_is_not_a_tool_and_a_model_cannot_call_it(self):
+        self.policy(web=True)
+        names = {t["function"]["name"] for t in self.rig.call("GET", "/v1/tools")[3]["data"]}
+        self.assertFalse([n for n in names if "policy" in n])
+        model = self.model([{"text": "", "calls": [("policy", {"action": "allow", "folder": self.root})]}, {"text": "done"}])
+        before = Path(self.policy_file).read_text()
+        self.chat({"colibri_tools": True})
+        self.assertEqual(Path(self.policy_file).read_text(), before)
+        self.assertTrue(model.requests)
+
+    def test_no_tool_can_write_the_policy_file(self):
+        Path(self.policy_file).write_text(json.dumps({"folders": [{"path": self.root, "write": True}]}))
+        before = Path(self.policy_file).read_text()
+        for tool, arguments in (("files_write", {"path": self.policy_file, "text": "{}"}),
+                                ("files_edit", {"path": self.policy_file, "old": "folders", "new": "x"})):
+            with self.subTest(tool=tool):
+                status, _, _, got = self.rig.call("POST", f"/v1/tools/{tool}", {"arguments": arguments, "confirm": True})
+                self.assertEqual((status, got["is_error"]), (200, True))
+                self.assertIn("policy file", got["text"])
+        self.assertEqual(Path(self.policy_file).read_text(), before)
+        self.assertEqual(self.rig.call("POST", "/v1/tools/files_read", {"arguments": {"path": self.policy_file}})[3]["is_error"], False, "reading it is fine")
+
+    def test_the_log_says_what_was_changed(self):
+        import request_log
+        log_path = os.path.join(self.root, "requests.jsonl")
+        self.rig.server.request_log = request_log.RequestLog(log_path)
+        self.edit({"action": "allow", "folder": self.proj, "write": True})
+        deadline = time.monotonic() + 5
+        while True:
+            text = Path(log_path).read_text() if os.path.exists(log_path) else ""
+            records = [json.loads(line) for line in text.splitlines() if line.strip()]
+            if any(r.get("path") == "/v1/tools/policy" for r in records) or time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        record = next(r for r in records if r.get("path") == "/v1/tools/policy")
+        self.assertEqual((record["tool"], record["target"], record["ok"]), ("policy:allow", os.path.normpath(self.proj), True))
 
 
 class LoopTest(ToolsTest):
@@ -694,7 +800,7 @@ class PendingTest(unittest.TestCase):
 class CoveredTest(unittest.TestCase):
     def test_the_routes_are_in_the_spec_and_the_docs(self):
         import test_api_spec
-        for route in (("GET", "/v1/tools"), ("GET", "/v1/tools/pending"), ("POST", "/v1/tools/pending"), ("POST", "/v1/tools/")):
+        for route in (("GET", "/v1/tools"), ("GET", "/v1/tools/pending"), ("POST", "/v1/tools/pending"), ("POST", "/v1/tools/policy"), ("POST", "/v1/tools/")):
             self.assertIn(route, test_api_spec.source_routes())
 
 
