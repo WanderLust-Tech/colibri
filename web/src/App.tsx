@@ -63,7 +63,8 @@ import ModelSwitcher from "@/components/ModelSwitcher"
 import PresetsPanel from "@/components/PresetsPanel"
 import VoicesPanel from "@/components/VoicesPanel"
 import VoiceControls from "@/components/VoiceControls"
-import { ToolTurn, ToolsPolicyNote } from "@/components/ToolParts"
+import { ToolTurn } from "@/components/ToolParts"
+import { ToolsAccess } from "@/components/ToolsAccess"
 import { useVoice } from "@/lib/useVoice"
 import { pickVoiceModels } from "@/lib/voice"
 import LibraryPanel from "@/components/LibraryPanel"
@@ -860,7 +861,7 @@ export default function App() {
             <ModelSwitcher baseUrl={baseUrl} apiKey={apiKey} connected={connected} busy={loading} onSwitched={() => void connect()} />
             {inferenceControls}
           </section>}
-          {activePage === "system" && <section className="settings-card">{runtimeControls}{metrics}<ToolsPolicyNote listing={toolsListing} /></section>}
+          {activePage === "system" && <section className="settings-card">{runtimeControls}{metrics}<ToolsAccess baseUrl={baseUrl} apiKey={apiKey} listing={toolsListing} onListing={setToolsListing} /></section>}
         </div>
       </section> : view === "brain" ? <BrainWorkspace baseUrl={baseUrl} apiKey={apiKey} connected={connected} />
       : view === "compare" ? <Compare baseUrl={baseUrl} apiKey={apiKey} connected={connected} models={chatModelInfos} settings={{ temperature, maxTokens, thinking }} />

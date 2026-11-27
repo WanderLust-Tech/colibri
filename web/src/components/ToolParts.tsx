@@ -5,8 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/Markdown"
 import { useLocale } from "@/i18n"
 import {
-  argumentsLine, argumentsText, clipText, enabledTools, policyFolders, secondsLeft,
-  type ApprovalPart, type CallPart, type ToolsListing, type TurnPart,
+  argumentsLine, argumentsText, clipText, secondsLeft,
+  type ApprovalPart, type CallPart, type TurnPart,
 } from "@/lib/tools"
 import { cn } from "@/lib/utils"
 
@@ -101,26 +101,5 @@ export function ToolTurn({ parts, live, onAnswer }: { parts: TurnPart[]; live: b
           : <ApprovalCard key={index} part={part} live={live} onAnswer={onAnswer} />)}
       {thinking && <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}
     </>
-  )
-}
-
-/* The tools policy, read only. It is changed on the router's PC (`coli tools allow`), never from this page: the router has
-   no route for it on purpose. */
-export function ToolsPolicyNote({ listing }: { listing: ToolsListing }) {
-  const { t } = useLocale()
-  if (!listing.available) return null
-  const on = enabledTools(listing)
-  const folders = listing.policy ? policyFolders(listing.policy) : { read: [], write: [] }
-  return (
-    <section className="side-section tools-policy">
-      <div className="section-title"><Wrench className="size-3.5" /> {t("tools.policyTitle")}</div>
-      {listing.problem && <p className="field-help model-error" role="alert">{t("tools.policyProblem", { message: listing.problem })}</p>}
-      <p className="field-help">{on.length ? t("tools.policyOn", { tools: on.map((tool) => tool.name).join(", ") }) : t("tools.policyOff")}</p>
-      {folders.read.length > 0 && <p className="field-help">{t("tools.policyRead", { folders: folders.read.join(", ") })}</p>}
-      {folders.write.length > 0 && <p className="field-help">{t("tools.policyWrite", { folders: folders.write.join(", ") })}</p>}
-      {listing.policy && folders.read.length + folders.write.length === 0 && <p className="field-help">{t("tools.policyNoFolders")}</p>}
-      {listing.policy && <p className="field-help">{t(listing.policy.web ? "tools.policyWebOn" : "tools.policyWebOff")}</p>}
-      <p className="field-help">{t("tools.policyHow")} <code>coli tools allow FOLDER</code></p>
-    </section>
   )
 }

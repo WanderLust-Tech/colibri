@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { ToolTurn, ToolsPolicyNote } from "./ToolParts"
-import { foldToolEvent, parseToolsListing, type ToolEvent, type TurnPart } from "@/lib/tools"
+import { ToolTurn } from "./ToolParts"
+import { foldToolEvent, type ToolEvent, type TurnPart } from "@/lib/tools"
 
 /* Static rendering, no DOM: the same approach as Markdown.test.tsx. Without a provider `t` answers with the key, which is
    enough to see which strings and buttons are drawn. */
@@ -104,30 +104,5 @@ describe("an approval card", () => {
     const html = render(fold({ ...ask, summary: "<script>x</script>" }))
     expect(html).not.toContain("<script>")
     expect(html).toContain("&lt;script&gt;")
-  })
-})
-
-describe("the tools policy line", () => {
-  const listing = parseToolsListing({
-    problem: null, policy: { folders: [{ path: "C:\\work\\project", write: false }, { path: "C:\\work\\scratch", write: true }], web: false, allowSecrets: false, approvalSeconds: 120, disabled: [] },
-    data: [{ type: "function", function: { name: "files_read", description: "", parameters: {} }, colibri: { group: "files", read_only: true, enabled: true } }],
-  })
-
-  it("says what the router allows, and that it is changed on the router's PC", () => {
-    const html = renderToStaticMarkup(<ToolsPolicyNote listing={listing} />)
-    expect(html).toContain("tools.policyRead")
-    expect(html).toContain("tools.policyWrite")
-    expect(html).toContain("tools.policyWebOff")
-    expect(html).toContain("tools.policyHow")
-    expect(html).toContain("coli tools allow")
-  })
-
-  it("has no control of any kind: the policy is never changed from the dashboard", () => {
-    const html = renderToStaticMarkup(<ToolsPolicyNote listing={listing} />)
-    expect(html).not.toMatch(/<(button|input|select|textarea|form)/)
-  })
-
-  it("is not drawn for a router that has no tools endpoint", () => {
-    expect(renderToStaticMarkup(<ToolsPolicyNote listing={parseToolsListing(undefined)} />)).toBe("")
   })
 })

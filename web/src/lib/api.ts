@@ -2,7 +2,7 @@ import { PREFER_ASYNC, runBackground, type Job } from "./jobs"
 import type { ModelDetails } from "./modelDetails"
 import type { LogLine, LogRead } from "./logTail"
 import type { ReplyStats } from "./replyStats"
-import { NO_TOOLS, parseToolsListing, toolEventOf, type AnswerResult, type ToolEvent, type ToolsListing, type TurnPart } from "./tools"
+import { NO_TOOLS, parsePolicy, parseToolsListing, toolEventOf, type AnswerResult, type ToolEvent, type ToolsListing, type ToolsPolicy, type ToolsPolicyEdit, type TurnPart } from "./tools"
 
 export type ChatRole = "system" | "user" | "assistant"
 
@@ -891,6 +891,21 @@ export async function listTools(baseUrl: string, apiKey: string, signal?: AbortS
   if (response.status === 404) return NO_TOOLS
   if (!response.ok) throw new Error(await responseError(response))
   return parseToolsListing(await response.json())
+}
+
+/* What the router answers to a change of its tools policy: the folder as it stored it (a normalised path; null for a web
+   change) and the whole policy as it is now. */
+export interface ToolsPolicyEdited { folder: string | null; policy: ToolsPolicy }
+
+/* Changes the folders the router's tools may use, or web fetch (POST /v1/tools/policy). A change the router refuses (400 a
+   folder that is not there, 404 a folder that is not in the list, 401, 403) throws with the router's own message. */
+export async function editToolsPolicy(baseUrl: string, apiKey: string, edit: ToolsPolicyEdit, signal?: AbortSignal): Promise<ToolsPolicyEdited> {
+  const response = await fetch(endpoint(baseUrl, "tools/policy"), { method: "POST", headers: headers(apiKey), signal, body: JSON.stringify(edit) })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json().catch(() => null)) as { folder?: unknown; policy?: unknown } | null
+  const policy = parsePolicy(body?.policy)
+  if (!policy) throw new Error("The router's answer did not include its tools policy.")
+  return { folder: typeof body?.folder === "string" ? body.folder : null, policy }
 }
 
 /* A person's answer to a call the router is waiting on (POST /v1/tools/pending). 404 is not an error to show as one: the

@@ -360,3 +360,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-countdown { margin-left: auto; font-size: 11px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
 .tool-problem { margin: 8px 0 0; font-size: 11px; color: var(--destructive); }
 .tool-note { margin: 6px 0 0; font-size: 11px; color: var(--muted-foreground); }
+
+/* Settings -> System: which folders the router's tools may use. */
+.tools-folders { gap: 6px; }
+.tools-folder { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.tools-path { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; word-break: break-all; font-size: 12px; background: none; padding: 0; }
+.tools-badge { flex: none; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; }
+.tools-badge.write { border-color: rgba(230,170,60,.55); background: rgba(230,170,60,.12); color: #c9a45c; }
+.tools-actions { flex: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.tools-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.tools-input { flex: 1 1 240px; min-width: 0; height: 36px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; color: var(--foreground); background: var(--input); font-size: 12px; outline: none; }
+.tools-input:focus { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+.tools-write, .tools-web { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.tools-file code { overflow-wrap: anywhere; word-break: break-all; }
+@media (max-width: 760px) { .tools-input { font-size: 16px; } .tools-folder { align-items: flex-start; } }

@@ -29,12 +29,34 @@ export interface ToolsListing {
   tools: ToolInfo[]
   policy: ToolsPolicy | null
   problem: string | null
+  /* Where the policy file is, on the router's PC. */
+  path: string | null
 }
 
-export const NO_TOOLS: ToolsListing = { available: false, tools: [], policy: null, problem: null }
+export const NO_TOOLS: ToolsListing = { available: false, tools: [], policy: null, problem: null, path: null }
+
+/* One change to the policy, as POST /v1/tools/policy takes it. `allow` adds a folder or replaces its entry, which is how a
+   folder switches between read-only and write; `deny` removes it; `web` turns web fetch on or off. */
+export type ToolsPolicyEdit =
+  | { action: "allow"; folder: string; write: boolean }
+  | { action: "deny"; folder: string }
+  | { action: "web"; on: boolean }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 const text = (value: unknown, fallback = "") => typeof value === "string" ? value : fallback
+
+/* The `policy` object of GET /v1/tools and of the answer to an edit; null for anything that is not one. */
+export function parsePolicy(raw: unknown): ToolsPolicy | null {
+  if (!isObject(raw)) return null
+  return {
+    folders: (Array.isArray(raw.folders) ? raw.folders : []).flatMap((folder) =>
+      isObject(folder) && typeof folder.path === "string" && folder.path ? [{ path: folder.path, write: folder.write === true }] : []),
+    web: raw.web === true,
+    allowSecrets: raw.allowSecrets === true,
+    approvalSeconds: typeof raw.approvalSeconds === "number" && Number.isFinite(raw.approvalSeconds) ? raw.approvalSeconds : null,
+    disabled: (Array.isArray(raw.disabled) ? raw.disabled : []).filter((name): name is string => typeof name === "string"),
+  }
+}
 
 export function parseToolsListing(body: unknown): ToolsListing {
   if (!isObject(body)) return NO_TOOLS
@@ -47,19 +69,9 @@ export function parseToolsListing(body: unknown): ToolsListing {
     if (!name) continue
     tools.push({ name, description: text(fn.description), group: text(info.group), readOnly: info.read_only === true, enabled: info.enabled === true })
   }
-  let policy: ToolsPolicy | null = null
-  if (isObject(body.policy)) {
-    const raw = body.policy
-    policy = {
-      folders: (Array.isArray(raw.folders) ? raw.folders : []).flatMap((folder) =>
-        isObject(folder) && typeof folder.path === "string" && folder.path ? [{ path: folder.path, write: folder.write === true }] : []),
-      web: raw.web === true,
-      allowSecrets: raw.allowSecrets === true,
-      approvalSeconds: typeof raw.approvalSeconds === "number" && Number.isFinite(raw.approvalSeconds) ? raw.approvalSeconds : null,
-      disabled: (Array.isArray(raw.disabled) ? raw.disabled : []).filter((name): name is string => typeof name === "string"),
-    }
-  }
-  return { available: true, tools, policy, problem: typeof body.problem === "string" && body.problem ? body.problem : null }
+  const policy = parsePolicy(body.policy)
+  return { available: true, tools, policy, problem: typeof body.problem === "string" && body.problem ? body.problem : null,
+    path: typeof body.path === "string" && body.path ? body.path : null }
 }
 
 /* The tools the router will run: the switch in the chat is offered only when there is at least one. */
