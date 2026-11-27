@@ -1,4 +1,5 @@
 """builtin_tools.py: the files and git tools over a real folder and a real repository, and the rules that keep them inside it."""
+import json
 import os
 import shutil
 import subprocess
@@ -251,6 +252,17 @@ class FilesTest(Folder):
         self.write("proj/many2.dat", "x")
         self.write("proj/many3.dat", "x")
         self.assertIn("stopped at 2 files", self.ok("files_search", {"glob": "*.dat", "max_results": 2}))
+
+    def test_the_box_has_the_face_the_loop_needs_for_tools_found_on_demand(self):
+        """mcp_agent.run_turn asks the box for `deferred`: the built-in tools are all listed, so it is empty and no search tools are offered."""
+        box = bt.BuiltinBox(tp.Policy([{"path": self.root}]))
+        self.assertEqual(box.deferred, {})
+        self.assertEqual([s["function"]["name"] for s in box.specs()], [t.name for t in bt.enabled(tp.Policy([{"path": self.root}]))])
+        messages = [{"role": "user", "content": "go"}]
+        steps = iter([("", [{"id": "c1", "name": "files_list", "arguments": json.dumps({"path": self.root})}]), ("done", [])])
+        outcome = bt.mcp_agent.run_turn(lambda m, t: next(steps), messages, box)
+        self.assertEqual(outcome, "done")
+        self.assertEqual(messages[2]["role"], "tool")
 
     def test_search_outside_is_refused(self):
         self.refused("files_search", {"text": "x", "path": self.outside}, "outside")

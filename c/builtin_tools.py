@@ -666,6 +666,7 @@ class BuiltinBox:
         self.chosen = pick(policy, wanted)
         self.tools = {t.name: mcp_agent.ToolInfo(t.name, "router", t.name, t.description, t.schema, t.read_only) for t in self.chosen}
         self.always, self.problems, self.clients = set(), {}, {}
+        self.deferred = {}                      # tools found on demand (mcp_agent.ToolBox): the built-in ones are all listed, there are 13
 
     def specs(self):
         return [t.spec() for t in self.tools.values()]

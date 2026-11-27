@@ -2334,6 +2334,14 @@
                                   "type": "string"
                                 }
                               },
+                              "toolMode": {
+                                "type": "string",
+                                "enum": [
+                                  "all",
+                                  "search"
+                                ],
+                                "description": "`search`: the client does not list this server's tools to the model; it gets `tools_search` and `tools_call` and finds the tool it needs. Does not change what is approved."
+                              },
                               "timeoutSeconds": {
                                 "type": "number"
                               },
@@ -2435,6 +2443,14 @@
                         "items": {
                           "type": "string"
                         }
+                      },
+                      "toolMode": {
+                        "type": "string",
+                        "enum": [
+                          "all",
+                          "search"
+                        ],
+                        "description": "`search`: the client does not list this server's tools to the model; it gets `tools_search` and `tools_call` and finds the tool it needs. Does not change what is approved."
                       },
                       "timeoutSeconds": {
                         "type": "number"

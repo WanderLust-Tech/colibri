@@ -242,6 +242,18 @@ class RouterMcpTest(unittest.TestCase):
         self.assertTrue(self.rig.call("GET", "/v1/mcp/servers")[3]["data"][0]["disabled"])
         self.assertEqual(reg.load(self.file)["git"]["disabled"], True, "the file is what was changed")
 
+    def test_toolmode_is_kept_listed_and_checked(self):
+        status, _, _, body = self.rig.call("POST", "/v1/mcp/servers", dict(GIT, name="big", toolMode="search"))
+        self.assertEqual((status, body["status"]), (200, "created"))
+        listed = {s["name"]: s for s in self.rig.call("GET", "/v1/mcp/servers")[3]["data"]}
+        self.assertEqual(listed["big"]["toolMode"], "search")
+        self.assertEqual(reg.load(self.file)["big"]["toolMode"], "search")
+        before = Path(self.file).read_text()
+        status, _, _, got = self.rig.call("POST", "/v1/mcp/servers", dict(GIT, name="odd", toolMode="lazy"))
+        self.assertEqual(status, 400)
+        self.assertIn("toolMode", got["error"]["message"])
+        self.assertEqual(Path(self.file).read_text(), before)
+
     def test_what_is_refused_is_a_400_with_the_reason_and_the_file_is_untouched(self):
         self.rig.call("POST", "/v1/mcp/servers", dict(GIT, name="git"))
         before = Path(self.file).read_text()
