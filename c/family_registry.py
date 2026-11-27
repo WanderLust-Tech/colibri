@@ -2390,9 +2390,27 @@ def resolve_model(model_dir):
                           config, family_config, str(model), head)
 
 
+MODEL_ID_FILE = "colibri-model-id.txt"
+_MODEL_ID_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def folder_model_id(model_dir):
+    """The id a model folder asks for in colibri-model-id.txt (one line), or "" when it has none or it is not a plain id.
+    A fine-tune of a model keeps its geometry, so it would get the original's id and the router could not tell the two
+    apart: the folder names itself instead (Qwen3.6-35B-A3B and an abliterated copy of it)."""
+    try:
+        text = (Path(model_dir) / MODEL_ID_FILE).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return ""
+    return text if _MODEL_ID_OK.fullmatch(text) else ""
+
+
 def default_model_id(resolved):
-    """The API model id for what was actually loaded: its display variant's, if it has
-    one of its own, else the family's."""
+    """The API model id for what was actually loaded: the one its folder names (colibri-model-id.txt), else its
+    display variant's if it has one of its own, else the family's."""
+    own = folder_model_id(resolved.model_dir)
+    if own:
+        return own
     family = resolved.descriptor
     config = resolved.family_config
     head = decision_head_of(resolved)

@@ -1563,6 +1563,29 @@ QWEN36_35B_CONFIG = {
 }
 
 
+class FolderModelIdTest(unittest.TestCase):
+    """A fine-tune with the original's geometry names itself with colibri-model-id.txt."""
+
+    def _id(self, text=None):
+        from family_registry import default_model_id
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.json").write_text(json.dumps(QWEN36_35B_CONFIG), encoding="utf-8")
+            if text is not None:
+                (root / "colibri-model-id.txt").write_bytes(text)
+            return default_model_id(resolve_model(root))
+
+    def test_no_file_keeps_the_family_id(self):
+        self.assertEqual(self._id(), "qwen3.6-colibri")
+
+    def test_the_file_names_the_model(self):
+        self.assertEqual(self._id(b"qwen3.6-abliterated-colibri\r\n"), "qwen3.6-abliterated-colibri")
+
+    def test_a_bad_id_is_ignored(self):
+        for text in (b"", b"  \n", b"has space", b"../x", b"-lead", b"x" * 65, b"\xff\xfe", b"two\nlines"):
+            self.assertEqual(self._id(text), "qwen3.6-colibri", text)
+
+
 class DisplayVariantTest(unittest.TestCase):
     """One model_type, two checkpoint sizes: the banner must name what is on disk."""
 
