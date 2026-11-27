@@ -16,6 +16,7 @@ import concurrent.futures
 import difflib
 import fnmatch
 import json
+import math
 import re
 import threading
 
@@ -25,6 +26,27 @@ import mcp_registry
 MAX_RESULT_CHARS = 20000
 MAX_NAME = 64
 SEPARATOR = "__"
+SEARCH_TOOL, CALL_TOOL = "tools_search", "tools_call"      # what the model sees for a server whose `toolMode` is "search"
+SEARCH_LIMIT, SEARCH_SCHEMA_CHARS, SEARCH_DESCRIPTION_CHARS = 5, 2500, 220
+
+
+def signature(schema):
+    """A tool's arguments in one line: `path*: string, detail: summary|complete` (`*` = required)."""
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or not properties:
+        return "(none)"
+    required = set(schema.get("required") or [])
+    bits = []
+    for name, spec in list(properties.items())[:14]:
+        kind = spec.get("type") if isinstance(spec, dict) else None
+        if isinstance(spec, dict) and isinstance(spec.get("enum"), list) and spec["enum"]:
+            kind = "|".join(str(v) for v in spec["enum"][:6]) + ("|..." if len(spec["enum"]) > 6 else "")
+        elif isinstance(kind, list):
+            kind = "/".join(str(k) for k in kind)
+        bits.append(f"{name}{'*' if name in required else ''}: {kind or 'any'}")
+    if len(properties) > 14:
+        bits.append(f"... +{len(properties) - 14} more")
+    return ", ".join(bits)
 
 
 def safe_name(text):
@@ -63,6 +85,8 @@ class ToolBox:
         self.servers, self.approve_server, self.environ = servers, approve_server, environ
         self.trust_file, self._connect = trust_file, connect or mcp_client.connect
         self.clients, self.tools, self.problems = {}, {}, {}
+        self.deferred = {}                       # the tools of "search" servers: not offered, found with tools_search and run with tools_call
+        self.searched = set()                    # searches already made, so an exact repeat can be told it is one
         self.always = set()                      # tools the person has said to run without asking again, this session
         self.lock = threading.Lock()
 
@@ -104,13 +128,13 @@ class ToolBox:
                 entry = self.servers[name]
                 for tool in listed:
                     if allowed(tool["name"], entry.get("includeTools"), entry.get("excludeTools")):
-                        self._add(name, tool)
+                        self._add(name, tool, deferred=entry.get("toolMode") == "search")
         return {n: self.problems.get(n) for n in list(chosen) + unknown}
 
-    def _add(self, server, tool):
+    def _add(self, server, tool, deferred=False):
         base = (safe_name(server) + SEPARATOR + safe_name(tool["name"]))[:MAX_NAME]
         name, n = base, 2
-        while name in self.tools:
+        while name in self.tools or name in self.deferred:
             suffix = f"_{n}"
             name, n = base[:MAX_NAME - len(suffix)] + suffix, n + 1
         schema = tool.get("inputSchema")
@@ -118,11 +142,89 @@ class ToolBox:
             schema = {"type": "object", "properties": {}}
         description = (tool.get("description") or tool.get("title") or "").strip() or f"{tool['name']} (from {server})"
         read_only = bool((tool.get("annotations") or {}).get("readOnlyHint"))     # the server's own word: it is a program the person approved to run
-        self.tools[name] = ToolInfo(name, server, tool["name"], f"[{server}] {description}", schema, read_only)
+        (self.deferred if deferred else self.tools)[name] = ToolInfo(name, server, tool["name"], f"[{server}] {description}", schema, read_only)
 
     # ---- using
     def specs(self):
-        return [t.spec() for t in self.tools.values()]
+        return [t.spec() for t in self.tools.values()] + self.meta_specs()
+
+    # ---- tools found on demand (a server with hundreds of tools costs the whole window if they are all listed)
+    def meta_specs(self):
+        """`tools_search` and `tools_call`, when a server's tools are on demand: two small fixed definitions instead of all of theirs
+        (and a list that never changes, so the model's cache of the conversation stays good)."""
+        if not self.deferred:
+            return []
+        servers = {}
+        for info in self.deferred.values():
+            servers[info.server] = servers.get(info.server, 0) + 1
+        where = ", ".join(f"{s} ({n} tools)" for s, n in servers.items())
+        return [
+            {"type": "function", "function": {
+                "name": SEARCH_TOOL,
+                "description": f"Find tools. The tools of these servers are not all listed here: {where}. Say in a few words what you want to do and the answer lists the "
+                               "matching tools with their arguments; an empty query lists every tool's name. Then run one with tools_call.",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "what you want to do, e.g. 'decompile a function'"},
+                                                                "limit": {"type": "integer", "description": f"how many to list (default {SEARCH_LIMIT}, at most 10)"},
+                                                                "full": {"type": "boolean", "description": "give the first match's complete argument schema"}}}}},
+            {"type": "function", "function": {
+                "name": CALL_TOOL,
+                "description": "Run a tool found with tools_search. `name` is the tool's name exactly as the search showed it; `arguments` is an object with the arguments it lists.",
+                "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name"]}}}]
+
+    def meta_info(self, which):
+        """A ToolInfo for the screen to show a search or a call-through with."""
+        return ToolInfo(which, "", which, which, {"type": "object", "properties": {}}, which == SEARCH_TOOL)
+
+    def find(self, name):
+        """The on-demand tool `name` stands for: its full name, or its own name when only one server has it. None when there is none."""
+        if name in self.deferred:
+            return self.deferred[name]
+        same = [i for i in self.deferred.values() if i.tool == name]
+        return same[0] if len(same) == 1 else None
+
+    def search(self, query, limit=SEARCH_LIMIT, full=False):
+        """The text a model gets for tools_search: the best matches, each with its arguments in short (`full` gives the first one's whole schema).
+        Words that few tools use count for more than words many use (`address` is in most of a binary tool's descriptions), and a word in a tool's
+        name counts for more than one in its description."""
+        query = (query or "").strip() if isinstance(query, str) else ""
+        if not query:
+            servers = {}
+            for info in self.deferred.values():
+                servers.setdefault(info.server, []).append(info.name)
+            return "\n".join(f"{server} ({len(names)} tools): " + ", ".join(names) for server, names in servers.items()) \
+                + "\nSearch for words about what you want to do to see a tool's description and arguments."
+        words = list(dict.fromkeys(re.findall(r"[a-z0-9]+", query.lower())))
+        rows = [(info, info.tool.lower(), set(re.findall(r"[a-z0-9]+", info.tool.lower())), info.description.lower()) for info in self.deferred.values()]
+        weight = {w: math.log(1 + len(rows) / max(1, sum(1 for _, tool, _, text in rows if w in tool or w in text))) for w in words}
+        scored = []
+        for info, tool, parts, text in rows:
+            score = sum(weight[w] * ((4 if w in parts else 2 if w in tool else 0) + (1 if w in text else 0)) for w in words)
+            if score:
+                scored.append((-score, info.name, info))
+        scored.sort(key=lambda s: s[:2])
+        if not scored:
+            near = difflib.get_close_matches(query.lower(), [i.tool.lower() for i in self.deferred.values()], n=5, cutoff=0.5)
+            return f"No tool matches {query!r}." + (f" Names that are close: {', '.join(near)}." if near else "") + " An empty query lists every tool's name."
+        limit = max(1, min(10, limit if isinstance(limit, int) else SEARCH_LIMIT))
+        out = []
+        for position, (_, _, info) in enumerate(scored[:limit]):
+            if full and position == 0:
+                shown = json.dumps(info.schema, separators=(",", ":"))
+                if len(shown) > SEARCH_SCHEMA_CHARS:
+                    shown = shown[:SEARCH_SCHEMA_CHARS] + " ...[the rest of the schema left out]"
+            else:
+                shown = signature(info.schema)
+            first = info.description.split("] ", 1)[-1]
+            first = first.split(". ")[0][:SEARCH_DESCRIPTION_CHARS]
+            out.append(f"{info.name}  ({'read-only' if info.read_only else 'asks the person first'})\n  {first}\n  arguments: {shown}")
+        more = len(scored) - limit
+        text = "\n\n".join(out) + ("\n\n(* = required)" if not full else "") \
+            + (f"\n{more} more match{'es' if more != 1 else ''}: a more specific query, or a larger limit, shows them." if more > 0 else "")
+        key = (query.lower(), limit, bool(full))
+        if key in self.searched:
+            text = "[You searched for exactly this before and the answer is the same. Pick a tool from it and run it with tools_call, or search with different words.]\n" + text
+        self.searched.add(key)
+        return text
 
     def instructions(self):
         """What the servers said about themselves, for the system prompt (their own words, labelled as theirs)."""
@@ -130,7 +232,7 @@ class ToolBox:
 
     def call(self, name, arguments):
         """The text a model is given for calling `name`: the result, or the reason there is none. Never raises for a server's trouble."""
-        info = self.tools[name]
+        info = self.tools.get(name) or self.deferred[name]
         try:
             result = self.clients[info.server].call_tool(info.tool, arguments)
         except mcp_client.McpTimeout as error:
@@ -215,8 +317,44 @@ def run_turn(complete, messages, box, approve=None, on_call=None, on_result=None
     return "rounds"
 
 
-def _one_call(call, box, approve, on_call, on_result, max_chars):
-    info = box.tools.get(call["name"])
+def _through(call, box, approve, on_call, on_result, max_chars):
+    """tools_search and tools_call: the search answers from the list the box kept; a call-through is the real tool's own call (its name, its approval,
+    its read-only mark), so the person is asked about `procedure_pseudo_code` with its arguments, not about `tools_call`."""
+    try:
+        arguments = json.loads(call["arguments"]) if (call["arguments"] or "").strip() else {}
+    except ValueError as error:
+        return f"Error: the arguments of `{call['name']}` are not valid JSON ({error}). Send one JSON object."
+    if not isinstance(arguments, dict):
+        return f"Error: the arguments of `{call['name']}` must be a JSON object."
+    if call["name"] == SEARCH_TOOL:
+        info = box.meta_info(SEARCH_TOOL)
+        if on_call:
+            on_call(info, arguments, "read-only")
+        text = box.search(arguments.get("query"), arguments.get("limit", SEARCH_LIMIT), arguments.get("full") is True)
+        if on_result:
+            on_result(info, text)
+        return clip_middle(text, max_chars)
+    target = box.find(arguments.get("name")) if isinstance(arguments.get("name"), str) else None
+    if target is None:
+        asked = arguments.get("name")
+        near = difflib.get_close_matches(asked, list(box.deferred), n=3, cutoff=0.6) if isinstance(asked, str) else []
+        return (f"Error: there is no tool called `{asked}` to run." if asked else "Error: tools_call needs the `name` of a tool.") \
+            + (f" Did you mean: {', '.join(near)}?" if near else " Find it first with tools_search.")
+    inner = arguments.get("arguments", {})
+    if isinstance(inner, str):                                      # some models send the arguments as text
+        try:
+            inner = json.loads(inner) if inner.strip() else {}
+        except ValueError as error:
+            return f"Error: the `arguments` of `{target.name}` are not valid JSON ({error}). Send an object."
+    if not isinstance(inner, dict):
+        return f"Error: the `arguments` of `{target.name}` must be an object."
+    return _one_call({"id": call["id"], "name": target.name, "arguments": json.dumps(inner)}, box, approve, on_call, on_result, max_chars, deferred_ok=True)
+
+
+def _one_call(call, box, approve, on_call, on_result, max_chars, deferred_ok=False):
+    if box.deferred and call["name"] in (SEARCH_TOOL, CALL_TOOL) and not deferred_ok:
+        return _through(call, box, approve, on_call, on_result, max_chars)
+    info = box.tools.get(call["name"]) or (box.deferred.get(call["name"]) if deferred_ok else None)
     if info is None:
         near = difflib.get_close_matches(call["name"], list(box.tools), n=3, cutoff=0.6)
         return f"Error: there is no tool called `{call['name']}`." + (f" Did you mean: {', '.join(near)}?" if near else

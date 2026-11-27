@@ -165,12 +165,13 @@ def open_toolbox(a, api, local, C, names=None):
     parts = []
     for name, why in status.items():
         count = sum(1 for t in box.tools.values() if t.server == name)
-        parts.append(f"{name} ({count})" if why is None else f"{name}: {why}")
+        later = sum(1 for t in box.deferred.values() if t.server == name)
+        parts.append((f"{name} ({count})" if not later else f"{name} ({later} on demand)") if why is None else f"{name}: {why}")
     print(f"  {C.dim}tools · {' · '.join(parts)}{C.r}")
     for name, why in status.items():
         if why and why not in ("disabled", "not approved on this machine"):
             print(f"  {C.yel}  {name}: {why}{C.r}")
-    if not box.tools:
+    if not box.tools and not box.deferred:
         box.close()
         return None
     return box
@@ -196,6 +197,8 @@ def list_session(box, C):
             mark = f"{C.grn}read-only{C.r}" if info.read_only else f"{C.yel}asks first{C.r}"
             first = info.description.split("] ", 1)[-1].splitlines()[0] if info.description else ""
             print(f"    {info.name}  {mark}  {C.dim}{clip(first, 70)}{C.r}")
+    for name in sorted({t.server for t in box.deferred.values()}):
+        print(f"  {C.teal}{name}{C.r}  {C.dim}{sum(1 for t in box.deferred.values() if t.server == name)} tools found on demand (tools_search, tools_call){C.r}")
     for name, why in box.problems.items():
         print(f"  {C.dim}{name}: {why}{C.r}")
     print()
@@ -383,6 +386,12 @@ def _add(a, api, C, local_ok):
             cfg["cwd"] = a.cwd
     if a.timeout:
         cfg["timeoutSeconds"] = a.timeout
+    if a.on_demand:
+        cfg["toolMode"] = "search"
+    for option, key in ((a.include, "includeTools"), (a.exclude, "excludeTools")):
+        names = [n.strip() for value in (option or []) for n in value.split(",") if n.strip()]
+        if names:
+            cfg[key] = names
     kept = reg.check(name, cfg)
     if local_ok:
         _, replaced = reg.put(name, kept)

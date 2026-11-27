@@ -56,13 +56,13 @@ GITHUB_TOKEN=ghp_...` is refused with the line to write instead.
 ```
 
 Settings: `command` + `args`, `env`, `cwd` (a stdio server) or `url` + `headers` (Streamable HTTP); `disabled`; `includeTools` and `excludeTools` (names, `*`
-matches anything; the server's own names); `timeoutSeconds` (one call, default 120) and `connectTimeoutSeconds` (start and list, default 30). Anything
+matches anything; the server's own names); `toolMode` (`"all"`, the default, or `"search"`: see [Tools on demand](#tools-on-demand)); `timeoutSeconds` (one call, default 120) and `connectTimeoutSeconds` (start and list, default 30). Anything
 else is an error that names it, and a file that is not valid is reported (`coli tools`, `GET /v1/mcp/servers` `problem`), not skipped. Names are
 letters, digits, `-`, `_` (40 at most).
 
 The tools reach the model as `<server>__<tool>`, with the server's name in the description, so two servers can both have a `search`.
 
-`coli tools` (list), `add NAME [--env N=V] [--header N=V] [--cwd D] [--timeout S] -- COMMAND ARGS...` (or `--url ADDRESS`), `remove`, `enable`, `disable`,
+`coli tools` (list), `add NAME [--env N=V] [--header N=V] [--cwd D] [--timeout S] [--include T[,T...]] [--exclude T[,T...]] [--on-demand] -- COMMAND ARGS...` (or `--url ADDRESS`), `remove`, `enable`, `disable`,
 `test`, `trust`, `untrust`. On this PC the file is edited directly, so no router has to run; with `--host` for another machine the router's API is used
 (`POST /v1/mcp/servers`, `POST /v1/mcp/servers/delete`) and that router must allow it.
 
@@ -127,6 +127,58 @@ Extension 0.28.0 reads this list (`GET /v1/mcp/servers`) as a second source afte
 - a router that is down, slow or older (no such route) delays and breaks nothing: the extension's own servers and the built-in tools start at once.
 
 An approval made with `coli` does not count in the extension and the other way round: each client asks for itself.
+
+## A server with hundreds of tools: REA (reverse engineering), 2026-11-26
+
+[REA](https://github.com/morluto/rea) (`rea-agents` on npm, MIT, stdio) is an MCP server for taking apart binaries, apps and web bundles. Tried here as a
+real, large server, and a lesson in what `includeTools` is for:
+
+- **It lists 263 tools, about 340,000 characters of definitions: roughly 88,000 tokens on Qwen3-Coder's tokenizer and 64,000 on Gemma 4's.** That does not fit the
+  65,536-token window the router gives Qwen (nor Gemma's 32,768), so it can only be used through `includeTools`. 20 tools for reading a native binary
+  (`open_binary`, `binary_overview`, `list_procedures`, `search_procedures`, `procedure_info`, `procedure_pseudo_code`, `procedure_assembly`, `procedure_callers`,
+  `procedure_callees`, `xrefs`, `list_strings`, `search_strings`, `read_bytes`, `list_names`, `get_call_graph`, `inspect_pe_imports`, `inspect_native_exports`,
+  `list_segments`, `analyze_function`, `close_binary`) cost **+5,357 tokens on Qwen and +3,855 on Gemma** (measured through the router's prompt count);
+  the first 10 of them +2,861 / +2,020. The write tools (renaming, comments) and the debugger, Android, browser and device tools are left out.
+- **Each result is large too:** a call returns an evidence record, 5,000 to 9,000 characters even for a 40 KB program (the pseudo code of one function: 5,600).
+- **It needs Ghidra 12.2 or newer and a JDK 25 or newer** for native binaries (12.1.4 and JDK 21 are refused: "Install a Ghidra 12.x (>=12.2)", then "JDK 25 or
+  newer"); with them, opening a copy of `hostname.exe` and asking for its overview, procedures and the pseudo code of `entry` took 16 s (the first analysis), then
+  about 0.1 s a call. Installed here beside the older ones: Ghidra 12.2 and Temurin 25 in `C:\Users\kp-mi\tools` (checksums matched the releases').
+- **It runs more than it reads** for some tools (a process, a debugger, a browser, an Android device; marked `destructiveHint`); those are among the ones left out
+  here, and the project's own disclaimer asks for a suitable environment for untrusted targets. What is left reads a program through Ghidra; it does not run it.
+- **How it was added:** installed from npm with `--ignore-scripts` (the package has no install-time scripts) into `C:\Users\kp-mi\tools\rea`, pinned to 6.10.1, and
+  `coli tools add rea --env GHIDRA_INSTALL_DIR=... --env JAVA_HOME=... --timeout 600 --include open_binary,... -- node .../rea.mjs mcp`. `coli tools test rea` shows
+  263 tools, 20 of them offered.
+- **A model working through it (Gemma 4 26B-A4B, a copy of a 40 KB program, the router on the CPU because the card had only 8 GB free):** with the 20 tools listed
+  it made four calls (imports, procedure list), then repeated "Actually, I'll check `FUN_...` first" until its 1,500-token limit and never answered; the context was
+  at 17.5k tokens after four calls (the results, 11.5k and 24.8k characters, were as heavy as the definitions). With the tools **on demand** (below) it answered.
+- **Not tried:** an obfuscated or large program, the extension's approval flow for it (every call asks first, which is many questions in a real analysis; REA marks
+  few tools read-only).
+
+## Tools on demand
+
+A server with `"toolMode": "search"` (or `coli tools add --on-demand`) does not list its tools to the model. The model is given two small fixed tools
+instead, `tools_search` and `tools_call`:
+
+- `tools_search(query, limit?, full?)` returns the best matches: the name, whether it is read-only, the first sentence of the description and the arguments on one
+  line (`path*: string, detail: summary|complete`, `*` = required). An empty query lists every tool's name. Words that few tools use count for more than words many
+  use, and a word in a tool's name for more than one in its description. `full` gives the first match's complete schema (cut at 2,500 characters). An exact repeat of
+  a search is told it is a repeat.
+- `tools_call(name, arguments)` runs the tool, under the same rules as any other: the **real** tool is what the person is asked about (`procedure_pseudo_code` with its
+  arguments, not `tools_call`), its own read-only mark decides whether to ask, `always` covers it, the result is cut the same way. The tool's own name is enough when only
+  one server has it; arguments may be an object or JSON text. A tool kept back cannot be called by its own name, only through `tools_call`.
+- `includeTools` and `excludeTools` still apply first: what they hide is not searchable either.
+
+The definitions are the same on every request, so the model's cache of the conversation holds (adding the found tools to the list instead would change it each time).
+Used by `coli chat --mcp` and anything built on `mcp_agent.ToolBox`; the router's loop and the extension do not have it yet. **A list with `toolMode` in it is
+rejected by a router or extension that does not know the setting** (the whole list is reported as not valid), so it should be added only where every client
+that reads the list has this code.
+
+Measured with REA (263 tools) on Gemma 4 26B-A4B, the same question, 2026-11-26 (the tools that run or change things excluded): the first request carried **390
+tokens** (4,077 with 20 tools listed, about 64,000 with all 263). First version, with each search answering 4,000 to 6,000 characters of full schemas ranked by a
+plain word count: 11 of 13 calls were searches, the context reached 19.5k tokens, 1,196 s. With the short format and the rarity weighting: 3 searches, the
+right tool (`inspect_pe_imports`) first, 12.4k tokens, 524 s, and an answer. It still never found `list_procedures` or `procedure_pseudo_code` ("entry point"
+is not in their descriptions), so the entry function's job was guessed from the imports; and it spent six calls raising `max_functions` against a
+`resource_constraint` error. One program, one model, one question: it shows the mechanism works, not how often.
 
 ## Not built
 

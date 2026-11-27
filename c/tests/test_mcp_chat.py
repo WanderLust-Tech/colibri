@@ -266,6 +266,16 @@ class ToolsCommandTest(unittest.TestCase):
     def setUp(self):
         self.env = home()
 
+    def test_add_with_only_some_of_a_servers_tools(self):
+        code, out = coli(["tools", "add", "big", "--include", "alpha,beta", "--include", "gamma", "--exclude", "beta", "--", sys.executable, FAKE, "noise"], self.env)
+        self.assertEqual(code, 0, out)
+        kept = json.loads(Path(self.env["COLI_MCP_SERVERS"]).read_text())["mcpServers"]["big"]
+        self.assertEqual((kept["includeTools"], kept["excludeTools"]), (["alpha", "beta", "gamma"], ["beta"]))
+        code, out = coli(["tools", "add", "plain", "--", sys.executable, FAKE, "noise"], self.env)
+        kept = json.loads(Path(self.env["COLI_MCP_SERVERS"]).read_text())["mcpServers"]["plain"]
+        self.assertNotIn("includeTools", kept)
+        self.assertNotIn("excludeTools", kept)
+
     def test_add_list_test_remove(self):
         code, out = coli(["tools"], self.env)
         self.assertIn("no MCP servers in the list", out)

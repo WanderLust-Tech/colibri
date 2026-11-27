@@ -24,7 +24,7 @@ import re
 import tempfile
 import threading
 
-KEYS = ("command", "args", "env", "cwd", "url", "headers", "disabled", "includeTools", "excludeTools", "timeoutSeconds",
+KEYS = ("command", "args", "env", "cwd", "url", "headers", "disabled", "includeTools", "excludeTools", "toolMode", "timeoutSeconds",
         "connectTimeoutSeconds")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 RESERVED = ("builtin",)                       # the extension's own in-process server
@@ -136,6 +136,10 @@ def check(name, cfg):
     for key in ("includeTools", "excludeTools"):
         if key in cfg:
             out[key] = _text_list(cfg[key], key)
+    if "toolMode" in cfg:
+        if cfg["toolMode"] not in ("all", "search"):
+            raise RegistryError("`toolMode` must be \"all\" (every tool is offered to the model) or \"search\" (the model searches the server's tools and calls the one it needs)")
+        out["toolMode"] = cfg["toolMode"]
     for key in ("timeoutSeconds", "connectTimeoutSeconds"):
         if key in cfg:
             out[key] = _number(cfg[key], key)
