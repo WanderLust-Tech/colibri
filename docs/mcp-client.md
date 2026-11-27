@@ -151,6 +151,11 @@ real, large server, and a lesson in what `includeTools` is for:
 - **A model working through it (Gemma 4 26B-A4B, a copy of a 40 KB program, the router on the CPU because the card had only 8 GB free):** with the 20 tools listed
   it made four calls (imports, procedure list), then repeated "Actually, I'll check `FUN_...` first" until its 1,500-token limit and never answered; the context was
   at 17.5k tokens after four calls (the results, 11.5k and 24.8k characters, were as heavy as the definitions). With the tools **on demand** (below) it answered.
+- **Two skills for the extension** ([docs/skills/](skills/); copies live in `~/.colibri/skills/`, where the extension finds them for every workspace; run with `/disassemble-exe PATH [FUNCTION]`
+  or `/decompile-exe PATH [FUNCTION]`, or the model loads one itself): `disassemble-exe` opens the program, finds the function (`procedure_info`, `search_procedures`) and shows
+  `procedure_assembly`, explaining it in words and writing no C; `decompile-exe` shows `procedure_pseudo_code` as C or C++ style code, says it is a decompiler's reconstruction,
+  and rewrites it with marked inferred names only when asked. Checked: the extension's own skill parser loads both, and `$1`/`$2` are filled (a quoted path with spaces
+  works). Not tried with a model.
 - **Not tried:** an obfuscated or large program, the extension's approval flow for it (every call asks first, which is many questions in a real analysis; REA marks
   few tools read-only).
 
