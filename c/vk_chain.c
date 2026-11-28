@@ -1777,7 +1777,7 @@ static void kab_shutdown(void) {
  * one dispatch of seconds (8192 rows of Qwen3.6 at its full context: about 5 s on a Radeon
  * 780M), past what a driver lets one submission run (amdgpu resets a ring after 10 s;
  * Windows' TDR after 2 s). An attention whose rows x positions x heads x head dim passes
- * COLI_VK_ATTN_SLICE (2^32; 0 = never) is recorded in slices of rows, each ending the
+ * COLI_VK_ATTN_SLICE (2^32, 2^30 on Windows; 0 = never) is recorded in slices of rows, each ending the
  * frame it is in (submitted, not waited for) and the next opening a frame of its own: the
  * next frame's first barrier orders it after the slice. A slice starts at a multiple of
  * `align` (the blocked attention's rows per workgroup), so its blocks are the ones the
@@ -1795,9 +1795,20 @@ static void kab_shutdown(void) {
  * submissions, the longest 90 -> 94 ms; 32K 69.0 -> 24.2 s, 592 -> 240, 180 -> 188 ms. An
  * integrated GPU keeps the budget alone (0) until one is measured: the budget is there for
  * the slow GPUs a driver's timeout catches (the 780M above; Windows' TDR at 2 s). */
+/* The default is 2^32 and, on Windows, 2^30: Qwen3.6-35B-A3B on an RTX 5090 lost the device when a chat grew past ~150K
+ * positions (the prompt chunk's attention in one submission ran past TDR's 2 s: "the device was lost" at 152596 positions,
+ * the cache growing 163840 -> 186368). Measured on that card with the same growth, 2^32 lost it; 2^31, 2^30 and 2^28 did not
+ * (145K tokens cold 124 / 188 / 345 s, the step past 165K 75 / 139 s). 2^30 keeps four times the room 2^32 has to the limit. */
+static long long attn_slice_default(void) {
+#ifdef _WIN32
+    return 1LL << 30;
+#else
+    return 1LL << 32;
+#endif
+}
 static long long attn_slice_budget(void) {
     const char *e = getenv("COLI_VK_ATTN_SLICE");
-    long long v = e && *e ? atoll(e) : (1LL << 32);
+    long long v = e && *e ? atoll(e) : attn_slice_default();
     return v < 0 ? 0 : v;
 }
 long long vkc_attn_slice_budget(void) { return attn_slice_budget(); }
